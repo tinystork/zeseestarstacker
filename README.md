@@ -1,6 +1,6 @@
 # ZeSeestarStacker
 
-ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography. By aligning and stacking light frames, the tool enhances the signal-to-noise ratio, bringing out fine details in astrophotography images.
+ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography and especially the seestar reason why there is no use of calibration files. By aligning and stacking light frames, the tool enhances the signal-to-noise ratio, bringing out fine details in astrophotography images.
 
 ---
 
