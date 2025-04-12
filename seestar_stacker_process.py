@@ -569,6 +569,36 @@ def align_and_stack_seestar_images(
     
     return final_path
 
+class SeestarStacker:
+    """
+    Class for stacking Seestar images with progress tracking.
+    """
+    def __init__(self):
+        self.stacking_mode = "kappa-sigma"
+        self.kappa = 2.5
+        self.max_iterations = 3
+        self.batch_size = 10
+        self.progress_callback = None
+        self.stop_processing = False
+        
+    def set_progress_callback(self, callback):
+        """Set a callback function for progress updates."""
+        self.progress_callback = callback
+        
+    def stack_images(self, input_folder, output_folder, batch_size=None):
+        """Stack images from input_folder and save to output_folder."""
+        if batch_size is not None:
+            self.batch_size = batch_size
+            
+        return align_and_stack_seestar_images(
+            input_folder=input_folder,
+            output_folder=output_folder,
+            stacking_mode=self.stacking_mode,
+            kappa=self.kappa,
+            max_iterations=self.max_iterations,
+            batch_size=self.batch_size,
+            progress_callback=self.progress_callback
+        )
 
 if __name__ == "__main__":
     input_path = input("📂 Entrez le chemin du dossier contenant les images FITS : ").strip('"\' ')

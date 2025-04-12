@@ -6,15 +6,12 @@ import time
 from seestar_stacker_process import SeestarStacker
 from seestar_alignment_process import align_seestar_images_batch
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 
 class SeestarStackerGUI:
     """
     GUI for the SeestarStacker class.
     """
     def __init__(self):
-        self.root = root
         self.stacker = SeestarStacker()
         self.root = tk.Tk()
         self.root.title("Seestar Stacker")

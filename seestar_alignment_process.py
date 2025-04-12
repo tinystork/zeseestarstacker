@@ -233,6 +233,7 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
 
     print(f"\n✅ Toutes les images alignées en couleur ont été sauvegardées dans: {output_folder}")
     return output_folder
+    
 
 if __name__ == "__main__":
     input_path = input("📂 Entrez le chemin du dossier contenant les images FITS : ").strip('"\' ')
