@@ -1,6 +1,6 @@
 # ZeSeestarStacker
 
-ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography and especially the seestar reason why there is no use of calibration files. By aligning and stacking light frames, the tool enhances the signal-to-noise ratio, bringing out fine details in astrophotography images.
+ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography and especially the seestar range of devices.
 
 ---
 
@@ -21,25 +21,28 @@ ZeSeestarStacker is a Python-based tool designed to simplify and optimize the pr
 ---
 
 ## Installation
+
 ### Prerequisites
 - Python 3.8 or later
-- Required Python packages:
+- Required Python packages (listed in `requirements.txt`):
   - `numpy`
   - `opencv-python`
   - `astropy`
   - `astroalign`
   - `tqdm`
+  - `psutil`
 
-You can install the required packages with:
-```bash
-pip install numpy opencv-python astropy astroalign tqdm
-```
+### Installation Steps
+1. Clone the Repository:
+   ```bash
+   git clone https://github.com/tinystork/zeseestarstacker.git
+   cd zeseestarstacker
+   ```
 
-### Clone the Repository
-```bash
-git clone https://github.com/tinystork/zeseestarstacker.git
-cd zeseestarstacker
-```
+2. Install the Dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ---
 
@@ -101,7 +104,7 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 ---
 
 ## Acknowledgments
-- Built with Python and open-source libraries like `numpy`, `opencv-python`, `astropy`, and `astroalign`.
+- Built with Python and open-source libraries like `numpy`, `opencv-python`, `astropy`, `astroalign`, and `psutil`.
 - Inspired by the needs of astrophotography enthusiasts to process large datasets efficiently.
 
 ---
