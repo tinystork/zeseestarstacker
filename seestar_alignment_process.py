@@ -37,9 +37,75 @@ def debayer_image(img, bayer_pattern="GRBG"):
     return color_img.astype(np.float32)
 
 
-def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None):
+def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
+    """
+    Détecte et corrige les pixels chauds dans une image.
+    
+    Parameters:
+        image (numpy.ndarray): Image à traiter
+        threshold (float): Seuil en écarts-types pour considérer un pixel comme "chaud"
+        neighborhood_size (int): Taille du voisinage pour le calcul de la médiane
+    
+    Returns:
+        numpy.ndarray: Image avec pixels chauds corrigés
+    """
+    # Vérifier si l'image est en couleur ou en niveaux de gris
+    is_color = len(image.shape) == 3 and image.shape[2] == 3
+    
+    if is_color:
+        # Traiter chaque canal séparément
+        corrected_img = np.copy(image)
+        for c in range(image.shape[2]):
+            channel = image[:, :, c]
+            
+            # Calculer les statistiques locales
+            mean = cv2.blur(channel, (neighborhood_size, neighborhood_size))
+            mean_sq = cv2.blur(channel**2, (neighborhood_size, neighborhood_size))
+            std = np.sqrt(np.maximum(mean_sq - mean**2, 0))  # Éviter les valeurs négatives
+            
+            # Identifier les pixels chauds (valeurs anormalement élevées)
+            hot_pixels = channel > (mean + threshold * std)
+            
+            # Appliquer une correction médiane où des pixels chauds sont détectés
+            if np.any(hot_pixels):
+                # Créer une version médiane de l'image
+                median_filtered = cv2.medianBlur(channel.astype(np.float32), neighborhood_size)
+                
+                # Remplacer uniquement les pixels chauds par leur valeur médiane
+                corrected_img[:, :, c] = np.where(hot_pixels, median_filtered, channel)
+    else:
+        # Image en niveaux de gris
+        # Calculer les statistiques locales
+        mean = cv2.blur(image, (neighborhood_size, neighborhood_size))
+        mean_sq = cv2.blur(image**2, (neighborhood_size, neighborhood_size))
+        std = np.sqrt(np.maximum(mean_sq - mean**2, 0))  # Éviter les valeurs négatives
+        
+        # Identifier les pixels chauds
+        hot_pixels = image > (mean + threshold * std)
+        
+        # Appliquer une correction médiane où des pixels chauds sont détectés
+        if np.any(hot_pixels):
+            median_filtered = cv2.medianBlur(image.astype(np.float32), neighborhood_size)
+            corrected_img = np.where(hot_pixels, median_filtered, image)
+        else:
+            corrected_img = image
+    
+    return corrected_img
+
+
+def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None, 
+                              correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
     """
     Align Seestar images in batches with an optional manual reference image.
+    
+    Parameters:
+        input_folder (str): Path to the input folder containing FITS files
+        bayer_pattern (str): Bayer pattern for debayering
+        batch_size (int): Number of images to process per batch
+        manual_reference_path (str): Optional path to a manual reference image
+        correct_hot_pixels (bool): Whether to perform hot pixel correction
+        hot_pixel_threshold (float): Threshold for hot pixel detection (in standard deviations)
+        neighborhood_size (int): Size of the neighborhood for median calculation
     """
     # Ensure batch_size is never zero or negative
     if batch_size <= 0:
@@ -75,6 +141,15 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
             elif fixed_reference_image.ndim == 3 and fixed_reference_image.shape[0] == 3:
                 # Pour les images 3D avec la première dimension comme canal
                 fixed_reference_image = np.moveaxis(fixed_reference_image, 0, -1)  # Convert to HxWx3
+            
+            # Appliquer la correction des pixels chauds si demandé
+            if correct_hot_pixels:
+                print("🔥 Application de la correction des pixels chauds sur l'image de référence...")
+                fixed_reference_image = detect_and_correct_hot_pixels(
+                    fixed_reference_image, 
+                    threshold=hot_pixel_threshold,
+                    neighborhood_size=neighborhood_size
+                )
                 
             fixed_reference_image = cv2.normalize(fixed_reference_image, None, 0, 65535, cv2.NORM_MINMAX)
             print(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
@@ -103,6 +178,14 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
                     elif img.ndim == 3 and img.shape[0] == 3:
                         # Pour les images 3D avec la première dimension comme canal
                         img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
+                    
+                    # Appliquer la correction des pixels chauds si demandé
+                    if correct_hot_pixels:
+                        img = detect_and_correct_hot_pixels(
+                            img, 
+                            threshold=hot_pixel_threshold,
+                            neighborhood_size=neighborhood_size
+                        )
                     
                     img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
                     
@@ -162,6 +245,14 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
                     elif img.ndim == 3 and img.shape[0] == 3:
                         img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
                     
+                    # Appliquer la correction des pixels chauds si demandé
+                    if correct_hot_pixels:
+                        img = detect_and_correct_hot_pixels(
+                            img, 
+                            threshold=hot_pixel_threshold,
+                            neighborhood_size=neighborhood_size
+                        )
+                    
                     img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
                     
                     images.append(img)
@@ -209,6 +300,10 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
                 new_header['NAXIS3'] = 3
                 new_header['BITPIX'] = 16
                 new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
+                if correct_hot_pixels:
+                    new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
+                    new_header.set('HOTPXTH', hot_pixel_threshold, 'Hot pixels detection threshold')
+                    new_header.set('HOTPXNB', neighborhood_size, 'Hot pixels neighborhood size')
                 
                 # Enregistrement de l'image alignée
                 out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
@@ -239,5 +334,24 @@ if __name__ == "__main__":
     input_path = input("📂 Entrez le chemin du dossier contenant les images FITS : ").strip('"\' ')
     reference_path = input("📌 Entrez le chemin de l'image de référence (laisser vide pour sélection dynamique) : ").strip('"\' ')
     batch_size = int(input("🛠️ Entrez la taille du lot (exemple : 10) : ") or 10)
-    align_seestar_images_batch(input_path, batch_size=batch_size, manual_reference_path=reference_path)
+    
+    # Options de correction des pixels chauds
+    correct_hot_pixels = input("🔥 Activer la correction des pixels chauds ? (o/n) [o] : ").strip().lower() != 'n'
+    hot_pixel_threshold = float(input("🔍 Seuil de détection des pixels chauds (en écarts-types) [3.0] : ") or 3.0)
+    neighborhood_size = int(input("🔍 Taille du voisinage pour la correction (nombre impair) [5] : ") or 5)
+    
+    # S'assurer que neighborhood_size est impair
+    if neighborhood_size % 2 == 0:
+        neighborhood_size += 1
+        print(f"⚠️ La taille du voisinage doit être impaire. Valeur ajustée à {neighborhood_size}.")
+        
+    align_seestar_images_batch(
+        input_path, 
+        batch_size=batch_size, 
+        manual_reference_path=reference_path,
+        correct_hot_pixels=correct_hot_pixels,
+        hot_pixel_threshold=hot_pixel_threshold,
+        neighborhood_size=neighborhood_size
+    )
+    
     input("\nAppuyez sur Entrée pour quitter...")
