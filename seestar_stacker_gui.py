@@ -1,4 +1,3 @@
-
 import os
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -30,49 +29,49 @@ class SeestarStackerGUI:
         # Input folder
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(input_frame, text="Input folder:").pack(side=tk.LEFT)
+        ttk.Label(input_frame, text="Dossier d'entrée:").pack(side=tk.LEFT)
         self.input_path = tk.StringVar()
         ttk.Entry(input_frame, textvariable=self.input_path, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(input_frame, text="Browse", command=self.browse_input).pack(side=tk.RIGHT)
+        ttk.Button(input_frame, text="Parcourir", command=self.browse_input).pack(side=tk.RIGHT)
 
         # Output folder
         output_frame = ttk.Frame(main_frame)
         output_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(output_frame, text="Output folder:").pack(side=tk.LEFT)
+        ttk.Label(output_frame, text="Dossier de sortie:").pack(side=tk.LEFT)
         self.output_path = tk.StringVar()
         ttk.Entry(output_frame, textvariable=self.output_path, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(output_frame, text="Browse", command=self.browse_output).pack(side=tk.RIGHT)
+        ttk.Button(output_frame, text="Parcourir", command=self.browse_output).pack(side=tk.RIGHT)
 
         # Options
         options_frame = ttk.LabelFrame(main_frame, text="Options")
         options_frame.pack(fill=tk.X, pady=10)
 
-        ttk.Label(options_frame, text="Stacking method:").pack(side=tk.LEFT)
+        ttk.Label(options_frame, text="Méthode d'empilement:").pack(side=tk.LEFT)
         self.stacking_mode = tk.StringVar(value="kappa-sigma")
         stacking_combo = ttk.Combobox(options_frame, textvariable=self.stacking_mode, width=15)
         stacking_combo['values'] = ('mean', 'median', 'kappa-sigma', 'winsorized-sigma')
         stacking_combo.pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(options_frame, text="Kappa value:").pack(side=tk.LEFT, padx=10)
+        ttk.Label(options_frame, text="Valeur de Kappa:").pack(side=tk.LEFT, padx=10)
         self.kappa = tk.DoubleVar(value=2.5)
         ttk.Spinbox(options_frame, from_=1.0, to=5.0, increment=0.1, textvariable=self.kappa, width=8).pack(side=tk.LEFT)
 
-        ttk.Label(options_frame, text="Batch size (0 for auto):").pack(side=tk.LEFT, padx=10)
+        ttk.Label(options_frame, text="Taille du lot (0 pour auto):").pack(side=tk.LEFT, padx=10)
         self.batch_size = tk.IntVar(value=0)
         ttk.Spinbox(options_frame, from_=0, to=500, increment=1, textvariable=self.batch_size, width=8).pack(side=tk.LEFT)
 
         # Alignment option
-        alignment_frame = ttk.LabelFrame(main_frame, text="Alignment")
+        alignment_frame = ttk.LabelFrame(main_frame, text="Alignement")
         alignment_frame.pack(fill=tk.X, pady=10)
         self.perform_alignment = tk.BooleanVar(value=True)
-        ttk.Checkbutton(alignment_frame, text="Perform alignment before stacking", variable=self.perform_alignment).pack(anchor=tk.W)
+        ttk.Checkbutton(alignment_frame, text="Effectuer l'alignement avant l'empilement", variable=self.perform_alignment).pack(anchor=tk.W)
 
         self.reference_image_path = tk.StringVar()
-        ttk.Label(alignment_frame, text="Reference image (leave empty for auto-selection):").pack(anchor=tk.W, padx=5)
+        ttk.Label(alignment_frame, text="Image de référence (laissez vide pour sélection automatique) :").pack(anchor=tk.W, padx=5)
         ttk.Entry(alignment_frame, textvariable=self.reference_image_path, width=50).pack(fill=tk.X, padx=5)
 
         # Progress
-        progress_frame = ttk.LabelFrame(main_frame, text="Progress")
+        progress_frame = ttk.LabelFrame(main_frame, text="Progression")
         progress_frame.pack(fill=tk.BOTH, expand=True, pady=10)
 
         self.progress_var = tk.DoubleVar()
@@ -83,11 +82,11 @@ class SeestarStackerGUI:
         time_frame = ttk.Frame(progress_frame)
         time_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(time_frame, text="Estimated remaining time:").pack(side=tk.LEFT, padx=5)
+        ttk.Label(time_frame, text="Temps restant estimé:").pack(side=tk.LEFT, padx=5)
         self.remaining_time_var = tk.StringVar(value="--:--:--")
         ttk.Label(time_frame, textvariable=self.remaining_time_var, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         
-        ttk.Label(time_frame, text="Elapsed time:").pack(side=tk.LEFT, padx=20)
+        ttk.Label(time_frame, text="Temps écoulé:").pack(side=tk.LEFT, padx=20)
         self.elapsed_time_var = tk.StringVar(value="00:00:00")
         ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
 
@@ -98,10 +97,10 @@ class SeestarStackerGUI:
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=10)
 
-        self.start_button = ttk.Button(control_frame, text="Start", command=self.start_processing)
+        self.start_button = ttk.Button(control_frame, text="Démarrer", command=self.start_processing)
         self.start_button.pack(side=tk.LEFT, padx=5)
 
-        self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED)
+        self.stop_button = ttk.Button(control_frame, text="Arrêter", command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
         # Timer variables
@@ -122,9 +121,10 @@ class SeestarStackerGUI:
         if progress is not None:
             self.progress_var.set(progress)
             
-            if "Estimated remaining time:" in message:
+            # Extract remaining time if present in the message
+            if "Temps restant estimé:" in message:
                 try:
-                    remaining_time = message.split("Estimated remaining time:")[1].strip()
+                    remaining_time = message.split("Temps restant estimé:")[1].strip()
                     self.remaining_time_var.set(remaining_time)
                 except:
                     pass
@@ -146,7 +146,7 @@ class SeestarStackerGUI:
         output_folder = self.output_path.get()
 
         if not input_folder or not output_folder:
-            messagebox.showerror("Error", "Please select input and output folders.")
+            messagebox.showerror("Erreur", "Veuillez sélectionner les dossiers d'entrée et de sortie.")
             return
 
         self.stacker.stacking_mode = self.stacking_mode.get()
@@ -157,9 +157,10 @@ class SeestarStackerGUI:
         self.stop_button.config(state=tk.NORMAL)
         self.processing = True
         
+        # Start timing
         self.start_time = time.time()
         self.update_timer()
-        self.remaining_time_var.set("Calculating...")
+        self.remaining_time_var.set("Calcul en cours...")
 
         self.thread = threading.Thread(target=self.run_processing, args=(input_folder, output_folder))
         self.thread.daemon = True
@@ -168,15 +169,17 @@ class SeestarStackerGUI:
     def stop_processing(self):
         if self.processing:
             self.stacker.stop_processing = True
-            self.update_progress("⚠️ Stop requested, please wait...")
+            self.update_progress("⚠️ Arrêt demandé, patientez...")
 
     def run_processing(self, input_folder, output_folder):
         try:
+            # Perform alignment if enabled
             if self.perform_alignment.get():
-                self.update_progress("⚙️ Starting image alignment...")
+                self.update_progress("⚙️ Début de l'alignement des images...")
+                # Ensure batch_size is never zero
                 align_batch_size = self.batch_size.get()
                 if align_batch_size == 0:
-                    align_batch_size = 10
+                    align_batch_size = 10  # Default value if 0
 
                 aligned_folder = align_seestar_images_batch(
                     input_folder=input_folder,
@@ -184,17 +187,22 @@ class SeestarStackerGUI:
                     batch_size=align_batch_size,
                     manual_reference_path=self.reference_image_path.get() or None
                 )
-                self.update_progress(f"✅ Using aligned folder: {aligned_folder}")
+            
+                # Utilisez le dossier aligné comme nouveau dossier d'entrée
+                self.update_progress(f"✅ Utilisation du dossier aligné : {aligned_folder}")
                 input_folder = aligned_folder
 
-            self.update_progress("⚙️ Starting image stacking...")
+            # Perform stacking
+            self.update_progress("⚙️ Début de l'empilement des images...")
             self.stacker.stack_images(input_folder, output_folder, batch_size=self.stacker.batch_size)
         except Exception as e:
-            self.update_progress(f"❌ Error: {e}")
+            self.update_progress(f"❌ Erreur : {e}")
         finally:
             self.processing = False
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
+            
+            # Stop the timer
             if self.timer_id:
                 self.root.after_cancel(self.timer_id)
                 self.timer_id = None
