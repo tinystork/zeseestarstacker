@@ -48,12 +48,6 @@ ZeSeestarStacker is a Python-based tool designed to simplify and optimize the pr
 
 ## Usage
 
-### Command Line Interface (CLI)
-Run the script directly from the command line:
-```bash
-python align_and_stack.py
-```
-
 Follow the on-screen prompts to:
 - Specify the input folder containing light frames (`.fit` or `.fits` files).
 - Choose a stacking method (e.g., `mean`, `median`, `kappa-sigma`, `winsorized-sigma`).
