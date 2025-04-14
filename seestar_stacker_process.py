@@ -263,7 +263,13 @@ def align_and_stack_seestar_images(
 
     # Ensure batch_size is never zero or negative
     if batch_size <= 0:
-        batch_size = 10  # Default value
+        sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+        if sample_files:
+            sample_path = os.path.join(input_folder, sample_files[0])
+            batch_size = estimate_batch_size(sample_path)
+            print(f"🧠 Taille de lot dynamique estimée : {batch_size}")
+        else:
+            batch_size = 10  # Valeur par défaut si aucun fichier n'est trouvé
     
     # Initialize variables for reference and batches
     fixed_reference_image = None
