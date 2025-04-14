@@ -278,10 +278,14 @@ class SeestarStackerGUI:
             if self.perform_alignment.get():
                 self.update_progress(self.tr('alignment_start'))
                 # Ensure batch_size is never zero
-                align_batch_size = self.batch_size.get()
                 if align_batch_size == 0:
-                    align_batch_size = 10  # Default value if 0
-
+                    sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                    if sample_files:
+                        sample_path = os.path.join(input_folder, sample_files[0])
+                        align_batch_size = estimate_batch_size(sample_path)
+                        print(f"🧠 Taille de lot dynamique estimée via GUI : {align_batch_size}")
+                    else:
+                        align_batch_size = 10
                 # Ensure neighborhood_size is odd
                 neighborhood_size = self.neighborhood_size.get()
                 if neighborhood_size % 2 == 0:
