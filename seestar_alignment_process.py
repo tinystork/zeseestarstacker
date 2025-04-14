@@ -93,8 +93,8 @@ def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
     return corrected_img
 
 
-def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None, 
-                              correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
+def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None,
+                               correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
     """
     Align Seestar images in batches with an optional manual reference image.
     
@@ -109,8 +109,14 @@ def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10
     """
     # Ensure batch_size is never zero or negative
     if batch_size <= 0:
-        batch_size = 10  # Default value
-
+        sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+        if sample_files:
+            sample_path = os.path.join(input_folder, sample_files[0])
+            batch_size = estimate_batch_size(sample_path)
+            print(f"🧠 Taille de lot dynamique estimée : {batch_size}")
+        else:
+            batch_size = 10  # Valeur par défaut
+            
     output_folder = os.path.join(input_folder, "aligned_lights")
     os.makedirs(output_folder, exist_ok=True)
     

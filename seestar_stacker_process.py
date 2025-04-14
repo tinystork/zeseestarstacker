@@ -6,12 +6,297 @@ import astroalign as aa
 from tqdm import tqdm
 import warnings
 import gc
-import psutil
-from datetime import datetime, timedelta
 import time
-import shutil
-
+        
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+class SeestarStacker:
+    """
+    Class for stacking astronomical images from the Seestar camera.
+    """
+    def __init__(self):
+        self.stacking_mode = "kappa-sigma"  # Default stacking mode
+        self.kappa = 2.5  # Default kappa value for kappa-sigma stacking
+        self.batch_size = 0  # 0 means auto-detect based on available memory
+        self.stop_processing = False
+        self.progress_callback = None
+    
+    def set_progress_callback(self, callback):
+        """Set the callback function for progress updates."""
+        self.progress_callback = callback
+    
+    def update_progress(self, message, progress=None):
+        """Update the progress using the callback if available."""
+        if self.progress_callback:
+            self.progress_callback(message, progress)
+        else:
+            print(message)
+    
+    def stack_images(self, input_folder, output_folder, batch_size=None):
+        """
+        Stack multiple FITS images and save the result.
+        
+        Parameters:
+            input_folder (str): Path to the folder containing aligned FITS images
+            output_folder (str): Path to save the stacked result
+            batch_size (int): Number of images to process at once (memory management)
+        """
+ 
+        self.stop_processing = False
+        
+        if batch_size is None:
+            batch_size = self.batch_size
+        
+        # Ensure batch_size is never zero or negative
+        if batch_size <= 0:
+            print("Batch size <= 0, tentative d'estimation dynamique...")
+            sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+            print(f"Fichiers détectés : {sample_files}")
+    
+            if sample_files:
+                sample_path = os.path.join(input_folder, sample_files[0])
+                print(f"Fichier exemple utilisé pour estimer la taille des lots : {sample_path}")
+                try:
+                    batch_size = estimate_batch_size(sample_path)
+                    print(f"Taille estimée des lots : {batch_size}")
+                except Exception as e:
+                    print(f"Erreur lors de l'estimation de la taille des lots : {e}")
+                    batch_size = 10
+            else:
+                print("Aucun fichier .fit ou .fits trouvé. Utilisation de la taille de lot par défaut : 10")
+                batch_size = 10
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Get all FITS files in the input directory
+        files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+        
+        if not files:
+            self.update_progress("❌ No FITS files found in the input directory.", 0)
+            return
+        
+        total_files = len(files)
+        self.update_progress(f"🔍 Found {total_files} FITS files to process.", 0)
+        
+        # Initialize variables for stacking
+        sum_image = None
+        count = 0
+        mask_sum = None
+        weights = None
+        
+        start_time = time.time()
+        processed_count = 0
+        
+        # Process files in batches to manage memory
+        for batch_start in range(0, total_files, batch_size):
+            if self.stop_processing:
+                self.update_progress("⛔ Processing stopped by user.", 100)
+                return
+            
+            batch_end = min(batch_start + batch_size, total_files)
+            batch_files = files[batch_start:batch_end]
+            
+            self.update_progress(f"🚀 Processing batch {batch_start//batch_size + 1}/{(total_files-1)//batch_size + 1} " +
+                                f"(images {batch_start+1} to {batch_end})...", 
+                                batch_start * 100 / total_files)
+            
+            # Load all images in the current batch
+            batch_images = []
+            
+            for i, file in enumerate(batch_files):
+                if self.stop_processing:
+                    self.update_progress("⛔ Processing stopped by user.", 100)
+                    return
+                
+                file_path = os.path.join(input_folder, file)
+                
+                try:
+                    # Load FITS file
+                    image_data = load_and_validate_fits(file_path)
+                    
+                    # If image is 3D with first dimension as channels (3xHxW), convert to HxWx3
+                    if image_data.ndim == 3 and image_data.shape[0] == 3:
+                        image_data = np.moveaxis(image_data, 0, -1)
+                    
+                    batch_images.append(image_data)
+                    processed_count += 1
+                    
+                    # Update progress
+                    percent_done = (batch_start + i + 1) * 100 / total_files
+                    elapsed_time = time.time() - start_time
+                    if processed_count > 0:
+                        time_per_image = elapsed_time / processed_count
+                        remaining_images = total_files - (batch_start + i + 1)
+                        estimated_time_remaining = remaining_images * time_per_image
+                        hours, remainder = divmod(int(estimated_time_remaining), 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+                        self.update_progress(f"📊 Processing {file}... ({processed_count}/{total_files}) " +
+                                           f"Temps restant estimé: {time_str}", percent_done)
+                    else:
+                        self.update_progress(f"📊 Processing {file}... ({processed_count}/{total_files})", percent_done)
+                
+                except Exception as e:
+                    self.update_progress(f"⚠️ Error processing {file}: {str(e)}", None)
+            
+            if not batch_images:
+                continue
+            
+            # Stack the batch
+            if self.stacking_mode == "mean":
+                # Simple mean stacking
+                batch_stack = np.mean(batch_images, axis=0)
+                
+                if sum_image is None:
+                    sum_image = batch_stack * len(batch_images)
+                    count = len(batch_images)
+                else:
+                    sum_image += batch_stack * len(batch_images)
+                    count += len(batch_images)
+            
+            elif self.stacking_mode == "median":
+                # Median stacking - needs all images in memory at once
+                # We'll collect all batches and do median at the end
+                if sum_image is None:
+                    sum_image = batch_images
+                else:
+                    sum_image.extend(batch_images)
+            
+            elif self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
+                # Kappa-sigma or winsorized sigma stacking
+                batch_stack = np.stack(batch_images, axis=0)
+                
+                # Initialize or extend the stack
+                if sum_image is None:
+                    # First batch - create the sum and count arrays
+                    if batch_stack.ndim == 4:  # Color images
+                        height, width, channels = batch_stack.shape[1], batch_stack.shape[2], batch_stack.shape[3]
+                        sum_image = np.zeros((height, width, channels), dtype=np.float64)
+                        mask_sum = np.zeros((height, width, channels), dtype=np.float64)
+                    else:  # Grayscale images
+                        height, width = batch_stack.shape[1], batch_stack.shape[2]
+                        sum_image = np.zeros((height, width), dtype=np.float64)
+                        mask_sum = np.zeros((height, width), dtype=np.float64)
+                
+                # Calculate mean and std dev for this batch
+                mean = np.mean(batch_stack, axis=0)
+                std = np.std(batch_stack, axis=0)
+                
+                # Create masks for pixels to include
+                for img in batch_stack:
+                    if self.stop_processing:
+                        break
+                    
+                    # Create a mask for values within kappa standard deviations
+                    deviation = np.abs(img - mean)
+                    mask = deviation <= (self.kappa * std)
+                    
+                    if self.stacking_mode == "winsorized-sigma":
+                        # For winsorized sigma, clip values outside range to the boundary
+                        upper_bound = mean + self.kappa * std
+                        lower_bound = mean - self.kappa * std
+                        clipped_img = np.clip(img, lower_bound, upper_bound)
+                        sum_image += clipped_img
+                        mask_sum += np.ones_like(mask)  # Count all pixels
+                    else:  # kappa-sigma
+                        # For kappa-sigma, only include values within range
+                        sum_image += img * mask  # Add only pixels that pass the mask
+                        mask_sum += mask  # Count how many pixels were included
+            
+            # Free memory
+            del batch_images
+            gc.collect()
+        
+        # Finalize the stacking process
+        if self.stop_processing:
+            self.update_progress("⛔ Processing stopped by user.", 100)
+            return
+        
+        self.update_progress("🧮 Finalizing stacked image...", 95)
+        
+        try:
+            # Complete the stacking based on the mode
+            if self.stacking_mode == "mean":
+                stacked_image = sum_image / count if count > 0 else sum_image
+            
+            elif self.stacking_mode == "median":
+                # For median stacking
+                if isinstance(sum_image, list):
+                    stacked_image = np.median(np.stack(sum_image, axis=0), axis=0)
+                else:
+                    stacked_image = sum_image  # Already stacked in batch
+            
+            elif self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
+                # Divide the sum by the count of included pixels
+                # Avoid division by zero
+                mask_sum = np.maximum(mask_sum, 1)  # At least one pixel
+                stacked_image = sum_image / mask_sum
+            
+            # Normalize and save the final image
+            self.update_progress("💾 Saving final stacked image...", 98)
+            
+            # Ensure the image is normalized to a reasonable range
+            stacked_image = np.clip(stacked_image, 0, None)  # Ensure no negative values
+            
+            # Determine if the result is color or monochrome
+            if stacked_image.ndim == 3 and stacked_image.shape[2] == 3:
+                # Color image - convert to FITS standard (3xHxW)
+                stacked_image = np.moveaxis(stacked_image, -1, 0)
+                is_color = True
+            else:
+                is_color = False
+            
+            # Create a new FITS header
+            hdr = fits.Header()
+            hdr['STACKED'] = True
+            hdr['STACKTYP'] = self.stacking_mode
+            if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
+                hdr['KAPPA'] = self.kappa
+            hdr['NIMAGES'] = count if count > 0 else len(files)
+            
+            # Add dimensions to header
+            hdr['BITPIX'] = 16  # 16-bit integers
+            if is_color:
+                hdr['NAXIS'] = 3
+                hdr['NAXIS1'] = stacked_image.shape[1]  # Width
+                hdr['NAXIS2'] = stacked_image.shape[2]  # Height
+                hdr['NAXIS3'] = 3  # Color channels
+                hdr['CTYPE3'] = 'RGB'
+            else:
+                hdr['NAXIS'] = 2
+                hdr['NAXIS1'] = stacked_image.shape[0]  # Width
+                hdr['NAXIS2'] = stacked_image.shape[1]  # Height
+            
+            # Normalize to 16-bit range and convert
+            stacked_image = (np.clip(stacked_image, 0, np.percentile(stacked_image, 99.9)) * (65535 / np.percentile(stacked_image, 99.9))).astype(np.uint16)
+            
+            # Save FITS file
+            output_path = os.path.join(output_folder, f"stacked_{self.stacking_mode}.fit")
+            fits.writeto(output_path, stacked_image, hdr, overwrite=True)
+            
+            # Also save as PNG for quick preview
+            import cv2
+            preview_path = os.path.join(output_folder, f"stacked_{self.stacking_mode}.png")
+            
+            if is_color:
+                # Convert from 3xHxW to HxWx3 for PNG
+                preview_img = np.moveaxis(stacked_image, 0, -1)
+                # Normalize to 8-bit
+                preview_img = cv2.normalize(preview_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                # OpenCV uses BGR, so convert RGB to BGR
+                preview_img = cv2.cvtColor(preview_img, cv2.COLOR_RGB2BGR)
+            else:
+                # Normalize to 8-bit
+                preview_img = cv2.normalize(stacked_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            
+            cv2.imwrite(preview_path, preview_img)
+            
+            self.update_progress(f"✅ Stacking complete! Results saved to: {output_path}", 100)
+            
+        except Exception as e:
+            self.update_progress(f"❌ Error during final stacking: {str(e)}", 100)
+
 
 
 def load_and_validate_fits(path):
@@ -41,268 +326,169 @@ def debayer_image(img, bayer_pattern="GRBG"):
     return color_img.astype(np.float32)
 
 
-def kappa_sigma_stack(images, kappa=2.5, iterations=3):
-    """Stack images using the kappa-sigma clipping algorithm."""
-    if len(images) < 3:
-        return np.mean(images, axis=0)
-
-    # Vérifier si les images sont en RGB ou monochrome
-    is_rgb = len(images[0].shape) == 3 and images[0].shape[2] == 3
-    
-    if is_rgb:
-        stack = np.zeros_like(images[0], dtype=np.float32)
-        for c in range(images[0].shape[2]):
-            data = np.array([img[..., c] for img in images])
-            mask = np.ones_like(data, dtype=bool)
-            mean = np.mean(data, axis=0)
-
-            for _ in range(iterations):
-                std = np.std(data, axis=0)
-                new_mask = np.abs(data - mean) <= (kappa * std)
-                mask = new_mask
-                non_zero_count = np.sum(mask, axis=0)
-                non_zero_count[non_zero_count == 0] = 1
-                mean = np.sum(data * mask, axis=0) / non_zero_count
-
-            stack[..., c] = mean
-    else:
-        # Pour les images monochromes
-        data = np.array(images)
-        mask = np.ones_like(data, dtype=bool)
-        mean = np.mean(data, axis=0)
-
-        for _ in range(iterations):
-            std = np.std(data, axis=0)
-            new_mask = np.abs(data - mean) <= (kappa * std)
-            mask = new_mask
-            non_zero_count = np.sum(mask, axis=0)
-            non_zero_count[non_zero_count == 0] = 1
-            mean = np.sum(data * mask, axis=0) / non_zero_count
-        
-        stack = mean
-        
-    return stack
-
-
-def winsorized_sigma_stack(images, kappa=2.5, iterations=3):
+def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
     """
-    Stack images using Winsorized Sigma Clipping.
-    
-    This method replaces outliers with the values at the boundaries instead of 
-    completely removing them, which can provide better results in some cases.
-    """
-    if len(images) < 3:
-        return np.mean(images, axis=0)
-
-    # Vérifier si les images sont en RGB ou monochrome
-    is_rgb = len(images[0].shape) == 3 and images[0].shape[2] == 3
-    
-    if is_rgb:
-        stack = np.zeros_like(images[0], dtype=np.float32)
-        for c in range(images[0].shape[2]):
-            data = np.array([img[..., c] for img in images])
-            
-            for _ in range(iterations):
-                mean = np.mean(data, axis=0)
-                std = np.std(data, axis=0)
-                
-                lower_bound = mean - kappa * std
-                upper_bound = mean + kappa * std
-                
-                # Winsorize: replace values outside bounds with the bounds
-                data = np.maximum(data, lower_bound)
-                data = np.minimum(data, upper_bound)
-            
-            # Final mean after winsorization
-            stack[..., c] = np.mean(data, axis=0)
-    else:
-        # Pour les images monochromes
-        data = np.array(images)
-        
-        for _ in range(iterations):
-            mean = np.mean(data, axis=0)
-            std = np.std(data, axis=0)
-            
-            lower_bound = mean - kappa * std
-            upper_bound = mean + kappa * std
-            
-            # Winsorize: replace values outside bounds with the bounds
-            data = np.maximum(data, lower_bound)
-            data = np.minimum(data, upper_bound)
-        
-        # Final mean after winsorization
-        stack = np.mean(data, axis=0)
-    
-    return stack
-
-
-def format_exposure_time(seconds):
-    """Convert seconds to HH:MM:SS format."""
-    return str(timedelta(seconds=int(seconds)))
-
-
-def estimate_remaining_time(start_time, files_done, total_files):
-    """
-    Estimate remaining processing time based on elapsed time and progress.
-    """
-    if files_done == 0:
-        return "Calcul en cours..."
-    
-    elapsed_time = time.time() - start_time
-    time_per_file = elapsed_time / files_done
-    remaining_files = total_files - files_done
-    remaining_seconds = time_per_file * remaining_files
-    
-    # Format as HH:MM:SS
-    return format_exposure_time(remaining_seconds)
-
-
-def stack_batch(batch_images, batch_headers, stacking_mode="kappa-sigma", kappa=2.5, max_iterations=3):
-    """
-    Stack a batch of images with the specified method.
+    Détecte et corrige les pixels chauds dans une image.
     
     Parameters:
-        batch_images (list): List of loaded image data arrays
-        batch_headers (list): List of FITS headers
-        stacking_mode (str): Method to use for stacking
-        kappa (float): Kappa value for sigma-clipping methods
-        max_iterations (int): Number of iterations for iterative methods
-        
+        image (numpy.ndarray): Image à traiter
+        threshold (float): Seuil en écarts-types pour considérer un pixel comme "chaud"
+        neighborhood_size (int): Taille du voisinage pour le calcul de la médiane
+    
     Returns:
-        tuple: (stacked_image, combined_header)
+        numpy.ndarray: Image avec pixels chauds corrigés
     """
-    if not batch_images:
-        return None, None
+    # Vérifier si l'image est en couleur ou en niveaux de gris
+    is_color = len(image.shape) == 3 and image.shape[2] == 3
+    
+    if is_color:
+        # Traiter chaque canal séparément
+        corrected_img = np.copy(image)
+        for c in range(image.shape[2]):
+            channel = image[:, :, c]
+            
+            # Calculer les statistiques locales
+            mean = cv2.blur(channel, (neighborhood_size, neighborhood_size))
+            mean_sq = cv2.blur(channel**2, (neighborhood_size, neighborhood_size))
+            std = np.sqrt(np.maximum(mean_sq - mean**2, 0))  # Éviter les valeurs négatives
+            
+            # Identifier les pixels chauds (valeurs anormalement élevées)
+            hot_pixels = channel > (mean + threshold * std)
+            
+            # Appliquer une correction médiane où des pixels chauds sont détectés
+            if np.any(hot_pixels):
+                # Créer une version médiane de l'image
+                median_filtered = cv2.medianBlur(channel.astype(np.float32), neighborhood_size)
+                
+                # Remplacer uniquement les pixels chauds par leur valeur médiane
+                corrected_img[:, :, c] = np.where(hot_pixels, median_filtered, channel)
+    else:
+        # Image en niveaux de gris
+        # Calculer les statistiques locales
+        mean = cv2.blur(image, (neighborhood_size, neighborhood_size))
+        mean_sq = cv2.blur(image**2, (neighborhood_size, neighborhood_size))
+        std = np.sqrt(np.maximum(mean_sq - mean**2, 0))  # Éviter les valeurs négatives
         
-    # Apply stacking method
-    if stacking_mode == "mean":
-        batch_stack = np.mean(batch_images, axis=0)
-    elif stacking_mode == "median":
-        batch_stack = np.median(batch_images, axis=0)
-    elif stacking_mode == "winsorized-sigma":
-        batch_stack = winsorized_sigma_stack(batch_images, kappa, max_iterations)
-    else:  # Default to kappa-sigma
-        batch_stack = kappa_sigma_stack(batch_images, kappa, max_iterations)
+        # Identifier les pixels chauds
+        hot_pixels = image > (mean + threshold * std)
+        
+        # Appliquer une correction médiane où des pixels chauds sont détectés
+        if np.any(hot_pixels):
+            median_filtered = cv2.medianBlur(image.astype(np.float32), neighborhood_size)
+            corrected_img = np.where(hot_pixels, median_filtered, image)
+        else:
+            corrected_img = image
     
-    # Combine header information
-    combined_header = batch_headers[0].copy() if batch_headers else fits.Header()
-    combined_header['STACKING'] = stacking_mode, 'Method of stacking'
-    combined_header['NUMIMGS'] = len(batch_images), 'Number of stacked images'
-    
-    # Calculate total exposure time if available
-    total_exposure_time = 0
-    for header in batch_headers:
-        if "EXPTIME" in header:
-            total_exposure_time += header["EXPTIME"]
-    
-    if total_exposure_time > 0:
-        combined_header['EXPTIME'] = total_exposure_time, 'Total equivalent exposure time'
-    
-    combined_header['DATE-STK'] = datetime.now().isoformat(), 'Date of stacking'
-    
-    return batch_stack, combined_header
+    return corrected_img
 
-
-def align_and_stack_seestar_images(
-    input_folder, 
-    output_folder=None,
-    stacking_mode="kappa-sigma", 
-    kappa=2.5, 
-    max_iterations=3,
-    bayer_pattern="GRBG", 
-    batch_size=10, 
-    manual_reference_path=None,
-    progress_callback=None
-):
+def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
     """
-    Align and stack Seestar images in batches with continuous optimization.
-    Process one batch at a time to minimize memory usage.
+    Estime la taille de lot optimale en fonction de la mémoire disponible.
     
     Parameters:
-        input_folder (str): Path to the folder containing input .fit/.fits files.
-        output_folder (str): Path to save output files. Defaults to input_folder/processed
-        stacking_mode (str): Stacking method ('mean', 'median', 'kappa-sigma', 'winsorized-sigma')
-        kappa (float): Kappa value for sigma-clipping methods
-        max_iterations (int): Number of iterations for iterative methods
-        bayer_pattern (str): Bayer pattern for debayering (default: "GRBG").
-        batch_size (int): Number of images to process per batch (default: 10).
-        manual_reference_path (str): Optional path to a manually selected reference image.
-        progress_callback (function): Optional callback for progress updates
+        sample_image_path: Chemin vers une image exemple pour estimer la taille mémoire
+        available_memory_percentage: Pourcentage de la mémoire disponible à utiliser (0-100)
+    
+    Returns:
+        int: Taille de lot estimée, au moins 3 et au plus 50
     """
-    # Setup output folders
-    if output_folder is None:
-        output_folder = os.path.join(input_folder, "processed")
+    try:
+        import psutil
         
-    # Create necessary folders
-    os.makedirs(output_folder, exist_ok=True)
-    aligned_folder = os.path.join(output_folder, "aligned_lights")
-    os.makedirs(aligned_folder, exist_ok=True)
-    unaligned_folder = os.path.join(aligned_folder, "unaligned")
-    os.makedirs(unaligned_folder, exist_ok=True)
-    substack_folder = os.path.join(output_folder, "sub_stacks")
-    os.makedirs(substack_folder, exist_ok=True)
-    
-    # Helper for progress updates
-    def update_progress(message, progress=None):
-        if progress_callback:
-            progress_callback(message, progress)
+        # Obtenir la mémoire disponible (en octets)
+        available_memory = psutil.virtual_memory().available
+        
+        # N'utiliser qu'un pourcentage de la mémoire disponible
+        usable_memory = available_memory * (available_memory_percentage / 100)
+        
+        # Estimer la taille d'une image
+        if sample_image_path:
+            img = load_and_validate_fits(sample_image_path)
+            # Une image traitée peut prendre jusqu'à 4x plus de mémoire (versions originale, débayerisée, normalisée, alignée)
+            image_size = img.nbytes * 4
         else:
-            print(message)
+            # Estimation prudente pour une image de taille moyenne (2000x2000 pixels, 3 canaux, float32)
+            image_size = 2000 * 2000 * 3 * 4  # environ 48 Mo
+        
+        # Calculer combien d'images peuvent tenir en mémoire (facteur de sécurité de 2)
+        estimated_batch = max(3, min(50, int(usable_memory / (image_size * 2))))
+        
+        print(f"Mémoire disponible: {available_memory / (1024**3):.2f} Go")
+        print(f"Taille estimée par image: {image_size / (1024**2):.2f} Mo")
+        print(f"Taille de lot estimée: {estimated_batch}")
+        
+        return estimated_batch
+    except Exception as e:
+        print(f"Erreur lors de l'estimation de la taille de lot: {e}")
+        return 10  # Valeur par défaut en cas d'erreur
 
-    # Start timing
-    processing_start_time = time.time()
+def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None, 
+                              correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
+    """
+    Align Seestar images in batches with an optional manual reference image.
     
-    # Find all FITS files in the input folder
-    files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
-    if not files:
-        update_progress("❌ Aucun fichier .fit/.fits trouvé")
-        return None
-    
-    total_files = len(files)
-    update_progress(f"\n🔍 Analyse de {total_files} images...")
-
+    Parameters:
+        input_folder (str): Path to the input folder containing FITS files
+        bayer_pattern (str): Bayer pattern for debayering
+        batch_size (int): Number of images to process per batch
+        manual_reference_path (str): Optional path to a manual reference image
+        correct_hot_pixels (bool): Whether to perform hot pixel correction
+        hot_pixel_threshold (float): Threshold for hot pixel detection (in standard deviations)
+        neighborhood_size (int): Size of the neighborhood for median calculation
+    """
     # Ensure batch_size is never zero or negative
     if batch_size <= 0:
-        sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
-        if sample_files:
-            sample_path = os.path.join(input_folder, sample_files[0])
-            batch_size = estimate_batch_size(sample_path)
-            print(f"🧠 Taille de lot dynamique estimée : {batch_size}")
-        else:
-            batch_size = 10  # Valeur par défaut si aucun fichier n'est trouvé
+        batch_size = 10  # Default value
+
+    output_folder = os.path.join(input_folder, "aligned_lights")
+    os.makedirs(output_folder, exist_ok=True)
     
-    # Initialize variables for reference and batches
+    # Créer un dossier séparé pour les images non alignées
+    unaligned_folder = os.path.join(output_folder, "unaligned")
+    os.makedirs(unaligned_folder, exist_ok=True)
+
+    files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+    if not files:
+        print("❌ Aucun fichier .fit/.fits trouvé")
+        return output_folder  # Retourner quand même le dossier de sortie
+
+    print(f"\n🔍 Analyse de {len(files)} images...")
+
     fixed_reference_image = None
     fixed_reference_header = None
-    batch_stacks = []
-    batch_stack_headers = []
-    total_exposure_time = 0
-    processed_files = 0
-    files_in_final_stack = 0
 
-    # Try to load manual reference if provided
+    # Tentative de chargement de l'image de référence manuelle si fournie
     if manual_reference_path:
         try:
-            update_progress(f"\n📌 Chargement de l'image de référence manuelle : {manual_reference_path}")
+            print(f"\n📌 Chargement de l'image de référence manuelle : {manual_reference_path}")
             fixed_reference_image = load_and_validate_fits(manual_reference_path)
             fixed_reference_header = fits.getheader(manual_reference_path)
             
-            # Apply debayer to reference image if it's a raw image
+            # Appliquer debayer sur l'image de référence si c'est une image brute
             if fixed_reference_image.ndim == 2:
                 fixed_reference_image = debayer_image(fixed_reference_image, bayer_pattern)
             elif fixed_reference_image.ndim == 3 and fixed_reference_image.shape[0] == 3:
-                # For 3D images with first dimension as channel
+                # Pour les images 3D avec la première dimension comme canal
                 fixed_reference_image = np.moveaxis(fixed_reference_image, 0, -1)  # Convert to HxWx3
+            
+            # Appliquer la correction des pixels chauds si demandé
+            if correct_hot_pixels:
+                print("🔥 Application de la correction des pixels chauds sur l'image de référence...")
+                fixed_reference_image = detect_and_correct_hot_pixels(
+                    fixed_reference_image, 
+                    threshold=hot_pixel_threshold,
+                    neighborhood_size=neighborhood_size
+                )
                 
             fixed_reference_image = cv2.normalize(fixed_reference_image, None, 0, 65535, cv2.NORM_MINMAX)
-            update_progress(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
+            print(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
         except Exception as e:
-            update_progress(f"❌ Erreur lors du chargement de l'image de référence manuelle: {e}")
+            print(f"❌ Erreur lors du chargement de l'image de référence manuelle: {e}")
             fixed_reference_image = None
 
-    # Find best reference image if not manually provided
+    # Pré-chargement des images pour trouver la meilleure référence si aucune référence manuelle n'est fournie
     if fixed_reference_image is None:
-        update_progress("\n⚙️ Recherche de la meilleure image de référence...")
+        print("\n⚙️ Recherche de la meilleure image de référence...")
         sample_images = []
         sample_headers = []
         sample_files = []
@@ -313,14 +499,22 @@ def align_and_stack_seestar_images(
                 img = load_and_validate_fits(img_path)
                 hdr = fits.getheader(img_path)
                 
-                # Ensure image has sufficient variance
+                # S'assurer que l'image a une variance suffisante
                 if np.std(img) > 5:
-                    # Convert to color if needed
+                    # Convertir en couleur si nécessaire
                     if img.ndim == 2:
                         img = debayer_image(img, bayer_pattern)
                     elif img.ndim == 3 and img.shape[0] == 3:
-                        # For 3D images with first dimension as channel
+                        # Pour les images 3D avec la première dimension comme canal
                         img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
+                    
+                    # Appliquer la correction des pixels chauds si demandé
+                    if correct_hot_pixels:
+                        img = detect_and_correct_hot_pixels(
+                            img, 
+                            threshold=hot_pixel_threshold,
+                            neighborhood_size=neighborhood_size
+                        )
                     
                     img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
                     
@@ -328,20 +522,20 @@ def align_and_stack_seestar_images(
                     sample_headers.append(hdr)
                     sample_files.append(f)
                 else:
-                    update_progress(f"⚠️ Image ignorée (faible variance): {f}")
+                    print(f"⚠️ Image ignorée (faible variance): {f}")
             except Exception as e:
-                update_progress(f"❌ Erreur lors de l'analyse de {f}: {e}")
+                print(f"❌ Erreur lors de l'analyse de {f}: {e}")
         
         if sample_images:
-            # Select image with best contrast (highest median)
+            # Sélectionner l'image avec le meilleur contraste (médiane la plus élevée)
             medians = [np.median(img) for img in sample_images]
             ref_idx = np.argmax(medians)
             fixed_reference_image = sample_images[ref_idx]
             fixed_reference_header = sample_headers[ref_idx]
-            update_progress(f"\n⭐ Référence utilisée: {sample_files[ref_idx]}")
+            print(f"\n⭐ Référence utilisée: {sample_files[ref_idx]}")
             
-            # Save reference image
-            ref_output_path = os.path.join(aligned_folder, "reference_image.fit")
+            # Sauvegarder l'image de référence
+            ref_output_path = os.path.join(output_folder, "reference_image.fit")
             ref_data = np.moveaxis(fixed_reference_image, -1, 0).astype(np.uint16)  # HxWx3 to 3xHxW
             
             new_header = fixed_reference_header.copy()
@@ -353,34 +547,25 @@ def align_and_stack_seestar_images(
             new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
             
             fits.writeto(ref_output_path, ref_data, new_header, overwrite=True)
-            update_progress(f"📁 Image de référence sauvegardée: {ref_output_path}")
-            
-            # Libération de la mémoire pour les échantillons
-            sample_images = None
-            sample_headers = None
-            gc.collect()
+            print(f"📁 Image de référence sauvegardée: {ref_output_path}")
         else:
-            update_progress("❌ Impossible de trouver une image de référence valide.")
-            return None
+            print("❌ Impossible de trouver une image de référence valide.")
+            return output_folder
 
-    # Process images in batches
+    # Traitement par lots
     for batch_start in range(0, len(files), batch_size):
-        # Get batch files
         batch_files = files[batch_start:batch_start + batch_size]
-        update_progress(f"\n🚀 Traitement du lot {batch_start // batch_size + 1} (images {batch_start + 1} à {batch_start + len(batch_files)})...")
+        print(f"\n🚀 Traitement du lot {batch_start // batch_size + 1} (images {batch_start + 1} à {batch_start + len(batch_files)})...")
         
-        # Variables for this batch
-        aligned_images = []
-        aligned_headers = []
-        aligned_paths = []
-        unaligned_paths = []
+        images = []
+        headers = []
+        valid_files = []
         
-        # Process each image in the batch
-        for i, f in enumerate(tqdm(batch_files, desc="Alignement")):
+        # Chargement des images du lot
+        for f in tqdm(batch_files, desc="Chargement"):
             try:
                 img_path = os.path.join(input_folder, f)
                 img = load_and_validate_fits(img_path)
-                hdr = fits.getheader(img_path)
                 
                 # Vérifier la qualité de l'image
                 if np.std(img) > 5:
@@ -389,296 +574,121 @@ def align_and_stack_seestar_images(
                     elif img.ndim == 3 and img.shape[0] == 3:
                         img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
                     
+                    # Appliquer la correction des pixels chauds si demandé
+                    if correct_hot_pixels:
+                        img = detect_and_correct_hot_pixels(
+                            img, 
+                            threshold=hot_pixel_threshold,
+                            neighborhood_size=neighborhood_size
+                        )
+                    
                     img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
                     
-                    # Alignement canal par canal pour les images couleur
-                    if img.ndim == 3:
-                        aligned_channels = []
-                        for c in range(3):
-                            # Normalisation pour l'alignement
-                            img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                            ref_norm = cv2.normalize(fixed_reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                            
-                            aligned_channel, _ = aa.register(img_norm, ref_norm)
-                            aligned_channels.append(aligned_channel)
-                        
-                        # Recombiner les canaux
-                        aligned_img = np.stack(aligned_channels, axis=-1)
-                        aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
-                    else:
-                        # Cas d'une image en niveaux de gris
-                        aligned_img, _ = aa.register(img, fixed_reference_image)
-                        aligned_img = np.stack((aligned_img,) * 3, axis=-1)
-                    
-                    # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
-                    color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
-                    
-                    # Mettre à jour l'en-tête
-                    new_header = hdr.copy()
-                    new_header['NAXIS'] = 3
-                    new_header['NAXIS1'] = aligned_img.shape[1]
-                    new_header['NAXIS2'] = aligned_img.shape[0]
-                    new_header['NAXIS3'] = 3
-                    new_header['BITPIX'] = 16
-                    new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
-                    
-                    # Enregistrement de l'image alignée
-                    out_path = os.path.join(aligned_folder, f"aligned_{batch_start + i:04}.fit")
-                    fits.writeto(out_path, color_cube, new_header, overwrite=True)
-                    
-                    # Store in memory for stacking
-                    aligned_images.append(aligned_img)
-                    aligned_headers.append(new_header)
-                    aligned_paths.append(out_path)
-                    
-                    # Libérer la mémoire des données originales
-                    img = None
-                    color_cube = None
-                    
-                    # Accumulate exposure time
-                    if "EXPTIME" in hdr:
-                        total_exposure_time += hdr["EXPTIME"]
+                    images.append(img)
+                    headers.append(fits.getheader(img_path))
+                    valid_files.append(f)
                 else:
-                    update_progress(f"Rejetée (qualité insuffisante): {f}")
+                    print(f"Rejetée (qualité insuffisante): {f}")
             except Exception as e:
-                update_progress(f"❌ Échec de l'alignement pour l'image {f}: {str(e)}")
+                print(f"⚠️ {f}: {str(e)}")
+        
+        if len(images) < 1:
+            print("❌ Aucune image valide dans ce lot, ignoré.")
+            continue
+            
+        # Alignement des images du lot
+        for i, (img, hdr, fname) in enumerate(zip(tqdm(images, desc="Alignement"), headers, valid_files)):
+            try:
+                # Alignement canal par canal pour les images couleur
+                if img.ndim == 3:
+                    aligned_channels = []
+                    for c in range(3):
+                        # Normalisation pour l'alignement
+                        img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                        ref_norm = cv2.normalize(fixed_reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                        
+                        aligned_channel, _ = aa.register(img_norm, ref_norm)
+                        aligned_channels.append(aligned_channel)
+                    
+                    # Recombiner les canaux
+                    aligned_img = np.stack(aligned_channels, axis=-1)
+                    aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
+                else:
+                    # Cas d'une image en niveaux de gris
+                    aligned_img, _ = aa.register(img, fixed_reference_image)
+                    aligned_img = np.stack((aligned_img,) * 3, axis=-1)
                 
-                # Copy unaligned image to separate folder
+                # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
+                color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
+                
+                # Mettre à jour l'en-tête
+                new_header = hdr.copy()
+                new_header['NAXIS'] = 3
+                new_header['NAXIS1'] = aligned_img.shape[1]
+                new_header['NAXIS2'] = aligned_img.shape[0]
+                new_header['NAXIS3'] = 3
+                new_header['BITPIX'] = 16
+                new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
+                if correct_hot_pixels:
+                    new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
+                    new_header.set('HOTPXTH', hot_pixel_threshold, 'Hot pixels detection threshold')
+                    new_header.set('HOTPXNB', neighborhood_size, 'Hot pixels neighborhood size')
+                
+                # Enregistrement de l'image alignée
+                out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
+                fits.writeto(out_path, color_cube, new_header, overwrite=True)
+            except Exception as e:
+                print(f"❌ Échec de l'alignement pour l'image {fname}: {str(e)}")
+                
+                # Copier l'image non alignée dans le dossier séparé
                 try:
-                    original_path = os.path.join(input_folder, f)
-                    out_path = os.path.join(unaligned_folder, f"unaligned_{f}")
+                    original_path = os.path.join(input_folder, fname)
+                    out_path = os.path.join(unaligned_folder, f"unaligned_{fname}")
                     with open(original_path, 'rb') as src, open(out_path, 'wb') as dst:
                         dst.write(src.read())
-                    update_progress(f"⚠️ Image non alignée sauvegardée: {out_path}")
-                    unaligned_paths.append(out_path)
+                    print(f"⚠️ Image non alignée sauvegardée: {out_path}")
                 except Exception as copy_err:
-                    update_progress(f"❌ Impossible de copier l'image originale: {copy_err}")
-            
-            # Update progress
-            processed_files += 1
-            progress_percent = (processed_files / total_files) * 100
-            remaining_time = estimate_remaining_time(processing_start_time, processed_files, total_files)
-            update_progress(
-                f"Traitement de {f} ({processed_files}/{total_files}) - "
-                f"Temps restant estimé: {remaining_time}", 
-                progress=progress_percent
-            )
-            
-            # Force garbage collection after each image processing
-            gc.collect()
+                    print(f"❌ Impossible de copier l'image originale: {copy_err}")
         
-        # Stack aligned images from this batch if there are any
-        if aligned_images:
-            update_progress(f"⚙️ Création du sous-empilement pour le lot {batch_start // batch_size + 1}...")
-            batch_stack, batch_header = stack_batch(
-                aligned_images, 
-                aligned_headers,
-                stacking_mode=stacking_mode,
-                kappa=kappa,
-                max_iterations=max_iterations
-            )
-            
-            if batch_stack is not None:
-                # Save sub-stack
-                substack_path = os.path.join(substack_folder, f"sub_stack_{batch_start // batch_size + 1:03d}.fit")
-                
-                # Convert to FITS format (HxWx3 -> 3xHxW)
-                if batch_stack.ndim == 3 and batch_stack.shape[2] == 3:
-                    batch_stack_fits = np.moveaxis(batch_stack, -1, 0).astype(np.float32)
-                else:
-                    batch_stack_fits = batch_stack.astype(np.float32)
-                
-                fits.writeto(substack_path, batch_stack_fits, batch_header, overwrite=True)
-                update_progress(f"✅ Sous-empilement sauvegardé: {substack_path}")
-                
-                # Add to list of sub-stacks for final stacking
-                batch_stacks.append(batch_stack)
-                batch_stack_headers.append(batch_header)
-                files_in_final_stack += len(aligned_images)
-                
-                # Libérer la mémoire du batch_stack après l'avoir ajouté à la liste
-                batch_stack_fits = None
-                
-                # Now that we have a sub-stack, delete the individual aligned files to save space
-                update_progress("🧹 Suppression des fichiers alignés individuels...")
-                for path in aligned_paths:
-                    try:
-                        os.remove(path)
-                    except Exception as e:
-                        update_progress(f"⚠️ Impossible de supprimer {path}: {e}")
-                
-                # Forcefully free memory
-                aligned_images = []
-                aligned_headers = []
-                aligned_paths = []
-                gc.collect()
-        
-        # Delete unaligned files to save space
-        if unaligned_paths:
-            update_progress("🧹 Suppression des fichiers non alignés...")
-            for path in unaligned_paths:
-                try:
-                    os.remove(path)
-                except Exception as e:
-                    update_progress(f"⚠️ Impossible de supprimer {path}: {e}")
-            
-            unaligned_paths = []
-        
-        # Force garbage collection after processing each batch
+        # Libérer la mémoire après le traitement du lot
+        del images
+        del headers
         gc.collect()
-    
-    # Check if we have any sub-stacks to create the final stack
-    if not batch_stacks:
-        update_progress("❌ Aucun sous-empilement créé, impossible de générer l'empilement final.")
-        return None
-    
-    # Create final stack from sub-stacks
-    update_progress(f"\n⭐ Création de l'empilement final à partir de {len(batch_stacks)} sous-empilements ({files_in_final_stack} images)...")
-    
-    # Stack all sub-stacks together
-    final_stack, final_header = stack_batch(
-        batch_stacks, 
-        batch_stack_headers,
-        stacking_mode=stacking_mode,
-        kappa=kappa,
-        max_iterations=max_iterations
-    )
-    
-    # Libérer la mémoire des sous-empilements
-    batch_stacks = None
-    batch_stack_headers = None
-    gc.collect()
-    
-    if final_stack is None:
-        update_progress("❌ Échec de la création de l'empilement final.")
-        return None
-    
-    # Save final stack
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    final_path = os.path.join(output_folder, f"FINAL_STACK_{stacking_mode}_{timestamp}.fit")
-    
-    # Convert to FITS format (HxWx3 -> 3xHxW) if needed
-    if final_stack.ndim == 3 and final_stack.shape[2] == 3:
-        final_stack_fits = np.moveaxis(final_stack, -1, 0).astype(np.float32)
-    else:
-        final_stack_fits = final_stack.astype(np.float32)
-    
-    # Update final header
-    final_header['NUMIMGS'] = files_in_final_stack, 'Total number of input images'
-    final_header['EXPTIME'] = total_exposure_time, 'Total equivalent exposure time'
-    final_header['DATE-STK'] = datetime.now().isoformat(), 'Date of stacking'
-    
-    fits.writeto(final_path, final_stack_fits, final_header, overwrite=True)
-    
-    # Libérer la mémoire après sauvegarde
-    final_stack = None
-    final_stack_fits = None
-    final_header = None
-    gc.collect()
-    
-    # Calculate total processing time
-    total_time = time.time() - processing_start_time
-    formatted_proc_time = format_exposure_time(total_time)
-    
-    update_progress(f"\n✅ Traitement terminé avec succès !")
-    update_progress(f"📁 Empilement final: {final_path}")
-    update_progress(f"📊 Nombre de fichiers traités: {processed_files}")
-    update_progress(f"📊 Nombre de fichiers dans l'empilement final: {files_in_final_stack}")
-    update_progress(f"⏱️ Durée totale du traitement: {formatted_proc_time}")
-    if total_exposure_time > 0:
-        formatted_exp_time = format_exposure_time(total_exposure_time)
-        update_progress(f"⏱️ Temps d'exposition total équivalent: {formatted_exp_time}")
-    
-    # Nettoyage des sous-empilements après création de l'empilement final
-    update_progress("\n🧹 Nettoyage des sous-empilements...")
-    for file in os.listdir(substack_folder):
-        try:
-            file_path = os.path.join(substack_folder, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        except Exception as e:
-            update_progress(f"⚠️ Impossible de supprimer {file}: {e}")
-    
-    # Clean up unaligned folder if empty
-    try:
-        if os.path.exists(unaligned_folder) and not os.listdir(unaligned_folder):
-            os.rmdir(unaligned_folder)
-            update_progress("🧹 Dossier 'unaligned' supprimé (vide)")
-        
-        # Clean up aligned folder if empty
-        if os.path.exists(aligned_folder) and (not os.listdir(aligned_folder) or (len(os.listdir(aligned_folder)) == 1 and os.path.exists(os.path.join(aligned_folder, "reference_image.fit")))):
-            # Just keep the reference image if needed
-            ref_path = os.path.join(aligned_folder, "reference_image.fit")
-            if os.path.exists(ref_path):
-                # Move reference to output folder
-                new_ref_path = os.path.join(output_folder, "reference_image.fit")
-                shutil.move(ref_path, new_ref_path)
-            
-            # Remove aligned folder
-            if os.path.exists(aligned_folder):
-                shutil.rmtree(aligned_folder)
-                update_progress("🧹 Dossier 'aligned_lights' supprimé (vide)")
-        
-        # Clean up substack folder if empty
-        if os.path.exists(substack_folder) and not os.listdir(substack_folder):
-            os.rmdir(substack_folder)
-            update_progress("🧹 Dossier 'sub_stacks' supprimé (vide)")
-    except Exception as e:
-        update_progress(f"⚠️ Nettoyage des dossiers: {e}")
-    
-    return final_path
-    
-class SeestarStacker:
-    """
-    Class for stacking Seestar images with progress tracking.
-    """
-    def __init__(self):
-        self.stacking_mode = "kappa-sigma"
-        self.kappa = 2.5
-        self.max_iterations = 3
-        self.batch_size = 10
-        self.progress_callback = None
-        self.stop_processing = False
-        
-    def set_progress_callback(self, callback):
-        """Set a callback function for progress updates."""
-        self.progress_callback = callback
-        
-    def stack_images(self, input_folder, output_folder, batch_size=None):
-        """Stack images from input_folder and save to output_folder."""
-        if batch_size is not None:
-            self.batch_size = batch_size
-            
-        return align_and_stack_seestar_images(
-            input_folder=input_folder,
-            output_folder=output_folder,
-            stacking_mode=self.stacking_mode,
-            kappa=self.kappa,
-            max_iterations=self.max_iterations,
-            batch_size=self.batch_size,
-            progress_callback=self.progress_callback
-        )
 
+    print(f"\n✅ Toutes les images alignées en couleur ont été sauvegardées dans: {output_folder}")
+    return output_folder
+    
 if __name__ == "__main__":
     input_path = input("📂 Entrez le chemin du dossier contenant les images FITS : ").strip('"\' ')
     reference_path = input("📌 Entrez le chemin de l'image de référence (laisser vide pour sélection dynamique) : ").strip('"\' ')
-    stacking_method = input("📋 Choisissez la méthode d'empilement (mean, median, kappa-sigma, winsorized-sigma) [kappa-sigma] : ").strip() or "kappa-sigma"
     batch_size = int(input("🛠️ Entrez la taille du lot (exemple : 10) : ") or 10)
     
-    if stacking_method in ["kappa-sigma", "winsorized-sigma"]:
-        kappa = float(input("📊 Entrez la valeur de kappa (défaut: 2.5) : ") or 2.5)
-        iterations = int(input("🔄 Entrez le nombre d'itérations (défaut: 3) : ") or 3)
-    else:
-        kappa = 2.5
-        iterations = 3
+    # Options de correction des pixels chauds
+    correct_hot_pixels = input("🔥 Activer la correction des pixels chauds ? (o/n) [o] : ").strip().lower() != 'n'
+    hot_pixel_threshold = float(input("🔍 Seuil de détection des pixels chauds (en écarts-types) [3.0] : ") or 3.0)
+    neighborhood_size = int(input("🔍 Taille du voisinage pour la correction (nombre impair) [5] : ") or 5)
     
-    align_and_stack_seestar_images(
-        input_path, 
-        stacking_mode=stacking_method,
-        kappa=kappa,
-        max_iterations=iterations,
+    # S'assurer que neighborhood_size est impair
+    if neighborhood_size % 2 == 0:
+        neighborhood_size += 1
+        print(f"⚠️ La taille du voisinage doit être impaire. Valeur ajustée à {neighborhood_size}.")
+        
+    # Vérifier si batch_size est nul ou négatif
+    if batch_size <= 0:
+        # Estimer dynamiquement la taille du lot en fonction de la mémoire disponible
+        sample_path = None
+        if files:
+            sample_path = os.path.join(input_path, files[0])
+        batch_size = estimate_batch_size(sample_path)
+        print(f"🧠 Taille de lot définie automatiquement à {batch_size} en fonction de la mémoire disponible")
+
+    # Appeler la fonction avec les bons paramètres
+    align_seestar_images_batch(
+        input_folder=input_path, 
         batch_size=batch_size, 
-        manual_reference_path=reference_path
+        manual_reference_path=reference_path,
+        correct_hot_pixels=correct_hot_pixels,
+        hot_pixel_threshold=hot_pixel_threshold,
+        neighborhood_size=neighborhood_size
     )
-    
     input("\nAppuyez sur Entrée pour quitter...")
