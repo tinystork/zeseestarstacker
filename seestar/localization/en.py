@@ -75,4 +75,10 @@ EN_TRANSLATIONS = {
     'remove_processed': 'Remove processed images',
     'queue_start': '⚙️ Starting queue processing...',
     'queue_completed': 'Queue processing completed.',
+    
+    # Processing mode
+    'processing_mode': 'Processing Mode',
+    'use_queue_mode': 'Use queue mode',
+    'use_traditional_mode': 'Use traditional stacking',
+    'remove_processed': 'Remove processed images',
 }

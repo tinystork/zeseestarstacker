@@ -6,6 +6,8 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import threading
 import time
+import numpy as np
+from astropy.io import fits
 
 from seestar.core.alignment import SeestarAligner
 from seestar.core.stacking import ProgressiveStacker
@@ -14,7 +16,7 @@ from seestar.localization.localization import Localization
 from .preview import PreviewManager
 from .progress import ProgressManager
 from .settings import SettingsManager
-
+from seestar.tools.stretch import Stretch
 
 class SeestarStackerGUI:
     """
@@ -27,6 +29,11 @@ class SeestarStackerGUI:
         if event.widget == self.root:
             self.refresh_preview()
 
+
+    def init_preview(self):
+        """Initialise la prévisualisation avec une image de test."""
+        test_img = self.preview_manager.create_test_image()
+        self.update_preview(test_img, "Image de test", True)
 
     def __init__(self):
         """Initialise l'interface graphique de Seestar Stacker."""
@@ -53,11 +60,15 @@ class SeestarStackerGUI:
         self.init_managers()
 
         # Initialiser la prévisualisation
-        self.init_preview()
+#        self.init_preview()
     
         # État du traitement
         self.processing = False
         self.thread = None
+        
+        # Variables pour le stockage des stacks intermédiaires et finaux
+        self.current_stack_data = None
+        self.current_stack_header = None
 
 
     def init_preview(self):
@@ -225,15 +236,14 @@ class SeestarStackerGUI:
         processing_mode_frame.pack(fill=tk.X, pady=10)
 
         # Option pour utiliser le mode file d'attente
-        self.queue_check = ttk.Checkbutton(processing_mode_frame, text="Utiliser le mode file d'attente",
+        self.queue_check = ttk.Checkbutton(processing_mode_frame, text=self.tr('use_queue_mode'),
                                            variable=self.use_queue)
         self.queue_check.pack(side=tk.LEFT, padx=5, pady=5)
 
         # Option d'empilement traditionnel
-        self.traditional_check = ttk.Checkbutton(processing_mode_frame, text="Utiliser l'empilement traditionnel",
+        self.traditional_check = ttk.Checkbutton(processing_mode_frame, text=self.tr('use_traditional_mode'),
                                                  variable=self.use_traditional)
         self.traditional_check.pack(side=tk.LEFT, padx=20)
-
         # Lier les deux options
         self.use_queue.trace_add(
             "write", lambda *args: self.use_traditional.set(not self.use_queue.get()))
@@ -265,7 +275,7 @@ class SeestarStackerGUI:
         remove_processed_frame.pack(fill=tk.X, pady=5)
 
         self.remove_processed_check = ttk.Checkbutton(remove_processed_frame,
-                                                      text="Supprimer les images traitées",
+                                                      text=self.tr('remove_processed'),
                                                       variable=self.remove_aligned)
         self.remove_processed_check.pack(side=tk.LEFT, padx=5)
 
@@ -381,7 +391,7 @@ class SeestarStackerGUI:
 
     def refresh_preview(self):
         """Actualise l'aperçu avec la dernière image stockée."""
-        if hasattr(self, 'queued_stacker') and self.queued_stacker.image_db:
+        if hasattr(self, 'queued_stacker') and hasattr(self.queued_stacker, 'image_db') and self.queued_stacker.image_db:
             # Récupérer le dernier stack si possible
             try:
                 output_folder = self.output_path.get()
@@ -389,15 +399,40 @@ class SeestarStackerGUI:
                     for key in sorted(os.listdir(output_folder), reverse=True):
                         if key.endswith('.fit') and not key.startswith('reference'):
                             stack_key = os.path.splitext(key)[0]
-                            stack_data, _ = self.queued_stacker.image_db.get_stack(
-                                stack_key)
+                            stack_data, _ = self.queued_stacker.image_db.get_stack(stack_key)
                             if stack_data is not None:
-                                self.update_preview(
-                                    stack_data, stack_key, self.apply_stretch.get())
-                                break
+                                self.update_preview(stack_data, stack_key, self.apply_stretch.get())
+                                return
             except Exception as e:
-                print(
-                    f"Erreur lors de l'actualisation de la prévisualisation: {e}")
+                print(f"Erreur lors de l'actualisation de la prévisualisation: {e}")
+        # Si on a un stack courant en mémoire (pour le mode traditionnel amélioré)
+        elif self.current_stack_data is not None:
+            self.update_preview(self.current_stack_data, "Stack actuel", self.apply_stretch.get())
+        elif hasattr(self, 'input_path') and self.input_path.get():
+            # Si aucun stack n'est disponible mais qu'un dossier d'entrée est choisi,
+            # essayer d'afficher la première image
+            try:
+                input_folder = self.input_path.get()
+                files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                if files:
+                    first_image = os.path.join(input_folder, files[0])
+                    from seestar.core.image_processing import load_and_validate_fits, debayer_image
+                    img_data = load_and_validate_fits(first_image)
+                    
+                    # Appliquer le debayering si nécessaire
+                    if img_data.ndim == 2:
+                        from astropy.io import fits
+                        try:
+                            header = fits.getheader(first_image)
+                            bayer_pattern = header.get('BAYERPAT', 'GRBG')
+                        except:
+                            bayer_pattern = 'GRBG'  # Motif par défaut
+                        
+                        img_data = debayer_image(img_data, bayer_pattern)
+                    
+                    self.update_preview(img_data, os.path.basename(first_image), self.apply_stretch.get())
+            except Exception as e:
+                print(f"Erreur lors du chargement de la première image: {e}")
 
     def update_preview(self, image_data, stack_name=None, apply_stretch=None):
         """
@@ -413,13 +448,15 @@ class SeestarStackerGUI:
 
         # Utiliser le gestionnaire de prévisualisation
         self.preview_manager.update_preview(
-            image_data, stack_name, apply_stretch)
+        image_data, stack_name, apply_stretch)
 
     def browse_input(self):
         """Ouvre une boîte de dialogue pour sélectionner le dossier d'entrée."""
         folder = filedialog.askdirectory()
         if folder:
             self.input_path.set(folder)
+            # Essayer d'afficher la première image ou le dernier stack
+            self.refresh_preview()
 
     def browse_output(self):
         """Ouvre une boîte de dialogue pour sélectionner le dossier de sortie."""
@@ -495,6 +532,11 @@ class SeestarStackerGUI:
             text=self.tr('hot_pixel_threshold'))
         self.neighborhood_size_label.config(text=self.tr('neighborhood_size'))
 
+        # Mise à jour des options de mode de traitement
+        self.queue_check.config(text=self.tr('use_queue_mode'))
+        self.traditional_check.config(text=self.tr('use_traditional_mode'))
+        self.remove_processed_check.config(text=self.tr('remove_processed'))
+
     def start_processing(self):
         """Démarre le traitement des images."""
         input_folder = self.input_path.get()
@@ -537,6 +579,10 @@ class SeestarStackerGUI:
         # Démarrer le minuteur
         self.progress_manager.start_timer()
         self.remaining_time_var.set(self.tr('calculating'))
+
+        # Réinitialiser le stack courant
+        self.current_stack_data = None
+        self.current_stack_header = None
 
         # Lancer le traitement dans un thread séparé
         self.thread = threading.Thread(
@@ -582,37 +628,8 @@ class SeestarStackerGUI:
                 self.update_progress(self.tr('queue_completed'))
 
             else:
-                # Mode traditionnel en deux étapes
-                aligned_folder = input_folder
-
-                # Étape 1: Alignement des images
-                self.update_progress(self.tr('alignment_start'))
-                aligned_folder = self.aligner.align_images(input_folder)
-
-                if self.aligner.stop_processing:
-                    raise Exception(self.tr('processing_stopped'))
-
-                self.update_progress(
-                    self.tr('using_aligned_folder').format(aligned_folder))
-
-                # Étape 2: Empilement des images alignées
-                self.update_progress(self.tr('progressive_stacking_start'))
-
-                # Créer le dossier de sortie final s'il n'existe pas
-                os.makedirs(output_folder, exist_ok=True)
-
-                # Traiter les images alignées par lots
-                stack_files = self.stacker.process_aligned_images(
-                    aligned_folder,
-                    output_folder,
-                    remove_aligned=self.remove_aligned.get()
-                )
-
-                if not stack_files:
-                    self.update_progress(f"⚠️ {self.tr('no_stacks_created')}")
-                else:
-                    self.update_progress(
-                        f"✅ {self.tr('processing_completed')} {len(stack_files)} {self.tr('stacks_created')}")
+                # Mode traditionnel amélioré avec visualisation en temps réel
+                self.run_enhanced_traditional_stacking(input_folder, output_folder)
 
         except Exception as e:
             self.update_progress(f"❌ {self.tr('error')}: {e}")
@@ -624,6 +641,376 @@ class SeestarStackerGUI:
             # Arrêter le minuteur
             self.progress_manager.stop_timer()
 
+    def run_enhanced_traditional_stacking(self, input_folder, output_folder):
+        """
+        Exécute un processus d'empilement traditionnel amélioré avec visualisation en temps réel.
+        Cette fonction garde l'alignement de base mais ajoute des fonctionnalités de visualisation
+        et de combinaison progressive des stacks.
+
+        Args:
+            input_folder (str): Dossier contenant les images brutes
+            output_folder (str): Dossier de sortie pour les images empilées
+        """
+        try:
+            # Créer les dossiers nécessaires
+            os.makedirs(output_folder, exist_ok=True)
+            aligned_folder = os.path.join(output_folder, "aligned_temp")
+            os.makedirs(aligned_folder, exist_ok=True)
+
+            # Récupérer les fichiers d'entrée
+            all_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+            if not all_files:
+                self.update_progress("❌ Aucun fichier .fit/.fits trouvé")
+                return
+
+            # Estimer la taille des lots si auto
+            if self.batch_size.get() <= 0:
+                from seestar.core.utils import estimate_batch_size
+                sample_path = os.path.join(input_folder, all_files[0])
+                self.batch_size.set(estimate_batch_size(sample_path))
+                self.update_progress(f"🧠 Taille de lot automatique estimée : {self.batch_size.get()}")
+
+            batch_size = self.batch_size.get()
+            total_files = len(all_files)
+            self.update_progress(f"🔍 {total_files} images trouvées à traiter en lots de {batch_size}")
+
+            # Étape 1: Obtenir une image de référence
+            # (on utilise la méthode de l'aligneur pour sélectionner la référence)
+            self.update_progress("🔍 Recherche de l'image de référence...")
+            
+            # Si l'utilisateur a spécifié une image de référence, l'utiliser
+            if self.reference_image_path.get():
+                reference_files = None  # L'aligneur utilisera directement reference_image_path
+            else:
+                # Sinon utiliser jusqu'à 50 images pour trouver une bonne référence
+                reference_files = all_files[:min(50, len(all_files))]
+                
+            self.aligner.stop_processing = False
+            reference_folder = self.aligner.align_images(
+                input_folder, 
+                aligned_folder, 
+                specific_files=reference_files
+            )
+            
+            # Vérifier que l'image de référence existe
+            reference_image_path = os.path.join(reference_folder, "reference_image.fit")
+            if not os.path.exists(reference_image_path):
+                self.update_progress("❌ Échec de la création de l'image de référence")
+                return
+            
+            self.update_progress(f"⭐ Image de référence créée : {reference_image_path}")
+            
+            # Nettoyer le dossier d'alignement temporaire
+            for f in os.listdir(aligned_folder):
+                if f != "reference_image.fit" and f != "unaligned":
+                    os.remove(os.path.join(aligned_folder, f))
+            
+            # Traiter les images par lots
+            start_time = time.time()
+            stack_count = 0
+            batch_count = (total_files + batch_size - 1) // batch_size  # Ceil division
+            
+            for batch_idx in range(batch_count):
+                if self.aligner.stop_processing or self.stacker.stop_processing:
+                    self.update_progress("⛔ Traitement arrêté par l'utilisateur.")
+                    break
+                    
+                # Calculer les indices du lot actuel
+                batch_start = batch_idx * batch_size
+                batch_end = min(batch_start + batch_size, total_files)
+                current_files = all_files[batch_start:batch_end]
+                
+                self.update_progress(
+                    f"🚀 Traitement du lot {batch_idx + 1}/{batch_count} "
+                    f"(images {batch_start+1} à {batch_end}/{total_files})...",
+                    batch_idx * 100.0 / batch_count
+                )
+                
+                # Étape 2: Aligner les images du lot sur l'image de référence
+                self.update_progress(f"📐 Alignement des images du lot {batch_idx + 1}...")
+                
+                # Utiliser l'image de référence comme référence explicite pour tous les lots
+                original_ref_path = self.aligner.reference_image_path
+                self.aligner.reference_image_path = reference_image_path
+                
+                # Aligner les images du lot
+                self.aligner.stop_processing = False
+                self.aligner.align_images(
+                    input_folder, 
+                    aligned_folder, 
+                    specific_files=current_files
+                )
+                
+                # Restaurer la référence d'origine
+                self.aligner.reference_image_path = original_ref_path
+                
+                # Vérifier si l'alignement a été arrêté
+                if self.aligner.stop_processing:
+                    self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
+                    break
+                
+                # Étape 3: Empiler les images alignées du lot
+                self.update_progress(f"🧮 Empilement des images alignées du lot {batch_idx + 1}...")
+                
+                # Trouver les fichiers alignés (format aligned_XXXX.fit)
+                aligned_files = [f for f in os.listdir(aligned_folder) 
+                               if f.startswith('aligned_') and f.endswith('.fit')]
+                
+                if not aligned_files:
+                    self.update_progress(f"⚠️ Aucune image alignée trouvée pour le lot {batch_idx + 1}")
+                    continue
+                
+                # Empiler les images alignées du lot
+                stack_file = os.path.join(output_folder, f"stack_batch_{batch_idx+1:03d}.fit")
+                
+                # Charger et empiler les images alignées
+                batch_stack_data, batch_stack_header = self._stack_aligned_images(
+                    aligned_folder, aligned_files, stack_file
+                )
+                
+                if batch_stack_data is None:
+                    self.update_progress(f"⚠️ Échec de l'empilement du lot {batch_idx + 1}")
+                    continue
+                
+                stack_count += 1
+                
+                # Mettre à jour la prévisualisation avec le résultat du lot
+                self.update_preview(
+                    batch_stack_data, 
+                    f"Stack du lot {batch_idx + 1}", 
+                    self.apply_stretch.get()
+                )
+                
+                # Étape 4: Combiner avec le stack cumulatif si ce n'est pas le premier lot
+                if self.current_stack_data is None:
+                    # Premier lot, initialiser le stack cumulatif
+                    self.current_stack_data = batch_stack_data
+                    self.current_stack_header = batch_stack_header
+                else:
+                    # Combiner le stack du lot avec le stack cumulatif
+                    self.update_progress(f"🔄 Fusion avec le stack cumulatif...")
+                    self._combine_with_current_stack(batch_stack_data, batch_stack_header)
+                
+                # Mettre à jour la prévisualisation avec le stack cumulatif
+                self.update_preview(
+                    self.current_stack_data, 
+                    f"Stack cumulatif ({batch_idx + 1}/{batch_count} lots)", 
+                    self.apply_stretch.get()
+                )
+                
+                # Enregistrer le stack cumulatif
+                cumulative_file = os.path.join(output_folder, f"stack_cumulative.fit")
+                from seestar.core.image_processing import save_fits_image, save_preview_image
+                save_fits_image(self.current_stack_data, cumulative_file, self.current_stack_header)
+                save_preview_image(self.current_stack_data, os.path.join(output_folder, "stack_cumulative.png"))
+                
+                # Suppression des images alignées traitées si demandé
+                if self.remove_aligned.get():
+                    for f in aligned_files:
+                        try:
+                            os.remove(os.path.join(aligned_folder, f))
+                        except Exception as e:
+                            self.update_progress(f"⚠️ Impossible de supprimer {f}: {e}")
+                    
+                    self.update_progress(f"🧹 Images alignées du lot {batch_idx + 1} supprimées")
+            
+            # Appliquer le débruitage au stack final si demandé
+            if self.apply_denoise.get() and self.current_stack_data is not None:
+                self.update_progress("🧹 Application du débruitage au stack final...")
+                try:
+                    from seestar.core.utils import apply_denoise
+                    self.current_stack_data = apply_denoise(self.current_stack_data, strength=5)
+                    
+                    # Mise à jour du header
+                    self.current_stack_header['DENOISED'] = True
+                    
+                    # Sauvegarder la version débruitée
+                    final_file = os.path.join(output_folder, "stack_final_denoised.fit")
+                    from seestar.core.image_processing import save_fits_image, save_preview_image
+                    save_fits_image(self.current_stack_data, final_file, self.current_stack_header)
+                    save_preview_image(self.current_stack_data, os.path.join(output_folder, "stack_final_denoised.png"))
+                    
+                    # Mise à jour de la prévisualisation
+                    self.update_preview(
+                        self.current_stack_data, 
+                        "Stack final débruité", 
+                        self.apply_stretch.get()
+                    )
+                except Exception as e:
+                    self.update_progress(f"⚠️ Échec du débruitage: {e}")
+            
+            # Rapport final
+            if stack_count > 0:
+                self.update_progress(f"✅ Traitement terminé : {stack_count} lots empilés")
+            else:
+                self.update_progress("⚠️ Aucun stack n'a été créé")
+            
+        except Exception as e:
+            self.update_progress(f"❌ Erreur lors du traitement: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _stack_aligned_images(self, aligned_folder, aligned_files, output_file):
+        """
+        Empile les images alignées et sauvegarde le résultat.
+        
+        Args:
+            aligned_folder (str): Dossier contenant les images alignées
+            aligned_files (list): Liste des fichiers à empiler
+            output_file (str): Chemin du fichier de sortie
+            
+        Returns:
+            tuple: (stack_data, stack_header) ou (None, None) si échec
+        """
+        try:
+            from seestar.core.image_processing import load_and_validate_fits, save_fits_image, save_preview_image
+            
+            # Charger toutes les images du lot
+            images = []
+            headers = []
+            
+            for file in aligned_files:
+                try:
+                    file_path = os.path.join(aligned_folder, file)
+                    img = load_and_validate_fits(file_path)
+                    
+                    # Si l'image est 3D avec la première dimension comme canaux (3xHxW), 
+                    # convertir en HxWx3
+                    if img.ndim == 3 and img.shape[0] == 3:
+                        img = np.moveaxis(img, 0, -1)
+                    
+                    images.append(img)
+                    headers.append(fits.getheader(file_path))
+                except Exception as e:
+                    self.update_progress(f"⚠️ Erreur lors du chargement de {file}: {e}")
+            
+            if not images:
+                self.update_progress(f"❌ Aucune image valide trouvée à empiler")
+                return None, None
+            
+            # Empiler les images selon la méthode choisie
+            stacking_mode = self.stacking_mode.get()
+            self.update_progress(f"🧮 Empilement avec la méthode '{stacking_mode}'...")
+            
+            if stacking_mode == "mean":
+                stacked_image = np.mean(images, axis=0)
+            elif stacking_mode == "median":
+                stacked_image = np.median(np.stack(images, axis=0), axis=0)
+            elif stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
+                kappa = self.kappa.get()
+                # Convertir la liste d'images en un tableau 3D/4D
+                stack = np.stack(images, axis=0)
+                
+                # Calculer la moyenne et l'écart-type
+                mean = np.mean(stack, axis=0)
+                std = np.std(stack, axis=0)
+                
+                if stacking_mode == "kappa-sigma":
+                    # Pour kappa-sigma, on crée des masques pour chaque image
+                    sum_image = np.zeros_like(mean)
+                    mask_sum = np.zeros_like(mean)
+                    
+                    for img in stack:
+                        deviation = np.abs(img - mean)
+                        mask = deviation <= (kappa * std)
+                        sum_image += img * mask
+                        mask_sum += mask
+                    
+                    # Éviter la division par zéro
+                    mask_sum = np.maximum(mask_sum, 1)
+                    stacked_image = sum_image / mask_sum
+                    
+                elif stacking_mode == "winsorized-sigma":
+                    # Pour winsorized-sigma, on remplace les valeurs extrêmes
+                    upper_bound = mean + kappa * std
+                    lower_bound = mean - kappa * std
+                    
+                    # Appliquer les limites à chaque image
+                    clipped_stack = np.clip(stack, lower_bound, upper_bound)
+                    
+                    # Calculer la moyenne des images recadrées
+                    stacked_image = np.mean(clipped_stack, axis=0)
+            else:
+                # Fallback sur la moyenne si méthode non reconnue
+                self.update_progress(f"⚠️ Méthode d'empilement '{stacking_mode}' non reconnue, utilisation de 'mean'")
+                stacked_image = np.mean(images, axis=0)
+            
+            # Créer un en-tête FITS
+            stack_header = fits.Header()
+            stack_header['STACKED'] = True
+            stack_header['STACKTYP'] = stacking_mode
+            stack_header['NIMAGES'] = len(images)
+            
+            if stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
+                stack_header['KAPPA'] = self.kappa.get()
+            
+            # Conserver les métadonnées importantes de la première image
+            important_keys = ['INSTRUME', 'EXPTIME', 'FILTER', 'OBJECT', 'DATE-OBS']
+            for key in important_keys:
+                if headers and key in headers[0]:
+                    stack_header[key] = headers[0][key]
+            
+            # Sauvegarder le stack
+            save_fits_image(stacked_image, output_file, header=stack_header)
+            
+            # Sauvegarder une prévisualisation PNG
+            preview_file = os.path.splitext(output_file)[0] + ".png"
+            save_preview_image(stacked_image, preview_file)
+            
+            self.update_progress(f"✅ Stack créé et sauvegardé: {output_file}")
+            
+            return stacked_image, stack_header
+            
+        except Exception as e:
+            self.update_progress(f"❌ Erreur lors de l'empilement: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+    
+    def _combine_with_current_stack(self, new_stack_data, new_stack_header):
+        """
+        Combine le nouveau stack avec le stack cumulatif actuel.
+        
+        Args:
+            new_stack_data (numpy.ndarray): Données du nouveau stack
+            new_stack_header (astropy.io.fits.Header): En-tête du nouveau stack
+        """
+        try:
+            # Vérifier que les dimensions sont compatibles
+            if new_stack_data.shape != self.current_stack_data.shape:
+                self.update_progress(f"⚠️ Dimensions incompatibles: stack actuel {self.current_stack_data.shape}, nouveau {new_stack_data.shape}")
+                
+                # Essayer de redimensionner (à implémenter si nécessaire)
+                return
+            
+            # Obtenir le nombre d'images dans chaque stack
+            current_images = int(self.current_stack_header.get('NIMAGES', 1))
+            new_images = int(new_stack_header.get('NIMAGES', 1))
+            total_images = current_images + new_images
+            
+            # Vérifier que la même méthode d'empilement est utilisée
+            current_method = self.current_stack_header.get('STACKTYP', 'mean')
+            new_method = new_stack_header.get('STACKTYP', 'mean')
+            
+            if current_method != new_method:
+                self.update_progress(f"⚠️ Méthodes d'empilement différentes: actuel {current_method}, nouveau {new_method}")
+                # Continuer quand même, mais en notant la différence
+            
+            # Combiner en pondérant par le nombre d'images
+            weight_current = current_images / total_images
+            weight_new = new_images / total_images
+            
+            self.current_stack_data = (self.current_stack_data * weight_current) + (new_stack_data * weight_new)
+            
+            # Mettre à jour l'en-tête
+            self.current_stack_header['NIMAGES'] = total_images
+            self.current_stack_header['STACKTYP'] = current_method  # Conserver la méthode d'origine
+            
+        except Exception as e:
+            self.update_progress(f"❌ Erreur lors de la combinaison des stacks: {e}")
+            import traceback
+            traceback.print_exc()
+            
     def run(self):
         """Lance l'interface graphique."""
         self.root.mainloop()

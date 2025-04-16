@@ -75,4 +75,10 @@ FR_TRANSLATIONS = {
     'remove_processed': 'Supprimer les images traitées',
     'queue_start': '⚙️ Démarrage du traitement par file d\'attente...',
     'queue_completed': 'Traitement par file d\'attente terminé.',
+    
+    # Mode de traitement
+    'processing_mode': 'Mode de traitement',
+    'use_queue_mode': 'Utiliser le mode file d\'attente',
+    'use_traditional_mode': 'Utiliser l\'empilement traditionnel',
+    'remove_processed': 'Supprimer les images traitées',
 }

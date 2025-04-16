@@ -194,7 +194,7 @@ class SeestarAligner:
                 continue
             
             self._align_batch(images, headers, valid_files, fixed_reference_image, 
-                             input_folder, output_folder, unaligned_folder, batch_start)
+                            input_folder, output_folder, unaligned_folder, batch_start)
             
             # Libérer la mémoire
             del images
@@ -203,235 +203,227 @@ class SeestarAligner:
         
         self.update_progress(f"✅ Toutes les images alignées ont été sauvegardées dans: {output_folder}")
         return output_folder
-
-# Coller la suite ici (depuis _get_reference_image jusqu'à la fin de la classe et la fonction d'aide)
-
+        
     def _get_reference_image(self, input_folder, files):
-            """
-            Obtient l'image de référence pour l'alignement.
-            
-            Args:
-                input_folder (str): Dossier contenant les images
-                files (list): Liste des fichiers FITS
-                
-            Returns:
-                tuple: (reference_image, reference_header) ou (None, None) si échec
-            """
-            fixed_reference_image = None
-            fixed_reference_header = None
-            
-            # Tenter de charger l'image de référence manuelle si fournie
-            if self.reference_image_path:
-                try:
-                    self.update_progress(f"📌 Chargement de l'image de référence manuelle : {self.reference_image_path}")
-                    fixed_reference_image = load_and_validate_fits(self.reference_image_path)
-                    fixed_reference_header = fits.getheader(self.reference_image_path)
-                    
-                    # Appliquer debayer sur l'image de référence si c'est une image brute
-                    if fixed_reference_image.ndim == 2:
-                        fixed_reference_image = debayer_image(fixed_reference_image, self.bayer_pattern)
-                    elif fixed_reference_image.ndim == 3 and fixed_reference_image.shape[0] == 3:
-                        # Pour les images 3D avec la première dimension comme canal
-                        fixed_reference_image = np.moveaxis(fixed_reference_image, 0, -1)  # Convert to HxWx3
-                    
-                    # Appliquer la correction des pixels chauds si demandé
-                    if self.correct_hot_pixels:
-                        self.update_progress("🔥 Application de la correction des pixels chauds sur l'image de référence...")
-                        fixed_reference_image = detect_and_correct_hot_pixels(
-                            fixed_reference_image, 
-                            threshold=self.hot_pixel_threshold,
-                            neighborhood_size=self.neighborhood_size
-                        )
-                        
-                    fixed_reference_image = cv2.normalize(fixed_reference_image, None, 0, 65535, cv2.NORM_MINMAX)
-                    self.update_progress(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
-                except Exception as e:
-                    self.update_progress(f"❌ Erreur lors du chargement de l'image de référence manuelle: {e}")
-                    fixed_reference_image = None
-            
-            # Sélection automatique de la meilleure image de référence si aucune n'est spécifiée
-            if fixed_reference_image is None:
-                self.update_progress("⚙️ Recherche de la meilleure image de référence...")
-                sample_images = []
-                sample_headers = []
-                sample_files = []
-                
-                # Analyser un sous-ensemble d'images pour trouver la meilleure référence
-                for f in tqdm(files[:min(self.batch_size*2, len(files))], desc="Analyse des images"):
-                    try:
-                        img_path = os.path.join(input_folder, f)
-                        img = load_and_validate_fits(img_path)
-                        hdr = fits.getheader(img_path)
-                        
-                        # S'assurer que l'image a une variance suffisante
-                        if np.std(img) > 5:
-                            # Convertir en couleur si nécessaire
-                            if img.ndim == 2:
-                                img = debayer_image(img, self.bayer_pattern)
-                            elif img.ndim == 3 and img.shape[0] == 3:
-                                # Pour les images 3D avec la première dimension comme canal
-                                img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
-                            
-                            # Appliquer la correction des pixels chauds si demandé
-                            if self.correct_hot_pixels:
-                                img = detect_and_correct_hot_pixels(
-                                    img, 
-                                    threshold=self.hot_pixel_threshold,
-                                    neighborhood_size=self.neighborhood_size
-                                )
-                            
-                            img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
-                            
-                            sample_images.append(img)
-                            sample_headers.append(hdr)
-                            sample_files.append(f)
-                        else:
-                            self.update_progress(f"⚠️ Image ignorée (faible variance): {f}")
-                    except Exception as e:
-                        self.update_progress(f"❌ Erreur lors de l'analyse de {f}: {e}")
-                
-                if sample_images:
-                    # Sélectionner l'image avec le meilleur contraste (médiane la plus élevée)
-                    medians = [np.median(img) for img in sample_images]
-                    ref_idx = np.argmax(medians)
-                    fixed_reference_image = sample_images[ref_idx]
-                    fixed_reference_header = sample_headers[ref_idx]
-                    self.update_progress(f"⭐ Référence utilisée: {sample_files[ref_idx]}")
-            
-            return fixed_reference_image, fixed_reference_header
-        
-            def _save_reference_image(self, reference_image, reference_header, output_folder):
-                """
-                Sauvegarde l'image de référence dans le dossier de sortie.
-                
-                Args:
-                    reference_image (numpy.ndarray): Image de référence
-                    reference_header (astropy.io.fits.Header): En-tête de l'image de référence
-                    output_folder (str): Dossier de sortie
-                """
-                try:
-                    ref_output_path = os.path.join(output_folder, "reference_image.fit")
-                    ref_data = np.moveaxis(reference_image, -1, 0).astype(np.uint16)  # HxWx3 to 3xHxW
-                    
-                    new_header = reference_header.copy()
-                    new_header['NAXIS'] = 3
-                    new_header['NAXIS1'] = reference_image.shape[1]
-                    new_header['NAXIS2'] = reference_image.shape[0]
-                    new_header['NAXIS3'] = 3
-                    new_header['BITPIX'] = 16
-                    new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
-                    new_header.set('REFRENCE', True, 'stacking reference')
-                    
-                    fits.writeto(ref_output_path, ref_data, new_header, overwrite=True)
-                    self.update_progress(f"📁 Image de référence sauvegardée: {ref_output_path}")
-                except Exception as e:
-                    self.update_progress(f"⚠️ Erreur lors de la sauvegarde de l'image de référence: {e}")
-        
-            def _align_batch(self, images, headers, filenames, reference_image, 
-                            input_folder, output_folder, unaligned_folder, batch_start):
-                """
-                Aligne un lot d'images sur l'image de référence.
-                
-                Args:
-                    images (list): Liste des images à aligner
-                    headers (list): Liste des en-têtes FITS
-                    filenames (list): Liste des noms de fichiers
-                    reference_image (numpy.ndarray): Image de référence
-                    input_folder (str): Dossier d'entrée
-                    output_folder (str): Dossier de sortie pour les images alignées
-                    unaligned_folder (str): Dossier pour les images non alignées
-                    batch_start (int): Index de début du lot
-                """
-                for i, (img, hdr, fname) in enumerate(zip(tqdm(images, desc="Alignement"), headers, filenames)):
-                    if self.stop_processing:
-                        self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
-                        break
-                        
-                    try:
-                        # Alignement canal par canal pour les images couleur
-                        if img.ndim == 3:
-                            aligned_channels = []
-                            for c in range(3):
-                                # Normalisation pour l'alignement
-                                img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                                ref_norm = cv2.normalize(reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                                
-                                aligned_channel, _ = aa.register(img_norm, ref_norm)
-                                aligned_channels.append(aligned_channel)
-                            
-                            # Recombiner les canaux
-                            aligned_img = np.stack(aligned_channels, axis=-1)
-                            aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
-                        else:
-                            # Cas d'une image en niveaux de gris
-                            aligned_img, _ = aa.register(img, reference_image)
-                            aligned_img = np.stack((aligned_img,) * 3, axis=-1)
-                        
-                        # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
-                        color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
-                        
-                        # Mettre à jour l'en-tête
-                        new_header = hdr.copy()
-                        new_header['NAXIS'] = 3
-                        new_header['NAXIS1'] = aligned_img.shape[1]
-                        new_header['NAXIS2'] = aligned_img.shape[0]
-                        new_header['NAXIS3'] = 3
-                        new_header['BITPIX'] = 16
-                        new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
-                        new_header.set('ALIGNED', True, 'Image Aligned on ref')
-                        
-                        if self.correct_hot_pixels:
-                            new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
-                            new_header.set('HOTPXTH', self.hot_pixel_threshold, 'Hot pixels detection threshold')
-                            new_header.set('HOTPXNB', self.neighborhood_size, 'Hot pixels neighborhood size')
-                        
-                        # Enregistrement de l'image alignée
-                        out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
-                        fits.writeto(out_path, color_cube, new_header, overwrite=True)
-                    except Exception as e:
-                        self.update_progress(f"❌ Échec de l'alignement pour l'image {fname}: {str(e)}")
-                        
-                        # Copier l'image non alignée dans le dossier séparé
-                        try:
-                            original_path = os.path.join(input_folder, fname)
-                            out_path = os.path.join(unaligned_folder, f"unaligned_{fname}")
-                            shutil.copy2(original_path, out_path)
-                            self.update_progress(f"⚠️ Image non alignée sauvegardée: {out_path}")
-                        except Exception as copy_err:
-                            self.update_progress(f"❌ Impossible de copier l'image originale: {copy_err}")
-
-
-    # Fonction d'aide pour la compatibilité avec l'ancien code
-    def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None,
-                                   correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
         """
-        Aligne les images Seestar par lots avec une image de référence optionnelle.
-        Cette fonction est maintenue pour la compatibilité avec l'ancien code.
+        Obtient l'image de référence pour l'alignement.
         
         Args:
-            input_folder (str): Chemin vers le dossier d'entrée contenant les fichiers FITS
-            bayer_pattern (str): Motif Bayer pour le débayering
-            batch_size (int): Nombre d'images à traiter par lot
-            manual_reference_path (str): Chemin optionnel vers une image de référence manuelle
-            correct_hot_pixels (bool): Corriger les pixels chauds
-            hot_pixel_threshold (float): Seuil pour la détection des pixels chauds
-            neighborhood_size (int): Taille du voisinage pour le calcul médian
+            input_folder (str): Dossier contenant les images
+            files (list): Liste des fichiers FITS
             
         Returns:
-            str: Chemin vers le dossier contenant les images alignées
+            tuple: (reference_image, reference_header) ou (None, None) si échec
         """
-        aligner = SeestarAligner()
-        aligner.bayer_pattern = bayer_pattern
-        aligner.batch_size = batch_size
-        aligner.reference_image_path = manual_reference_path
-        aligner.correct_hot_pixels = correct_hot_pixels
-        aligner.hot_pixel_threshold = hot_pixel_threshold
-        aligner.neighborhood_size = neighborhood_size
+        fixed_reference_image = None
+        fixed_reference_header = None
         
-        return aligner.align_images(input_folder)
-        aligner.reference_image_path = manual_reference_path
-        aligner.correct_hot_pixels = correct_hot_pixels
-        aligner.hot_pixel_threshold = hot_pixel_threshold
-        aligner.neighborhood_size = neighborhood_size
+        # Tenter de charger l'image de référence manuelle si fournie
+        if self.reference_image_path:
+            try:
+                self.update_progress(f"📌 Chargement de l'image de référence manuelle : {self.reference_image_path}")
+                fixed_reference_image = load_and_validate_fits(self.reference_image_path)
+                fixed_reference_header = fits.getheader(self.reference_image_path)
+                
+                # Appliquer debayer sur l'image de référence si c'est une image brute
+                if fixed_reference_image.ndim == 2:
+                    fixed_reference_image = debayer_image(fixed_reference_image, self.bayer_pattern)
+                elif fixed_reference_image.ndim == 3 and fixed_reference_image.shape[0] == 3:
+                    # Pour les images 3D avec la première dimension comme canal
+                    fixed_reference_image = np.moveaxis(fixed_reference_image, 0, -1)  # Convert to HxWx3
+                
+                # Appliquer la correction des pixels chauds si demandé
+                if self.correct_hot_pixels:
+                    self.update_progress("🔥 Application de la correction des pixels chauds sur l'image de référence...")
+                    fixed_reference_image = detect_and_correct_hot_pixels(
+                        fixed_reference_image, 
+                        threshold=self.hot_pixel_threshold,
+                        neighborhood_size=self.neighborhood_size
+                    )
+                    
+                fixed_reference_image = cv2.normalize(fixed_reference_image, None, 0, 65535, cv2.NORM_MINMAX)
+                self.update_progress(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
+            except Exception as e:
+                self.update_progress(f"❌ Erreur lors du chargement de l'image de référence manuelle: {e}")
+                fixed_reference_image = None
         
-        return aligner.align_images(input_folder)
+        # Sélection automatique de la meilleure image de référence si aucune n'est spécifiée
+        if fixed_reference_image is None:
+            self.update_progress("⚙️ Recherche de la meilleure image de référence...")
+            sample_images = []
+            sample_headers = []
+            sample_files = []
+            
+            # Analyser un sous-ensemble d'images pour trouver la meilleure référence
+            for f in tqdm(files[:min(self.batch_size*2, len(files))], desc="Analyse des images"):
+                try:
+                    img_path = os.path.join(input_folder, f)
+                    img = load_and_validate_fits(img_path)
+                    hdr = fits.getheader(img_path)
+                    
+                    # S'assurer que l'image a une variance suffisante
+                    if np.std(img) > 5:
+                        # Convertir en couleur si nécessaire
+                        if img.ndim == 2:
+                            img = debayer_image(img, self.bayer_pattern)
+                        elif img.ndim == 3 and img.shape[0] == 3:
+                            # Pour les images 3D avec la première dimension comme canal
+                            img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
+                        
+                        # Appliquer la correction des pixels chauds si demandé
+                        if self.correct_hot_pixels:
+                            img = detect_and_correct_hot_pixels(
+                                img, 
+                                threshold=self.hot_pixel_threshold,
+                                neighborhood_size=self.neighborhood_size
+                            )
+                        
+                        img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
+                        
+                        sample_images.append(img)
+                        sample_headers.append(hdr)
+                        sample_files.append(f)
+                    else:
+                        self.update_progress(f"⚠️ Image ignorée (faible variance): {f}")
+                except Exception as e:
+                    self.update_progress(f"❌ Erreur lors de l'analyse de {f}: {e}")
+            
+            if sample_images:
+                # Sélectionner l'image avec le meilleur contraste (médiane la plus élevée)
+                medians = [np.median(img) for img in sample_images]
+                ref_idx = np.argmax(medians)
+                fixed_reference_image = sample_images[ref_idx]
+                fixed_reference_header = sample_headers[ref_idx]
+                self.update_progress(f"⭐ Référence utilisée: {sample_files[ref_idx]}")
+        
+        return fixed_reference_image, fixed_reference_header
+    
+    def _save_reference_image(self, reference_image, reference_header, output_folder):
+        """
+        Sauvegarde l'image de référence dans le dossier de sortie.
+        
+        Args:
+            reference_image (numpy.ndarray): Image de référence
+            reference_header (astropy.io.fits.Header): En-tête de l'image de référence
+            output_folder (str): Dossier de sortie
+        """
+        try:
+            ref_output_path = os.path.join(output_folder, "reference_image.fit")
+            ref_data = np.moveaxis(reference_image, -1, 0).astype(np.uint16)  # HxWx3 to 3xHxW
+            
+            new_header = reference_header.copy()
+            new_header['NAXIS'] = 3
+            new_header['NAXIS1'] = reference_image.shape[1]
+            new_header['NAXIS2'] = reference_image.shape[0]
+            new_header['NAXIS3'] = 3
+            new_header['BITPIX'] = 16
+            new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
+            new_header.set('REFRENCE', True, 'stacking reference')
+            
+            fits.writeto(ref_output_path, ref_data, new_header, overwrite=True)
+            self.update_progress(f"📁 Image de référence sauvegardée: {ref_output_path}")
+        except Exception as e:
+            self.update_progress(f"⚠️ Erreur lors de la sauvegarde de l'image de référence: {e}")
+    
+    def _align_batch(self, images, headers, filenames, reference_image, 
+                    input_folder, output_folder, unaligned_folder, batch_start):
+        """
+        Aligne un lot d'images sur l'image de référence.
+        
+        Args:
+            images (list): Liste des images à aligner
+            headers (list): Liste des en-têtes FITS
+            filenames (list): Liste des noms de fichiers
+            reference_image (numpy.ndarray): Image de référence
+            input_folder (str): Dossier d'entrée
+            output_folder (str): Dossier de sortie pour les images alignées
+            unaligned_folder (str): Dossier pour les images non alignées
+            batch_start (int): Index de début du lot
+        """
+        for i, (img, hdr, fname) in enumerate(zip(tqdm(images, desc="Alignement"), headers, filenames)):
+            if self.stop_processing:
+                self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
+                break
+                
+            try:
+                # Alignement canal par canal pour les images couleur
+                if img.ndim == 3:
+                    aligned_channels = []
+                    for c in range(3):
+                        # Normalisation pour l'alignement
+                        img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                        ref_norm = cv2.normalize(reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                        
+                        aligned_channel, _ = aa.register(img_norm, ref_norm)
+                        aligned_channels.append(aligned_channel)
+                    
+                    # Recombiner les canaux
+                    aligned_img = np.stack(aligned_channels, axis=-1)
+                    aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
+                else:
+                    # Cas d'une image en niveaux de gris
+                    aligned_img, _ = aa.register(img, reference_image)
+                    aligned_img = np.stack((aligned_img,) * 3, axis=-1)
+                
+                # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
+                color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
+                
+                # Mettre à jour l'en-tête
+                new_header = hdr.copy()
+                new_header['NAXIS'] = 3
+                new_header['NAXIS1'] = aligned_img.shape[1]
+                new_header['NAXIS2'] = aligned_img.shape[0]
+                new_header['NAXIS3'] = 3
+                new_header['BITPIX'] = 16
+                new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
+                new_header.set('ALIGNED', True, 'Image Aligned on ref')
+                
+                if self.correct_hot_pixels:
+                    new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
+                    new_header.set('HOTPXTH', self.hot_pixel_threshold, 'Hot pixels detection threshold')
+                    new_header.set('HOTPXNB', self.neighborhood_size, 'Hot pixels neighborhood size')
+                
+                # Enregistrement de l'image alignée
+                out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
+                fits.writeto(out_path, color_cube, new_header, overwrite=True)
+            except Exception as e:
+                self.update_progress(f"❌ Échec de l'alignement pour l'image {fname}: {str(e)}")
+                
+                # Copier l'image non alignée dans le dossier séparé
+                try:
+                    original_path = os.path.join(input_folder, fname)
+                    out_path = os.path.join(unaligned_folder, f"unaligned_{fname}")
+                    shutil.copy2(original_path, out_path)
+                    self.update_progress(f"⚠️ Image non alignée sauvegardée: {out_path}")
+                except Exception as copy_err:
+                    self.update_progress(f"❌ Impossible de copier l'image originale: {copy_err}")
+
+
+# Fonction d'aide pour la compatibilité avec l'ancien code
+def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None,
+                               correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
+    """
+    Aligne les images Seestar par lots avec une image de référence optionnelle.
+    Cette fonction est maintenue pour la compatibilité avec l'ancien code.
+    
+    Args:
+        input_folder (str): Chemin vers le dossier d'entrée contenant les fichiers FITS
+        bayer_pattern (str): Motif Bayer pour le débayering
+        batch_size (int): Nombre d'images à traiter par lot
+        manual_reference_path (str): Chemin optionnel vers une image de référence manuelle
+        correct_hot_pixels (bool): Corriger les pixels chauds
+        hot_pixel_threshold (float): Seuil pour la détection des pixels chauds
+        neighborhood_size (int): Taille du voisinage pour le calcul médian
+        
+    Returns:
+        str: Chemin vers le dossier contenant les images alignées
+    """
+    aligner = SeestarAligner()
+    aligner.bayer_pattern = bayer_pattern
+    aligner.batch_size = batch_size
+    aligner.reference_image_path = manual_reference_path
+    aligner.correct_hot_pixels = correct_hot_pixels
+    aligner.hot_pixel_threshold = hot_pixel_threshold
+    aligner.neighborhood_size = neighborhood_size
+    
+    return aligner.align_images(input_folder)        
