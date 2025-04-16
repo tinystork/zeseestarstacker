@@ -386,7 +386,7 @@ class SeestarStackerGUI:
 
     def refresh_preview(self):
         """Actualise l'aperçu avec la dernière image stockée."""
-        if hasattr(self, 'queued_stacker') and self.queued_stacker.image_db:
+        if hasattr(self, 'queued_stacker') and hasattr(self.queued_stacker, 'image_db') and self.queued_stacker.image_db:
             # Récupérer le dernier stack si possible
             try:
                 output_folder = self.output_path.get()
@@ -394,15 +394,37 @@ class SeestarStackerGUI:
                     for key in sorted(os.listdir(output_folder), reverse=True):
                         if key.endswith('.fit') and not key.startswith('reference'):
                             stack_key = os.path.splitext(key)[0]
-                            stack_data, _ = self.queued_stacker.image_db.get_stack(
-                                stack_key)
+                            stack_data, _ = self.queued_stacker.image_db.get_stack(stack_key)
                             if stack_data is not None:
-                                self.update_preview(
-                                    stack_data, stack_key, self.apply_stretch.get())
-                                break
+                                self.update_preview(stack_data, stack_key, self.apply_stretch.get())
+                                return
             except Exception as e:
-                print(
-                    f"Erreur lors de l'actualisation de la prévisualisation: {e}")
+                print(f"Erreur lors de l'actualisation de la prévisualisation: {e}")
+        elif hasattr(self, 'input_path') and self.input_path.get():
+            # Si aucun stack n'est disponible mais qu'un dossier d'entrée est choisi,
+            # essayer d'afficher la première image
+            try:
+                input_folder = self.input_path.get()
+                files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                if files:
+                    first_image = os.path.join(input_folder, files[0])
+                    from seestar.core.image_processing import load_and_validate_fits, debayer_image
+                    img_data = load_and_validate_fits(first_image)
+                    
+                    # Appliquer le debayering si nécessaire
+                    if img_data.ndim == 2:
+                        from astropy.io import fits
+                        try:
+                            header = fits.getheader(first_image)
+                            bayer_pattern = header.get('BAYERPAT', 'GRBG')
+                        except:
+                            bayer_pattern = 'GRBG'  # Motif par défaut
+                        
+                        img_data = debayer_image(img_data, bayer_pattern)
+                    
+                    self.update_preview(img_data, os.path.basename(first_image), self.apply_stretch.get())
+            except Exception as e:
+                print(f"Erreur lors du chargement de la première image: {e}")
 
     def update_preview(self, image_data, stack_name=None, apply_stretch=None):
         """
@@ -425,6 +447,8 @@ class SeestarStackerGUI:
         folder = filedialog.askdirectory()
         if folder:
             self.input_path.set(folder)
+            # Essayer d'afficher la première image ou le dernier stack
+            self.refresh_preview()
 
     def browse_output(self):
         """Ouvre une boîte de dialogue pour sélectionner le dossier de sortie."""

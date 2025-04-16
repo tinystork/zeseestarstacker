@@ -107,8 +107,15 @@ class Stretch:
         Returns:
             np.array: données de l'image étirée
         """
+        # S'assurer qu'on ne modifie pas l'original
+        data_copy = np.copy(data)
+        
         # Normaliser les données
-        d = data / np.max(data)
+        if np.max(data_copy) > 0:
+            d = data_copy / np.nanmax(data_copy)
+        else:
+            # Éviter la division par zéro
+            return np.zeros_like(data_copy)
 
         # Obtenir les paramètres d'étirement
         stretch_params = self._get_stretch_parameters(d)
@@ -126,7 +133,7 @@ class Stretch:
         # Pour le reste des pixels : appliquer la fonction de transfert des tons moyens
         d[above] = self._mtf(m, (d[above] - c0) / (1 - c0))
         return d
-
+    
 @staticmethod
 def apply_stretch(data, target_bkg=0.25, shadows_clip=-1.25):
     """
