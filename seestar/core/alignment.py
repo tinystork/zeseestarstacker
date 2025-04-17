@@ -262,7 +262,7 @@ class SeestarAligner:
                     hdr = fits.getheader(img_path)
                     
                     # S'assurer que l'image a une variance suffisante
-                    if np.std(img) > 5:
+                    if np.std(img) > 3:
                         # Convertir en couleur si nécessaire
                         if img.ndim == 2:
                             img = debayer_image(img, self.bayer_pattern)
