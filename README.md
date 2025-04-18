@@ -36,7 +36,7 @@ ZeSeestarStacker is a Python-based tool designed to simplify and optimize the pr
 1. Clone the Repository:
    ```bash
    git clone https://github.com/tinystork/zeseestarstacker.git
-   cd zeseestarstacker
+   cd seestar
    ```
 
 2. Install the Dependencies:
