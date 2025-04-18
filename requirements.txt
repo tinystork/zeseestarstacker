@@ -4,3 +4,4 @@ astropy
 astroalign
 tqdm
 psutil
+matplotlib
