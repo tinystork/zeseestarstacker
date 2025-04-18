@@ -1,0 +1,29 @@
+seestar/
+├── __init__.py                   # Point d'entrée principal du package
+├── main.py                       # Script d'exécution principal
+├── core/                         # Fonctionnalités de base
+│   ├── __init__.py
+│   ├── alignment.py              # Alignement d'images
+│   ├── hot_pixels.py             # Correction des pixels chauds
+│   ├── image_processing.py       # Traitement d'images
+│   ├── stacking.py               # Empilement d'images
+│   └── utils.py                  # Fonctions utilitaires
+├── queue/                        # Gestion de la file d'attente
+│   ├── __init__.py
+│   ├── image_db.py               # Base de données d'images
+│   ├── image_info.py             # Métadonnées des images
+│   └── queue_manager.py          # Gestionnaire de file d'attente
+├── gui/                          # Interface graphique
+│   ├── __init__.py
+│   ├── main_window.py            # Fenêtre principale
+│   ├── preview.py                # Prévisualisation des images
+│   ├── progress.py               # Suivi de la progression
+│   └── settings.py               # Gestion des paramètres
+├── localization/                 # Localisation
+│   ├── __init__.py
+│   ├── en.py                     # Traductions anglaises
+│   ├── fr.py                     # Traductions françaises
+│   └── localization.py           # Système de localisation
+└── tools/                        # Outils complémentaires
+    ├── __init__.py
+    └── stretch.py                # Étirement d'image

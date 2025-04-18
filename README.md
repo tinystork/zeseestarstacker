@@ -1,6 +1,6 @@
 # ZeSeestarStacker
 
-ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography and especially the seestar range of devices.
+ZeSeestarStacker is a Python-based tool designed to simplify and optimize the process of stacking a large number of light frames (images) often used in astrophotography and especially the Seestar range of devices. still in beta use at your own risk
 
 ---
 
@@ -48,22 +48,36 @@ ZeSeestarStacker is a Python-based tool designed to simplify and optimize the pr
 
 ## Usage
 
+### Command-Line Interface (CLI)
 Follow the on-screen prompts to:
 - Specify the input folder containing light frames (`.fit` or `.fits` files).
 - Choose a stacking method (e.g., `mean`, `median`, `kappa-sigma`, `winsorized-sigma`).
 - Optionally specify a manual reference frame.
 
 ### Graphical User Interface (GUI)
-Run the GUI script:
+The `Graphic` branch introduces a robust and user-friendly Graphical User Interface (GUI) for interacting with the Seestar Stacker application.
+
+#### Launching the GUI
+Run the following command:
 ```bash
-python seestar_stacker_gui.py
+python seestar/main.py
 ```
 
 #### GUI Features:
-- Select input and output folders.
-- Configure stacking methods and parameters.
-- Monitor progress and estimated time remaining.
-- View logs and status updates in real-time.
+- **Input/Output Folder Selection**:
+  - Easily browse and select folders containing light frames or designate an output directory.
+- **Configurable Stacking Options**:
+  - Choose stacking methods and customize parameters directly within the GUI.
+- **Dependency Verification**:
+  - Automatically checks for required dependencies and prompts the user to install any missing ones.
+- **Real-Time Status Updates**:
+  - Monitor progress, estimated time remaining, and logs in real time.
+
+#### Technical Details:
+- The GUI is powered by the `SeestarStackerGUI` class, located in the `seestar/gui` module.
+- The `main.py` script serves as the entry point for the GUI. It handles:
+  - Dependency checks.
+  - Initialization and execution of the GUI.
 
 ---
 
@@ -96,12 +110,3 @@ Contributions are welcome! Feel free to:
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ---
-
-## Acknowledgments
-- Built with Python and open-source libraries like `numpy`, `opencv-python`, `astropy`, `astroalign`, and `psutil`.
-- Inspired by the needs of astrophotography enthusiasts to process large datasets efficiently.
-
----
-
-## Contact
-For questions or support, feel free to reach out via [GitHub Issues](https://github.com/tinystork/zeseestarstacker/issues).
