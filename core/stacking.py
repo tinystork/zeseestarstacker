@@ -172,7 +172,6 @@ class ProgressiveStacker:
             self.update_progress(f"❌ Erreur lors de la combinaison des stacks: {e}")
             return False
 
-# Coller la suite ici (depuis process_aligned_images jusqu'à la fin de la classe)
     def process_aligned_images(self, input_folder, output_folder, remove_aligned=True):
         """
         Traite les images alignées par lots, en empilant chaque lot 

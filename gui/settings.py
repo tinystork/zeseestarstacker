@@ -116,7 +116,13 @@ class SettingsManager:
             self.enable_preview = variables['enable_preview'].get()
         if 'apply_stretch' in variables:
             self.apply_stretch = variables['apply_stretch'].get()
-
+        # Mode de traitement
+        if 'use_queue_mode' in variables:
+            self.use_queue_mode = variables['use_queue_mode'].get()
+        #if 'watch_mode' in variables:  # Nouveau paramètre
+        #    self.watch_mode = variables['watch_mode'].get()
+            
+        
     def validate_settings(self):
         """
         Valide les paramètres et effectue des ajustements si nécessaire.
@@ -249,3 +255,15 @@ class SettingsManager:
         except Exception as e:
             print(f"Erreur lors du chargement des paramètres: {e}")
             return False
+    
+#    def configure_queued_stacker(self, queued_stacker):
+#       # ... Code existant ...
+#        queued_stacker.stacking_mode = self.stacking_mode
+#        queued_stacker.kappa = float(self.kappa)
+#        queued_stacker.batch_size = int(self.batch_size)
+#        queued_stacker.correct_hot_pixels = self.correct_hot_pixels
+#        queued_stacker.hot_pixel_threshold = float(self.hot_pixel_threshold)
+#        queued_stacker.neighborhood_size = int(self.neighborhood_size)
+#        queued_stacker.denoise = self.denoise
+#        if hasattr(self, 'watch_mode'):  # Nouveau paramètre
+#            queued_stacker.watch_mode = self.watch_mode

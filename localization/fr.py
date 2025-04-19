@@ -69,10 +69,11 @@ FR_TRANSLATIONS = {
     'incremental_stacking_start': '⚙️ Démarrage de l\'empilement incrémental...',
     'real_time_preview': 'Prévisualisation en temps réel',
     'enable_preview': 'Activer la prévisualisation en temps réel',
-    'queue_mode': 'Mode file d\'attente',
-    'use_queue_mode': 'Utiliser le mode file d\'attente',
     'use_traditional_mode': 'Utiliser l\'empilement traditionnel',
     'remove_processed': 'Supprimer les images traitées',
-    'queue_start': '⚙️ Démarrage du traitement par file d\'attente...',
-    'queue_completed': 'Traitement par file d\'attente terminé.',
+    
+    # Mode de traitement
+    'processing_mode': 'Mode de traitement',
+    'use_traditional_mode': 'Utiliser l\'empilement traditionnel',
+    'remove_processed': 'Supprimer les images traitées',
 }

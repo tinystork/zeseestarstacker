@@ -8,7 +8,7 @@ import cv2
 import threading
 from queue import Queue, Empty
 import time
-
+import astroalign as aa
 from .image_db import ImageDatabase
 from .image_info import ImageInfo
 from seestar.core.image_processing import (
@@ -32,7 +32,7 @@ class SeestarQueuedStacker:
         self.stop_processing = False
         self.progress_callback = None
         self.preview_callback = None
-        
+        self.reference_images = {}  # Dictionnaire pour stocker les images de référence par stack_key        
         # Options d'empilement
         self.stacking_mode = "kappa-sigma"
         self.kappa = 2.5
@@ -240,6 +240,9 @@ class SeestarQueuedStacker:
             # Pour une nouvelle image, le stack est simplement l'image elle-même
             stack_data = img_data
             
+            # Stocker cette image comme référence pour ce stack
+            self.reference_images[stack_key] = img_data.copy()
+            
             # Créer un en-tête pour le stack
             stack_header = fits.Header()
             stack_header['STACKTYP'] = self.stacking_mode
@@ -281,11 +284,51 @@ class SeestarQueuedStacker:
                 if stack_data.shape != img_data.shape:
                     raise ValueError(f"Incompatibilité de dimensions non résoluble: stack {stack_data.shape}, image {img_data.shape}")
             
-            # Stack existant - empiler avec la méthode choisie
+            # Stack existant - aligner l'image sur la référence avant d'empiler
             stack_count = int(stack_header.get('STACKCNT', 1))
             self.update_progress(f"🔄 Empilement avec {stack_key} (déjà {stack_count} images)...")
-        
             
+            # Alignement de l'image avant empilement si référence disponible
+            if stack_key in self.reference_images:
+                reference_image = self.reference_images[stack_key]
+                try:
+                    # Aligner canal par canal pour les images couleur
+                    if img_data.ndim == 3 and img_data.shape[2] == 3:
+                        aligned_channels = []
+                        for c in range(3):
+                            # Normalisation pour l'alignement
+                            img_norm = cv2.normalize(img_data[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                            ref_norm = cv2.normalize(reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
+                            
+                            try:
+                                aligned_channel, _ = aa.register(img_norm, ref_norm)
+                                aligned_channels.append(aligned_channel)
+                            except Exception as align_err:
+                                self.update_progress(f"⚠️ Échec de l'alignement pour le canal {c}: {align_err}")
+                                # Utiliser le canal non aligné comme fallback
+                                aligned_channels.append(img_norm)
+                        
+                        # Recombiner les canaux
+                        aligned_img = np.stack(aligned_channels, axis=-1)
+                        img_data = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
+                    else:
+                        # Cas d'une image en niveaux de gris
+                        img_norm = cv2.normalize(img_data, None, 0, 1, cv2.NORM_MINMAX)
+                        ref_norm = cv2.normalize(reference_image, None, 0, 1, cv2.NORM_MINMAX)
+                        
+                        try:
+                            aligned_img, _ = aa.register(img_norm, ref_norm)
+                            img_data = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
+                        except Exception as align_err:
+                            self.update_progress(f"⚠️ Échec de l'alignement: {align_err}")
+                            # Continuer avec l'image non alignée
+                
+                    self.update_progress(f"✅ Image alignée avec succès sur la référence")
+                except Exception as e:
+                    self.update_progress(f"⚠️ Erreur pendant l'alignement: {e}")
+                    # Continuer avec l'image non alignée
+            
+            # Empiler selon la méthode choisie
             if self.stacking_mode == "mean":
                 # Moyenne simple
                 stack_data = (stack_data * stack_count + img_data) / (stack_count + 1)
@@ -363,7 +406,7 @@ class SeestarQueuedStacker:
         if self.image_counter % 10 == 0 or is_last_image:
             if hasattr(self, 'preview_callback') and self.preview_callback:
                 self.preview_callback(stack_data, stack_key, apply_stretch=True)
-
+            
     def start_processing(self, input_folder, output_folder):
         """
         Démarre le traitement des images en mode file d'attente.

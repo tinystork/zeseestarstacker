@@ -1,29 +1,33 @@
 seestar/
-├── __init__.py                   # Point d'entrée principal du package
-├── main.py                       # Script d'exécution principal
-├── core/                         # Fonctionnalités de base
+├── __init__.py                   # Main entry point for the package
+├── main.py                       # Main execution script
+├── core/                         # Core functionalities
 │   ├── __init__.py
-│   ├── alignment.py              # Alignement d'images
-│   ├── hot_pixels.py             # Correction des pixels chauds
-│   ├── image_processing.py       # Traitement d'images
-│   ├── stacking.py               # Empilement d'images
-│   └── utils.py                  # Fonctions utilitaires
-├── queue/                        # Gestion de la file d'attente
+│   ├── alignment.py              # Image alignment
+│   ├── hot_pixels.py             # Hot pixel correction
+│   ├── image_processing.py       # Image processing
+│   ├── stacking.py               # Image stacking
+│   └── utils.py                  # Utility functions
+├── queuep/                       # Queue management
 │   ├── __init__.py
-│   ├── image_db.py               # Base de données d'images
-│   ├── image_info.py             # Métadonnées des images
-│   └── queue_manager.py          # Gestionnaire de file d'attente
-├── gui/                          # Interface graphique
+│   ├── image_db.py               # Image database
+│   ├── image_info.py             # Image metadata
+│   └── queue_manager.py          # Queue manager
+├── gui/                          # Graphical interface (REFACTORED)
 │   ├── __init__.py
-│   ├── main_window.py            # Fenêtre principale
-│   ├── preview.py                # Prévisualisation des images
-│   ├── progress.py               # Suivi de la progression
-│   └── settings.py               # Gestion des paramètres
-├── localization/                 # Localisation
+│   ├── main_window.py            # Main window with initialization and core functionality
+│   ├── processing.py             # Processing management
+│   ├── stacking.py               # Stacking operations
+│   ├── ui_components.py          # UI components creation and management
+│   ├── file_handling.py          # File operations management
+│   ├── preview.py                # Image preview
+│   ├── progress.py               # Progress tracking
+│   └── settings.py               # Settings management
+├── localization/                 # Localization
 │   ├── __init__.py
-│   ├── en.py                     # Traductions anglaises
-│   ├── fr.py                     # Traductions françaises
-│   └── localization.py           # Système de localisation
-└── tools/                        # Outils complémentaires
+│   ├── en.py                     # English translations
+│   ├── fr.py                     # French translations
+│   └── localization.py           # Localization system
+└── tools/                        # Complementary tools
     ├── __init__.py
-    └── stretch.py                # Étirement d'image
+    └── stretch.py                # Image stretching

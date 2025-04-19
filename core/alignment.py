@@ -262,7 +262,7 @@ class SeestarAligner:
                     hdr = fits.getheader(img_path)
                     
                     # S'assurer que l'image a une variance suffisante
-                    if np.std(img) > 5:
+                    if np.std(img) > 3:
                         # Convertir en couleur si nécessaire
                         if img.ndim == 2:
                             img = debayer_image(img, self.bayer_pattern)
@@ -325,26 +325,23 @@ class SeestarAligner:
         except Exception as e:
             self.update_progress(f"⚠️ Erreur lors de la sauvegarde de l'image de référence: {e}")
     
-    def _align_batch(self, images, headers, filenames, reference_image, 
-                    input_folder, output_folder, unaligned_folder, batch_start):
-        """
-        Aligne un lot d'images sur l'image de référence.
-        
-        Args:
-            images (list): Liste des images à aligner
-            headers (list): Liste des en-têtes FITS
-            filenames (list): Liste des noms de fichiers
-            reference_image (numpy.ndarray): Image de référence
-            input_folder (str): Dossier d'entrée
-            output_folder (str): Dossier de sortie pour les images alignées
-            unaligned_folder (str): Dossier pour les images non alignées
-            batch_start (int): Index de début du lot
-        """
-        for i, (img, hdr, fname) in enumerate(zip(tqdm(images, desc="Alignement"), headers, filenames)):
+    def _align_batch(self, images, headers, filenames, reference_image,
+                     input_folder, output_folder, unaligned_folder, batch_start):
+        import concurrent.futures
+        import os
+        from functools import partial
+
+        # Déterminer le nombre optimal de threads
+        num_cores = os.cpu_count()
+        max_workers = min(max(num_cores // 2, 1), 8)  # Utiliser la moitié des cœurs, mais au moins 1 et au plus 8
+        self.update_progress(f"🧵 Démarrage de l'alignement parallèle avec {max_workers} threads...")
+
+        # Fonction pour aligner une seule image (à exécuter dans un thread)
+        def align_single_image(args):
+            i, img, hdr, fname = args
             if self.stop_processing:
-                self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
-                break
-                
+                return None
+
             try:
                 # Alignement canal par canal pour les images couleur
                 if img.ndim == 3:
@@ -353,10 +350,10 @@ class SeestarAligner:
                         # Normalisation pour l'alignement
                         img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
                         ref_norm = cv2.normalize(reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                        
+
                         aligned_channel, _ = aa.register(img_norm, ref_norm)
                         aligned_channels.append(aligned_channel)
-                    
+
                     # Recombiner les canaux
                     aligned_img = np.stack(aligned_channels, axis=-1)
                     aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
@@ -364,10 +361,10 @@ class SeestarAligner:
                     # Cas d'une image en niveaux de gris
                     aligned_img, _ = aa.register(img, reference_image)
                     aligned_img = np.stack((aligned_img,) * 3, axis=-1)
-                
+
                 # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
                 color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
-                
+
                 # Mettre à jour l'en-tête
                 new_header = hdr.copy()
                 new_header['NAXIS'] = 3
@@ -377,27 +374,51 @@ class SeestarAligner:
                 new_header['BITPIX'] = 16
                 new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
                 new_header.set('ALIGNED', True, 'Image Aligned on ref')
-                
+
                 if self.correct_hot_pixels:
                     new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
                     new_header.set('HOTPXTH', self.hot_pixel_threshold, 'Hot pixels detection threshold')
                     new_header.set('HOTPXNB', self.neighborhood_size, 'Hot pixels neighborhood size')
-                
+
                 # Enregistrement de l'image alignée
                 out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
                 fits.writeto(out_path, color_cube, new_header, overwrite=True)
+
+                return (i, True, None)  # Succès
             except Exception as e:
-                self.update_progress(f"❌ Échec de l'alignement pour l'image {fname}: {str(e)}")
-                
-                # Copier l'image non alignée dans le dossier séparé
+                # Gérer l'erreur, enregistrer l'image non alignée
                 try:
                     original_path = os.path.join(input_folder, fname)
                     out_path = os.path.join(unaligned_folder, f"unaligned_{fname}")
                     shutil.copy2(original_path, out_path)
-                    self.update_progress(f"⚠️ Image non alignée sauvegardée: {out_path}")
+                    return (i, False, str(e))  # Échec avec erreur
                 except Exception as copy_err:
-                    self.update_progress(f"❌ Impossible de copier l'image originale: {copy_err}")
+                    return (i, False, f"Erreur double: {str(e)} et {str(copy_err)}")  # Échec avec erreur double
 
+        # Créer les arguments pour chaque image à traiter
+        image_args = [(i, img, hdr, fname) for i, (img, hdr, fname) in enumerate(zip(images, headers, filenames))]
+
+        # Utiliser ThreadPoolExecutor pour paralléliser le traitement
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Soumettre toutes les tâches et collecter les futurs
+            futures = [executor.submit(align_single_image, args) for args in image_args]
+
+            # Traiter les résultats au fur et à mesure qu'ils sont disponibles
+            for future in concurrent.futures.as_completed(futures):
+                if self.stop_processing:
+                    executor.shutdown(wait=False)
+                    self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
+                    break
+
+                result = future.result()
+                if result:
+                    i, success, error_msg = result
+                    if success:
+                        # Mise à jour de la progression pour chaque image alignée avec succès
+                        self.update_progress(f"✓ Image {batch_start + i:04} alignée avec succès")
+                    else:
+                        # Signaler l'échec
+                        self.update_progress(f"❌ Échec de l'alignement pour l'image {batch_start + i:04}: {error_msg}")
 
 # Fonction d'aide pour la compatibilité avec l'ancien code
 def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None,

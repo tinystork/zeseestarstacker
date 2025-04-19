@@ -29,25 +29,38 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         # Estimer la taille d'une image
         if sample_image_path:
             img = load_and_validate_fits(sample_image_path)
-            # Une image traitée peut prendre jusqu'à 4x plus de mémoire (versions originale, débayerisée, normalisée, alignée)
-            image_size = img.nbytes * 4
+            # Une image traitée peut prendre jusqu'à 4x plus de mémoire 
+            # (versions originale, débayerisée, normalisée, alignée, plus les tampons intermédiaires)
+            single_image_size = img.nbytes * 4
+            
+            # Pour les images couleur, prendre en compte le facteur de conversion 
+            # de dimensions durant le traitement
+            if img.ndim == 2:
+                # Une image 2D sera convertie en 3D (3 canaux) durant le traitement
+                single_image_size = single_image_size * 3
         else:
             # Estimation prudente pour une image de taille moyenne (2000x2000 pixels, 3 canaux, float32)
-            image_size = 2000 * 2000 * 3 * 4  # environ 48 Mo
+            single_image_size = 2000 * 2000 * 3 * 4  # environ 48 Mo
 
-        # Calculer combien d'images peuvent tenir en mémoire (facteur de sécurité de 2)
-        estimated_batch = max(
-            3, min(50, int(usable_memory / (image_size * 2))))
+        # Facteur de sécurité pour tenir compte des opérations supplémentaires
+        safety_factor = 2.5
+        
+        # Calculer combien d'images peuvent tenir en mémoire
+        estimated_batch = int(usable_memory / (single_image_size * safety_factor))
+        
+        # Limites raisonnables pour la taille des lots (au moins 3, au plus 50)
+        estimated_batch = max(3, min(50, estimated_batch))
 
         print(f"Mémoire disponible: {available_memory / (1024**3):.2f} Go")
-        print(f"Taille estimée par image: {image_size / (1024**2):.2f} Mo")
+        print(f"Taille estimée par image: {single_image_size / (1024**2):.2f} Mo")
         print(f"Taille de lot estimée: {estimated_batch}")
 
         return estimated_batch
     except Exception as e:
         print(f"Erreur lors de l'estimation de la taille de lot: {e}")
+        import traceback
+        traceback.print_exc()
         return 10  # Valeur par défaut en cas d'erreur
-
 
 def apply_denoise(image, strength=1):
     """
