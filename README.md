@@ -30,7 +30,7 @@ Zeseestarstacker is a simple tool designed to stack large amounts of images. Thi
 
     Accédez au répertoire du projet / Navigate to the project directory:​
 
-    cd zeseestarstacker
+    cd zeseestarstacker/seestar
 
     Installez les dépendances requises / Install the required dependencies:​
     GitHub
@@ -41,12 +41,11 @@ Zeseestarstacker is a simple tool designed to stack large amounts of images. Thi
 
 Exécutez le script principal avec les images à empiler en tant qu'arguments :​
 
-python main.py image1.jpg image2.jpg image3.jpg
+python main.py 
 
-Run the main script with the images to be stacked as arguments:​
-Communauté Jeedom
+Run the main script choose the images to be stacked :​
 
-python main.py image1.jpg image2.jpg image3.jpg
+python main.py
 
 📂 Structure du projet / Project Structure
 
