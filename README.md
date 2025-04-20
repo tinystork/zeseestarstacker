@@ -1,75 +1,86 @@
-# Zeseestarstacker
+Zeseestarstacker
+📝 Description
 
-## Description (Français)
-Zeseestarstacker est un outil simple pour empiler de grandes quantités de lumières. Ce projet est particulièrement utile pour les amateurs d'astrophotographie ou toute autre application nécessitant l'empilement d'images.
+Français :
+Zeseestarstacker est un outil simple pour empiler de grandes quantités d'images. Ce projet est particulièrement utile pour les amateurs d'astrophotographie ou toute autre application nécessitant l'empilement d'images.​
 
-### Fonctionnalités
-- Empilement rapide et efficace de grandes quantités de fichiers image.
-- Support des formats standards d'images (par exemple : JPEG, PNG, FITS).
-- Algorithmes optimisés pour la gestion des grandes données.
+English:
+Zeseestarstacker is a simple tool designed to stack large amounts of images. This project is particularly useful for astrophotography enthusiasts or any application requiring image stacking.​
+✨ Fonctionnalités / Features
 
-### Installation
-1. Clonez ce dépôt :
-   ```bash
-   git clone https://github.com/tinystork/zeseestarstacker.git
-   ```
-2. Accédez au répertoire du projet :
-   ```bash
-   cd zeseestarstacker
-   ```
-3. Installez les dépendances requises :
-   ```bash
-   pip install -r requirements.txt
-   ```
+    Empilement rapide et efficace de grandes quantités de fichiers image.
 
-### Utilisation
-1. Placez vos images dans un dossier spécifique.
-2. Exécutez le script principal pour empiler les images :
-   ```bash
-   python stacker.py --input ./path/to/images --output ./path/to/output
-   ```
-3. Vérifiez les résultats dans le dossier de sortie.
+    Support des formats standards d'images (par exemple : JPEG, PNG, FITS).
 
-### Contribution
-Les contributions sont les bienvenues ! Si vous avez des idées ou des améliorations, ouvrez une issue ou soumettez une pull request.
+    Algorithmes optimisés pour la gestion des grandes données.​
+    GitHub
 
-### Licence
-Ce projet est sous licence [GNU General Public License v3.0](LICENSE).
+    Fast and efficient stacking of large numbers of image files.
 
----
+    Support for standard image formats (e.g., JPEG, PNG, FITS).
 
-## Description (English)
-Zeseestarstacker is a simple tool for stacking large amounts of lights. This project is particularly useful for astrophotography enthusiasts or any other application requiring image stacking.
+    Optimized algorithms for handling large datasets.​
 
-### Features
-- Quickly and efficiently stacks large quantities of image files.
-- Supports standard image formats (e.g., JPEG, PNG, FITS).
-- Optimized algorithms for handling large datasets.
+🛠️ Installation
 
-### Installation
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/tinystork/zeseestarstacker.git
-   ```
-2. Navigate to the project directory:
-   ```bash
-   cd zeseestarstacker
-   ```
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+    Clonez ce dépôt / Clone this repository:​
+    GitHub+3Communauté Jeedom+3FreeCodeCamp+3
 
-### Usage
-1. Place your images in a specific folder.
-2. Run the main script to stack images:
-   ```bash
-   python stacker.py --input ./path/to/images --output ./path/to/output
-   ```
-3. Check the results in the output folder.
+    git clone https://github.com/tinystork/zeseestarstacker.git
 
-### Contribution
-Contributions are welcome! If you have ideas or improvements, feel free to open an issue or submit a pull request.
+    Accédez au répertoire du projet / Navigate to the project directory:​
 
-### License
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+    cd zeseestarstacker
+
+    Installez les dépendances requises / Install the required dependencies:​
+    GitHub
+
+    pip install -r requirements.txt
+
+🚀 Utilisation / Usage
+
+Exécutez le script principal avec les images à empiler en tant qu'arguments :​
+
+python main.py image1.jpg image2.jpg image3.jpg
+
+Run the main script with the images to be stacked as arguments:​
+Communauté Jeedom
+
+python main.py image1.jpg image2.jpg image3.jpg
+
+📂 Structure du projet / Project Structure
+
+    core/ : Contient la logique principale de l'empilement.
+
+    gui/ : Interface graphique pour une utilisation conviviale.
+
+    localization/ : Fichiers de localisation pour le support multilingue.
+
+    queuep/ : Gestion des files d'attente pour le traitement des images.
+
+    tools/ : Outils auxiliaires pour le traitement des images.
+
+    main.py : Script principal pour lancer l'application.
+
+    requirements.txt : Liste des dépendances Python nécessaires.​
+
+    core/: Contains the main stacking logic.
+
+    gui/: Graphical interface for user-friendly operation.
+
+    localization/: Localization files for multilingual support.
+
+    queuep/: Queue management for image processing.
+
+    tools/: Auxiliary tools for image processing.
+
+    main.py: Main script to launch the application.
+
+    requirements.txt: List of required Python dependencies.​
+    GitHub
+
+📜 Licence / License
+
+Ce projet est sous licence GPL-3.0.​
+
+This project is licensed under the GPL-3.0 license.
