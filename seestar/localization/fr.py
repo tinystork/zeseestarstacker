@@ -47,10 +47,15 @@ FR_TRANSLATIONS = {
     'stretch_gamma': "Gamma :",
     'auto_stretch': "Auto Étir.",
     'reset_stretch': "Réinit. Étir.",
+    'image_adjustments': "Réglages Image",
+    'brightness': "Luminosité :",
+    'contrast': "Contraste :",
+    'saturation': "Saturation :",
+    'reset_bcs': "Réinit. Réglages",
 
     # --- Zone Progression ---
     'progress': "Progression",
-    'estimated_time': "Restant :",
+    'estimated_time': "ETA:", # Gardons ETA simple pour le moment, global_eta sera séparé
     'elapsed_time': "Écoulé :",
     'Remaining:': "Restant :", # Clé pour label statique
     'Additional:': "Additionnels :", # Clé pour label statique
@@ -93,7 +98,7 @@ FR_TRANSLATIONS = {
     'no_additional_folders': "Aucun",
     '1 additional folder': "1 dossier add.",
     '{count} additional folders': "{count} dossiers add.", # Utiliser format
-    'Start processing to add folders': "Le traitement doit être démarré pour ajouter des dossiers.",
+    'Start processing to add folders': "Le traitement doit être démarré pour ajouter des dossiers.", # Modifié pour être plus précis
     'Processing not active or finished.': 'Traitement inactif ou terminé.',
     'Folder not found': "Dossier non trouvé",
     'Input folder cannot be added': "Le dossier d'entrée principal ne peut pas être ajouté.",
@@ -122,5 +127,15 @@ FR_TRANSLATIONS = {
     'Auto Stretch requires an image preview.': "L'Auto Étirement requiert un aperçu d'image.",
     'Error during Auto Stretch': 'Erreur pendant Auto Étirement',
     'Total Exp (s)': "Expo Totale (s)",
+    # --- Ajouts pour ETA et Rapport Final ---
+    'global_eta_label': "ETA Global :",
+    'processing_report_title': "Résumé du Traitement",
+    'report_images_stacked': "Images Empilées :",
+    'report_total_exposure': "Temps Pose Total :",
+    'report_total_time': "Temps Traitement Total :",
+    'report_seconds': "secondes",
+    'report_minutes': "minutes",
+    'report_hours': "heures",
+    'eta_calculating': "Calcul...",
 }
 # --- END OF FILE seestar/localization/fr.py ---

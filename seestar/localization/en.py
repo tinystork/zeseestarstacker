@@ -47,10 +47,15 @@ EN_TRANSLATIONS = {
     'stretch_gamma': "Gamma:",
     'auto_stretch': "Auto Stretch",
     'reset_stretch': "Reset Stretch",
+    'image_adjustments': "Image Adjustments",
+    'brightness': "Brightness:",
+    'contrast': "Contrast:",
+    'saturation': "Saturation:",
+    'reset_bcs': "Reset Adjust.",
 
     # --- Progress Area ---
     'progress': "Progress",
-    'estimated_time': "ETA:",
+    'estimated_time': "ETA:", # Reste ETA pour le lot courant peut-être ? Ou on renomme ?
     'elapsed_time': "Elapsed:",
     'Remaining:': "Remaining:", # Key for static label
     'Additional:': "Additional:", # Key for static label
@@ -93,7 +98,7 @@ EN_TRANSLATIONS = {
     'no_additional_folders': "None",
     '1 additional folder': "1 add. folder",
     '{count} additional folders': "{count} add. folders", # Use format
-    'Start processing to add folders': "Processing must be started to add additional folders.",
+    'Start processing to add folders': "Processing must be started to add additional folders.", # Modifié pour être plus précis
     'Processing not active or finished.': 'Processing not active or finished.',
     'Folder not found': "Folder not found",
     'Input folder cannot be added': "The main input folder cannot be added.",
@@ -121,6 +126,16 @@ EN_TRANSLATIONS = {
     'Error during Auto WB': 'Error during Auto WB',
     'Auto Stretch requires an image preview.': "Auto Stretch requires an image preview.",
     'Error during Auto Stretch': 'Error during Auto Stretch',
-    'Total Exp (s)': "Total Exp (s)", # Added for image info if needed later
+    'Total Exp (s)': "Total Exp (s)",
+    # --- Additions for ETA and Final Report ---
+    'global_eta_label': "Global ETA:",
+    'processing_report_title': "Processing Summary",
+    'report_images_stacked': "Images Stacked:",
+    'report_total_exposure': "Total Exposure:",
+    'report_total_time': "Total Processing Time:",
+    'report_seconds': "seconds",
+    'report_minutes': "minutes",
+    'report_hours': "hours",
+    'eta_calculating': "Calculating...", # Message pendant le calcul de l'ETA
 }
 # --- END OF FILE seestar/localization/en.py ---

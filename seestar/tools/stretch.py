@@ -107,17 +107,21 @@ def apply_auto_stretch(data):
 
     try:
         if data.ndim == 3 and data.shape[2] == 3:
+            # Utiliser luminance pour images couleur
             luminance = 0.299 * data[..., 0] + 0.587 * data[..., 1] + 0.114 * data[..., 2]
         elif data.ndim == 2:
             luminance = data
-        else: return (0.0, 1.0)
+        else: return (0.0, 1.0) # Format non supporté
 
+        # Filtrer NaN/Inf avant calculs
         finite_lum = luminance[np.isfinite(luminance)]
-        if finite_lum.size < 20: print("Warning AutoStretch: Not enough finite pixels."); return (0.0, 1.0)
+        if finite_lum.size < 20: print("Warning AutoStretch: Not enough finite pixels."); return (0.0, 1.0) # Besoin d'assez de points
 
-        bp = np.percentile(finite_lum, 1.0)
-        wp = np.percentile(finite_lum, 99.0)
+        # Calculer les percentiles
+        bp = np.percentile(finite_lum, 1.0)  # Point noir au 1er percentile
+        wp = np.percentile(finite_lum, 99.0) # Point blanc au 99ème percentile
 
+        # S'assurer que les points sont valides et distincts
         min_separation = 1e-4
         bp = np.clip(bp, 0.0, 1.0 - min_separation)
         wp = np.clip(wp, bp + min_separation, 1.0)
@@ -153,22 +157,26 @@ def apply_auto_white_balance(data):
             finite_data = channel_data[np.isfinite(channel_data)]
             if finite_data.size == 0: raise ValueError(f"Channel {i} is empty or all NaN/Inf.")
 
-            min_r, max_r = np.percentile(finite_data, [0.5, 99.5])
-            if max_r <= min_r: max_r = min_r + 1e-5 # Ensure range is valid
+            # Calculer le mode basé sur l'histogramme des valeurs centrales
+            min_r, max_r = np.percentile(finite_data, [0.5, 99.5]) # Ignorer extrêmes
+            if max_r <= min_r: max_r = min_r + 1e-5 # Assurer une plage valide
 
             hist, bin_edges = np.histogram(finite_data, bins=num_bins, range=(min_r, max_r))
             mode_index = np.argmax(hist)
+            # Prendre le centre du bin modal
             channel_mode = (bin_edges[mode_index] + bin_edges[mode_index+1]) / 2
-            channel_mode = max(channel_mode, 1e-5)
+            channel_mode = max(channel_mode, 1e-5) # Eviter mode nul
             modes.append(channel_mode)
 
         mode_r, mode_g, mode_b = modes
         # print(f"Auto WB Modes: R={mode_r:.4f}, G={mode_g:.4f}, B={mode_b:.4f}") # Debug
 
+        # Calculer gains pour égaliser les modes (cible = mode vert)
         gain_r = mode_g / mode_r if mode_r > 1e-9 else 1.0
         gain_g = 1.0
         gain_b = mode_g / mode_b if mode_b > 1e-9 else 1.0
 
+        # Limiter les gains pour éviter des couleurs extrêmes
         max_gain = 5.0; min_gain = 0.2
         gain_r = np.clip(gain_r, min_gain, max_gain)
         gain_b = np.clip(gain_b, min_gain, max_gain)
@@ -226,6 +234,7 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
             try:
                 img_for_clahe = np.array(pil_img)
                 if is_color:
+                    # Convert to LAB color space for CLAHE on L channel
                     lab = cv2.cvtColor(img_for_clahe, cv2.COLOR_RGB2LAB)
                     l_channel, a_channel, b_channel = cv2.split(lab)
                     clahe_processor = cv2.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
