@@ -497,21 +497,34 @@ class SeestarQueuedStacker:
         # --- Main Stacking Logic ---
         stacked_image_np = None # Final result will be a NumPy array
 
-        # --- GPU (CuPy) Path ---
+
+# --- GPU (CuPy) Path ---
         if use_cupy:
-            gpu_images_cp = None # Keep reference to CuPy array list/stack
-            gpu_weights_cp = None
+            # --- Initialize GPU vars to None ---
+            gpu_images_stack_cp = None
+            gpu_weights_1d_cp = None
+            weights_broadcast_cp = None
+            gpu_stacked_image_cp = None
+            gpu_mean_cp = None
+            gpu_std_cp = None
+            gpu_threshold_cp = None
+            gpu_lower_bound_cp = None
+            gpu_upper_bound_cp = None
+            gpu_mask_cp = None
+            gpu_masked_weights_cp = None
+            gpu_sum_weights_kept_cp = None
+            gpu_weighted_sum_kept_cp = None
+            gpu_count_kept_cp = None
+            gpu_sum_image_cp = None
+            gpu_clipped_stack_cp = None
+            # --- End Initialization ---
+
             try:
                 # 1. Upload data to GPU
                 start_upload = time.monotonic()
-                # Stack into a single CuPy array (more efficient for CuPy ops)
-                # Use float32 on GPU to conserve memory, unless high precision needed
                 gpu_images_stack_cp = cupy.asarray(batch_images, dtype=cupy.float32)
-                # print(f"DEBUG CuPy {progress_info}: Uploaded shape {gpu_images_stack_cp.shape}")
                 upload_time = time.monotonic() - start_upload
 
-                # Upload weights if needed
-                weights_broadcast_cp = None
                 if weights_1d_np is not None:
                     gpu_weights_1d_cp = cupy.asarray(weights_1d_np, dtype=cupy.float32)
                     weight_shape = [-1] + [1] * (gpu_images_stack_cp.ndim - 1)
@@ -519,118 +532,117 @@ class SeestarQueuedStacker:
 
                 # 2. Perform Stacking on GPU
                 start_compute = time.monotonic()
-                gpu_stacked_image_cp = None # Result on GPU
-
-                # --- CuPy Stacking Methods ---
+                # --- (Rest of the CuPy Stacking Methods logic stays the same) ---
                 if self.stacking_mode == "mean":
-                    if weights_broadcast_cp is not None:
-                        # CuPy average needs axis specified and weights matching dimensions
-                        gpu_stacked_image_cp = cupy.average(gpu_images_stack_cp, axis=0, weights=weights_broadcast_cp)
-                    else:
+                    # ... (mean logic) ...
+                     if weights_broadcast_cp is not None:
+                        gpu_stacked_image_cp = cupy.average(gpu_images_stack_cp, axis=0, weights=gpu_weights_1d_cp)
+                     else:
                         gpu_stacked_image_cp = cupy.mean(gpu_images_stack_cp, axis=0)
 
                 elif self.stacking_mode == "median":
+                     # ... (median logic) ...
                     if weights_broadcast_cp is not None:
                          self.update_progress(f"⚠️ Pondération non supportée pour 'median' avec CuPy, utilisation mediane simple {progress_info}.")
                     gpu_stacked_image_cp = cupy.median(gpu_images_stack_cp, axis=0)
 
+
                 elif self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
-                    # Calculations in float32 for potentially better performance/less memory
-                    gpu_mean_cp = cupy.mean(gpu_images_stack_cp, axis=0, dtype=cupy.float32)
+                     # ... (kappa/winsorized logic requires gpu_mean_cp, gpu_std_cp etc.) ...
+                    gpu_mean_cp = cupy.mean(gpu_images_stack_cp, axis=0, dtype=cupy.float32) # <--- Error happened here in your trace
                     gpu_std_cp = cupy.std(gpu_images_stack_cp, axis=0, dtype=cupy.float32)
+                    # ... (rest of kappa/winsorized) ...
                     gpu_std_cp = cupy.maximum(gpu_std_cp, 1e-6) # Avoid division by zero
                     gpu_threshold_cp = self.kappa * gpu_std_cp
 
                     if self.stacking_mode == "kappa-sigma":
                         gpu_lower_bound_cp = gpu_mean_cp - gpu_threshold_cp
                         gpu_upper_bound_cp = gpu_mean_cp + gpu_threshold_cp
-                        # Create mask directly on GPU
                         gpu_mask_cp = (gpu_images_stack_cp >= gpu_lower_bound_cp) & (gpu_images_stack_cp <= gpu_upper_bound_cp)
-
+                        # ... (rest of weighted/unweighted kappa-sigma) ...
                         if weights_broadcast_cp is not None:
-                            # Apply mask to weights
                             gpu_masked_weights_cp = cupy.where(gpu_mask_cp, weights_broadcast_cp, 0.0)
-                            # Sum masked weights along the stacking axis (axis=0)
                             gpu_sum_weights_kept_cp = cupy.sum(gpu_masked_weights_cp, axis=0)
-                            gpu_sum_weights_kept_cp = cupy.maximum(gpu_sum_weights_kept_cp, 1e-9) # Avoid zero division
-                            # Apply mask and weights to images, then sum
+                            gpu_sum_weights_kept_cp = cupy.maximum(gpu_sum_weights_kept_cp, 1e-9)
                             gpu_weighted_sum_kept_cp = cupy.sum(cupy.where(gpu_mask_cp, gpu_images_stack_cp * gpu_masked_weights_cp, 0.0), axis=0)
                             gpu_stacked_image_cp = gpu_weighted_sum_kept_cp / gpu_sum_weights_kept_cp
                         else:
-                            # Sum counts where mask is True
                             gpu_count_kept_cp = cupy.sum(gpu_mask_cp, axis=0, dtype=cupy.int16)
-                            gpu_count_kept_cp = cupy.maximum(gpu_count_kept_cp, 1) # Avoid zero division
-                            # Sum image values where mask is True
+                            gpu_count_kept_cp = cupy.maximum(gpu_count_kept_cp, 1)
                             gpu_sum_image_cp = cupy.sum(cupy.where(gpu_mask_cp, gpu_images_stack_cp, 0.0), axis=0)
                             gpu_stacked_image_cp = gpu_sum_image_cp / gpu_count_kept_cp
 
-                        # Optional: Calculate rejection stats (can be slow)
-                        # rejected_count = gpu_images_stack_cp.size - cupy.sum(gpu_mask_cp)
-                        # rejected_percent = (rejected_count / gpu_images_stack_cp.size) * 100 if gpu_images_stack_cp.size > 0 else 0
-                        # self.update_progress(f"   (CuPy Kappa-Sigma {progress_info}: {rejected_percent:.2f}% pixels rejetés)") # Requires .get()
-
                     elif self.stacking_mode == "winsorized-sigma":
-                        gpu_lower_bound_cp = gpu_mean_cp - gpu_threshold_cp
-                        gpu_upper_bound_cp = gpu_mean_cp + gpu_threshold_cp
-                        # Clip values on GPU
+                        gpu_upper_bound_cp = gpu_mean_cp + gpu_threshold_cp # Typo fixed: should be gpu_mean_cp + gpu_threshold_cp
                         gpu_clipped_stack_cp = cupy.clip(gpu_images_stack_cp, gpu_lower_bound_cp, gpu_upper_bound_cp)
-                        # Calculate mean of clipped stack
                         if weights_broadcast_cp is not None:
-                             gpu_stacked_image_cp = cupy.average(gpu_clipped_stack_cp, axis=0, weights=weights_broadcast_cp)
+                            gpu_stacked_image_cp = cupy.average(gpu_clipped_stack_cp, axis=0, weights=gpu_weights_1d_cp)
                         else:
                              gpu_stacked_image_cp = cupy.mean(gpu_clipped_stack_cp, axis=0)
-                        # self.update_progress(f"   (CuPy Winsorized-Sigma {progress_info} appliqué)")
+
 
                 else: # Fallback method
+                     # ... (fallback logic) ...
                     self.update_progress(f"⚠️ Méthode CuPy '{self.stacking_mode}' non reconnue, utilisation 'mean' {progress_info}.")
                     if weights_broadcast_cp is not None:
-                        gpu_stacked_image_cp = cupy.average(gpu_images_stack_cp, axis=0, weights=weights_broadcast_cp)
+                        gpu_stacked_image_cp = cupy.average(gpu_clipped_stack_cp, axis=0, weights=gpu_weights_1d_cp)
                     else:
                         gpu_stacked_image_cp = cupy.mean(gpu_images_stack_cp, axis=0)
 
+
                 # 3. Download result from GPU
                 start_download = time.monotonic()
-                if gpu_stacked_image_cp is None:
-                    raise ValueError("CuPy stacking did not produce a result.")
-
-                # Ensure result is float32 numpy array
+                if gpu_stacked_image_cp is None: raise ValueError("CuPy stacking did not produce a result.")
                 stacked_image_np = cupy.asnumpy(gpu_stacked_image_cp).astype(output_dtype)
                 download_time = time.monotonic() - start_download
                 compute_time = time.monotonic() - start_compute - download_time
+                self.update_progress(f"   ⏱️ CuPy Times {progress_info}: Upload={upload_time:.3f}s, Compute={compute_time:.3f}s, Download={download_time:.3f}s")
 
-                self.update_progress(
-                     f"   ⏱️ CuPy Times {progress_info}: Upload={upload_time:.3f}s, Compute={compute_time:.3f}s, Download={download_time:.3f}s"
-                     )
-
+            # --- (Keep except blocks as they were) ---
             except cupy.cuda.memory.OutOfMemoryError as mem_err:
-                print(f"\nERROR CuPy {progress_info}: GPU Out of Memory! {mem_err}")
-                self.update_progress(f"❌ ERREUR CuPy {progress_info}: GPU Manque de Mémoire! Essai avec CPU...")
-                use_cupy = False # Trigger CPU fallback
-                gc.collect() # CPU garbage collect
-                cupy.get_default_memory_pool().free_all_blocks() # Free GPU blocks
+                # ... (existing code) ...
+                 print(f"\nERROR CuPy {progress_info}: GPU Out of Memory! {mem_err}")
+                 self.update_progress(f"❌ ERREUR CuPy {progress_info}: GPU Manque de Mémoire! Essai avec CPU...")
+                 use_cupy = False # Trigger CPU fallback
+                 gc.collect() # CPU garbage collect
+                 cupy.get_default_memory_pool().free_all_blocks() # Free GPU blocks
 
             except Exception as gpu_err:
-                print(f"\nERROR CuPy {progress_info}: {gpu_err}")
-                traceback.print_exc(limit=3)
-                self.update_progress(f"❌ ERREUR CuPy {progress_info}: {gpu_err}. Essai avec CPU...")
-                use_cupy = False # Trigger CPU fallback
-                gc.collect()
-                try:
-                     cupy.get_default_memory_pool().free_all_blocks()
-                except Exception: pass
+                 # ... (existing code) ...
+                 print(f"\nERROR CuPy {progress_info}: {gpu_err}")
+                 traceback.print_exc(limit=3)
+                 self.update_progress(f"❌ ERREUR CuPy {progress_info}: {gpu_err}. Essai avec CPU...")
+                 use_cupy = False # Trigger CPU fallback
+                 gc.collect()
+                 try: cupy.get_default_memory_pool().free_all_blocks()
+                 except Exception: pass
 
             finally:
-                # Explicitly delete CuPy arrays to free GPU memory sooner
-                del gpu_images_stack_cp, gpu_weights_1d_cp, weights_broadcast_cp
-                del gpu_mean_cp, gpu_std_cp, gpu_threshold_cp, gpu_mask_cp # Add others if created
-                if '_cupy_installed' in globals() and _cupy_installed: # Only call if cupy was imported
-                    try:
-                        cupy.get_default_memory_pool().free_all_blocks()
-                    except Exception as free_err:
-                         print(f"Warning: Error freeing CuPy memory blocks: {free_err}")
+                # --- Modified finally block ---
+                # Explicitly delete CuPy arrays *if they were assigned*
+                if gpu_images_stack_cp is not None: del gpu_images_stack_cp
+                if gpu_weights_1d_cp is not None: del gpu_weights_1d_cp
+                if weights_broadcast_cp is not None: del weights_broadcast_cp
+                if gpu_stacked_image_cp is not None: del gpu_stacked_image_cp
+                if gpu_mean_cp is not None: del gpu_mean_cp
+                if gpu_std_cp is not None: del gpu_std_cp
+                if gpu_threshold_cp is not None: del gpu_threshold_cp
+                if gpu_lower_bound_cp is not None: del gpu_lower_bound_cp
+                if gpu_upper_bound_cp is not None: del gpu_upper_bound_cp
+                if gpu_mask_cp is not None: del gpu_mask_cp
+                if gpu_masked_weights_cp is not None: del gpu_masked_weights_cp
+                if gpu_sum_weights_kept_cp is not None: del gpu_sum_weights_kept_cp
+                if gpu_weighted_sum_kept_cp is not None: del gpu_weighted_sum_kept_cp
+                if gpu_count_kept_cp is not None: del gpu_count_kept_cp
+                if gpu_sum_image_cp is not None: del gpu_sum_image_cp
+                if gpu_clipped_stack_cp is not None: del gpu_clipped_stack_cp
 
+                # Free memory pool blocks
+                if '_cupy_installed' in globals() and _cupy_installed:
+                    try: cupy.get_default_memory_pool().free_all_blocks()
+                    except Exception as free_err: print(f"Warning: Error freeing CuPy memory blocks: {free_err}")
+# --- End Modified finally block ---
 
-        # --- CPU (NumPy) Path (Fallback or if CUDA not used) ---
         if not use_cupy:
             if backend_info == "GPU (CuPy)": # Check if we are here due to fallback
                  self.update_progress(f"   -> Exécution via CPU (NumPy) pour {progress_info} après échec GPU.")

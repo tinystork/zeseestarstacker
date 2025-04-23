@@ -1,6 +1,6 @@
 {
     "version": "1.2.0",
-    "input_folder": "F:\\astro photos\\seestar s 50\\M 94\\tempo\\1",
+    "input_folder": "F:\\seescan\\env\\zeseestarstacker\\testdataset\\1",
     "output_folder": "F:\\astro photos\\seestar s 50\\M 94\\tempo\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",

@@ -127,7 +127,83 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Placez votre image de fond personnalisée (`.png` ou `.jpg`) et mettez à jour `bg_image_path` dans `seestar/gui/preview.py`.
 
 ---
+## Optional GPU Acceleration (CUDA)
 
+This application can optionally leverage an NVIDIA GPU using CUDA to accelerate certain processing steps, potentially leading to significant speed improvements, especially for stacking large numbers of images.
+
+**However, GPU acceleration is strictly optional.** The application will run correctly using your computer's main processor (CPU) by default, without requiring any special hardware or setup.
+
+### Requirements for GPU Acceleration
+
+To enable GPU acceleration, you need:
+
+1.  **Hardware:** An NVIDIA graphics card that supports CUDA.
+2.  **Drivers:** Up-to-date NVIDIA drivers for your graphics card.
+3.  **CUDA Toolkit:** The NVIDIA CUDA Toolkit installed on your system. You can check if it's installed and find its version by opening a terminal or command prompt and running `nvcc --version`.
+
+### Python Dependencies for GPU Acceleration
+
+If you meet the requirements above, you need specific Python packages:
+
+1.  **OpenCV Contrib:** The `requirements.txt` file includes `opencv-contrib-python`. This version *might* use CUDA for some operations (like denoising) if your system is correctly configured *before* you install it via pip.
+2.  **CuPy:** For significantly faster image stacking, you need to install CuPy *manually* after installing the base requirements.
+    *   Check your CUDA Toolkit version (`nvcc --version`).
+    *   Install the matching CuPy package. See the detailed comments in the `requirements.txt` file for the exact `pip install cupy-cudaXXX` command corresponding to your CUDA version (e.g., `pip install cupy-cuda12x` for CUDA 12.x).
+
+### Important Note on Terminal Messages (GPU Checks)
+
+When you run the application, it performs checks to see if CUDA-enabled OpenCV and CuPy are available.
+
+*   You might see messages in your terminal like:
+    *   `DEBUG: CUDA device(s) detected by OpenCV.` (or `No CUDA devices detected...`)
+    *   `DEBUG: CuPy library not found.`
+    *   `DEBUG: CuPy detected CUDA Device X: ...` (or `No CUDA device is available/detected by CuPy.`)
+    *   `Warning: CUDA ... failed: ... Falling back to CPU.`
+    *   Errors related to missing `.dll` files (like `nvrtc64_XXX.dll`) if CuPy is installed but doesn't match your CUDA Toolkit.
+
+*   **If you do NOT have an NVIDIA GPU or have not installed the CUDA Toolkit and the correct CuPy package, seeing these messages is NORMAL and EXPECTED.**
+*   They simply indicate that the optional GPU acceleration could not be activated.
+*   **The application is designed to automatically and safely fall back to using the CPU in these cases.** It will continue to function correctly.
+
+---
+
+## Accélération GPU Optionnelle (CUDA) - French Version
+
+Cette application peut optionnellement utiliser une carte graphique NVIDIA via CUDA pour accélérer certaines étapes de traitement, ce qui peut améliorer significativement la vitesse, notamment pour l'empilement d'un grand nombre d'images.
+
+**Cependant, l'accélération GPU est strictement optionnelle.** L'application fonctionnera correctement en utilisant le processeur principal de votre ordinateur (CPU) par défaut, sans nécessiter de matériel ou de configuration spécifique.
+
+### Prérequis pour l'Accélération GPU
+
+Pour activer l'accélération GPU, vous avez besoin de :
+
+1.  **Matériel :** Une carte graphique NVIDIA supportant CUDA.
+2.  **Pilotes :** Des pilotes NVIDIA à jour pour votre carte graphique.
+3.  **CUDA Toolkit :** Le NVIDIA CUDA Toolkit installé sur votre système. Vous pouvez vérifier s'il est installé et connaître sa version en ouvrant un terminal ou une invite de commande et en exécutant `nvcc --version`.
+
+### Dépendances Python pour l'Accélération GPU
+
+Si vous remplissez les conditions ci-dessus, vous avez besoin de paquets Python spécifiques :
+
+1.  **OpenCV Contrib :** Le fichier `requirements.txt` inclut `opencv-contrib-python`. Cette version *peut potentiellement* utiliser CUDA pour certaines opérations (comme le débruitage) si votre système est correctement configuré *avant* son installation via pip.
+2.  **CuPy :** Pour un empilement d'images significativement plus rapide, vous devez installer CuPy *manuellement* après avoir installé les dépendances de base.
+    *   Vérifiez la version de votre CUDA Toolkit (`nvcc --version`).
+    *   Installez le paquet CuPy correspondant. Consultez les commentaires détaillés dans le fichier `requirements.txt` pour la commande exacte `pip install cupy-cudaXXX` adaptée à votre version CUDA (ex: `pip install cupy-cuda12x` pour CUDA 12.x).
+
+### Note Importante Concernant les Messages du Terminal (Vérifications GPU)
+
+Lorsque vous lancez l'application, elle effectue des vérifications pour voir si OpenCV avec CUDA et CuPy sont disponibles.
+
+*   Vous pourriez voir des messages dans votre terminal tels que :
+    *   `DEBUG: CUDA device(s) detected by OpenCV.` (ou `No CUDA devices detected...`)
+    *   `DEBUG: CuPy library not found.`
+    *   `DEBUG: CuPy detected CUDA Device X: ...` (ou `No CUDA device is available/detected by CuPy.`)
+    *   `Warning: CUDA ... failed: ... Falling back to CPU.`
+    *   Des erreurs liées à des fichiers `.dll` manquants (comme `nvrtc64_XXX.dll`) si CuPy est installé mais ne correspond pas à votre CUDA Toolkit.
+
+*   **Si vous N'AVEZ PAS de GPU NVIDIA ou si vous n'avez pas installé le CUDA Toolkit et le paquet CuPy correct, voir ces messages est NORMAL et ATTENDU.**
+*   Ils indiquent simplement que l'accélération GPU optionnelle n'a pas pu être activée.
+*   **L'application est conçue pour utiliser automatiquement et sans danger le CPU dans ces cas.** Elle continuera de fonctionner correctement.
 ## Usage / Utilisation
 
 **(English)**
