@@ -29,7 +29,10 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Customizable: Supports custom application icon and preview background image.
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
-![Uploading image.png…]()
+
+![image](https://github.com/user-attachments/assets/719d9fe9-db73-46cc-84b2-4ad5d4853054)
+
+
 
 **(Français)**
 
@@ -51,7 +54,8 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
 
----
+
+![image](https://github.com/user-attachments/assets/722832cc-dc1c-4779-a1ee-c2367c6bdc67)
 
 ## Requirements / Prérequis
 
