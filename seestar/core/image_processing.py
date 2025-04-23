@@ -7,6 +7,7 @@ import numpy as np
 from astropy.io import fits
 import cv2
 import warnings
+from astropy.io.fits.verify import VerifyWarning
 from PIL import Image, ImageEnhance, ImageFilter # Added PIL imports for enhanced stretch
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -175,23 +176,23 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
     # Ensure header is valid or create a new one
     final_header = fits.Header()
     if header is not None and isinstance(header, fits.Header):
-         # Copy existing header but clear structural keywords we will redefine
-         keywords_to_remove = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3',
-                              'EXTEND', 'BSCALE', 'BZERO']
-         temp_header = header.copy()
-         for key in keywords_to_remove:
-              if key in temp_header: del temp_header[key]
-         # Update final_header with the remaining keywords
-         final_header.update(temp_header)
+        # Copy existing header but clear structural keywords we will redefine
+        keywords_to_remove = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3',
+                             'EXTEND', 'BSCALE', 'BZERO']
+        temp_header = header.copy()
+        for key in keywords_to_remove:
+            if key in temp_header:
+                del temp_header[key]
+        # Update final_header with the remaining keywords
+        final_header.update(temp_header)
     elif header is not None:
-         print("Warning: Provided header is not valid astropy.io.fits.Header. Creating new one.")
-
+        print("Warning: Provided header is not valid astropy.io.fits.Header. Creating new one.")
 
     # Determine if image is color (HxWx3 format assumed)
     is_color = image.ndim == 3 and image.shape[-1] == 3
 
     # Prepare data: Ensure float32, clip 0-1, scale to uint16, handle axis order
-    image_float32 = image.astype(np.float32) # Ensure float type
+    image_float32 = image.astype(np.float32)  # Ensure float type
     image_clipped = np.clip(image_float32, 0.0, 1.0)
     image_uint16 = (image_clipped * 65535.0).astype(np.uint16)
 
@@ -200,37 +201,52 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
         # Input is HxWx3, convert to 3xHxW for saving
         image_to_save = np.moveaxis(image_uint16, -1, 0)
         final_header['NAXIS'] = 3
-        final_header['NAXIS1'] = image.shape[1] # Width
-        final_header['NAXIS2'] = image.shape[0] # Height
-        final_header['NAXIS3'] = 3 # Channels
-        if 'CTYPE3' not in final_header: final_header['CTYPE3'] = ('RGB', 'Color Format')
-    else: # Grayscale image (HxW)
+        final_header['NAXIS1'] = image.shape[1]  # Width
+        final_header['NAXIS2'] = image.shape[0]  # Height
+        final_header['NAXIS3'] = 3  # Channels
+        if 'CTYPE3' not in final_header:
+            final_header['CTYPE3'] = ('RGB', 'Color Format')
+    else:  # Grayscale image (HxW)
         image_to_save = image_uint16
         final_header['NAXIS'] = 2
-        final_header['NAXIS1'] = image.shape[1] # Width
-        final_header['NAXIS2'] = image.shape[0] # Height
+        final_header['NAXIS1'] = image.shape[1]  # Width
+        final_header['NAXIS2'] = image.shape[0]  # Height
         # Remove potential leftover 3rd axis keys
-        if 'NAXIS3' in final_header: del final_header['NAXIS3']
-        if 'CTYPE3' in final_header: del final_header['CTYPE3']
-
+        if 'NAXIS3' in final_header:
+            del final_header['NAXIS3']
+        if 'CTYPE3' in final_header:
+            del final_header['CTYPE3']
 
     # Common FITS settings for saving intensity data as uint16
     final_header['BITPIX'] = 16
     final_header['BSCALE'] = 1
-    final_header['BZERO'] = 32768 # Standard for unsigned integer FITS
+    final_header['BZERO'] = 32768  # Standard for unsigned integer FITS
 
-    # Write the FITS file
+    # --- Write the FITS file WITH warning suppression ---
     try:
         hdu = fits.PrimaryHDU(data=image_to_save, header=final_header)
         hdul = fits.HDUList([hdu])
-        hdul.writeto(output_path, overwrite=overwrite, checksum=True)
+
+        # --- Add warning suppression context ---
+        with warnings.catch_warnings():
+            # Filter out the specific warning about keyword length/characters
+            warnings.filterwarnings(
+                'ignore',
+                category=VerifyWarning,
+                message="Keyword name.*is greater than 8 characters.*"
+            )
+            warnings.filterwarnings(
+                'ignore',
+                category=VerifyWarning,
+                message="Keyword name.*contains characters not allowed.*"
+            )
+            # The actual writing happens within the suppressed context
+            hdul.writeto(output_path, overwrite=overwrite, checksum=True)
+        # --- End warning suppression context ---
     except Exception as e:
-        print(f"Error saving FITS file to {output_path}: {e}")
-        import traceback
-        traceback.print_exc(limit=2)
-        raise # Re-raise after printing
+        print(f"An error occurred while saving the FITS file: {e}")
 
-
+        
 def save_preview_image(image, output_path, apply_stretch=False, enhanced_stretch=False, color_balance=(1.0, 1.0, 1.0)):
     """
     Enregistre une image PNG/JPG pour la prévisualisation (normalisée 0-255 uint8).
