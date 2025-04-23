@@ -25,13 +25,21 @@ EN_TRANSLATIONS = {
     'stacking_method': "Method:",
     'kappa_value': "Kappa:",
     'batch_size': "Batch Size:",
-    'batch_size_auto': "(0=auto)",
+    'batch_size_auto': "(0=auto)", # Gardé même si 0 n'est plus auto pour compatibilité affichage
     'hot_pixels_correction': 'Hot Pixel Correction',
     'perform_hot_pixels_correction': 'Correct hot pixels',
     'hot_pixel_threshold': 'Threshold:',
     'neighborhood_size': 'Neighborhood:',
     'post_proc_opts_frame_label': "Post-Processing Options",
     'cleanup_temp_check_label': "Cleanup temporary files after processing",
+    'quality_weighting_frame': "Quality Weighting",
+    'enable_weighting_check': "Enable weighting",
+    'weighting_metrics_label': "Metrics:",
+    'weight_snr_check': "SNR",
+    'weight_stars_check': "Star Count",
+    'snr_exponent_label': "SNR Exp.:",
+    'stars_exponent_label': "Stars Exp.:",
+    'min_weight_label': "Min Weight:",
 
     # --- Preview Tab ---
     'white_balance': "White Balance (Preview)",
@@ -55,12 +63,13 @@ EN_TRANSLATIONS = {
 
     # --- Progress Area ---
     'progress': "Progress",
-    'estimated_time': "ETA:", # Reste ETA pour le lot courant peut-être ? Ou on renomme ?
+    'estimated_time': "ETA:",
     'elapsed_time': "Elapsed:",
     'Remaining:': "Remaining:", # Key for static label
     'Additional:': "Additional:", # Key for static label
     'aligned_files_label': "Aligned:", # Static label text (placeholder)
     'aligned_files_label_format': "Aligned: {count}", # Format string for display
+    'global_eta_label': "Global ETA:", # Global ETA label
 
     # --- Preview Area (Right Panel) ---
     'preview': "Preview",
@@ -70,6 +79,9 @@ EN_TRANSLATIONS = {
     'start': "Start",
     'stop': "Stop",
     'add_folder_button': "Add Folder",
+    # NOUVEAU: Clés pour les nouveaux boutons (utiliser le nom de variable comme référence)
+    'copy_log_button_text': "Copy",
+    'open_output_button_text': "Open Output",
 
     # --- Dialog Titles ---
     'Select Input Folder': "Select Input Folder",
@@ -97,8 +109,8 @@ EN_TRANSLATIONS = {
     'no_files_waiting': "No files waiting",
     'no_additional_folders': "None",
     '1 additional folder': "1 add. folder",
-    '{count} additional folders': "{count} add. folders", # Use format
-    'Start processing to add folders': "Processing must be started to add additional folders.", # Modifié pour être plus précis
+    '{count} additional folders': "{count} add. folders",
+    'Start processing to add folders': "Processing must be started to add additional folders.", # Reste pertinent pour l'ajout pendant le process
     'Processing not active or finished.': 'Processing not active or finished.',
     'Folder not found': "Folder not found",
     'Input folder cannot be added': "The main input folder cannot be added.",
@@ -127,8 +139,6 @@ EN_TRANSLATIONS = {
     'Auto Stretch requires an image preview.': "Auto Stretch requires an image preview.",
     'Error during Auto Stretch': 'Error during Auto Stretch',
     'Total Exp (s)': "Total Exp (s)",
-    # --- Additions for ETA and Final Report ---
-    'global_eta_label': "Global ETA:",
     'processing_report_title': "Processing Summary",
     'report_images_stacked': "Images Stacked:",
     'report_total_exposure': "Total Exposure:",
@@ -136,6 +146,11 @@ EN_TRANSLATIONS = {
     'report_seconds': "seconds",
     'report_minutes': "minutes",
     'report_hours': "hours",
-    'eta_calculating': "Calculating...", # Message pendant le calcul de l'ETA
+    'eta_calculating': "Calculating...",
+    # --- Weighting Info Display ---
+    'Weighting': 'Weighting', # Key for label 'WGHT_ON' in header
+    'W. Metrics': 'W. Metrics', # Key for label 'WGHT_MET' in header
+    'weighting_enabled': "Enabled", # Value for WGHT_ON=True
+    'weighting_disabled': "Disabled", # Value for WGHT_ON=False
 }
 # --- END OF FILE seestar/localization/en.py ---

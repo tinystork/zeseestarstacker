@@ -1,0 +1,11 @@
+# --- START OF FILE requirements.txt ---
+numpy
+opencv-python
+astropy
+astroalign
+tqdm
+psutil
+matplotlib
+Pillow
+scikit-image
+# --- END OF FILE requirements.txt ---

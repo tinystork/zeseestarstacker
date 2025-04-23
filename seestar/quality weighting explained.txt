@@ -1,0 +1,127 @@
+Understanding Quality Weighting in Seestar Stacker
+
+What is it?
+
+Imagine you took 100 photos of a galaxy. Some might be perfect, but others might have slight issues: a bit of cloud passing by, a slight tracking wobble making stars less sharp, or maybe just more background noise.
+
+    Simple Stacking: Just averages all 100 photos equally. The bad photos can slightly blur or add noise to the good ones.
+
+    Quality Weighting (This App): Tries to be smarter! It analyzes each photo after it's aligned and gives a "quality score". Photos with higher scores are given more importance (more "weight") when creating the final average. Photos with lower scores contribute less.
+
+Why use it?
+
+The goal is to produce a sharper, cleaner final image by letting the best photos have the most influence and reducing the negative impact of the poorer photos.
+
+How does the App measure "Quality"?
+
+It looks at two main things for each aligned photo:
+
+    SNR (Signal-to-Noise Ratio):
+
+        Think of it like: How clear is the "signal" (your galaxy or nebula) compared to the random background "noise" (graininess)?
+
+        A high SNR score means the image has a strong, clear signal over a smooth background – that's good!
+
+        A low SNR score means the signal is weak or the background is very noisy – that's less good.
+
+    Star Count / Sharpness:
+
+        Think of it like: How many sharp, pinpoint stars can the app detect?
+
+        More sharp stars usually mean the focus was good and the telescope tracking was steady during that photo. This often indicates better overall image quality.
+
+        Fewer detected stars, or stars that look blurry, might suggest poorer focus or tracking for that specific photo.
+
+How do I control it? (The GUI Settings)
+
+In the "Stacking" tab, under "Quality Weighting":
+
+    [ ] Enable Weighting: This is the main switch!
+
+        Checked: The app will measure SNR and/or Stars and adjust the importance of each image.
+
+        Unchecked: All images that align successfully are treated equally (simple average).
+
+    Metrics: [ ] SNR [ ] Star Count: If "Enable Weighting" is checked, these let you choose which quality measurements to use.
+
+        You can use both (recommended to start).
+
+        You can use only SNR.
+
+        You can use only Star Count.
+
+    SNR Exp. (SNR Exponent): Controls how strongly the SNR score affects the weight.
+
+        1.0 (Default): Balanced influence. An image with twice the SNR score gets about twice the weight (from SNR).
+
+        Lower values (e.g., 0.5, 0.3): Makes the app less sensitive to SNR differences. Use this if you think the app is being too harsh on images with slightly lower SNR.
+
+        Higher values (e.g., 1.5, 2.0): Makes the app more sensitive. Only images with the very best SNR will have high weight.
+
+    Stars Exp. (Stars Exponent): Controls how strongly the Star Count score affects the weight.
+
+        1.0 (Default): Balanced influence.
+
+        Lower values (e.g., 0.5, 0.3): Makes the app less sensitive to the number/sharpness of stars. Use this if good images seem to be getting low weight just because they have fewer stars (e.g., edge of nebula).
+
+        Higher values (e.g., 1.5, 2.0): Makes the app more sensitive. Only images with the most/sharpest stars get high weight.
+
+    Min Weight: A safety net. It guarantees that every image included in the stack contributes at least this minimum amount (e.g., 0.1 = 10% of an average weight).
+
+        Recommendation: Usually keep this low (0.05 to 0.15). Setting it too high can defeat the purpose of weighting by forcing bad images to contribute more.
+
+Troubleshooting: Why are images excluded or the stack poor?
+
+Sometimes images don't make it into the stack, or the final weighted stack doesn't look great. Here's how to figure out why:
+
+Scenario 1: Images are COMPLETELY MISSING from the final stack count.
+
+This means they were rejected before weighting was even applied. Check the log area for messages about the specific file:
+
+    Message: ⚠️ Image ignorée (faible variance: ...)
+
+        Meaning: The app thought the raw image was too dim or had too little contrast to be useful (like a nearly black frame).
+
+        Action: We already adjusted this threshold lower (0.0025 in the code). If you still see this for images that look visually okay (check the original FITS!), the threshold might need further adjustment (this is an advanced code change) or the image might genuinely be too faint.
+
+    Message: ➡️ Échec alignement... (Alignment Failed)
+
+        Meaning: The app couldn't find enough stars to reliably line this image up with the others.
+
+        Action:
+
+            Visually check the original FITS image: Was it very cloudy? Did stars trail badly? Was the focus way off? If yes, the rejection is correct.
+
+            Weighting settings cannot fix this. Alignment is a pass/fail step before weighting.
+
+    Other Errors: Look for messages about file loading errors, debayering errors, etc.
+
+Scenario 2: Images ARE included (stack count seems right), but the final stack looks Noisy or Blurry.
+
+This might mean the weighting isn't working optimally for your data.
+
+    Visually Check Your Raw Files: Open some of the original FITS files. Do some look obviously worse than others (fainter, noisier, less sharp stars, thin clouds)? If they all look very similar, weighting might not provide a huge benefit. If some are clearly worse, weighting should help.
+
+    Try Disabling One Metric: Uncheck "SNR" and stack. Then, re-check "SNR" and uncheck "Star Count" and stack again. Does the result improve significantly with one metric disabled? Maybe that metric wasn't reliable for your specific target or conditions.
+
+    Adjust the Exponents:
+
+        If the stack seems too noisy (bad frames contributing too much): Try increasing the Exponent(s) slightly (e.g., to 1.2 or 1.5) for the metric(s) you trust. This makes the app pickier.
+
+        If the stack seems blurry or not much better than average (good frames maybe not contributing enough): Try decreasing the Exponent(s) (e.g., to 0.7, 0.5, or 0.3). This makes the app less picky.
+
+        Experiment: Change one exponent at a time and see how the final stack changes.
+
+    Check "Min Weight": Ensure it's set low (like 0.1). If it's high (like 0.5), lower it.
+
+In Summary:
+
+    Weighting helps improve stacks by favoring better-quality images.
+
+    It uses SNR (signal vs noise) and Star Count/Sharpness.
+
+    Use the GUI controls (Enable, SNR/Stars checkboxes, SNR Exp., Stars Exp., Min Weight) to tune it.
+
+    If images are missing entirely, check the log for variance or alignement errors – weighting settings don't fix these.
+
+    If the weighted stack quality isn't great, adjust the exponents or try disabling one of the metrics. Start by lowering exponents below 1.0 if it seems too harsh.

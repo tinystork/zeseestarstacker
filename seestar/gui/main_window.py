@@ -1,8 +1,8 @@
-# --- START OF FILE seestar/gui/main_window.py ---
+# --- START OF FILE seestar/gui/main_window.py (Part 1/3) ---
 """
 Module principal pour l'interface graphique de GSeestar.
 Intègre la prévisualisation avancée et le traitement en file d'attente via QueueManager.
-(Version Révisée: Interaction avec QueueManager modifié, gestion état boutons)
+(Version Révisée: Ajout dossiers avant start, Log amélioré, Bouton Ouvrir Sortie)
 """
 
 import os
@@ -14,11 +14,17 @@ import numpy as np
 from astropy.io import fits
 import traceback
 import math
+import platform # NOUVEL import
+import subprocess # NOUVEL import
+import gc #
+from PIL import Image, ImageTk 
 
+    
 # Seestar imports
 from seestar.core.image_processing import load_and_validate_fits, debayer_image
+from seestar.core.image_processing import load_and_validate_fits, debayer_image
 from seestar.localization import Localization
-from seestar.queuep.queue_manager import SeestarQueuedStacker # Updated import
+from seestar.queuep.queue_manager import SeestarQueuedStacker
 try:
     # Import tools for preview adjustments and auto calculations
     from seestar.tools.stretch import StretchPresets, ColorCorrection
@@ -59,6 +65,34 @@ class SeestarStackerGUI:
     def __init__(self):
         """Initialise l'interface graphique."""
         self.root = tk.Tk()
+      
+        try:
+            # Replace this path with the ACTUAL path to icon file!
+            # Example: icon_path = "icons/my_app_icon.png"
+            # Make sure the path is correct relative to where you run the script,
+            # or use an absolute path.
+            icon_path = 'icon/icon.png'
+
+            if os.path.exists(icon_path):
+                # Load the image using Pillow
+                icon_image = Image.open(icon_path)
+                # Convert it for Tkinter
+                self.tk_icon = ImageTk.PhotoImage(icon_image)
+                # Set the icon for the window (and taskbar/dock)
+                self.root.iconphoto(True, self.tk_icon)
+                print(f"DEBUG: Successfully loaded and set icon from: {icon_path}") # Optional debug message
+            else:
+                print(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
+        except FileNotFoundError:
+             print(f"Error: Icon file not found at specified path: {icon_path}. Using default icon.")
+        except Exception as e:
+            print(f"Error loading or setting window icon: {e}")
+            # Optional: Show traceback for debugging complex errors
+            # import traceback
+            # traceback.print_exc()
+        # --- End Icon Setting ---
+
+        self.localization = Localization("en") # The rest of the __init__ method continues here
         self.localization = Localization("en")
         self.settings = SettingsManager()
         self.queued_stacker = SeestarQueuedStacker() # Use the queued stacker
@@ -71,6 +105,17 @@ class SeestarStackerGUI:
         self.time_per_image = 0 # Average time per processed file (updated by tracker)
         self.global_start_time = None # Start time of the whole processing session
 
+        # *** NOUVEAU : Liste pour les dossiers ajoutés AVANT de démarrer ***
+        self.additional_folders_to_process = []
+        # --- Fin Nouveau ---
+
+        # --- Quality Weighting Variables ---
+        self.use_weighting_var = tk.BooleanVar(value=False)
+        self.weight_snr_var = tk.BooleanVar(value=True)
+        self.weight_stars_var = tk.BooleanVar(value=True)
+        self.snr_exponent_var = tk.DoubleVar(value=1.0)
+        self.stars_exponent_var = tk.DoubleVar(value=0.5)
+        self.min_weight_var = tk.DoubleVar(value=0.1)
         # Initialize Tkinter variables first
         self.init_variables()
 
@@ -87,10 +132,10 @@ class SeestarStackerGUI:
 
         # Initialize managers that need widget references
         self.init_managers() # Initializes progress_manager, preview_manager etc.
-        #self.current_stack_count_preview = 0 # Add variable to store stack count for preview
-        
+
         # Apply loaded settings to the UI widgets
         self.settings.apply_to_ui(self)
+        self._update_weighting_options_state()
         self.update_ui_language() # Translate UI based on loaded language
 
         # Connect backend callbacks
@@ -159,14 +204,12 @@ class SeestarStackerGUI:
             )
         else:
             print("Error: Progress widgets not found for ProgressManager initialization.")
-            # Handle error gracefully, maybe disable progress updates
 
         # Preview Manager
         if hasattr(self, 'preview_canvas'):
             self.preview_manager = PreviewManager(self.preview_canvas)
         else:
             print("Error: Preview canvas not found for PreviewManager initialization.")
-            # Handle error, maybe disable preview
 
         # Histogram Widget Callback (if widget exists)
         if hasattr(self, 'histogram_widget') and self.histogram_widget:
@@ -177,11 +220,30 @@ class SeestarStackerGUI:
         # File Handler (should already be created in __init__)
         if not hasattr(self, 'file_handler'):
              print("Error: FileHandlingManager not initialized.")
-             # Potentially create it here as a fallback if absolutely necessary
-             # self.file_handler = FileHandlingManager(self)
 
         # Show initial state in preview area
         self.show_initial_preview()
+        # Update additional folders display initially
+        self.update_additional_folders_display()
+
+    def _update_weighting_options_state(self):
+        """Active ou désactive les options de pondération détaillées."""
+        state = tk.NORMAL if self.use_weighting_var.get() else tk.DISABLED
+        widgets_to_toggle = [
+            getattr(self, 'weight_metrics_label', None),
+            getattr(self, 'weight_snr_check', None),
+            getattr(self, 'weight_stars_check', None),
+            getattr(self, 'snr_exp_label', None),
+            getattr(self, 'snr_exp_spinbox', None),
+            getattr(self, 'stars_exp_label', None),
+            getattr(self, 'stars_exp_spinbox', None),
+            getattr(self, 'min_w_label', None),
+            getattr(self, 'min_w_spinbox', None)
+        ]
+        for widget in widgets_to_toggle:
+            if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+                try: widget.config(state=state)
+                except tk.TclError: pass
 
     def show_initial_preview(self):
         """ Affiche un état initial dans la zone d'aperçu. """
@@ -199,9 +261,7 @@ class SeestarStackerGUI:
         # --- Structure principale ---
         main_frame = ttk.Frame(self.root); main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL); paned_window.pack(fill=tk.BOTH, expand=True)
-        # Left panel for controls (fixed width initially)
         left_frame = ttk.Frame(paned_window, width=450, height=700); left_frame.pack_propagate(False); paned_window.add(left_frame, weight=1)
-        # Right panel for preview (expands)
         right_frame = ttk.Frame(paned_window, width=750, height=700); right_frame.pack_propagate(False); paned_window.add(right_frame, weight=3)
 
         # --- Panneau Gauche ---
@@ -261,7 +321,9 @@ class SeestarStackerGUI:
         self.batch_size_label = ttk.Label(batch_frame, text=self.tr("batch_size")); self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
         self.batch_spinbox = ttk.Spinbox(batch_frame, from_=3, to=500, increment=1, textvariable=self.batch_size, width=5) # Min batch size 3 for stats
         self.batch_spinbox.pack(side=tk.LEFT)
-        # Removed (0=auto) label as 0 is no longer auto
+
+# --- END OF FILE seestar/gui/main_window.py (Part 1/3) ---
+# --- START OF FILE seestar/gui/main_window.py (Part 2/3) ---
 
         # Hot Pixels Group
         self.hp_frame = ttk.LabelFrame(tab_stacking, text=self.tr("hot_pixels_correction"))
@@ -278,6 +340,48 @@ class SeestarStackerGUI:
         self.neighborhood_size_label = ttk.Label(hp_params_frame, text=self.tr("neighborhood_size")); self.neighborhood_size_label.pack(side=tk.LEFT)
         self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4) # Must be odd
         self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
+
+        # Quality Weighting Group
+        self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Pondération par Qualité") # Sera traduit par update_ui_language
+        self.weighting_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.use_weighting_check = ttk.Checkbutton(
+            self.weighting_frame,
+            text="Activer la pondération", # Sera traduit
+            variable=self.use_weighting_var,
+            command=self._update_weighting_options_state # Lie la commande
+        )
+        self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2))
+
+        self.weighting_options_frame = ttk.Frame(self.weighting_frame)
+        self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)) # Indentation
+
+        metrics_frame = ttk.Frame(self.weighting_options_frame)
+        metrics_frame.pack(fill=tk.X, pady=2)
+        self.weight_metrics_label = ttk.Label(metrics_frame, text="Métriques:") # Sera traduit
+        self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5))
+        self.weight_snr_check = ttk.Checkbutton(metrics_frame, text="SNR", variable=self.weight_snr_var) # Sera traduit
+        self.weight_snr_check.pack(side=tk.LEFT, padx=5)
+        self.weight_stars_check = ttk.Checkbutton(metrics_frame, text="Nb Étoiles", variable=self.weight_stars_var) # Sera traduit
+        self.weight_stars_check.pack(side=tk.LEFT, padx=5)
+
+        params_frame = ttk.Frame(self.weighting_options_frame)
+        params_frame.pack(fill=tk.X, pady=2)
+        self.snr_exp_label = ttk.Label(params_frame, text="Exp. SNR:") # Sera traduit
+        self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2))
+        self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5)
+        self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        self.stars_exp_label = ttk.Label(params_frame, text="Exp. Étoiles:") # Sera traduit
+        self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2))
+        self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5)
+        self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        self.min_w_label = ttk.Label(params_frame, text="Poids Min:") # Sera traduit
+        self.min_w_label.pack(side=tk.LEFT, padx=(0, 2))
+        self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5)
+        self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Initialiser état des widgets de pondération
+        self._update_weighting_options_state()
 
         # Post Processing Group
         self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text=self.tr('post_proc_opts_frame_label'))
@@ -330,7 +434,6 @@ class SeestarStackerGUI:
         self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation)
         self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
 
-
         # --- Zone Progression (à la fin du panneau gauche) ---
         self.progress_frame = ttk.LabelFrame(left_frame, text=self.tr("progress"))
         self.progress_frame.pack(fill=tk.X, pady=(10, 0), padx=5, side=tk.BOTTOM) # Pack at bottom
@@ -339,14 +442,32 @@ class SeestarStackerGUI:
         self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode='determinate')
         self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2))
 
-        # Time Info Row
+        # Time Info Row (New version using grid)
         time_frame = ttk.Frame(self.progress_frame)
         time_frame.pack(fill=tk.X, padx=5, pady=2)
-        self.remaining_time_label = ttk.Label(time_frame, text=self.tr("estimated_time")); self.remaining_time_label.pack(side=tk.LEFT)
-        self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='w'); self.remaining_time_value.pack(side=tk.LEFT, padx=(2, 10))
-        self.elapsed_time_label = ttk.Label(time_frame, text=self.tr("elapsed_time")); self.elapsed_time_label.pack(side=tk.LEFT)
-        self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='w'); self.elapsed_time_value.pack(side=tk.LEFT, padx=2)
 
+        # Configure columns for the grid within time_frame
+        time_frame.columnconfigure(0, weight=0) # Column for "ETA:" label (no extra space)
+        time_frame.columnconfigure(1, weight=1) # Column for ETA value (takes available space)
+        time_frame.columnconfigure(2, weight=0) # Column for "Elapsed:" label (no extra space)
+        time_frame.columnconfigure(3, weight=0) # Column for Elapsed value (no extra space)
+
+        # Place widgets using grid
+        self.remaining_time_label = ttk.Label(time_frame, text=self.tr("estimated_time"))
+        self.remaining_time_label.grid(row=0, column=0, sticky='w') # West alignment
+
+        # Removed width=9 to allow it to expand naturally
+        self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), anchor='w')
+        self.remaining_time_value.grid(row=0, column=1, sticky='w', padx=(2, 10)) # West alignment, pad right
+
+        self.elapsed_time_label = ttk.Label(time_frame, text=self.tr("elapsed_time"))
+        self.elapsed_time_label.grid(row=0, column=2, sticky='e', padx=(5,0)) # East alignment, pad left
+
+        # Kept width=9 and anchor='e' for consistent spacing of time value itself
+        self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='e')
+        self.elapsed_time_value.grid(row=0, column=3, sticky='e', padx=(2,0)) # East alignment, pad left
+
+    
         # File Count Info Row
         files_info_frame = ttk.Frame(self.progress_frame)
         files_info_frame.pack(fill=tk.X, padx=5, pady=2)
@@ -365,16 +486,31 @@ class SeestarStackerGUI:
         self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2))
 
 
-        # Status Text Area
+        # --- MODIFIÉ: Status Text Area ---
         status_text_frame = ttk.Frame(self.progress_frame)
-        status_text_font = tkFont.Font(family="Arial", size=8) # Smaller font
-        status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5))
-        self.status_text = tk.Text(status_text_frame, height=5, wrap=tk.WORD, bd=0, font=status_text_font, relief=tk.FLAT, state=tk.DISABLED)
-        self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical", command=self.status_text.yview)
-        self.status_text.configure(yscrollcommand=self.status_scrollbar.set)
-        self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        status_text_font = tkFont.Font(family="Arial", size=8) # Police ok
+        status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5)) # expand=False est important
 
+        # --- NOUVEAU: Bouton Copier Log ---
+        self.copy_log_button = ttk.Button(status_text_frame, text="Copy",
+                                          command=self._copy_log_to_clipboard, width=5)
+        self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor='ne') # Pack à droite, en haut
+
+        # --- Barre de défilement ---
+        self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical") # Command sera lié plus bas
+        self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0)
+
+        # --- Zone de Texte (plus haute) ---
+        # AUGMENTER LA HAUTEUR ICI (par exemple de 5 à 8 ou 10)
+        self.status_text = tk.Text(status_text_frame, height=8, wrap=tk.WORD, bd=0,
+                                   font=status_text_font, relief=tk.FLAT, state=tk.DISABLED,
+                                   yscrollcommand=self.status_scrollbar.set) # Lier scrollbar ici
+        self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=0)
+        self.status_scrollbar.config(command=self.status_text.yview) # Lier scrollbar au Text
+        # --- Fin Modification Log ---
+
+# --- END OF FILE seestar/gui/main_window.py (Part 2/3) ---
+# --- START OF FILE seestar/gui/main_window.py (Part 3/3) ---
 
         # --- Boutons de Contrôle (sous la zone de progression) ---
         control_frame = ttk.Frame(left_frame)
@@ -386,15 +522,20 @@ class SeestarStackerGUI:
             accent_style = 'Accent.TButton' if 'Accent.TButton' in style.element_names() else 'TButton'
         except tk.TclError:
             accent_style = 'TButton'
-
         self.start_button = ttk.Button(control_frame, text=self.tr("start"), command=self.start_processing, style=accent_style)
         self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text=self.tr("stop"), command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        # Add Folder button - starts disabled, enabled during processing
-        self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.add_folder, state=tk.DISABLED)
-        self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+        # Le bouton "Ajouter Dossier" peut maintenant être utilisé avant le démarrage
+        self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL) # Commence NORMAL
+        self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2) # pack à droite
 
+        # --- NOUVEAU : Bouton Ouvrir Dossier Sortie ---
+        # Placé à gauche du bouton Ajouter Dossier
+        self.open_output_button = ttk.Button(control_frame, text="Open Output", # Sera traduit
+                                              command=self._open_output_folder, state=tk.DISABLED) # Commence Désactivé
+        self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+        # --- Fin Nouveau Bouton ---
 
         # --- Panneau Droit (Aperçu et Histogramme) ---
         # Preview Frame
@@ -406,17 +547,14 @@ class SeestarStackerGUI:
 
         # Histogram Frame (at the bottom of right panel)
         self.histogram_frame = ttk.LabelFrame(right_frame, text=self.tr("histogram"))
-        # Calculate height based on desired Matplotlib figsize/dpi
-        hist_fig_height_inches = 2.2
-        hist_fig_dpi = 80 # Adjust if needed
-        hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1) # Add some padding
+        hist_fig_height_inches = 2.2; hist_fig_dpi = 80
+        hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1)
         self.histogram_frame.pack(fill=tk.X, expand=False, pady=(0,5), padx=5, side=tk.BOTTOM)
-        self.histogram_frame.pack_propagate(False) # Prevent resizing based on content
-        self.histogram_frame.config(height=hist_height_pixels)
+        self.histogram_frame.pack_propagate(False); self.histogram_frame.config(height=hist_height_pixels)
 
         # Create and pack HistogramWidget inside its frame
         self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram)
-        self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2)) # Leave space for button
+        self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2))
 
         # Add Reset Zoom button next to histogram
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2)
@@ -427,136 +565,65 @@ class SeestarStackerGUI:
 
     def _create_slider_spinbox_group(self, parent, label_key, min_val, max_val, step, tk_var, callback=None):
         """Helper to create a consistent Slider + SpinBox group with debouncing."""
-        frame = ttk.Frame(parent)
-        frame.pack(fill=tk.X, padx=5, pady=(1,1))
-
-        # Label
-        label_widget = ttk.Label(frame, text=self.tr(label_key, default=label_key), width=10) # Use tr() for label
-        label_widget.pack(side=tk.LEFT)
-
-        # Determine number of decimals for Spinbox format
-        decimals = 0
+        frame = ttk.Frame(parent); frame.pack(fill=tk.X, padx=5, pady=(1,1))
+        label_widget = ttk.Label(frame, text=self.tr(label_key, default=label_key), width=10); label_widget.pack(side=tk.LEFT)
+        decimals = 0; log_step = -3
         if step > 0:
-            try:
-                 log_step = math.log10(step)
-                 if log_step < 0: decimals = abs(int(log_step))
-            except ValueError: log_step = -3 # Default if step is 0 or invalid
+            try: log_step = math.log10(step);
+            except ValueError: pass
             if log_step < 0: decimals = abs(int(log_step))
-        format_str = f"%.{decimals}f" # e.g., "%.3f" for step=0.001
-
-        # Spinbox (on the right)
-        spinbox = ttk.Spinbox(
-            frame, from_=min_val, to=max_val, increment=step,
-            textvariable=tk_var, width=7, justify=tk.RIGHT,
-            command=self._debounce_refresh_preview, # Update on change
-            format=format_str # Apply format
-        )
+        format_str = f"%.{decimals}f"
+        spinbox = ttk.Spinbox(frame, from_=min_val, to=max_val, increment=step,textvariable=tk_var, width=7, justify=tk.RIGHT, command=self._debounce_refresh_preview, format=format_str)
         spinbox.pack(side=tk.RIGHT, padx=(5,0))
-
-        # Slider (in the middle, expands)
-        # Callback for immediate UI feedback (e.g., histogram lines) if needed
         def on_scale_change(value_str):
-            # Convert value from string provided by Scale
             try: value = float(value_str)
             except ValueError: return
-
-            # Call optional immediate callback (e.g., for histogram lines)
             if callback:
                 try: callback(value)
                 except Exception as cb_err: print(f"Error in slider immediate callback: {cb_err}")
-
-            # Trigger the debounced preview refresh
             self._debounce_refresh_preview()
-
-        slider = ttk.Scale(
-            frame, from_=min_val, to=max_val,
-            variable=tk_var, # Link to the same variable as Spinbox
-            orient=tk.HORIZONTAL,
-            command=on_scale_change # Call function on change
-        )
+        slider = ttk.Scale(frame, from_=min_val, to=max_val, variable=tk_var, orient=tk.HORIZONTAL, command=on_scale_change)
         slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        # Store references for potential external access (e.g., translation)
-        ctrls = {
-            'frame': frame,
-            'label': label_widget,
-            'slider': slider,
-            'spinbox': spinbox
-        }
-        return ctrls
+        ctrls = {'frame': frame, 'label': label_widget, 'slider': slider, 'spinbox': spinbox}; return ctrls
 
     def _store_widget_references(self):
         """Stores references to widgets that need language updates."""
-        # Find the notebook widget to reference tabs correctly
         notebook_widget = None
         try:
-            # Assuming main_frame -> paned_window -> left_frame -> control_notebook structure
-            main_frame = self.root.winfo_children()[0]
-            paned_window = main_frame.winfo_children()[0]
+            main_frame = self.root.winfo_children()[0]; paned_window = main_frame.winfo_children()[0]
             left_frame_widget = self.root.nametowidget(paned_window.panes()[0])
             for child in left_frame_widget.winfo_children():
-                if isinstance(child, ttk.Notebook):
-                    notebook_widget = child
-                    break
-        except (IndexError, tk.TclError, AttributeError) as e:
-            print(f"Warning: Could not reliably find Notebook widget for translation: {e}")
+                if isinstance(child, ttk.Notebook): notebook_widget = child; break
+        except Exception as e: print(f"Warning: Could not find Notebook widget: {e}")
 
-        # Dictionary mapping translation keys to widgets or (notebook, index) tuples
         self.widgets_to_translate = {
             # Tabs
-            "tab_stacking": (notebook_widget, 0) if notebook_widget else None,
-            "tab_preview": (notebook_widget, 1) if notebook_widget else None,
+            "tab_stacking": (notebook_widget, 0) if notebook_widget else None, "tab_preview": (notebook_widget, 1) if notebook_widget else None,
             # LabelFrames
-            "Folders": getattr(self, 'folders_frame', None),
-            "options": getattr(self, 'options_frame', None),
-            "hot_pixels_correction": getattr(self, 'hp_frame', None),
-            "post_proc_opts_frame_label": getattr(self, 'post_proc_opts_frame', None),
-            "white_balance": getattr(self, 'wb_frame', None),
-            "stretch_options": getattr(self, 'stretch_frame_controls', None),
-            "image_adjustments": getattr(self, 'bcs_frame', None),
-            "progress": getattr(self, 'progress_frame', None),
-            "preview": getattr(self, 'preview_frame', None),
-            "histogram": getattr(self, 'histogram_frame', None),
+            "Folders": getattr(self, 'folders_frame', None), "options": getattr(self, 'options_frame', None), "hot_pixels_correction": getattr(self, 'hp_frame', None),
+            "post_proc_opts_frame_label": getattr(self, 'post_proc_opts_frame', None), "white_balance": getattr(self, 'wb_frame', None), "stretch_options": getattr(self, 'stretch_frame_controls', None),
+            "image_adjustments": getattr(self, 'bcs_frame', None), "progress": getattr(self, 'progress_frame', None), "preview": getattr(self, 'preview_frame', None),
+            "histogram": getattr(self, 'histogram_frame', None), "quality_weighting_frame": getattr(self, 'weighting_frame', None),
             # Labels
-            "input_folder": getattr(self, 'input_label', None),
-            "output_folder": getattr(self, 'output_label', None),
-            "reference_image": getattr(self, 'reference_label', None),
-            "stacking_method": getattr(self, 'stacking_method_label', None),
-            "kappa_value": getattr(self, 'kappa_label', None),
-            "batch_size": getattr(self, 'batch_size_label', None),
-            # "batch_size_auto": getattr(self, 'batch_size_auto_label', None), # Removed
-            "hot_pixel_threshold": getattr(self, 'hot_pixel_threshold_label', None),
-            "neighborhood_size": getattr(self, 'neighborhood_size_label', None),
-            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'),
-            "wb_g": getattr(self, 'wb_g_ctrls', {}).get('label'),
-            "wb_b": getattr(self, 'wb_b_ctrls', {}).get('label'),
-            "stretch_method": getattr(self, 'stretch_method_label', None),
-            "stretch_bp": getattr(self, 'stretch_bp_ctrls', {}).get('label'),
-            "stretch_wp": getattr(self, 'stretch_wp_ctrls', {}).get('label'),
-            "stretch_gamma": getattr(self, 'stretch_gamma_ctrls', {}).get('label'),
-            "brightness": getattr(self, 'brightness_ctrls', {}).get('label'),
-            "contrast": getattr(self, 'contrast_ctrls', {}).get('label'),
-            "saturation": getattr(self, 'saturation_ctrls', {}).get('label'),
-            "estimated_time": getattr(self, 'remaining_time_label', None),
-            "elapsed_time": getattr(self, 'elapsed_time_label', None),
-            "Remaining:": getattr(self, 'remaining_static_label', None),
-            "Additional:": getattr(self, 'additional_static_label', None),
-            # "aligned_files_label": getattr(self, 'aligned_files_static_label', None), # Removed static label
+            "input_folder": getattr(self, 'input_label', None), "output_folder": getattr(self, 'output_label', None), "reference_image": getattr(self, 'reference_label', None),
+            "stacking_method": getattr(self, 'stacking_method_label', None), "kappa_value": getattr(self, 'kappa_label', None), "batch_size": getattr(self, 'batch_size_label', None),
+            "hot_pixel_threshold": getattr(self, 'hot_pixel_threshold_label', None), "neighborhood_size": getattr(self, 'neighborhood_size_label', None),
+            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'), "wb_g": getattr(self, 'wb_g_ctrls', {}).get('label'), "wb_b": getattr(self, 'wb_b_ctrls', {}).get('label'),
+            "stretch_method": getattr(self, 'stretch_method_label', None), "stretch_bp": getattr(self, 'stretch_bp_ctrls', {}).get('label'), "stretch_wp": getattr(self, 'stretch_wp_ctrls', {}).get('label'),
+            "stretch_gamma": getattr(self, 'stretch_gamma_ctrls', {}).get('label'), "brightness": getattr(self, 'brightness_ctrls', {}).get('label'), "contrast": getattr(self, 'contrast_ctrls', {}).get('label'),
+            "saturation": getattr(self, 'saturation_ctrls', {}).get('label'), "estimated_time": getattr(self, 'remaining_time_label', None), "elapsed_time": getattr(self, 'elapsed_time_label', None),
+            "Remaining:": getattr(self, 'remaining_static_label', None), "Additional:": getattr(self, 'additional_static_label', None), "weighting_metrics_label": getattr(self, 'weight_metrics_label', None),
+            "snr_exponent_label": getattr(self, 'snr_exp_label', None), "stars_exponent_label": getattr(self, 'stars_exp_label', None), "min_weight_label": getattr(self, 'min_w_label', None),
             # Buttons
-            "browse_input_button": getattr(self, 'browse_input_button', None),
-            "browse_output_button": getattr(self, 'browse_output_button', None),
-            "browse_ref_button": getattr(self, 'browse_ref_button', None),
-            "auto_wb": getattr(self, 'auto_wb_button', None),
-            "reset_wb": getattr(self, 'reset_wb_button', None),
-            "auto_stretch": getattr(self, 'auto_stretch_button', None),
-            "reset_stretch": getattr(self, 'reset_stretch_button', None),
-            "reset_bcs": getattr(self, 'reset_bcs_button', None),
-            "start": getattr(self, 'start_button', None),
-            "stop": getattr(self, 'stop_button', None),
-            "add_folder_button": getattr(self, 'add_files_button', None),
+            "browse_input_button": getattr(self, 'browse_input_button', None), "browse_output_button": getattr(self, 'browse_output_button', None), "browse_ref_button": getattr(self, 'browse_ref_button', None),
+            "auto_wb": getattr(self, 'auto_wb_button', None), "reset_wb": getattr(self, 'reset_wb_button', None), "auto_stretch": getattr(self, 'auto_stretch_button', None),
+            "reset_stretch": getattr(self, 'reset_stretch_button', None), "reset_bcs": getattr(self, 'reset_bcs_button', None), "start": getattr(self, 'start_button', None),
+            "stop": getattr(self, 'stop_button', None), "add_folder_button": getattr(self, 'add_files_button', None),
+            "copy_log_button_text": getattr(self, 'copy_log_button', None), # NOUVEAU (clé pour texte)
+            "open_output_button_text": getattr(self, 'open_output_button', None), # NOUVEAU (clé pour texte)
             # Checkbuttons
-            "perform_hot_pixels_correction": getattr(self, 'hot_pixels_check', None),
-            "cleanup_temp_check_label": getattr(self, 'cleanup_temp_check', None),
+            "perform_hot_pixels_correction": getattr(self, 'hot_pixels_check', None), "cleanup_temp_check_label": getattr(self, 'cleanup_temp_check', None),
+            "enable_weighting_check": getattr(self, 'use_weighting_check', None), "weight_snr_check": getattr(self, 'weight_snr_check', None), "weight_stars_check": getattr(self, 'weight_stars_check', None),
         }
 
     def change_language(self, event=None):
@@ -574,49 +641,27 @@ class SeestarStackerGUI:
         if not hasattr(self, 'widgets_to_translate'):
             print("Warning: Widget reference dictionary not found for translation.")
             return
-
         for key, widget_info in self.widgets_to_translate.items():
-            # Use default text from English if key not found in current lang or 'en'
             default_text = self.localization.translations['en'].get(key, key.replace("_", " ").title())
-            translation = self.tr(key, default=default_text) # tr() handles fallback internally now
-
+            translation = self.tr(key, default=default_text)
             try:
-                if widget_info is None:
-                    # print(f"Debug: Skipping translation for '{key}' (widget is None)")
-                    continue
-
-                # Handle notebook tabs
+                if widget_info is None: continue
                 if isinstance(widget_info, tuple):
                     notebook, index = widget_info
-                    if notebook and notebook.winfo_exists() and index < notebook.index("end"):
-                        notebook.tab(index, text=f' {translation} ') # Add padding
-                # Handle regular widgets
+                    if notebook and notebook.winfo_exists() and index < notebook.index("end"): notebook.tab(index, text=f' {translation} ')
                 elif hasattr(widget_info, 'winfo_exists') and widget_info.winfo_exists():
                     widget = widget_info
-                    if isinstance(widget, (ttk.Label, ttk.Button, ttk.Checkbutton)):
-                        widget.config(text=translation)
-                    elif isinstance(widget, ttk.LabelFrame):
-                        widget.config(text=translation)
-                    # Add other widget types if needed (e.g., Menus)
-                # else:
-                    # print(f"Debug: Skipping translation for '{key}' (widget destroyed or invalid)")
-
-            except tk.TclError as e:
-                # Ignore errors likely due to widget destruction during update
-                # print(f"Debug: TclError updating widget '{key}': {e}")
-                pass
-            except Exception as e:
-                print(f"Debug: Unexpected error updating widget '{key}' ({type(widget_info)}): {e}")
-
-        # Update dynamic text variables that depend on language
+                    if isinstance(widget, (ttk.Label, ttk.Button, ttk.Checkbutton)): widget.config(text=translation)
+                    elif isinstance(widget, ttk.LabelFrame): widget.config(text=translation)
+            except tk.TclError: pass
+            except Exception as e: print(f"Debug: Error updating widget '{key}': {e}")
+        # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
-            self.update_additional_folders_display() # Update count display text
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
             self.aligned_files_var.set(default_aligned_fmt.format(count="--"))
             self.remaining_time_var.set("--:--:--")
-        else:
-            # Ensure static labels in progress area are also translated if processing
+        else: # Ensure static labels are translated if processing
             if hasattr(self,'remaining_static_label'): self.remaining_static_label.config(text=self.tr("Remaining:"))
             if hasattr(self,'additional_static_label'): self.additional_static_label.config(text=self.tr("Additional:"))
             if hasattr(self,'elapsed_time_label'): self.elapsed_time_label.config(text=self.tr("elapsed_time"))
@@ -628,715 +673,603 @@ class SeestarStackerGUI:
                 self.aligned_files_var.set(default_aligned_fmt.format(count=count))
                 self.update_remaining_files() # Re-calculate R/T display
 
-        # Update initial preview message if no image is loaded
+        self.update_additional_folders_display() # Update folder count display text
+
         if self.current_preview_data is None and hasattr(self, 'preview_manager'):
             self.preview_manager.clear_preview(self.tr('Select input/output folders.'))
 
-
     def _debounce_refresh_preview(self, *args):
-        """ Debounce preview refresh calls from sliders/spinboxes. """
         if self.debounce_timer_id:
             try: self.root.after_cancel(self.debounce_timer_id)
-            except tk.TclError: pass # Ignore if timer ID is invalid (e.g., window closing)
-        try:
-            self.debounce_timer_id = self.root.after(150, self.refresh_preview) # Delay refresh
-        except tk.TclError: pass # Ignore if root window is destroyed
-
+            except tk.TclError: pass
+        try: self.debounce_timer_id = self.root.after(150, self.refresh_preview)
+        except tk.TclError: pass
 
     def update_histogram_lines_from_sliders(self, *args):
-        """ Callback from BP/WP sliders to update histogram lines immediately. """
         if hasattr(self, 'histogram_widget') and self.histogram_widget:
-            try:
-                bp = self.preview_black_point.get()
-                wp = self.preview_white_point.get()
-            except tk.TclError: return # Ignore if vars are invalid
+            try: bp = self.preview_black_point.get(); wp = self.preview_white_point.get()
+            except tk.TclError: return
             self.histogram_widget.set_range(bp, wp)
 
-
     def update_stretch_from_histogram(self, black_point, white_point):
-        """ Callback from HistogramWidget when lines are dragged. """
-        # Update UI variables
+        try: self.preview_black_point.set(round(black_point, 4)); self.preview_white_point.set(round(white_point, 4))
+        except tk.TclError: return
         try:
-            self.preview_black_point.set(round(black_point, 4))
-            self.preview_white_point.set(round(white_point, 4))
-        except tk.TclError: return # Ignore if vars invalid
-
-        # Update sliders/spinboxes to reflect change (disable signals temporarily)
-        try:
-            if hasattr(self, 'stretch_bp_ctrls'):
-                 self.stretch_bp_ctrls['slider'].set(black_point)
-                 # Spinbox updates via tk_var link
-            if hasattr(self, 'stretch_wp_ctrls'):
-                 self.stretch_wp_ctrls['slider'].set(white_point)
-        except tk.TclError: pass # Ignore if sliders destroyed
-
-        # Trigger debounced preview refresh
+            if hasattr(self, 'stretch_bp_ctrls'): self.stretch_bp_ctrls['slider'].set(black_point)
+            if hasattr(self, 'stretch_wp_ctrls'): self.stretch_wp_ctrls['slider'].set(white_point)
+        except tk.TclError: pass
         self._debounce_refresh_preview()
 
-
     def refresh_preview(self):
-        """ Redraws the preview canvas with current settings. """
-        # Cancel any pending debounce timer
         if self.debounce_timer_id:
             try: self.root.after_cancel(self.debounce_timer_id)
             except tk.TclError: pass
             self.debounce_timer_id = None
-
-        # Check if preview is possible
-        if (self.current_preview_data is None or
-           not hasattr(self, 'preview_manager') or self.preview_manager is None or
+        if (self.current_preview_data is None or not hasattr(self, 'preview_manager') or self.preview_manager is None or
            not hasattr(self, 'histogram_widget') or self.histogram_widget is None):
-            # (Fallback logic remains the same)
-            if (not self.processing and self.input_path.get() and
-               os.path.isdir(self.input_path.get())):
-                self._try_show_first_input_image()
+            if (not self.processing and self.input_path.get() and os.path.isdir(self.input_path.get())): self._try_show_first_input_image()
             else:
-                if hasattr(self, 'preview_manager') and self.preview_manager:
-                    self.preview_manager.clear_preview(self.tr('Select input/output folders.'))
-                if hasattr(self, 'histogram_widget') and self.histogram_widget:
-                    self.histogram_widget.plot_histogram(None)
+                if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr('Select input/output folders.'))
+                if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
             return
-
-        # Get current preview parameters from UI variables
         try:
             preview_params = {
-                "stretch_method": self.preview_stretch_method.get(),
-                "black_point": self.preview_black_point.get(),
-                "white_point": self.preview_white_point.get(),
-                "gamma": self.preview_gamma.get(),
-                "r_gain": self.preview_r_gain.get(),
-                "g_gain": self.preview_g_gain.get(),
-                "b_gain": self.preview_b_gain.get(),
-                "brightness": self.preview_brightness.get(),
-                "contrast": self.preview_contrast.get(),
-                "saturation": self.preview_saturation.get(),
+                "stretch_method": self.preview_stretch_method.get(), "black_point": self.preview_black_point.get(),
+                "white_point": self.preview_white_point.get(), "gamma": self.preview_gamma.get(),
+                "r_gain": self.preview_r_gain.get(), "g_gain": self.preview_g_gain.get(), "b_gain": self.preview_b_gain.get(),
+                "brightness": self.preview_brightness.get(), "contrast": self.preview_contrast.get(), "saturation": self.preview_saturation.get(),
             }
-        except tk.TclError:
-            print("Error getting preview parameters from UI.")
-            return
-
-        # --- MODIFICATION START: Pass stack count to PreviewManager ---
-        # Call PreviewManager WITHOUT stack_count
-        processed_pil_image, data_for_histogram = self.preview_manager.update_preview(
-            self.current_preview_data,
-            preview_params # NO stack_count here
-        )
-
-        # Update the preview using PreviewManager
-        # PreviewManager applies WB, Stretch, Gamma, BCS
-        processed_pil_image, data_for_histogram = self.preview_manager.update_preview(
-            self.current_preview_data, preview_params
-        )
-
-        # Update the histogram with the data *after* WB but *before* Stretch/Gamma/BCS
+        except tk.TclError: print("Error getting preview parameters from UI."); return
+        processed_pil_image, data_for_histogram = self.preview_manager.update_preview(self.current_preview_data, preview_params, stack_count=self.preview_img_count, total_images=self.preview_total_imgs, current_batch=self.preview_current_batch, total_batches=self.preview_total_batches)
         self.histogram_widget.update_histogram(data_for_histogram)
-        # Ensure histogram lines match current slider/spinbox values
         self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
 
-
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
-        """ Callback function for the QueuedStacker to update the GUI preview. """
-        if stack_data is None:
-            print("GUI received None stack_data for preview.")
-            return
-
-        # Update the internal data reference for subsequent refreshes
-        self.current_preview_data = stack_data.copy() # Make a copy
-        self.current_stack_header = stack_header.copy() if stack_header else None
-        #self.current_stack_count_preview = stack_count # <<< STORE THE STACK COUNT
-
-        # Store the extra info for potential use elsewhere if needed
-        self.preview_img_count = img_count
-        self.preview_total_imgs = total_imgs
-        self.preview_current_batch = current_batch
-        self.preview_total_batches = total_batches
-
-        # Schedule the preview refresh to happen in the main GUI thread
+        if stack_data is None: print("GUI received None stack_data for preview."); return
+        self.current_preview_data = stack_data.copy(); self.current_stack_header = stack_header.copy() if stack_header else None
+        self.preview_img_count = img_count; self.preview_total_imgs = total_imgs; self.preview_current_batch = current_batch; self.preview_total_batches = total_batches
         try:
             preview_params = {
-                "stretch_method": self.preview_stretch_method.get(),
-                "black_point": self.preview_black_point.get(),
-                "white_point": self.preview_white_point.get(),
-                "gamma": self.preview_gamma.get(),
-                "r_gain": self.preview_r_gain.get(),
-                "g_gain": self.preview_g_gain.get(),
-                "b_gain": self.preview_b_gain.get(),
-                "brightness": self.preview_brightness.get(),
-                "contrast": self.preview_contrast.get(),
-                "saturation": self.preview_saturation.get(),
-            }            
-            self.root.after_idle(
-                lambda d=self.current_preview_data, p=preview_params, sc=img_count, ti=total_imgs, cb=current_batch, tb=total_batches:
-                    # Check if preview_manager exists before calling its method
-                    self.preview_manager.update_preview(d, p, stack_count=sc, total_images=ti, current_batch=cb, total_batches=tb)
-                    if hasattr(self, 'preview_manager') and self.preview_manager is not None else None
-            )
-        except tk.TclError:
-            pass # Ignore if window is closing
-
-        # Update image info text area if header is available
+                "stretch_method": self.preview_stretch_method.get(), "black_point": self.preview_black_point.get(),
+                "white_point": self.preview_white_point.get(), "gamma": self.preview_gamma.get(),
+                "r_gain": self.preview_r_gain.get(), "g_gain": self.preview_g_gain.get(), "b_gain": self.preview_b_gain.get(),
+                "brightness": self.preview_brightness.get(), "contrast": self.preview_contrast.get(), "saturation": self.preview_saturation.get(),
+            }
+            self.root.after_idle(lambda d=self.current_preview_data, p=preview_params, sc=img_count, ti=total_imgs, cb=current_batch, tb=total_batches:
+                self.preview_manager.update_preview(d, p, stack_count=sc, total_images=ti, current_batch=cb, total_batches=tb) if hasattr(self, 'preview_manager') and self.preview_manager else None)
+        except tk.TclError: pass
         if self.current_stack_header:
-            try:
-                # Schedule info update separately
-                self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h))
-            except tk.TclError:
-                pass
-
+            try: self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h))
+            except tk.TclError: pass
 
     def update_image_info(self, header):
-        """ Met à jour la zone de texte d'informations image. """
-        if not header or not hasattr(self, 'preview_manager'): return
-
+        if not header or not hasattr(self, 'preview_manager'):
+            return
         info_lines = []
-        # Define standard keys and their preferred labels (can be translation keys)
         keys_labels = {
-            'OBJECT': 'Object', 'DATE-OBS': 'Date', 'EXPTIME': 'Exp (s)',
-            'GAIN': 'Gain', 'OFFSET': 'Offset', 'CCD-TEMP': 'Temp (°C)',
-            'NIMAGES': 'Images', 'STACKTYP': 'Method', 'FILTER': 'Filter',
-            'BAYERPAT': 'Bayer', 'TOTEXP': 'Total Exp (s)', 'ALIGNED': 'Aligned',
-            'FAILALIGN': 'Failed Align', 'FAILSTACK': 'Failed Stack', 'SKIPPED': 'Skipped'
+            'OBJECT': 'Object',
+            'DATE-OBS': 'Date',
+            'EXPTIME': 'Exp (s)',
+            'GAIN': 'Gain',
+            'OFFSET': 'Offset',
+            'CCD-TEMP': 'Temp (°C)',
+            'NIMAGES': 'Images',
+            'STACKTYP': 'Method',
+            'FILTER': 'Filter',
+            'BAYERPAT': 'Bayer',
+            'TOTEXP': 'Total Exp (s)',
+            'ALIGNED': 'Aligned',
+            'FAILALIGN': 'Failed Align',
+            'FAILSTACK': 'Failed Stack',
+            'SKIPPED': 'Skipped',
+            'WGHT_ON': 'Weighting',
+            'WGHT_MET': 'W. Metrics',
         }
-
         for key, label_key in keys_labels.items():
-            label = self.tr(label_key, default=label_key) # Translate the label
+            label = self.tr(label_key, default=label_key)
             value = header.get(key)
             if value is not None and str(value).strip() != '':
                 s_value = str(value)
-                # Special formatting for some keys
                 if key == 'DATE-OBS':
-                     s_value = s_value.split('T')[0] # Show only date part
+                    s_value = s_value.split('T')[0]
                 elif key in ['EXPTIME', 'CCD-TEMP', 'TOTEXP'] and isinstance(value, (int, float)):
-                     try: s_value = f"{float(value):.1f}"
-                     except ValueError: pass
+                    try:
+                        s_value = f"{float(value):.1f}"
+                    except ValueError:
+                        pass
                 elif key == 'KAPPA' and isinstance(value, (int, float)):
-                     try: s_value = f"{float(value):.2f}"
-                     except ValueError: pass
-
+                    try:
+                        s_value = f"{float(value):.2f}"
+                    except ValueError:
+                        pass
+                elif key == 'WGHT_ON':
+                    s_value = self.tr('weighting_enabled')
+                else:
+                    if value:
+                        pass  # La condition est toujours vraie ici, l'indentation suivante était incorrecte
+                    else:
+                        s_value = self.tr('weighting_disabled')
                 info_lines.append(f"{label}: {s_value}")
-
         info_text = "\n".join(info_lines) if info_lines else self.tr('No image info available')
-
-        # Update the text area via PreviewManager
         if hasattr(self.preview_manager, 'update_info_text'):
             self.preview_manager.update_info_text(info_text)
-        else:
-             # Fallback if method doesn't exist on preview manager
-             pass
 
     def _try_show_first_input_image(self):
-        """ Tente de charger et d'afficher la première image FITS du dossier d'entrée. """
         input_folder = self.input_path.get()
-        # Ensure managers needed for display exist
-        if not hasattr(self, 'preview_manager') or not hasattr(self, 'histogram_widget'):
-            print("Warning: Cannot show first image, preview/histogram managers not ready.")
-            return
-
+        if not hasattr(self, 'preview_manager') or not hasattr(self, 'histogram_widget'): return
         if not input_folder or not os.path.isdir(input_folder):
             if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Input folder not found"))
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
             return
-
         try:
             files = sorted([f for f in os.listdir(input_folder) if f.lower().endswith((".fit", ".fits"))])
             if not files:
                 if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("No FITS files in input"))
                 if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
                 return
-
             first_image_path = os.path.join(input_folder, files[0])
             self.update_progress_gui(f"Chargement aperçu: {files[0]}...", None)
-
-            # Load image data and header
-            img_data = load_and_validate_fits(first_image_path) # Expects float32 0-1
-            if img_data is None:
-                 raise ValueError(f"Échec chargement/validation {files[0]}")
-            header = fits.getheader(first_image_path) # Get header separately
-
-            # Prepare for preview (debayer if necessary)
+            img_data = load_and_validate_fits(first_image_path)
+            if img_data is None: raise ValueError(f"Échec chargement/validation {files[0]}")
+            header = fits.getheader(first_image_path)
             img_for_preview = img_data
             if img_data.ndim == 2:
-                bayer_pattern = header.get("BAYERPAT", self.settings.bayer_pattern) # Use setting default
-                valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
+                bayer_pattern = header.get("BAYERPAT", self.settings.bayer_pattern); valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
                 if isinstance(bayer_pattern, str) and bayer_pattern.upper() in valid_bayer_patterns:
-                    try:
-                        img_for_preview = debayer_image(img_data, bayer_pattern.upper())
-                    except ValueError as debayer_err:
-                        self.update_progress_gui(f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.", None)
-                        # Keep grayscale if debayer fails
-
-            # Update internal data reference and trigger refresh
-            self.current_preview_data = img_for_preview.copy() # Store potentially debayered data
-            self.current_stack_header = header.copy() if header else None
-            self.refresh_preview() # This will call preview_manager.update_preview
-
-            # Update info text area
-            if self.current_stack_header:
-                self.update_image_info(self.current_stack_header)
-
+                    try: img_for_preview = debayer_image(img_data, bayer_pattern.upper())
+                    except ValueError as debayer_err: self.update_progress_gui(f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.", None)
+            self.current_preview_data = img_for_preview.copy(); self.current_stack_header = header.copy() if header else None
+            self.refresh_preview()
+            if self.current_stack_header: self.update_image_info(self.current_stack_header)
         except FileNotFoundError:
             if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Input folder not found"))
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
-        except ValueError as ve: # Catch specific load/validation errors
+        except ValueError as ve:
             self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {ve}", None)
             if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Error loading preview (invalid format?)"))
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
         except Exception as e:
-            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {e}", None)
-            traceback.print_exc(limit=2)
+            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {e}", None); traceback.print_exc(limit=2)
             if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Error loading preview"))
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
 
-
-    # --- Auto WB / Stretch / BCS Actions ---
     def apply_auto_white_balance(self):
-        """ Applique la balance des blancs automatique à l'aperçu. """
-        if not _tools_available:
-            messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."); return
-        # Use the data *currently held* for preview (could be initial image or stack)
-        if self.current_preview_data is None or self.current_preview_data.ndim != 3:
-            messagebox.showwarning(self.tr("warning"), self.tr("Auto WB requires a color image preview.")); return
-
+        if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."); return
+        if self.current_preview_data is None or self.current_preview_data.ndim != 3: messagebox.showwarning(self.tr("warning"), self.tr("Auto WB requires a color image preview.")); return
         try:
-            r_gain, g_gain, b_gain = calculate_auto_wb(self.current_preview_data) # Calculate from raw preview data
-            # Set UI variables
-            self.preview_r_gain.set(round(r_gain, 3))
-            self.preview_g_gain.set(round(g_gain, 3))
-            self.preview_b_gain.set(round(b_gain, 3))
-            self.update_progress_gui(f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}", None)
-            # Trigger refresh to apply new gains
-            self.refresh_preview()
-        except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}")
-            traceback.print_exc(limit=2)
+            r_gain, g_gain, b_gain = calculate_auto_wb(self.current_preview_data)
+            self.preview_r_gain.set(round(r_gain, 3)); self.preview_g_gain.set(round(g_gain, 3)); self.preview_b_gain.set(round(b_gain, 3))
+            self.update_progress_gui(f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}", None); self.refresh_preview()
+        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}"); traceback.print_exc(limit=2)
 
-    def reset_white_balance(self):
-        """ Réinitialise les gains de balance des blancs à 1.0. """
-        self.preview_r_gain.set(1.0)
-        self.preview_g_gain.set(1.0)
-        self.preview_b_gain.set(1.0)
-        self.refresh_preview()
-
-    def reset_brightness_contrast_saturation(self):
-        """ Réinitialise les ajustements B/C/S à 1.0 (S à 1.0). """
-        self.preview_brightness.set(1.0)
-        self.preview_contrast.set(1.0)
-        self.preview_saturation.set(1.0)
-        self.refresh_preview()
+    def reset_white_balance(self): self.preview_r_gain.set(1.0); self.preview_g_gain.set(1.0); self.preview_b_gain.set(1.0); self.refresh_preview()
+    def reset_brightness_contrast_saturation(self): self.preview_brightness.set(1.0); self.preview_contrast.set(1.0); self.preview_saturation.set(1.0); self.refresh_preview()
 
     def apply_auto_stretch(self):
-        """ Calcule et applique l'étirement automatique à l'aperçu. """
-        if not _tools_available:
-             messagebox.showerror(self.tr("error"), "Stretch tools not available."); return
-
-        # Determine the data to analyze: Use the preview data *after* current WB settings are applied
+        if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch tools not available."); return
         data_to_analyze = None
-        if hasattr(self, 'preview_manager') and self.preview_manager.image_data_wb is not None:
-            # If PreviewManager has cached the white-balanced data, use it
-            data_to_analyze = self.preview_manager.image_data_wb
+        if hasattr(self, 'preview_manager') and self.preview_manager.image_data_wb is not None: data_to_analyze = self.preview_manager.image_data_wb
         elif self.current_preview_data is not None:
-            # Otherwise, apply current WB settings to the raw preview data
             print("Warning AutoStretch: Using current WB settings for analysis.")
             if self.current_preview_data.ndim == 3:
-                try:
-                    r=self.preview_r_gain.get(); g=self.preview_g_gain.get(); b=self.preview_b_gain.get()
-                    data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r, g, b)
-                except Exception: data_to_analyze = self.current_preview_data # Fallback
-            else: data_to_analyze = self.current_preview_data # Grayscale
-        else:
-            messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch requires an image preview.")); return
-
+                try: r=self.preview_r_gain.get(); g=self.preview_g_gain.get(); b=self.preview_b_gain.get(); data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r, g, b)
+                except Exception: data_to_analyze = self.current_preview_data
+            else: data_to_analyze = self.current_preview_data
+        else: messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch requires an image preview.")); return
         try:
-            bp, wp = calculate_auto_stretch(data_to_analyze) # Calculate BP/WP
-            # Set UI variables
-            self.preview_black_point.set(round(bp, 4))
-            self.preview_white_point.set(round(wp, 4))
-            # Update histogram lines directly
+            bp, wp = calculate_auto_stretch(data_to_analyze)
+            self.preview_black_point.set(round(bp, 4)); self.preview_white_point.set(round(wp, 4))
             if hasattr(self, 'histogram_widget'): self.histogram_widget.set_range(bp, wp)
-            self.update_progress_gui(f"Auto Stretch appliqué (Aperçu): BP={bp:.3f} WP={wp:.3f}", None)
-            # Trigger refresh to apply new stretch points
-            self.refresh_preview()
-        except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}")
-            traceback.print_exc(limit=2)
+            self.update_progress_gui(f"Auto Stretch appliqué (Aperçu): BP={bp:.3f} WP={wp:.3f}", None); self.refresh_preview()
+        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"); traceback.print_exc(limit=2)
 
     def reset_stretch(self):
-        """ Réinitialise les paramètres d'étirement aux valeurs par défaut. """
-        default_method = "Asinh"
-        default_bp = 0.01
-        default_wp = 0.99
-        default_gamma = 1.0
-        self.preview_stretch_method.set(default_method)
-        self.preview_black_point.set(default_bp)
-        self.preview_white_point.set(default_wp)
-        self.preview_gamma.set(default_gamma)
-        # Reset histogram lines and zoom
-        if hasattr(self, 'histogram_widget'):
-             self.histogram_widget.set_range(default_bp, default_wp)
-             self.histogram_widget.reset_zoom()
+        default_method = "Asinh"; default_bp = 0.01; default_wp = 0.99; default_gamma = 1.0
+        self.preview_stretch_method.set(default_method); self.preview_black_point.set(default_bp); self.preview_white_point.set(default_wp); self.preview_gamma.set(default_gamma)
+        if hasattr(self, 'histogram_widget'): self.histogram_widget.set_range(default_bp, default_wp); self.histogram_widget.reset_zoom()
         self.refresh_preview()
 
-    def add_folder(self):
-        """ Handles adding a folder DURING processing via FileHandlingManager. """
-        # Let FileHandlingManager handle the logic and call queue_manager.add_folder
-        if hasattr(self, 'file_handler'):
-            self.file_handler.add_folder()
+    # --- NOUVELLE MÉTHODE pour gérer la requête d'ajout ---
+    def handle_add_folder_request(self, folder_path):
+        """
+        Gère une requête d'ajout de dossier, en l'ajoutant soit à la liste
+        pré-démarrage, soit en appelant le backend si le traitement est actif.
+        """
+        abs_folder = os.path.abspath(folder_path)
+
+        if self.processing and hasattr(self, 'queued_stacker') and self.queued_stacker.is_running():
+            # Traitement actif : appeler le backend
+            add_success = self.queued_stacker.add_folder(abs_folder)
+            if not add_success:
+                 messagebox.showwarning(
+                     self.tr('warning'),
+                     self.tr('Folder not added (already present, invalid path, or error?)', default='Folder not added (already present, invalid path, or error?)')
+                 )
+            # La mise à jour de l'affichage se fera via callback "folder_count_update" du backend
         else:
-            messagebox.showerror(self.tr('error'), "File handler not initialized.")
+            # Traitement non actif : ajouter à la liste pré-démarrage
+            if abs_folder not in self.additional_folders_to_process:
+                self.additional_folders_to_process.append(abs_folder)
+                self.update_progress_gui(f"ⓘ Dossier ajouté pour prochain traitement: {os.path.basename(abs_folder)}", None)
+                self.update_additional_folders_display() # Mettre à jour l'affichage UI
+            else:
+                 messagebox.showinfo(self.tr('info'), self.tr('Folder already added', default='Folder already added to the list.'))
 
-    # --- Processing Control ---
+    # --- MODIFIÉ: start_processing ---
     def start_processing(self):
-        """Démarre le traitement des images via SeestarQueuedStacker."""
-        input_folder = self.input_path.get()
-        output_folder = self.output_path.get()
-
-        # --- Input Validation ---
-        if not input_folder or not output_folder:
-            messagebox.showerror(self.tr("error"), self.tr("select_folders")); return
-        if not os.path.isdir(input_folder):
-            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"); return
+        """Démarre le traitement, en passant les paramètres de pondération."""
+        input_folder = self.input_path.get(); output_folder = self.output_path.get()
+        if not input_folder or not output_folder: messagebox.showerror(self.tr("error"), self.tr("select_folders")); return
+        if not os.path.isdir(input_folder): messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"); return
         if not os.path.isdir(output_folder):
             try: os.makedirs(output_folder, exist_ok=True)
             except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}"); return
             self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
         try:
-            # Check for FITS files but allow starting even if none initially
             if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
                 if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")): return
-        except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}"); return
+        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}"); return
 
-        # --- Prepare for Processing ---
-        self.processing = True
-        self.time_per_image = 0 # Reset average time
-        self.global_start_time = time.monotonic() # Record start time
-        # Reset stats display
+        self.processing = True; self.time_per_image = 0; self.global_start_time = time.monotonic()
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var.set(default_aligned_fmt.format(count=0))
-        self.update_remaining_files() # Reset R/T display
 
-        # Disable controls, enable Stop/Add
+        # *** NOUVEAU : Gérer la liste des dossiers pré-ajoutés ***
+        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        self.additional_folders_to_process = [] # Vide la liste du GUI
+        self.update_additional_folders_display() # Met à jour l'affichage (vers 0)
+        # --- Fin Nouveau ---
+
         self._set_parameter_widgets_state(tk.DISABLED)
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        self.add_files_button.config(state=tk.NORMAL) # Enable Add Folder button
+        self.start_button.config(state=tk.DISABLED); self.stop_button.config(state=tk.NORMAL)
+        # Le bouton Add Folder reste NORMAL (géré par _set_parameter_widgets_state ou état initial)
+        # *** NOUVEAU : Désactiver le bouton "Ouvrir Sortie" au démarrage ***
+        if hasattr(self, 'open_output_button'): self.open_output_button.config(state=tk.DISABLED)
 
-        # Reset progress manager and status text
         self.progress_manager.reset(); self.progress_manager.start_timer()
-        self.remaining_time_var.set("--:--:--") # Reset ETA display
         if hasattr(self, 'status_text'):
             try:
-                self.status_text.config(state=tk.NORMAL)
-                self.status_text.delete(1.0, tk.END)
-                self.status_text.insert(tk.END, "--- Début du Traitement ---\n")
-                self.status_text.config(state=tk.DISABLED)
-            except tk.TclError: pass # Ignore if widget destroyed
+                self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END); self.status_text.insert(tk.END, "--- Début du Traitement ---\n"); self.status_text.config(state=tk.DISABLED)
+            except tk.TclError: pass
 
-        # Update settings from UI and validate them
-        self.settings.update_from_ui(self)
-        validation_messages = self.settings.validate_settings()
+        self.settings.update_from_ui(self); validation_messages = self.settings.validate_settings()
         if validation_messages:
             self.update_progress_gui("⚠️ Paramètres ajustés:", None)
-            for msg in validation_messages: self.update_progress_gui(f"   - {msg}", None)
-            self.settings.apply_to_ui(self) # Apply corrected values back to UI
+            for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None)
+            self.settings.apply_to_ui(self)
 
-        # --- Configure the QueuedStacker instance ---
-        self.queued_stacker.stacking_mode = self.settings.stacking_mode
-        self.queued_stacker.kappa = self.settings.kappa
-        self.queued_stacker.batch_size = self.settings.batch_size # Use validated setting
-        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
-        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
-        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
-        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern # Get from settings
-        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
-        # Pass reference path from UI/settings to the *aligner* instance within the stacker
+        # Configure QueuedStacker
+        self.queued_stacker.stacking_mode = self.settings.stacking_mode; self.queued_stacker.kappa = self.settings.kappa
+        self.queued_stacker.batch_size = self.settings.batch_size; self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
+        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold; self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
+        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern; self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
         self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
 
         self.update_progress_gui(self.tr("stacking_start"), 0)
 
-        # --- Start the QueuedStacker ---
-        # Pass initial folder, output folder, and reference path
-        # Note: initial_additional_folders is not explicitly handled here,
-        # assume user adds them via button after start if needed.
+        # --- Start the QueuedStacker with Weighting & Initial Folders ---
         processing_started = self.queued_stacker.start_processing(
-            self.settings.input_folder,
-            self.settings.output_folder,
-            self.settings.reference_image_path # Pass ref path for aligner setup
-            # initial_additional_folders=None # Could pass a list here if needed
+            self.settings.input_folder, self.settings.output_folder, self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend, # *** NOUVEAU ***
+            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr, weight_stars=self.settings.weight_by_stars,
+            snr_exp=self.settings.snr_exponent, stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight
         )
 
         if processing_started:
-            # Start the GUI progress tracking thread
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
-            self.thread.start()
+            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker"); self.thread.start()
         else:
-            # Handle case where backend thread failed to start
-            self.update_progress_gui("❌ Échec démarrage du thread de traitement.", None)
-            messagebox.showerror(self.tr("error"), self.tr("Failed to start processing."))
-            self._processing_finished() # Reset UI state
+            self.update_progress_gui("❌ Échec démarrage du thread de traitement.", None); messagebox.showerror(self.tr("error"), self.tr("Failed to start processing."))
+            self._processing_finished()
+
 
     def _track_processing_progress(self):
         """Monitors the QueuedStacker worker thread and updates GUI stats."""
+        # print("DEBUG: GUI Progress Tracker Thread Started.") # Keep disabled unless debugging
+
         while self.processing and hasattr(self, "queued_stacker"):
             try:
-                # Check if the backend worker is still running
+                # Check if the worker thread is still active
                 if not self.queued_stacker.is_running():
-                    # Worker finished or stopped, schedule final UI update
+                    # print("DEBUG: Worker is_running() is False. Preparing to finalize.") # Keep disabled
+                    # --- CORRECTED JOIN LOGIC ---
+                    # Check and join the *worker* thread object stored in the queued_stacker
+                    worker_thread = getattr(self.queued_stacker, 'processing_thread', None)
+                    if worker_thread and worker_thread.is_alive():
+                        # print("DEBUG: Joining worker thread...") # Keep disabled
+                        worker_thread.join(timeout=0.5) # Wait up to 0.5 seconds
+                        # if worker_thread.is_alive():
+                        #     print("WARN: Worker thread did not exit cleanly after join timeout.") # Keep disabled
+                        # else:
+                        #     print("DEBUG: Worker thread joined successfully.") # Keep disabled
+                    # else:
+                         # print("DEBUG: Worker thread object not found or already dead.") # Keep disabled
+                    # --- END CORRECTED JOIN LOGIC ---
+
+                    # Now that we've waited, schedule the final GUI update routine
+                    # print("DEBUG: Scheduling _processing_finished...") # Keep disabled
                     self.root.after(0, self._processing_finished)
-                    break
+                    break # Exit the monitoring loop
 
-                # --- Get Stats from QueuedStacker ---
+                # --- Update intermediate progress stats (ETA, counts) ---
                 q_stacker = self.queued_stacker
-                processed = q_stacker.processed_files_count # Files dequeued
+                processed = q_stacker.processed_files_count
                 aligned = q_stacker.aligned_files_count
-                failed_align = q_stacker.failed_align_count
-                failed_stack = q_stacker.failed_stack_count # New stat
-                skipped = q_stacker.skipped_files_count
-                total_queued = q_stacker.files_in_queue # Dynamic total
+                total_queued = q_stacker.files_in_queue
 
-                # --- Calculate ETA ---
+                # Calculate ETA
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
-                    self.time_per_image = elapsed / processed # Avg time per dequeued file
+                    self.time_per_image = elapsed / processed
                     try:
                         remaining_estimated = max(0, total_queued - processed)
                         if self.time_per_image > 1e-6 and remaining_estimated > 0:
                             eta_seconds = remaining_estimated * self.time_per_image
-                            h, rem = divmod(int(eta_seconds), 3600); m, s = divmod(rem, 60)
+                            h, rem = divmod(int(eta_seconds), 3600)
+                            m, s = divmod(rem, 60)
                             self.remaining_time_var.set(f"{h:02}:{m:02}:{s:02}")
                         elif remaining_estimated == 0 and total_queued > 0:
-                            self.remaining_time_var.set("00:00:00") # Finished
+                            self.remaining_time_var.set("00:00:00") # Finishing up
                         else:
-                            self.remaining_time_var.set("--:--:--") # Not enough data or finished
-                    except tk.TclError: break # Stop if UI destroyed
+                            self.remaining_time_var.set(self.tr("eta_calculating", default="Calculating..."))
+                    except tk.TclError:
+                        # print("DEBUG: tk.TclError updating ETA, breaking tracker loop.") # Keep disabled
+                        break # Exit loop if Tkinter objects are gone
                     except Exception as eta_err:
                         print(f"Warning: Error calculating ETA: {eta_err}")
-                        try: self.remaining_time_var.set("Error")
-                        except tk.TclError: break
-                else:
-                    try: self.remaining_time_var.set("--:--:--") # Not started or no processed files yet
-                    except tk.TclError: break
+                        try:
+                             self.remaining_time_var.set("Error")
+                        except tk.TclError: break # Exit loop
 
-                # --- Update Aligned Files Count Display ---
+                else: # Not enough info for ETA yet
+                    try:
+                        self.remaining_time_var.set(self.tr("eta_calculating", default="Calculating..."))
+                    except tk.TclError: break # Exit loop
+
+                # Update Aligned Files Count
                 default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-                try: self.aligned_files_var.set(default_aligned_fmt.format(count=aligned))
-                except tk.TclError: break
+                try:
+                    self.aligned_files_var.set(default_aligned_fmt.format(count=aligned))
+                except tk.TclError:
+                    # print("DEBUG: tk.TclError updating aligned count, breaking tracker loop.") # Keep disabled
+                    break # Exit loop
 
-                # --- Update Remaining Files Display ---
-                self.update_remaining_files() # Uses queued_stacker stats
+                # Update Remaining/Total Files display
+                self.update_remaining_files() # Calls the method to update R/T label
 
-                # --- Sleep before next check ---
-                time.sleep(0.5) # Check stats twice per second
+                # Sleep briefly to avoid busy-waiting
+                time.sleep(0.5)
 
             except Exception as e:
-                print(f"Error in GUI progress tracker thread: {e}")
+                # Catch errors within the tracking loop itself
+                print(f"Error in GUI progress tracker thread loop: {e}")
                 traceback.print_exc(limit=2)
+                # Attempt to gracefully finish processing in case of tracker error
                 try:
-                    # Attempt to trigger finish sequence on error
                     self.root.after(0, self._processing_finished)
-                except tk.TclError: pass # Ignore if root destroyed
-                break # Exit tracker thread on error
+                except tk.TclError: pass # Tk might be gone
+                break # Exit the tracker loop on error
 
-
+        # print("DEBUG: GUI Progress Tracker Thread Exiting.") # Keep disabled
+ 
     def update_remaining_files(self):
         """Met à jour l'affichage des fichiers restants / total ajouté."""
         if hasattr(self, "queued_stacker") and self.processing:
             try:
-                # Get stats directly from the stacker instance
-                total_queued = self.queued_stacker.files_in_queue
-                processed_total = self.queued_stacker.processed_files_count # All dequeued files
+                total_queued = self.queued_stacker.files_in_queue; processed_total = self.queued_stacker.processed_files_count
                 remaining_estimated = max(0, total_queued - processed_total)
-                # Update the variable (e.g., "50/150")
                 self.remaining_files_var.set(f"{remaining_estimated}/{total_queued}")
-            except tk.TclError: pass # Ignore if UI destroyed
-            except AttributeError: # Handle if stacker becomes unavailable unexpectedly
+            except tk.TclError: pass
+            except AttributeError:
                 try: self.remaining_files_var.set(self.tr("no_files_waiting"))
                 except tk.TclError: pass
-            except Exception as e:
-                print(f"Error updating remaining files display: {e}")
-                try: self.remaining_files_var.set("Error")
-                except tk.TclError: pass
+            except Exception as e: print(f"Error updating remaining files display: {e}")
+            try: self.remaining_files_var.set("Error")
+            except tk.TclError: pass
         elif not self.processing:
-             # Set to default state when not processing
              try: self.remaining_files_var.set(self.tr("no_files_waiting"))
              except tk.TclError: pass
 
-
+    # --- MODIFIÉ: update_additional_folders_display ---
     def update_additional_folders_display(self):
-        """Met à jour l'affichage du nombre de dossiers supplémentaires en attente."""
+        """Met à jour l'affichage du nombre de dossiers supplémentaires."""
         count = 0
-        if hasattr(self, 'queued_stacker'):
-            # Access the list safely using the lock
-            with self.queued_stacker.folders_lock:
-                count = len(self.queued_stacker.additional_folders)
+        if self.processing and hasattr(self, 'queued_stacker'):
+            # Pendant le traitement, lire la liste du backend
+            with self.queued_stacker.folders_lock: count = len(self.queued_stacker.additional_folders)
+        else:
+            # Avant le traitement, lire la liste du GUI
+            count = len(self.additional_folders_to_process)
 
         try:
-            if count == 0:
-                self.additional_folders_var.set(self.tr('no_additional_folders'))
-            elif count == 1:
-                self.additional_folders_var.set(self.tr('1 additional folder'))
-            else:
-                # Use format for robustness if translation is missing {count}
-                self.additional_folders_var.set(
-                     self.tr('{count} additional folders', default="{count} add. folders").format(count=count)
-                 )
-        except tk.TclError: pass # Ignore if UI destroyed
-
+            if count == 0: self.additional_folders_var.set(self.tr('no_additional_folders'))
+            elif count == 1: self.additional_folders_var.set(self.tr('1 additional folder'))
+            else: self.additional_folders_var.set(self.tr('{count} additional folders', default="{count} add. folders").format(count=count))
+        except tk.TclError: pass
+        except AttributeError: pass
 
     def stop_processing(self):
-        """ Demande l'arrêt du traitement via QueuedStacker. """
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
-            self.update_progress_gui(self.tr("stacking_stopping"), None)
-            self.queued_stacker.stop() # Signal the backend thread to stop
-            # Disable stop button immediately to prevent multiple clicks
+            self.update_progress_gui(self.tr("stacking_stopping"), None); self.queued_stacker.stop()
             if hasattr(self,'stop_button'): self.stop_button.config(state=tk.DISABLED)
-            # The _processing_finished method will re-enable start etc. when the worker actually exits
         elif self.processing:
-            # Case where UI thinks it's processing, but backend isn't running
-            self.update_progress_gui("Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None)
-            self._processing_finished() # Reset UI immediately
+            self.update_progress_gui("Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None); self._processing_finished()
 
 
     def _processing_finished(self):
-        """Actions performed in the main GUI thread after processing ends/stops."""
-        self.processing = False # Update UI processing flag
-        if hasattr(self, 'progress_manager'):
-             self.progress_manager.stop_timer() # Stop elapsed timer
+        """Actions performed in the main GUI thread after processing ends/stops. Uses custom summary dialog."""
+        if not self.processing: return # Avoid running multiple times
 
-        # --- Gather Final Stats from QueuedStacker ---
-        final_message = self.tr("stacking_finished")
-        final_progress = 100
+        self.processing = False # Set flag FIRST
+        # print("DEBUG: Entering _processing_finished (Custom Dialog Version)") # Keep disabled unless debugging
+
+        if hasattr(self, 'progress_manager'):
+            self.progress_manager.stop_timer()
+
+        # --- Gather final state from the worker ---
+        final_message_for_status_bar = self.tr("stacking_finished") # Default status bar message
         final_stack_path = None
-        error_message = None
+        processing_error_details = None
         images_stacked = 0
         aligned_count = 0
         failed_align_count = 0
         failed_stack_count = 0
         skipped_count = 0
+        processed_files_count = 0 # Total files attempted by the worker
         total_exposure = 0.0
+        was_stopped_by_user = False
+        output_folder_exists = False
+        can_open_output = False
+        final_stack_exists = False
 
         if hasattr(self, "queued_stacker"):
             q_stacker = self.queued_stacker
-            final_stack_path = q_stacker.final_stacked_path
-            images_stacked = q_stacker.images_in_cumulative_stack # Images combined into final
-            aligned_count = q_stacker.aligned_files_count
-            failed_align_count = q_stacker.failed_align_count
-            failed_stack_count = q_stacker.failed_stack_count
-            skipped_count = q_stacker.skipped_files_count
-            total_exposure = q_stacker.total_exposure_seconds
+            # Retrieve final state variables safely
+            final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
+            images_stacked = getattr(q_stacker, 'images_in_cumulative_stack', 0)
+            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
+            failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
+            failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
+            skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
+            processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
+            total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
+            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False)
+            processing_error_details = getattr(q_stacker, 'processing_error', None)
 
-            # Determine final status message
-            if q_stacker.stop_processing: # Check if stop was requested
-                final_message = self.tr("processing_stopped")
-                # Set progress bar to current value if stopped early
-                if hasattr(self,'progress_bar'): final_progress = self.progress_bar['value']
-            elif q_stacker.processing_error: # Check for critical errors
-                error_message = f"{self.tr('stacking_error_msg')}\n{q_stacker.processing_error}"
-                final_message = error_message
-                if hasattr(self,'progress_bar'): final_progress = self.progress_bar['value']
-            elif images_stacked == 0: # No errors, but nothing stacked
-                final_message = self.tr("no_stacks_created")
-            # else: Success, use default "Finished" message initially
-
-            # Update final aligned count display
+            # Update aligned count display one last time
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-            try: self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
+            try:
+                if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
             except tk.TclError: pass
-        else:
-            final_message = "Erreur: Stacker non initialisé."
-            final_progress = 0
 
-        # --- Generate and Display Final Report ---
-        report_text = ""
-        if not error_message and (images_stacked > 0 or aligned_count > 0 or failed_align_count > 0 or skipped_count > 0):
-            elapsed_total_seconds = 0
-            if self.global_start_time:
-                elapsed_total_seconds = time.monotonic() - self.global_start_time
+            # Check output folder state for 'Open Output' button
+            if hasattr(self, 'output_path') and self.output_path.get():
+                output_folder_exists = os.path.isdir(self.output_path.get())
 
-            report_lines = [
-                f"--- {self.tr('processing_report_title')} ---",
-                f"{self.tr('report_images_stacked')} {images_stacked}",
-                f"{self.tr('report_total_exposure')} {self._format_duration(total_exposure)}",
-                f"{self.tr('report_total_time')} {self._format_duration(elapsed_total_seconds)}",
-                f"Alignés: {aligned_count}, Échecs Align: {failed_align_count}",
-                f"Échecs Stack: {failed_stack_count}, Autres Ignorés: {skipped_count}"
-            ]
-            report_text = "\n".join(report_lines)
-            # Use report as the final message if generated
-            final_message = report_text
+            # Determine if final stack exists and if output can be opened
+            final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
+            if not processing_error_details and output_folder_exists:
+                can_open_output = True
 
-        # Update status text area with the final message/report
-        self.update_progress_gui(final_message, final_progress)
-        if hasattr(self, 'status_text'):
+        else: # Should not happen if started correctly
+            final_message_for_status_bar = "Erreur: Stacker non initialisé."
+            processing_error_details = final_message_for_status_bar # Treat as an error
+            if hasattr(self, 'output_path') and self.output_path.get():
+                output_folder_exists = os.path.isdir(self.output_path.get())
+            can_open_output = output_folder_exists and not processing_error_details
+
+        # --- Set Status Bar Message based on outcome ---
+        if was_stopped_by_user:
+            final_message_for_status_bar = self.tr("processing_stopped")
+        elif processing_error_details:
+            final_message_for_status_bar = self.tr('stacking_error_msg')
+        elif images_stacked == 0 and aligned_count == 0:
+            final_message_for_status_bar = self.tr("no_stacks_created")
+        elif images_stacked > 0:
+             final_message_for_status_bar = self.tr("stacking_complete_msg") # Short success message
+        # Update the simple status label/bar message
+        self.update_progress_gui(final_message_for_status_bar, None)
+
+        # --- Try Loading Final Preview ---
+        preview_load_error_msg = None # Store potential preview error message
+        if not was_stopped_by_user and not processing_error_details and final_stack_exists:
             try:
-                self.status_text.config(state=tk.NORMAL)
-                # Add final marker if not already part of the report
-                if not report_text: self.status_text.insert(tk.END, "\n")
-                self.status_text.insert(tk.END, "--- Traitement Terminé/Arrêté ---\n")
-                self.status_text.see(tk.END)
-                self.status_text.config(state=tk.DISABLED)
-            except tk.TclError: pass # Ignore if widget destroyed
-
-        # --- Reset UI Controls ---
-        self._set_parameter_widgets_state(tk.NORMAL) # Re-enable parameter widgets
-        if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
-        if hasattr(self, 'stop_button'): self.stop_button.config(state=tk.DISABLED)
-        if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.DISABLED) # Disable Add Folder
-
-        # Set final time values
-        if hasattr(self, 'remaining_time_var'):
-             try: self.remaining_time_var.set("00:00:00")
-             except tk.TclError: pass
-
-        # --- Show Final Popups / Load Final Preview ---
-        if error_message:
-            messagebox.showerror(self.tr("error"), error_message)
-        elif not error_message and final_stack_path and os.path.exists(final_stack_path):
-            # Show simple completion message (report is in status area)
-            messagebox.showinfo(self.tr("info"), f"{self.tr('stacking_complete_msg')}\n{final_stack_path}")
-            # Attempt to load the final stack into the preview
-            try:
-                self.update_progress_gui(f"Chargement aperçu final: {os.path.basename(final_stack_path)}...", None)
-                # Load the final image data
+                # Optional: add status update for loading preview
+                # self.update_progress_gui(f"Chargement aperçu final: {os.path.basename(final_stack_path)}...", None)
                 final_image_data = load_and_validate_fits(final_stack_path)
                 if final_image_data is not None:
                     final_header = fits.getheader(final_stack_path)
-                    # Update internal data and trigger preview refresh
                     self.current_preview_data = final_image_data
                     self.current_stack_header = final_header
                     self.refresh_preview()
-                    # Update info text
                     if final_header: self.update_image_info(final_header)
                 else:
-                    raise ValueError("Impossible de charger le fichier stack final pour l'aperçu.")
-            except Exception as e:
-                self.update_progress_gui(f"⚠️ {self.tr('Error loading final stack preview')}: {e}", None)
+                    preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: load_and_validate_fits returned None."
+            except Exception as preview_load_error:
+                preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: {preview_load_error}"
                 traceback.print_exc(limit=2)
-                messagebox.showerror(self.tr("error"), f"{self.tr('Error loading final preview')}:\n{e}")
-        elif hasattr(self, 'queued_stacker') and not q_stacker.stop_processing and images_stacked == 0:
-            # Processing finished normally but nothing was stacked
-            messagebox.showwarning(self.tr("warning"), self.tr("no_stacks_created"))
+                # Show a separate error box JUST for the preview failure
+                messagebox.showerror(self.tr("Preview Error"), f"{self.tr('Error loading final preview')}:\n{preview_load_error}")
 
+        # --- Generate the Final Summary String ---
+        # (This part is largely the same as the previous step)
+        summary_lines = []
+        # Use a slightly different title for the pop-up
+        summary_title = self.tr("processing_report_title", default="Processing Summary")
+
+        # Overall Status for summary text
+        status_text = ""
+        if was_stopped_by_user: status_text = self.tr('processing_stopped')
+        elif processing_error_details: status_text = f"ERREUR ({processing_error_details})"
+        elif images_stacked > 0: status_text = "Terminé avec succès"
+        else: status_text = "Terminé (Aucun stack final créé)"
+        summary_lines.append(f"Statut: {status_text}")
+
+        # Timing
+        elapsed_total_seconds = 0
+        if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
+        summary_lines.append(f"Temps Total Traitement: {self._format_duration(elapsed_total_seconds)}")
+
+        # File Counts
+        summary_lines.append(f"Fichiers Traités (Tentatives): {processed_files_count}")
+        total_rejected = failed_align_count + failed_stack_count + skipped_count
+        summary_lines.append(f"Fichiers Rejetés (Total): {total_rejected}")
+        summary_lines.append(f"  - Échec Alignement: {failed_align_count}")
+        summary_lines.append(f"  - Échec Empilement Lot: {failed_stack_count}")
+        summary_lines.append(f"  - Autres (Variance, Erreur...): {skipped_count}")
+
+        # Stack Info
+        summary_lines.append(f"Images Alignées avec Succès: {aligned_count}")
+        summary_lines.append(f"Images dans Stack Final: {images_stacked}")
+        summary_lines.append(f"Temps Pose Total (Stack Final): {self._format_duration(total_exposure)}")
+        if final_stack_exists: summary_lines.append(f"Fichier Stack Final:\n  {final_stack_path}") # Add newline for long paths
+        else: summary_lines.append("Fichier Stack Final: Non créé ou introuvable.")
+
+        # Combine lines for the dialog
+        full_summary_text_for_dialog = "\n".join(summary_lines)
+
+        # --- Display Final Dialog (Custom or Error) ---
+        # IMPORTANT: Do NOT add the summary to the main log here anymore
+        # self.update_progress_gui(full_summary_text_for_dialog, None) # REMOVED THIS LINE
+
+        if processing_error_details:
+            # Show critical error in a standard error box
+             messagebox.showerror(self.tr("error"), f"{self.tr('stacking_error_msg')}\n{processing_error_details}")
+        elif not was_stopped_by_user:
+            # Show the custom summary dialog if not stopped and no critical error
+            self._show_summary_dialog(summary_title, full_summary_text_for_dialog)
+
+        # --- Reset UI State ---
+        self._set_parameter_widgets_state(tk.NORMAL)
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.NORMAL)
+            except tk.TclError: pass
+        if hasattr(self, 'stop_button'):
+            try: self.stop_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+        if hasattr(self, 'open_output_button'):
+            try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
+            except tk.TclError: pass
+        if hasattr(self, 'remaining_time_var'):
+            try: self.remaining_time_var.set("00:00:00")
+            except tk.TclError: pass
+
+        # Final garbage collection hint
+        # Check if gc was imported before calling
+        if 'gc' in globals() or 'gc' in locals():
+             gc.collect()
+        # print("DEBUG: Exiting _processing_finished (Custom Dialog Version)") # Keep disabled
 
     def _format_duration(self, seconds):
-        """ Formate une durée en secondes vers H M S ou M S ou S. """
         try:
-            secs = int(round(float(seconds)))
+            secs = int(round(float(seconds)));
             if secs < 0: return "N/A"
-            if secs < 60:
-                return f"{secs} {self.tr('report_seconds', 's')}" # Shorter unit
-            elif secs < 3600:
-                m, s = divmod(secs, 60)
-                return f"{m} {self.tr('report_minutes', 'min')} {s} {self.tr('report_seconds', 's')}"
-            else:
-                h, rem = divmod(secs, 3600)
-                m, s = divmod(rem, 60)
-                return f"{h} {self.tr('report_hours', 'h')} {m} {self.tr('report_minutes', 'min')} {s} {self.tr('report_seconds', 's')}"
-        except (ValueError, TypeError):
-            return "N/A"
+            if secs < 60: return f"{secs} {self.tr('report_seconds', 's')}"
+            elif secs < 3600: m, s = divmod(secs, 60); return f"{m} {self.tr('report_minutes', 'min')} {s} {self.tr('report_seconds', 's')}"
+            else: h, rem = divmod(secs, 3600); m, s = divmod(rem, 60); return f"{h} {self.tr('report_hours', 'h')} {m} {self.tr('report_minutes', 'min')} {s} {self.tr('report_seconds', 's')}"
+        except (ValueError, TypeError): return "N/A"
 
     def _set_parameter_widgets_state(self, state):
-        """Enable/disable control widgets, EXCLUDING preview controls if disabling."""
-        # List widgets related to setting processing parameters
+        """Enable/disable control widgets."""
         processing_widgets = []
         if hasattr(self, 'input_entry'): processing_widgets.append(self.input_entry)
         if hasattr(self, 'browse_input_button'): processing_widgets.append(self.browse_input_button)
@@ -1352,9 +1285,13 @@ class SeestarStackerGUI:
         if hasattr(self, 'hp_neigh_spinbox'): processing_widgets.append(self.hp_neigh_spinbox)
         if hasattr(self, 'cleanup_temp_check'): processing_widgets.append(self.cleanup_temp_check)
         if hasattr(self, 'language_combo'): processing_widgets.append(self.language_combo)
-        # Add other processing-related widgets if any
+        if hasattr(self, 'use_weighting_check'): processing_widgets.append(self.use_weighting_check)
+        if hasattr(self, 'weight_snr_check'): processing_widgets.append(self.weight_snr_check)
+        if hasattr(self, 'weight_stars_check'): processing_widgets.append(self.weight_stars_check)
+        if hasattr(self, 'snr_exp_spinbox'): processing_widgets.append(self.snr_exp_spinbox)
+        if hasattr(self, 'stars_exp_spinbox'): processing_widgets.append(self.stars_exp_spinbox)
+        if hasattr(self, 'min_w_spinbox'): processing_widgets.append(self.min_w_spinbox)
 
-        # List widgets related ONLY to the preview display adjustments
         preview_widgets = []
         if hasattr(self, 'wb_r_ctrls'): preview_widgets.extend([self.wb_r_ctrls['slider'], self.wb_r_ctrls['spinbox']])
         if hasattr(self, 'wb_g_ctrls'): preview_widgets.extend([self.wb_g_ctrls['slider'], self.wb_g_ctrls['spinbox']])
@@ -1371,145 +1308,186 @@ class SeestarStackerGUI:
         if hasattr(self, 'contrast_ctrls'): preview_widgets.extend([self.contrast_ctrls['slider'], self.contrast_ctrls['spinbox']])
         if hasattr(self, 'saturation_ctrls'): preview_widgets.extend([self.saturation_ctrls['slider'], self.saturation_ctrls['spinbox']])
         if hasattr(self, 'reset_bcs_button'): preview_widgets.append(self.reset_bcs_button)
-        # Histogram reset button should always be active? Or disabled during processing? Let's disable.
         if hasattr(self, 'hist_reset_btn'): preview_widgets.append(self.hist_reset_btn)
 
-
-        # Determine which widgets to affect based on state
         widgets_to_set = []
         if state == tk.NORMAL:
-            # Enable ALL widgets when processing finishes
+            # Activer TOUS les widgets quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
-        else: # tk.DISABLED
-            # Disable ONLY processing parameter widgets, leave preview widgets active
+            # S'assurer que les options de pondération sont dans le bon état
+            self._update_weighting_options_state()
+            # Le bouton Ajouter Dossier reste NORMAL par défaut ici
+            if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
+
+        else: # tk.DISABLED (Pendant le traitement)
+            # Désactiver SEULEMENT les paramètres de traitement
             widgets_to_set = processing_widgets
-            # Ensure preview widgets remain enabled (or explicitly enable them)
+            # Les widgets de preview restent actifs
             for widget in preview_widgets:
                  if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
                      try: widget.config(state=tk.NORMAL)
                      except tk.TclError: pass
+            # Le bouton Ajouter Dossier reste NORMAL
+            if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
 
-        # Apply the state to the selected widgets
         for widget in widgets_to_set:
             if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
                 try: widget.config(state=state)
-                except tk.TclError: pass # Ignore errors for destroyed widgets
-
+                except tk.TclError: pass
 
     def _debounce_resize(self, event=None):
-        """ Debounce window resize event for preview redraw. """
         if self._after_id_resize:
              try: self.root.after_cancel(self._after_id_resize)
              except tk.TclError: pass
-        try:
-            # Schedule the redraw after a short delay
-            self._after_id_resize = self.root.after(300, self._refresh_preview_on_resize)
-        except tk.TclError: pass # Ignore if root is destroyed
+        try: self._after_id_resize = self.root.after(300, self._refresh_preview_on_resize)
+        except tk.TclError: pass
 
     def _refresh_preview_on_resize(self):
-        """ Trigger redraw on preview manager after resize debounce. """
-        if hasattr(self, 'preview_manager'):
-            self.preview_manager.trigger_redraw()
-        # Also redraw histogram as its size might change
+        if hasattr(self, 'preview_manager'): self.preview_manager.trigger_redraw()
         if hasattr(self, 'histogram_widget') and self.histogram_widget.winfo_exists():
-             try:
-                  self.histogram_widget.canvas.draw_idle()
+             try: self.histogram_widget.canvas.draw_idle()
              except tk.TclError: pass
 
+    def _show_summary_dialog(self, summary_title, summary_text):
+        """Displays a custom modal dialog with the processing summary and a copy button."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(summary_title)
+        dialog.transient(self.root) # Associate with main window
+        dialog.grab_set() # Make it modal (blocks interaction with main window)
+        dialog.resizable(False, False)
+
+        # --- Content Frame ---
+        content_frame = ttk.Frame(dialog, padding="10 10 10 10")
+        content_frame.pack(expand=True, fill=tk.BOTH)
+
+        # --- Icon (Optional, mimics standard messagebox) ---
+        try:
+            # Try to use a standard icon (might depend on OS/Tk version)
+            icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
+            icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
+        except tk.TclError:
+            # Fallback if icon not found
+             icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
+             icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
+
+
+        # --- Summary Text ---
+        # Use a read-only Text widget for better text selection/display if needed, or Label
+        # Using Label for simplicity here, assuming summary isn't excessively long
+        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450) # Adjust wraplength as needed
+        summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
+
+        # --- Button Frame ---
+        button_frame = ttk.Frame(content_frame)
+        # Place button frame below the text, spanning both columns
+        button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
+
+        # --- Copy Summary Button ---
+
+        def copy_action():
+            try:
+                dialog.clipboard_clear()
+                dialog.clipboard_append(summary_text)
+                # Optional: Briefly change button text or show status
+                copy_button.config(text=self.tr("Copied!", default="Copied!"))
+                dialog.after(1500, lambda: copy_button.config(text=self.tr("Copy Summary", default="Copy Summary")) if copy_button.winfo_exists() else None)
+            except Exception as copy_e:
+                print(f"Error copying summary: {copy_e}")
+                # Optionally show a small error message within the dialog?
+
+        copy_button = ttk.Button(button_frame, text=self.tr("Copy Summary", default="Copy Summary"), command=copy_action)
+        copy_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # --- OK Button ---
+        ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy, style='Accent.TButton' if 'Accent.TButton' in ttk.Style().element_names() else 'TButton')
+        ok_button.pack(side=tk.RIGHT)
+        ok_button.focus_set() # Set initial focus on OK
+
+        # --- Center the dialog ---
+        dialog.update_idletasks() # Update geometry calculations
+        # Get main window geometry
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_width = self.root.winfo_width()
+        root_height = self.root.winfo_height()
+        # Get dialog geometry
+        dialog_width = dialog.winfo_width()
+        dialog_height = dialog.winfo_height()
+        # Calculate position
+        pos_x = root_x + (root_width // 2) - (dialog_width // 2)
+        pos_y = root_y + (root_height // 2) - (dialog_height // 2)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+
+        # --- Wait for the dialog to be closed ---
+        self.root.wait_window(dialog)
 
     def _on_closing(self):
-        """Handles window closing event."""
-        # Check if processing is active (using the UI flag)
         if self.processing:
             if messagebox.askokcancel(self.tr("quit"), self.tr("quit_while_processing")):
-                print("Arrêt demandé via fermeture fenêtre...")
-                self.stop_processing() # Request backend stop
-                # Wait a short time for the thread to potentially finish cleanly
-                if self.thread and self.thread.is_alive():
-                    self.thread.join(timeout=1.5) # Wait max 1.5 seconds
-                # Check again if thread is still alive
-                if hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
-                    print("Warning: Worker thread did not exit cleanly after stop request.")
-                # Save settings and destroy window regardless
+                print("Arrêt demandé via fermeture fenêtre..."); self.stop_processing()
+                if self.thread and self.thread.is_alive(): self.thread.join(timeout=1.5)
+                if hasattr(self, "queued_stacker") and self.queued_stacker.is_running(): print("Warning: Worker thread did not exit cleanly.")
                 self._save_settings_and_destroy()
-            else:
-                return # User cancelled closing
-        else:
-            # Not processing, save settings and close directly
-            self._save_settings_and_destroy()
+            else: return
+        else: self._save_settings_and_destroy()
 
     def _save_settings_and_destroy(self):
-        """ Saves geometry/settings and closes the application. """
         try:
-            # Get current geometry if window exists
-            if self.root.winfo_exists():
-                 self.settings.window_geometry = self.root.geometry()
-        except tk.TclError: pass # Ignore error if window already destroyed
-        # Update other settings from UI just before saving
-        self.settings.update_from_ui(self)
-        self.settings.save_settings()
-        print("Fermeture de l'application.")
-        self.root.destroy() # Destroy the main window
+            if self.root.winfo_exists(): self.settings.window_geometry = self.root.geometry()
+        except tk.TclError: pass
+        self.settings.update_from_ui(self); self.settings.save_settings()
+        print("Fermeture de l'application."); self.root.destroy()
 
+    # --- NOUVELLES METHODES ---
+    def _copy_log_to_clipboard(self):
+        """Copie le contenu de la zone de log dans le presse-papiers."""
+        try:
+            log_content = self.status_text.get(1.0, tk.END)
+            self.root.clipboard_clear(); self.root.clipboard_append(log_content)
+            self.update_progress_gui("ⓘ Contenu du log copié dans le presse-papiers.", None)
+        except tk.TclError as e: print(f"Erreur Tcl lors de la copie du log: {e}")
+        except Exception as e: print(f"Erreur copie log: {e}"); self.update_progress_gui(f"❌ Erreur copie log: {e}", None); messagebox.showerror(self.tr("error"), f"Impossible de copier le log:\n{e}")
+
+    def _open_output_folder(self):
+        """Ouvre le dossier de sortie dans l'explorateur de fichiers système."""
+        output_folder = self.output_path.get()
+        if not output_folder: messagebox.showwarning(self.tr("warning"), "Le chemin du dossier de sortie n'est pas défini."); return
+        if not os.path.isdir(output_folder): messagebox.showerror(self.tr("error"), f"Le dossier de sortie n'existe pas :\n{output_folder}"); return
+        try:
+            system = platform.system()
+            if system == "Windows": os.startfile(output_folder)
+            elif system == "Darwin": subprocess.Popen(["open", output_folder])
+            else: subprocess.Popen(["xdg-open", output_folder])
+            self.update_progress_gui(f"ⓘ Ouverture du dossier: {output_folder}", None)
+        except FileNotFoundError: messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier.\nCommande non trouvée pour votre système ({system}).")
+        except Exception as e: print(f"Erreur ouverture dossier: {e}"); messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}"); self.update_progress_gui(f"❌ Erreur ouverture dossier: {e}", None)
+    # --- Fin Nouvelles Méthodes ---
 
     def update_progress_gui(self, message, progress=None):
-        """Handles progress messages from the backend thread."""
-        # Check for special messages first
-        if isinstance(message, str):
-            if message.startswith("folder_count_update:"):
-                # Schedule the display update in the main thread
-                try: self.root.after_idle(self.update_additional_folders_display)
-                except tk.TclError: pass
-                return # Don't display this message in the log
-            # elif message.startswith("stats_update:"): # Could add other special handlers
-            #     return
-
-        # Pass regular messages to the ProgressManager
+        if isinstance(message, str) and message.startswith("folder_count_update:"):
+            try: self.root.after_idle(self.update_additional_folders_display)
+            except tk.TclError: pass
+            return
         if hasattr(self, "progress_manager") and self.progress_manager:
-            # ProgressManager's update_progress should handle the after_idle call
             self.progress_manager.update_progress(message, progress)
-
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # --- Theme Setup (Optional but recommended) ---
     try:
-        _dummy_root = tk.Tk(); _dummy_root.withdraw() # Create temp root for style
-        style = ttk.Style()
-        available_themes = style.theme_names()
-        # print("Available themes:", available_themes) # Debug
-        theme_to_use = 'default'
-        # Prefer modern themes if available
-        preferred_themes = ['clam', 'alt', 'vista', 'xpnative'] # Windows examples
-        # Add Linux/macOS themes if needed: e.g., 'aqua' (macOS), potentially others
+        _dummy_root = tk.Tk(); _dummy_root.withdraw(); style = ttk.Style(); available_themes = style.theme_names()
+        theme_to_use = 'default'; preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
         for t in preferred_themes:
-            if t in available_themes:
-                theme_to_use = t
-                break
-        print(f"Using theme: {theme_to_use}")
-        style.theme_use(theme_to_use)
-
-        # Configure accent button style (example)
-        try:
-            style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
-        except tk.TclError:
-            print("Warning: Could not configure Accent.TButton style (theme might not support it).")
-        # Configure other styles if needed
-        try:
-             style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
+            if t in available_themes: theme_to_use = t; break
+        print(f"Using theme: {theme_to_use}"); style.theme_use(theme_to_use)
+        try: style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
+        except tk.TclError: print("Warning: Could not configure Accent.TButton style.")
+        try: style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
         except tk.TclError: print("Warning: Could not configure Toolbutton.TButton style.")
+        if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
+    except tk.TclError as theme_err: print(f"Error initializing Tk themes: {theme_err}. Using Tk default.");
+    if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
 
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
-             _dummy_root.destroy() # Clean up temp root
-
-    except tk.TclError as theme_err:
-        print(f"Error initializing Tk themes: {theme_err}. Using Tk default.")
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
-             _dummy_root.destroy() # Clean up temp root
-    # --- End Theme Setup ---
-
-    # Create and run the application
     gui = SeestarStackerGUI()
     gui.root.mainloop()
 
-# --- END OF FILE seestar/gui/main_window.py ---
+# --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---

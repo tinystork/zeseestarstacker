@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image, ImageTk, ImageEnhance, ImageFont # Added ImageFont
 import traceback
 import platform # For finding fonts
+import os 
 
 # Import stretch/color tools using the package structure
 try:
@@ -79,6 +80,28 @@ class PreviewManager:
         self._view_offset_y = 0 # Current pan offset Y relative to center
         self._img_id_on_canvas = None # Store the ID of the image item on canvas
         self._text_id_on_canvas = None # ID for the stack count text
+        # --- Load Background Image ---
+        self.bg_pil_image = None # Holds the PIL Image for the background
+        self.tk_bg_img = None    # Holds the Tkinter PhotoImage for the background
+        try:
+            # IMPORTANT: Replace this with the ACTUAL path to YOUR background image file!
+            # Example: bg_image_path = "assets/background.png"
+            bg_image_path = 'icon/back.png'
+
+            if os.path.exists(bg_image_path):
+                # Load the background image using Pillow
+                self.bg_pil_image = Image.open(bg_image_path)
+                # Convert to RGBA to handle potential transparency (optional but safer)
+                # self.bg_pil_image = self.bg_pil_image.convert("RGBA")
+                print(f"DEBUG: Background image loaded: {bg_image_path} (Size: {self.bg_pil_image.size})")
+                # We will create the Tk PhotoImage later, when needed for drawing
+            else:
+                print(f"Warning: Background image file not found at: {bg_image_path}")
+        except FileNotFoundError:
+             print(f"Error: Background image file not found at path: {bg_image_path}")
+        except Exception as e:
+            print(f"Error loading background image: {e}")
+        # --- End Background Image Loading ---
 
         # Load a suitable font
         self._load_font()
@@ -207,97 +230,155 @@ class PreviewManager:
             self.clear_preview("Preview Processing Error"); return None, None
 
     def _redraw_canvas(self):
-        """Redessine l'image PIL et le texte d'info (image/batch) sur le canvas."""
-        pil_image_to_draw = self.last_displayed_pil_image
+        """Redessine l'image de fond (si chargée), l'image PIL astro et le texte d'info."""
+        pil_image_to_draw = self.last_displayed_pil_image # The astronomical image
+
         if not self.canvas.winfo_exists(): return
-        # print("DEBUG: _redraw_canvas called.") # Keep disabled unless needed
+        # print("DEBUG: _redraw_canvas called.")
 
-        # Clear previous items
-        self.canvas.delete("message")
-        if self._img_id_on_canvas: self.canvas.delete(self._img_id_on_canvas); self._img_id_on_canvas = None
-        if self._text_id_on_canvas: self.canvas.delete(self._text_id_on_canvas); self._text_id_on_canvas = None
+        # --- Clear previous drawn items ---
+        # Clear specific items instead of "all" to preserve bindings etc.
+        self.canvas.delete("message") # Delete any messages like "No Image Data"
+        if hasattr(self, '_bg_img_id_on_canvas') and self._bg_img_id_on_canvas:
+            self.canvas.delete(self._bg_img_id_on_canvas)
+            self._bg_img_id_on_canvas = None
+        if self._img_id_on_canvas:
+            self.canvas.delete(self._img_id_on_canvas)
+            self._img_id_on_canvas = None
+        if self._text_id_on_canvas:
+            self.canvas.delete(self._text_id_on_canvas)
+            self._text_id_on_canvas = None
+        # We clear self.tk_bg_img reference here, it will be recreated if needed
+        self.tk_bg_img = None
 
-        if pil_image_to_draw is None: return
-
+        # --- Get Canvas Size ---
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
-        if canvas_width <= 1 or canvas_height <= 1: return
+        if canvas_width <= 1 or canvas_height <= 1: return # Avoid drawing on tiny canvas
 
-        img_width, img_height = pil_image_to_draw.size
-        if img_width <= 0 or img_height <= 0: return
+        # --- 1. Draw Background Image (if available) ---
+        bg_drawn = False
+        if self.bg_pil_image: # Check if the background PIL image was loaded in __init__
+            try:
+                # Create the Tkinter PhotoImage for the background *now*
+                self.tk_bg_img = ImageTk.PhotoImage(self.bg_pil_image)
+                # Draw it centered
+                self._bg_img_id_on_canvas = self.canvas.create_image(
+                    canvas_width / 2,
+                    canvas_height / 2,
+                    anchor="center",
+                    image=self.tk_bg_img,
+                    tags="background" # Add a tag for potential layering
+                )
+                bg_drawn = True
+                # print("DEBUG: Background image drawn.") # Optional debug
+            except Exception as bg_draw_err:
+                print(f"Error creating/drawing background PhotoImage: {bg_draw_err}")
+                self.tk_bg_img = None # Clear reference if creation failed
+                self._bg_img_id_on_canvas = None
 
-        # --- Resize and create Tk PhotoImage ---
-        display_width = max(1, int(img_width * self.zoom_level))
-        display_height = max(1, int(img_height * self.zoom_level))
-        try:
-            resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-            if self.zoom_level > 2.0: resample_filter = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
-            resized_img = pil_image_to_draw.resize((display_width, display_height), resample_filter)
-        except Exception as resize_err: print(f"Error resizing preview image: {resize_err}"); return
-        try: self.tk_img = ImageTk.PhotoImage(image=resized_img)
-        except Exception as photoimg_err: print(f"Error creating PhotoImage: {photoimg_err}"); self.tk_img = None; return
+        # --- 2. Draw Astronomical Preview Image (if available) ---
+        if pil_image_to_draw:
+            img_width, img_height = pil_image_to_draw.size
+            if img_width > 0 and img_height > 0:
+                # --- Resize and create Tk PhotoImage for astro image ---
+                display_width = max(1, int(img_width * self.zoom_level))
+                display_height = max(1, int(img_height * self.zoom_level))
+                try:
+                    resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                    if self.zoom_level > 2.0: resample_filter = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
+                    resized_img = pil_image_to_draw.resize((display_width, display_height), resample_filter)
+                except Exception as resize_err: print(f"Error resizing preview image: {resize_err}"); return
+                try:
+                    self.tk_img = ImageTk.PhotoImage(image=resized_img) # Store main image reference
+                except Exception as photoimg_err: print(f"Error creating PhotoImage: {photoimg_err}"); self.tk_img = None; return
 
-        # --- Calculate position ---
-        display_x = canvas_width / 2 + self._view_offset_x
-        display_y = canvas_height / 2 + self._view_offset_y
+                # --- Calculate position ---
+                display_x = canvas_width / 2 + self._view_offset_x
+                display_y = canvas_height / 2 + self._view_offset_y
 
-        # --- Draw image ---
-        try:
-            if self.tk_img:
-                 self._img_id_on_canvas = self.canvas.create_image(display_x, display_y, anchor="center", image=self.tk_img)
-        except tk.TclError as draw_err: print(f"Error drawing image: {draw_err}"); self._img_id_on_canvas = None
+                # --- Draw astro image ---
+                try:
+                    if self.tk_img:
+                        self._img_id_on_canvas = self.canvas.create_image(
+                            display_x, display_y,
+                            anchor="center",
+                            image=self.tk_img,
+                            tags="foreground" # Add a tag
+                        )
+                except tk.TclError as draw_err: print(f"Error drawing image: {draw_err}"); self._img_id_on_canvas = None
 
-        # --- Draw Stack/Batch Info Text ---
-        # Use the internally stored display values
+        # --- 3. Draw Stack/Batch Info Text (if applicable) ---
+        # (This part is largely the same as before)
         if self.display_img_count > 0:
             try:
-                # Format the text string with two lines
                 total_imgs_str = str(self.display_total_imgs) if self.display_total_imgs > 0 else "?"
                 total_batches_str = str(self.display_total_batches) if self.display_total_batches > 0 else "?"
                 text_content = f"Img: #{self.display_img_count}/{total_imgs_str}\nBatch: {self.display_current_batch}/{total_batches_str}"
-
-                text_x = canvas_width - 10 # Top right X padding
-                text_y = 10                # Top right Y padding
+                text_x = canvas_width - 10; text_y = 10
                 font_to_use = self.tk_font_tuple if hasattr(self, 'tk_font_tuple') else ('TkDefaultFont', 10)
-
-                # Draw the text
                 self._text_id_on_canvas = self.canvas.create_text(
                     text_x, text_y,
                     text=text_content,
-                    anchor="ne", # Anchor North-East (top-right)
-                    fill="yellow", # Text color
-                    font=font_to_use,
-                    justify=tk.RIGHT # Right-align the lines
+                    anchor="ne", fill="yellow", font=font_to_use, justify=tk.RIGHT,
+                    tags="textoverlay" # Add a tag
                 )
-
-                # Explicitly raise text above image
-                if self._img_id_on_canvas and self._text_id_on_canvas:
-                     self.canvas.tag_raise(self._text_id_on_canvas, self._img_id_on_canvas)
-
             except tk.TclError as text_err:
                 print(f"Error drawing stack count text: {text_err}")
                 self._text_id_on_canvas = None
 
+        # --- 4. Ensure Correct Layering ---
+        # Lower the background, raise the foreground and text
+        if hasattr(self, '_bg_img_id_on_canvas') and self._bg_img_id_on_canvas:
+            self.canvas.tag_lower(self._bg_img_id_on_canvas)
+        if self._img_id_on_canvas:
+            self.canvas.tag_raise(self._img_id_on_canvas)
+        if self._text_id_on_canvas:
+            self.canvas.tag_raise(self._text_id_on_canvas)
+
     def clear_preview(self, message=None):
-        """Efface la prévisualisation et affiche un message optionnel."""
+        """
+        Efface l'image astro, le texte, et les messages, puis redessine le fond (si chargé).
+        Affiche un message optionnel par-dessus le fond.
+        """
         if not hasattr(self.canvas, "winfo_exists") or not self.canvas.winfo_exists(): return
 
-        self.canvas.delete("all")
-        self._img_id_on_canvas = None; self._text_id_on_canvas = None
+        # --- Clear specific items, keep background image object ---
+        # Delete the astro image, text overlay, and any previous message text
+        if self._img_id_on_canvas: self.canvas.delete(self._img_id_on_canvas); self._img_id_on_canvas = None
+        if self._text_id_on_canvas: self.canvas.delete(self._text_id_on_canvas); self._text_id_on_canvas = None
+        self.canvas.delete("message") # Delete previous status messages
+
+        # Reset astro image data references
         self.image_data_raw = None; self.image_data_raw_shape = None
         self.image_data_wb = None; self.tk_img = None; self.last_displayed_pil_image = None
-        # --- ADD Reset display info counts ---
-        self.display_img_count = 0
-        self.display_total_imgs = 0
-        self.display_current_batch = 0
-        self.display_total_batches = 0
-        # --- END ADD ---
+        # Reset display info counts
+        self.display_img_count = 0; self.display_total_imgs = 0
+        self.display_current_batch = 0; self.display_total_batches = 0
+        # Reset zoom/pan state
         self.reset_zoom_and_pan()
+
+        # --- Redraw the background image (if it exists) ---
+        # This reuses the logic now embedded in _redraw_canvas
+        # We call _redraw_canvas which will now only draw the background
+        # because self.last_displayed_pil_image is None.
+        self._redraw_canvas()
+
+        # --- Display the message (if provided) on top of the background ---
         if message:
             canvas_width = self.canvas.winfo_width(); canvas_height = self.canvas.winfo_height()
             if canvas_width > 1 and canvas_height > 1:
-                try: self.canvas.create_text(canvas_width / 2, canvas_height / 2, text=message, fill="gray", font=("Arial", 11), anchor="center", justify="center", tags="message")
-                except tk.TclError: pass
+                try:
+                    # Create the message text item
+                    msg_id = self.canvas.create_text(
+                        canvas_width / 2, canvas_height / 2,
+                        text=message, fill="gray", font=("Arial", 11),
+                        anchor="center", justify="center", tags="message"
+                    )
+                    # Ensure it's on top
+                    self.canvas.tag_raise(msg_id)
+                except tk.TclError:
+                    pass # Ignore if canvas is destroyed during message creation
 
     def update_info_text(self, text_content): self.image_info_text_content = text_content
 

@@ -25,13 +25,21 @@ FR_TRANSLATIONS = {
     'stacking_method': "Méthode :",
     'kappa_value': "Kappa :",
     'batch_size': "Taille Lot :",
-    'batch_size_auto': "(0=auto)",
+    'batch_size_auto': "(0=auto)", # Gardé pour affichage
     'hot_pixels_correction': 'Correction Pixels Chauds',
     'perform_hot_pixels_correction': 'Corriger pixels chauds',
     'hot_pixel_threshold': 'Seuil :',
     'neighborhood_size': 'Voisinage :',
     'post_proc_opts_frame_label': "Options Post-Traitement",
     'cleanup_temp_check_label': "Nettoyer fichiers temporaires après traitement",
+    'quality_weighting_frame': "Pondération par Qualité",
+    'enable_weighting_check': "Activer la pondération",
+    'weighting_metrics_label': "Métriques:",
+    'weight_snr_check': "SNR",
+    'weight_stars_check': "Nb Étoiles",
+    'snr_exponent_label': "Exp. SNR:",
+    'stars_exponent_label': "Exp. Étoiles:",
+    'min_weight_label': "Poids Min:",
 
     # --- Onglet Aperçu ---
     'white_balance': "Balance des Blancs (Aperçu)",
@@ -55,12 +63,13 @@ FR_TRANSLATIONS = {
 
     # --- Zone Progression ---
     'progress': "Progression",
-    'estimated_time': "ETA:", # Gardons ETA simple pour le moment, global_eta sera séparé
+    'estimated_time': "ETA:",
     'elapsed_time': "Écoulé :",
     'Remaining:': "Restant :", # Clé pour label statique
     'Additional:': "Additionnels :", # Clé pour label statique
     'aligned_files_label': "Alignés :", # Texte statique
     'aligned_files_label_format': "Alignés : {count}", # Format d'affichage
+    'global_eta_label': "ETA Global :",
 
     # --- Zone Aperçu (Panneau Droit) ---
     'preview': "Aperçu",
@@ -70,6 +79,9 @@ FR_TRANSLATIONS = {
     'start': "Démarrer",
     'stop': "Arrêter",
     'add_folder_button': "Ajouter Dossier",
+    # NOUVEAU: Clés pour les nouveaux boutons
+    'copy_log_button_text': "Copier",
+    'open_output_button_text': "Ouvrir Sortie",
 
     # --- Titres Dialogues ---
     'Select Input Folder': "Sélectionner Dossier d'Entrée",
@@ -97,8 +109,8 @@ FR_TRANSLATIONS = {
     'no_files_waiting': "Aucun fichier en attente",
     'no_additional_folders': "Aucun",
     '1 additional folder': "1 dossier add.",
-    '{count} additional folders': "{count} dossiers add.", # Utiliser format
-    'Start processing to add folders': "Le traitement doit être démarré pour ajouter des dossiers.", # Modifié pour être plus précis
+    '{count} additional folders': "{count} dossiers add.",
+    'Start processing to add folders': "Le traitement doit être démarré pour ajouter des dossiers.", # Reste pertinent
     'Processing not active or finished.': 'Traitement inactif ou terminé.',
     'Folder not found': "Dossier non trouvé",
     'Input folder cannot be added': "Le dossier d'entrée principal ne peut pas être ajouté.",
@@ -127,8 +139,6 @@ FR_TRANSLATIONS = {
     'Auto Stretch requires an image preview.': "L'Auto Étirement requiert un aperçu d'image.",
     'Error during Auto Stretch': 'Erreur pendant Auto Étirement',
     'Total Exp (s)': "Expo Totale (s)",
-    # --- Ajouts pour ETA et Rapport Final ---
-    'global_eta_label': "ETA Global :",
     'processing_report_title': "Résumé du Traitement",
     'report_images_stacked': "Images Empilées :",
     'report_total_exposure': "Temps Pose Total :",
@@ -137,5 +147,10 @@ FR_TRANSLATIONS = {
     'report_minutes': "minutes",
     'report_hours': "heures",
     'eta_calculating': "Calcul...",
+    # --- Weighting Info Display ---
+    'Weighting': 'Pondération', # Clé pour label 'WGHT_ON'
+    'W. Metrics': 'Métr. Poids', # Clé pour label 'WGHT_MET'
+    'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
+    'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
 }
 # --- END OF FILE seestar/localization/fr.py ---

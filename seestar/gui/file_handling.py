@@ -1,7 +1,7 @@
 # --- START OF FILE seestar/gui/file_handling.py ---
 """
 Module pour la gestion des fichiers et dossiers dans l'interface GSeestar.
-(Version Révisée: Simplification add_folder)
+(Version Révisée: Simplification add_folder - délégation au GUI)
 """
 import os
 import tkinter as tk
@@ -51,16 +51,13 @@ class FileHandlingManager:
     def browse_reference(self):
         """Ouvre une boîte de dialogue pour sélectionner l'image de référence."""
         initial_dir = None
-        # Try getting dir from current reference path
         current_ref = self.gui.reference_image_path.get()
         if current_ref and os.path.isfile(current_ref):
              initial_dir = os.path.dirname(current_ref)
-        # Fallback to input dir if no ref set or invalid
         elif hasattr(self.gui.settings, 'input_folder') and self.gui.settings.input_folder and os.path.isdir(self.gui.settings.input_folder):
              initial_dir = self.gui.settings.input_folder
-        else: # Fallback to current working directory or home
+        else:
              initial_dir = "."
-
 
         file = filedialog.askopenfilename(
             title=self.gui.tr('Select Reference Image (Optional)'),
@@ -72,48 +69,31 @@ class FileHandlingManager:
             self.gui.reference_image_path.set(abs_file)
             self.gui.settings.reference_image_path = abs_file # Save setting
             self.gui.settings.save_settings()
-            # Optional: Try to show the reference image preview if implemented in main_window
+            # Optional: Try to show the reference image preview
             # if hasattr(self.gui, '_try_show_reference_image'):
             #     self.gui._try_show_reference_image(abs_file)
 
     def add_folder(self):
         """
-        Demande un dossier à l'utilisateur et le transmet au QueueManager
-        pour ajout asynchrone à la liste de traitement.
+        Demande un dossier à l'utilisateur et transmet la requête au GUI principal
+        pour décider où l'ajouter (liste pré-démarrage ou backend).
         """
-        # Check if processing is conceptually "started" from the UI perspective
-        if not self.gui.processing:
-             messagebox.showinfo(
-                 self.gui.tr('info'),
-                 self.gui.tr('Start processing to add folders')
-             )
-             return
-
-        # Check if the backend worker thread exists and is running
-        if not hasattr(self.gui, 'queued_stacker') or not self.gui.queued_stacker.is_running():
-            messagebox.showinfo(
-                self.gui.tr('info'),
-                self.gui.tr('Processing not active or finished.', default='Processing not active or finished.')
-            )
-            return
-
-        # Suggest initial directory based on input folder
+        # Suggerer répertoire initial basé sur dossier input
         last_path = self.gui.settings.input_folder if hasattr(self.gui.settings, 'input_folder') and self.gui.settings.input_folder else None
         folder = filedialog.askdirectory(
             title=self.gui.tr('Select Additional Images Folder'),
             initialdir=last_path
         )
 
-        if not folder: return # User cancelled
+        if not folder: return # Annulé par l'utilisateur
 
         abs_folder = os.path.abspath(folder)
 
-        # --- Minimal validation in GUI thread ---
+        # --- Validation minimale dans le GUI avant de passer au handle ---
         if not os.path.isdir(abs_folder):
             messagebox.showerror(self.gui.tr('error'), self.gui.tr('Folder not found'))
             return
 
-        # Prevent adding input/output folders (basic check)
         abs_input = os.path.abspath(self.gui.input_path.get()) if self.gui.input_path.get() else None
         abs_output = os.path.abspath(self.gui.output_path.get()) if self.gui.output_path.get() else None
 
@@ -124,53 +104,20 @@ class FileHandlingManager:
             if os.path.normcase(abs_folder) == os.path.normcase(abs_output):
                  messagebox.showwarning(self.gui.tr('warning'), self.gui.tr('Output folder cannot be added'))
                  return
-            # Use normcase for case-insensitive comparison on Windows
             if os.path.normcase(abs_folder).startswith(os.path.normcase(abs_output) + os.sep):
                  messagebox.showwarning(self.gui.tr('warning'), self.gui.tr('Cannot add subfolder of output folder'))
                  return
-        # --- End Minimal Validation ---
+        # --- Fin Validation ---
 
-
-        # --- Attempt to add the folder via the queued stacker ---
-        # QueueManager now handles checks for duplicates, empty folders (later),
-        # and provides feedback via progress callback.
-        add_success = self.gui.queued_stacker.add_folder(abs_folder)
-
-        if not add_success:
-            # Stacker should have sent a progress message explaining why via callback,
-            # but show a generic warning here just in case the callback failed or
-            # the reason wasn't clear from the progress messages.
-            messagebox.showwarning(
-                self.gui.tr('warning'),
-                self.gui.tr('Folder not added (already present, invalid path, or error?)', default='Folder not added (already present, invalid path, or error?)')
-            )
-        # The QueueManager's progress callback 'folder_count_update:N' will trigger
-        # the update_additional_folders_display method in the main GUI.
-
-    # This function is now primarily called by the main GUI's update_ui_language or _track_processing_progress
-    # It remains here for potential direct use but is less critical now.
-    def update_additional_folders_display(self):
-        """Met à jour l'affichage du nombre de dossiers supplémentaires."""
-        # This method is less critical here now, as the main window updates
-        # this based on callbacks from the queue manager.
-        # We can leave it for potential direct calls or remove it if unused.
-        if hasattr(self.gui, 'queued_stacker'):
-            count = 0
-            with self.gui.queued_stacker.folders_lock: # Access count safely
-                count = len(self.gui.queued_stacker.additional_folders)
-            try:
-                if count == 0:
-                    self.gui.additional_folders_var.set(self.gui.tr('no_additional_folders'))
-                elif count == 1:
-                    self.gui.additional_folders_var.set(self.gui.tr('1 additional folder'))
-                else:
-                    self.gui.additional_folders_var.set(
-                         self.gui.tr('{count} additional folders', default="{count} additional folders").format(count=count)
-                    )
-            except tk.TclError: pass # Ignore if GUI destroyed
+        # --- Transmettre la requête au GUI principal ---
+        # Il est préférable que SeestarStackerGUI gère l'état (processing ou non)
+        if hasattr(self.gui, 'handle_add_folder_request'):
+            self.gui.handle_add_folder_request(abs_folder)
         else:
-            # Set default if stacker isn't available
-            try: self.gui.additional_folders_var.set(self.gui.tr('no_additional_folders'))
-            except tk.TclError: pass
+             # Fallback ou erreur si la méthode n'existe pas dans le GUI
+             print("Erreur: Méthode handle_add_folder_request non trouvée dans le GUI.")
+             messagebox.showerror(self.gui.tr("error"), "Erreur interne lors de l'ajout du dossier.")
+
+    # La méthode update_additional_folders_display est maintenant gérée dans main_window.py
 
 # --- END OF FILE seestar/gui/file_handling.py ---
