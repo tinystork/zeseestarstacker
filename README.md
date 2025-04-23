@@ -1,4 +1,4 @@
-# Seestar Stacker
+# Seestar Stacker the little stacker for a lot of light :-)
 **(English)** User-friendly Astronomical Image Stacker for Seestar S50
 **(Français)** Empileur d'Images Astronomiques Convivial pour Seestar S50
 
@@ -29,6 +29,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Customizable: Supports custom application icon and preview background image.
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
+![Uploading image.png…]()
 
 **(Français)**
 
