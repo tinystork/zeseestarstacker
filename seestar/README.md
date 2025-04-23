@@ -1,4 +1,4 @@
-# Seestar Stacker
+# Seestar Stacker the tiny stacker for a lot of lights
 **(English)** User-friendly Astronomical Image Stacker for Seestar S50
 **(Français)** Empileur d'Images Astronomiques Convivial pour Seestar S50
 
