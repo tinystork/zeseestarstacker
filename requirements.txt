@@ -1,8 +1,25 @@
+      
+# --- START OF requirements.txt ---
 numpy
-opencv-python
+opencv-contrib-python # Changed previously for OpenCV CUDA potential
 astropy
 astroalign
 tqdm
-psutil
 matplotlib
 Pillow
+scikit-image
+psutil # Optional but recommended
+
+# --- Optional: CuPy for GPU Acceleration (Stacking) ---
+# If you have an NVIDIA GPU and the CUDA Toolkit installed, you can install
+# CuPy for potential stacking speedup. Replace 'XX' with your CUDA major version
+# (e.g., 11 or 12) and '.x' if needed, or check CuPy installation docs.
+# Example for CUDA 12.x: pip install cupy-cuda12x
+# Example for CUDA 11.x: pip install cupy-cuda11x
+# Find your CUDA version: nvcc --version
+# Check CuPy docs for exact package name for your CUDA version:
+# https://docs.cupy.dev/en/stable/install.html
+# cupy-cudaXXX
+# --- END OF requirements.txt ---
+
+    

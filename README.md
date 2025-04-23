@@ -1,4 +1,4 @@
-# Seestar Stacker the tiny stacker for a lot of lights
+# Seestar Stacker
 **(English)** User-friendly Astronomical Image Stacker for Seestar S50
 **(Français)** Empileur d'Images Astronomiques Convivial pour Seestar S50
 
@@ -97,8 +97,9 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install -r requirements.txt
     ```
-4.  ![image](https://github.com/user-attachments/assets/bb94448c-1bd4-4fa4-a183-4fe0cdfd1ac3)
-
+4.  **(Optional - Customization):**
+    *   Place your custom window icon (`.png`, e.g., 256x256) and update the `icon_path` in `seestar/gui/main_window.py`.
+    *   Place your custom background image (`.png` or `.jpg`) and update the `bg_image_path` in `seestar/gui/preview.py`.
 
 **(Français)**
 

@@ -1,350 +1,443 @@
+# --- START OF FILE seestar/gui/preview.py ---
 """
-Module pour la gestion de la prévisualisation des images astronomiques.
+Module pour la gestion de la prévisualisation des images astronomiques (Canvas + Panning).
+Le traitement de l'image pour l'affichage (WB, Stretch, Gamma, B/C/S) est effectué ici.
+(Version Révisée 2: Accepte stack_count et l'affiche)
 """
-
-import os
-import numpy as np
-import cv2
-from PIL import Image, ImageTk # Requires Pillow
 import tkinter as tk
-from tkinter import ttk  # <--- Added this import
-import traceback # Added for better error reporting in update_preview
+import numpy as np
+from PIL import Image, ImageTk, ImageEnhance, ImageFont # Added ImageFont
+import traceback
+import platform # For finding fonts
+import os 
 
-# Import stretch tool using the package structure
+# Import stretch/color tools using the package structure
 try:
-    from seestar.tools.stretch import Stretch
+    from seestar.tools.stretch import StretchPresets, ColorCorrection
 except ImportError:
-    # Fallback or raise error if tools are essential
-    print("Warning: Could not import Stretch tool from seestar.tools")
-    # Define a dummy class if needed, or let it fail later if essential
-    class Stretch:
-        def stretch(self, data): return data # Dummy implementation
+    print("Warning: Could not import StretchPresets/ColorCorrection from seestar.tools")
+    # Define dummy classes if needed for basic functionality
+    class StretchPresets:
+        @staticmethod
+        def linear(data, bp=0., wp=1.): wp=max(wp,bp+1e-6); return np.clip((data-bp)/(wp-bp), 0, 1)
+        @staticmethod
+        def asinh(data, scale=1., bp=0.): data_s=data-bp; data_c=np.maximum(data_s,0.); max_v=np.nanmax(data_c); den=np.arcsinh(scale*max_v); return np.arcsinh(scale*data_c)/den if den>1e-6 else np.zeros_like(data)
+        @staticmethod
+        def logarithmic(data, scale=1., bp=0.): data_s=data-bp; data_c=np.maximum(data_s,1e-10); max_v=np.nanmax(data_c); den=np.log1p(scale*max_v); return np.log1p(scale*data_c)/den if den>1e-6 else np.zeros_like(data)
+        @staticmethod
+        def gamma(data, gamma=1.0): return np.power(np.maximum(data, 1e-10), gamma)
+    class ColorCorrection:
+        @staticmethod
+        def white_balance(data, r=1., g=1., b=1.):
+            if data is None or data.ndim != 3: return data
+            corr=data.astype(np.float32).copy(); corr[...,0]*=r; corr[...,1]*=g; corr[...,2]*=b; return np.clip(corr,0,1)
+
 
 class PreviewManager:
     """
-    Classe pour gérer la prévisualisation des images astronomiques dans le Canvas Tkinter.
+    Gère l'affichage et l'interaction (zoom, pan) avec l'image dans un Canvas Tkinter.
+    Applique la balance des blancs, l'étirement, le gamma et B/C/S pour l'affichage.
+    Affiche le nombre d'images stackées dans le coin supérieur droit.
     """
-
-    def __init__(self, canvas, stack_label, info_text_widget):
+    def __init__(self, canvas):
         """
         Initialise le gestionnaire de prévisualisation.
 
         Args:
             canvas (tk.Canvas): Canvas Tkinter pour l'affichage des images.
-            stack_label (ttk.Label): Label pour afficher le nom du stack/image.
-            info_text_widget (tk.Text): Zone de texte pour les informations sur l'image.
         """
-        # Input validation
         if not isinstance(canvas, tk.Canvas):
             raise TypeError("canvas must be a tkinter Canvas widget")
-        # Corrected: Check for both tk.Label and ttk.Label
-        if not isinstance(stack_label, (tk.Label, ttk.Label)):
-             raise TypeError("stack_label must be a tkinter Label or ttk.Label widget")
-        if not isinstance(info_text_widget, tk.Text):
-             raise TypeError("info_text_widget must be a tkinter Text widget")
 
         self.canvas = canvas
-        self.current_stack_label = stack_label
-        self.image_info_text = info_text_widget # Store reference to the text widget
-        self.tk_img = None # Holds the PhotoImage object to prevent garbage collection
-        try:
-            self.stretch_tool = Stretch() # Instance of the stretch algorithm
-        except NameError: # Handle case where Stretch couldn't be imported
-            print("Error: Stretch tool not available.")
-            self.stretch_tool = None
+        self.tk_img = None  # Holds the PhotoImage object to prevent garbage collection
+        self.stretch_presets = StretchPresets()
+        self.color_correction = ColorCorrection()
 
-
-        # Variables for zoom and pan (pan not implemented here yet)
+        # State Variables
         self.zoom_level = 1.0
-        self.MAX_ZOOM = 10.0 # Increased max zoom
-        self.MIN_ZOOM = 0.1 # Decreased min zoom
-        self.original_image_data = None # Store the raw (or debayered) full-res data
-        self.current_stack_name = "No Stack" # Name displayed in the label
-        self.last_displayed_pil_image = None # Store the last PIL image used for display
+        self.MAX_ZOOM = 15.0
+        self.MIN_ZOOM = 0.05
+        self.image_data_raw = None     # The initial data (0-1 float, potentially debayered)
+        self.image_data_raw_shape = None # Store shape to detect dimension changes
+        self.image_data_wb = None      # Data after white balance (for histogram)
+        self.last_displayed_pil_image = None # Stretched PIL image for redraws
+        self.current_display_params = {} # Store params used for last display
+        self.image_info_text_content = "" # Store content for info text area
+        self.current_stack_count = 0 # Add variable to store stack count
 
-        # Configurer les événements pour le zoom sur le canvas
-        self.canvas.bind("<MouseWheel>", self._zoom_on_scroll)  # Windows/macOS
-        self.canvas.bind("<Button-4>", self._zoom_on_scroll)   # Linux (scroll up)
-        self.canvas.bind("<Button-5>", self._zoom_on_scroll)   # Linux (scroll down)
-        # Add bindings for panning if needed (e.g., <B1-Motion>, <ButtonPress-1>, <ButtonRelease-1>)
+        # --- Store info for text overlay ---
+        self.display_img_count = 0
+        self.display_total_imgs = 0
+        self.display_current_batch = 0
+        self.display_total_batches = 0
 
-
-    def create_test_image(self, width=300, height=200):
-        """
-        Crée une image numpy de test colorée (RGB).
-
-        Args:
-            width (int): Largeur de l'image.
-            height (int): Hauteur de l'image.
-
-        Returns:
-            numpy.ndarray: Image de test (uint8 HxWx3 RGB).
-        """
-        img = np.zeros((height, width, 3), dtype=np.uint8)
-        # Gradient rouge horizontal
-        img[:, :, 0] = np.tile(np.linspace(0, 255, width, dtype=np.uint8), (height, 1))
-        # Gradient vert vertical
-        img[:, :, 1] = np.tile(np.linspace(0, 255, height, dtype=np.uint8)[:, np.newaxis], (1, width))
-        # Motif de grille bleue
-        img[::20, :, 2] = 255
-        img[:, ::20, 2] = 255
-        return img
-
-    def update_preview(self, image_data, stack_name=None, apply_stretch=False, info_text=None, force_redraw=False):
-        """
-        Met à jour l'aperçu avec les données d'image fournies.
-
-        Args:
-            image_data (numpy.ndarray): Données de l'image (HxW ou HxWx3, numeric type).
-            stack_name (str, optional): Nom du stack/image à afficher.
-            apply_stretch (bool): Appliquer un étirement automatique à l'image.
-            info_text (str, optional): Texte d'information à afficher dans la zone dédiée.
-            force_redraw (bool): Forcer le redessinage même si les données n'ont pas changé.
-        """
-        # Basic validation
-        if image_data is None:
-            self.clear_preview(self.tr("No Image Data", default="No Image Data")) # Use localization if available
-            return
-
-        if not isinstance(image_data, np.ndarray):
-             print("Error: update_preview received non-numpy array data.")
-             self.clear_preview(self.tr("Preview Error", default="Preview Error"))
-             return
-
-        # --- Data Preparation ---
+        # Pan State
+        self._is_panning = False
+        self._pan_start_x = 0
+        self._pan_start_y = 0
+        self._view_offset_x = 0 # Current pan offset X relative to center
+        self._view_offset_y = 0 # Current pan offset Y relative to center
+        self._img_id_on_canvas = None # Store the ID of the image item on canvas
+        self._text_id_on_canvas = None # ID for the stack count text
+        # --- Load Background Image ---
+        self.bg_pil_image = None # Holds the PIL Image for the background
+        self.tk_bg_img = None    # Holds the Tkinter PhotoImage for the background
         try:
-            # Store original data if it's different or forced
-            if force_redraw or self.original_image_data is None or not np.array_equal(image_data, self.original_image_data):
-                 self.original_image_data = image_data.copy() # Store a copy
+            # IMPORTANT: Replace this with the ACTUAL path to YOUR background image file!
+            # Example: bg_image_path = "assets/background.png"
+            bg_image_path = 'icon/back.png'
 
-            # Update stack name
-            self.current_stack_name = stack_name or self.tr("Stack", default="Stack")
-
-            # Process the data for display (use the stored original data)
-            display_data = self.original_image_data.copy()
-
-            # Apply stretch if requested
-            if apply_stretch and self.stretch_tool:
-                display_data = self.stretch_tool.stretch(display_data) # Stretch returns 0-1 float
-                # Scale stretched data (0-1) to 0-255 for uint8 conversion
-                display_uint8 = (np.clip(display_data, 0, 1) * 255).astype(np.uint8)
+            if os.path.exists(bg_image_path):
+                # Load the background image using Pillow
+                self.bg_pil_image = Image.open(bg_image_path)
+                # Convert to RGBA to handle potential transparency (optional but safer)
+                # self.bg_pil_image = self.bg_pil_image.convert("RGBA")
+                print(f"DEBUG: Background image loaded: {bg_image_path} (Size: {self.bg_pil_image.size})")
+                # We will create the Tk PhotoImage later, when needed for drawing
             else:
-                 # Normalize directly to 0-255 uint8
-                 min_val, max_val = np.nanmin(display_data), np.nanmax(display_data)
-                 if max_val > min_val:
-                      display_norm = (display_data.astype(np.float32) - min_val) / (max_val - min_val)
-                      display_uint8 = (display_norm * 255.0).astype(np.uint8)
-                 elif max_val == min_val: # Handle constant image
-                      display_uint8 = np.full_like(display_data, 128, dtype=np.uint8) # Mid-gray
-                 else: # Handle all NaN or other weird cases
-                      display_uint8 = np.zeros_like(display_data, dtype=np.uint8)
+                print(f"Warning: Background image file not found at: {bg_image_path}")
+        except FileNotFoundError:
+             print(f"Error: Background image file not found at path: {bg_image_path}")
+        except Exception as e:
+            print(f"Error loading background image: {e}")
+        # --- End Background Image Loading ---
 
-            # Ensure image is in RGB uint8 format (HxWx3) for PIL
-            if display_uint8.ndim == 2:
-                 # Convert grayscale to RGB
-                 pil_img = Image.fromarray(display_uint8).convert('RGB')
-            elif display_uint8.ndim == 3 and display_uint8.shape[-1] == 3:
-                 # Assume it's already RGB
-                 pil_img = Image.fromarray(display_uint8)
-            else:
-                 print(f"Error: Cannot display image with shape {display_uint8.shape}")
-                 self.clear_preview(self.tr("Preview Error", default="Preview Error"))
-                 return
+        # Load a suitable font
+        self._load_font()
 
-            # Store this PIL image before resizing for redraws
+        # Bind events
+        self.canvas.bind("<MouseWheel>", self._zoom_on_scroll)  # Windows/macOS
+        self.canvas.bind("<Button-4>", self._zoom_on_scroll)  # Linux (scroll up)
+        self.canvas.bind("<Button-5>", self._zoom_on_scroll)  # Linux (scroll down)
+        self.canvas.bind("<ButtonPress-1>", self._start_pan)   # Left-click press
+        self.canvas.bind("<B1-Motion>", self._pan_image)       # Left-click drag
+        self.canvas.bind("<ButtonRelease-1>", self._stop_pan)    # Left-click release
+        self.canvas.bind("<Configure>", self._on_canvas_resize) # Handle resize
+
+        
+    def _load_font(self):
+        """ Tries to load a suitable small font. """
+        # Define preferred fonts
+        fonts = ['Arial', 'Helvetica', 'DejaVu Sans', 'Liberation Sans', 'sans-serif'] # Common sans-serif
+        font_size = 10 # Small size
+
+        # Select based on platform for better defaults
+        os_name = platform.system()
+        if os_name == "Windows":
+            fonts.insert(0, 'Segoe UI') # Good default on Windows
+            fonts.insert(1, 'Calibri')
+        elif os_name == "Darwin": # macOS
+            fonts.insert(0, 'Helvetica Neue')
+            fonts.insert(0, 'San Francisco') # Newer default
+        # Linux will likely pick up DejaVu or Liberation
+
+        # Try loading the font
+        self.display_font = None
+        for font_name in fonts:
+            try:
+                # Try loading with PIL first (might fail if font not in standard paths)
+                # self.display_font = ImageFont.truetype(f"{font_name}.ttf", font_size)
+                # Let's rely on Tkinter finding the font by name primarily
+                self.tk_font_tuple = (font_name, font_size)
+                # Test if Tkinter recognizes it (crude test)
+                _ = tk.font.Font(family=font_name, size=font_size)
+                print(f"Using Tkinter font: {font_name} {font_size}")
+                self.display_font = None # Indicate we should use Tkinter font tuple
+                break
+            except Exception:
+                 continue # Try next font
+
+        # Fallback if no preferred font found (use Tkinter default)
+        if not hasattr(self, 'tk_font_tuple'):
+             self.tk_font_tuple = ('TkDefaultFont', font_size)
+             print(f"Warning: Could not load preferred font. Using fallback: {self.tk_font_tuple}")
+             self.display_font = None # Ensure PIL font isn't used
+
+
+    def update_preview(self, raw_image_data, params, stack_count=None, total_images=None, current_batch=None, total_batches=None): # Add new args with defaults
+        """
+        Updates the preview with raw data, display parameters, and tracking info.
+        Zoom/pan only reset if image dimensions change.
+        """
+        # --- Store tracking info IF PROVIDED ---
+        if stack_count is not None: self.display_img_count = stack_count
+        if total_images is not None: self.display_total_imgs = total_images
+        if current_batch is not None: self.display_current_batch = current_batch
+        if total_batches is not None: self.display_total_batches = total_batches
+        # --- End Store ---
+
+        if raw_image_data is None:
+            if self.image_data_raw is not None: self.clear_preview("No Image Data")
+            return None, None
+
+        if not isinstance(raw_image_data, np.ndarray):
+            print("Error: update_preview received non-numpy array data.")
+            if self.image_data_raw is not None: self.clear_preview("Preview Error")
+            return None, None
+
+        new_shape = raw_image_data.shape
+        dimensions_changed = (self.image_data_raw_shape is None or new_shape != self.image_data_raw_shape)
+        params_changed = self.current_display_params != params
+
+        if dimensions_changed:
+            print("Preview dimensions changed, resetting zoom/pan.")
+            self.reset_zoom_and_pan()
+            self.image_data_raw_shape = new_shape
+
+        self.image_data_raw = raw_image_data # Update reference AFTER checking dimensions
+        # Always update if data/params changed OR if text needs drawing/updating
+        if not dimensions_changed and not params_changed and self.last_displayed_pil_image is not None:
+            if self._text_id_on_canvas or self.display_img_count > 0: self._redraw_canvas()
+            return self.last_displayed_pil_image, self.image_data_wb
+
+        self.current_display_params = params.copy()
+
+        try:
+            processing_data = self.image_data_raw.copy()
+            # --- Pipeline Steps (1-5) ---
+            # 1. White Balance
+            if processing_data.ndim == 3 and processing_data.shape[2] == 3: self.image_data_wb = self.color_correction.white_balance(processing_data, r=params.get('r_gain', 1.0), g=params.get('g_gain', 1.0), b=params.get('b_gain', 1.0))
+            else: self.image_data_wb = processing_data
+            data_for_histogram = self.image_data_wb.copy()
+            # 2. Stretch
+            stretch_method = params.get('stretch_method', 'Linear'); bp = params.get('black_point', 0.0); wp = params.get('white_point', 1.0)
+            data_stretched = self.image_data_wb
+            if stretch_method == "Linear": data_stretched = self.stretch_presets.linear(data_stretched, bp, wp)
+            elif stretch_method == "Asinh": asinh_scale = 10.0 / max(0.01, wp - bp) if wp > bp else 10.0; data_stretched = self.stretch_presets.asinh(data_stretched, scale=asinh_scale, bp=bp)
+            elif stretch_method == "Log": log_scale = 10.0; data_stretched = self.stretch_presets.logarithmic(data_stretched, scale=log_scale, bp=bp)
+            data_stretched = np.clip(data_stretched, 0.0, 1.0)
+            # 3. Gamma
+            gamma = params.get('gamma', 1.0); data_gamma_corrected = self.stretch_presets.gamma(data_stretched, gamma); data_gamma_corrected = np.clip(data_gamma_corrected, 0.0, 1.0)
+            # 4. Convert to PIL
+            display_uint8 = (np.nan_to_num(data_gamma_corrected) * 255).astype(np.uint8); pil_img = None
+            if display_uint8.ndim == 2: pil_img = Image.fromarray(display_uint8, mode='L')
+            elif display_uint8.ndim == 3 and display_uint8.shape[2] == 3: pil_img = Image.fromarray(display_uint8, mode='RGB')
+            else: raise ValueError(f"Cannot create PIL image from processed shape {display_uint8.shape}")
+            # 5. BCS
+            brightness = params.get('brightness', 1.0); contrast = params.get('contrast', 1.0); saturation = params.get('saturation', 1.0)
+            if abs(brightness - 1.0) > 1e-3: enhancer = ImageEnhance.Brightness(pil_img); pil_img = enhancer.enhance(brightness)
+            if abs(contrast - 1.0) > 1e-3: enhancer = ImageEnhance.Contrast(pil_img); pil_img = enhancer.enhance(contrast)
+            if pil_img.mode == 'RGB' and abs(saturation - 1.0) > 1e-3: enhancer = ImageEnhance.Color(pil_img); pil_img = enhancer.enhance(saturation)
+            # --- End Pipeline ---
+
             self.last_displayed_pil_image = pil_img
-
-            # Redraw the canvas with the processed PIL image
-            self._redraw_canvas(self.last_displayed_pil_image)
-
-            # --- Update UI Elements ---
-            # Update stack name label
-            if self.current_stack_label and self.current_stack_label.winfo_exists():
-                 self.current_stack_label.config(text=self.current_stack_name)
-
-            # Update info text area if text is provided
-            if info_text and self.image_info_text and self.image_info_text.winfo_exists():
-                try:
-                    self.image_info_text.config(state=tk.NORMAL)
-                    self.image_info_text.delete(1.0, tk.END)
-                    self.image_info_text.insert(tk.END, info_text)
-                    self.image_info_text.config(state=tk.DISABLED)
-                except tk.TclError: pass # Ignore if widget destroyed
+            self._redraw_canvas() # Call redraw which now handles text
+            return pil_img, data_for_histogram
 
         except Exception as e:
-            print(f"Error during preview update: {e}")
-            traceback.print_exc()
-            self.clear_preview(self.tr("Preview Update Error", default="Preview Update Error"))
+            print(f"Error during preview processing pipeline: {e}"); traceback.print_exc(limit=2)
+            self.clear_preview("Preview Processing Error"); return None, None
 
-    def _redraw_canvas(self, pil_image_to_draw):
-        """Redessine l'image PIL fournie sur le canvas, en tenant compte du zoom et de la taille du canvas."""
-        if not pil_image_to_draw or not hasattr(self.canvas, 'winfo_exists') or not self.canvas.winfo_exists():
-            return
+    def _redraw_canvas(self):
+        """Redessine l'image de fond (si chargée), l'image PIL astro et le texte d'info."""
+        pil_image_to_draw = self.last_displayed_pil_image # The astronomical image
 
+        if not self.canvas.winfo_exists(): return
+        # print("DEBUG: _redraw_canvas called.")
+
+        # --- Clear previous drawn items ---
+        # Clear specific items instead of "all" to preserve bindings etc.
+        self.canvas.delete("message") # Delete any messages like "No Image Data"
+        if hasattr(self, '_bg_img_id_on_canvas') and self._bg_img_id_on_canvas:
+            self.canvas.delete(self._bg_img_id_on_canvas)
+            self._bg_img_id_on_canvas = None
+        if self._img_id_on_canvas:
+            self.canvas.delete(self._img_id_on_canvas)
+            self._img_id_on_canvas = None
+        if self._text_id_on_canvas:
+            self.canvas.delete(self._text_id_on_canvas)
+            self._text_id_on_canvas = None
+        # We clear self.tk_bg_img reference here, it will be recreated if needed
+        self.tk_bg_img = None
+
+        # --- Get Canvas Size ---
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
+        if canvas_width <= 1 or canvas_height <= 1: return # Avoid drawing on tiny canvas
 
-        # Prevent division by zero if canvas is not yet sized
-        if canvas_width <= 1 or canvas_height <= 1:
-            # print("Warning: Canvas not properly sized yet for redraw.")
-            # Schedule redraw later?
-            self.canvas.after(100, lambda: self._redraw_canvas(pil_image_to_draw))
-            return
+        # --- 1. Draw Background Image (if available) ---
+        bg_drawn = False
+        if self.bg_pil_image: # Check if the background PIL image was loaded in __init__
+            try:
+                # Create the Tkinter PhotoImage for the background *now*
+                self.tk_bg_img = ImageTk.PhotoImage(self.bg_pil_image)
+                # Draw it centered
+                self._bg_img_id_on_canvas = self.canvas.create_image(
+                    canvas_width / 2,
+                    canvas_height / 2,
+                    anchor="center",
+                    image=self.tk_bg_img,
+                    tags="background" # Add a tag for potential layering
+                )
+                bg_drawn = True
+                # print("DEBUG: Background image drawn.") # Optional debug
+            except Exception as bg_draw_err:
+                print(f"Error creating/drawing background PhotoImage: {bg_draw_err}")
+                self.tk_bg_img = None # Clear reference if creation failed
+                self._bg_img_id_on_canvas = None
 
-        img_width, img_height = pil_image_to_draw.size
-        if img_width <= 0 or img_height <= 0:
-             print(f"Warning: Invalid image dimensions for redraw ({img_width}x{img_height}).")
-             return
+        # --- 2. Draw Astronomical Preview Image (if available) ---
+        if pil_image_to_draw:
+            img_width, img_height = pil_image_to_draw.size
+            if img_width > 0 and img_height > 0:
+                # --- Resize and create Tk PhotoImage for astro image ---
+                display_width = max(1, int(img_width * self.zoom_level))
+                display_height = max(1, int(img_height * self.zoom_level))
+                try:
+                    resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                    if self.zoom_level > 2.0: resample_filter = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
+                    resized_img = pil_image_to_draw.resize((display_width, display_height), resample_filter)
+                except Exception as resize_err: print(f"Error resizing preview image: {resize_err}"); return
+                try:
+                    self.tk_img = ImageTk.PhotoImage(image=resized_img) # Store main image reference
+                except Exception as photoimg_err: print(f"Error creating PhotoImage: {photoimg_err}"); self.tk_img = None; return
 
+                # --- Calculate position ---
+                display_x = canvas_width / 2 + self._view_offset_x
+                display_y = canvas_height / 2 + self._view_offset_y
 
-        # Calculate the display size based on zoom and canvas fit
-        # Fit the base image (zoom=1.0) within the canvas
-        try:
-             base_ratio = min(canvas_width / img_width, canvas_height / img_height)
-        except ZeroDivisionError:
-             print("Error: Image dimensions are zero, cannot calculate ratio.")
-             return
+                # --- Draw astro image ---
+                try:
+                    if self.tk_img:
+                        self._img_id_on_canvas = self.canvas.create_image(
+                            display_x, display_y,
+                            anchor="center",
+                            image=self.tk_img,
+                            tags="foreground" # Add a tag
+                        )
+                except tk.TclError as draw_err: print(f"Error drawing image: {draw_err}"); self._img_id_on_canvas = None
 
-        # Apply current zoom level
-        display_ratio = base_ratio * self.zoom_level
+        # --- 3. Draw Stack/Batch Info Text (if applicable) ---
+        # (This part is largely the same as before)
+        if self.display_img_count > 0:
+            try:
+                total_imgs_str = str(self.display_total_imgs) if self.display_total_imgs > 0 else "?"
+                total_batches_str = str(self.display_total_batches) if self.display_total_batches > 0 else "?"
+                text_content = f"Img: #{self.display_img_count}/{total_imgs_str}\nBatch: {self.display_current_batch}/{total_batches_str}"
+                text_x = canvas_width - 10; text_y = 10
+                font_to_use = self.tk_font_tuple if hasattr(self, 'tk_font_tuple') else ('TkDefaultFont', 10)
+                self._text_id_on_canvas = self.canvas.create_text(
+                    text_x, text_y,
+                    text=text_content,
+                    anchor="ne", fill="yellow", font=font_to_use, justify=tk.RIGHT,
+                    tags="textoverlay" # Add a tag
+                )
+            except tk.TclError as text_err:
+                print(f"Error drawing stack count text: {text_err}")
+                self._text_id_on_canvas = None
 
-        new_width = max(1, int(img_width * display_ratio))
-        new_height = max(1, int(img_height * display_ratio))
-
-        # Resize the PIL image using LANCZOS for better quality
-        try:
-             # Check Pillow version for resampling attribute
-             if hasattr(Image, 'Resampling') and hasattr(Image.Resampling, 'LANCZOS'):
-                 resample_method = Image.Resampling.LANCZOS
-             else: # Fallback for older Pillow versions
-                 resample_method = Image.LANCZOS
-             resized_img = pil_image_to_draw.resize((new_width, new_height), resample_method)
-        except Exception as resize_err:
-             print(f"Error resizing preview image: {resize_err}")
-             return # Cannot proceed if resize fails
-
-
-        # Convert PIL image to Tkinter PhotoImage
-        # Keep a reference to prevent garbage collection!
-        try:
-            self.tk_img = ImageTk.PhotoImage(image=resized_img)
-        except Exception as photoimg_err:
-            print(f"Error creating PhotoImage: {photoimg_err}")
-            return
-
-
-        # Clear previous drawings and display the new image centered
-        try:
-            self.canvas.delete("all")
-            # Place image at the center of the canvas
-            self.canvas.create_image(canvas_width / 2, canvas_height / 2, anchor="center", image=self.tk_img)
-        except tk.TclError as draw_err:
-             # Catch errors if canvas is destroyed during redraw attempt
-             print(f"Error drawing image on canvas: {draw_err}")
-
-
-    def _update_info_text_area(self):
-        """Met à jour la zone d'information (e.g., avec dimensions/zoom)."""
-        # This is better handled by update_image_info based on FITS header.
-        pass # No action needed here now
-
+        # --- 4. Ensure Correct Layering ---
+        # Lower the background, raise the foreground and text
+        if hasattr(self, '_bg_img_id_on_canvas') and self._bg_img_id_on_canvas:
+            self.canvas.tag_lower(self._bg_img_id_on_canvas)
+        if self._img_id_on_canvas:
+            self.canvas.tag_raise(self._img_id_on_canvas)
+        if self._text_id_on_canvas:
+            self.canvas.tag_raise(self._text_id_on_canvas)
 
     def clear_preview(self, message=None):
-        """Efface la prévisualisation et affiche un message optionnel."""
-        if not hasattr(self.canvas, 'winfo_exists') or not self.canvas.winfo_exists(): return
+        """
+        Efface l'image astro, le texte, et les messages, puis redessine le fond (si chargé).
+        Affiche un message optionnel par-dessus le fond.
+        """
+        if not hasattr(self.canvas, "winfo_exists") or not self.canvas.winfo_exists(): return
 
-        self.canvas.delete("all")
-        self.original_image_data = None
-        self.tk_img = None # Clear PhotoImage reference
-        self.last_displayed_pil_image = None
-        self.current_stack_name = self.tr("no_current_stack", default="No Stack") # Reset name
+        # --- Clear specific items, keep background image object ---
+        # Delete the astro image, text overlay, and any previous message text
+        if self._img_id_on_canvas: self.canvas.delete(self._img_id_on_canvas); self._img_id_on_canvas = None
+        if self._text_id_on_canvas: self.canvas.delete(self._text_id_on_canvas); self._text_id_on_canvas = None
+        self.canvas.delete("message") # Delete previous status messages
 
+        # Reset astro image data references
+        self.image_data_raw = None; self.image_data_raw_shape = None
+        self.image_data_wb = None; self.tk_img = None; self.last_displayed_pil_image = None
+        # Reset display info counts
+        self.display_img_count = 0; self.display_total_imgs = 0
+        self.display_current_batch = 0; self.display_total_batches = 0
+        # Reset zoom/pan state
+        self.reset_zoom_and_pan()
+
+        # --- Redraw the background image (if it exists) ---
+        # This reuses the logic now embedded in _redraw_canvas
+        # We call _redraw_canvas which will now only draw the background
+        # because self.last_displayed_pil_image is None.
+        self._redraw_canvas()
+
+        # --- Display the message (if provided) on top of the background ---
         if message:
-            # Display message centered on canvas
-            canvas_width = self.canvas.winfo_width()
-            canvas_height = self.canvas.winfo_height()
+            canvas_width = self.canvas.winfo_width(); canvas_height = self.canvas.winfo_height()
             if canvas_width > 1 and canvas_height > 1:
-                 try:
-                      self.canvas.create_text(
-                           canvas_width / 2, canvas_height / 2,
-                           text=message, fill="white", font=("Arial", 12), anchor="center", justify="center"
-                      )
-                 except tk.TclError as text_err:
-                       print(f"Error drawing clear message on canvas: {text_err}")
+                try:
+                    # Create the message text item
+                    msg_id = self.canvas.create_text(
+                        canvas_width / 2, canvas_height / 2,
+                        text=message, fill="gray", font=("Arial", 11),
+                        anchor="center", justify="center", tags="message"
+                    )
+                    # Ensure it's on top
+                    self.canvas.tag_raise(msg_id)
+                except tk.TclError:
+                    pass # Ignore if canvas is destroyed during message creation
 
+    def update_info_text(self, text_content): self.image_info_text_content = text_content
 
-        # Update UI labels/text areas
-        if self.current_stack_label and self.current_stack_label.winfo_exists():
-            self.current_stack_label.config(text=self.current_stack_name)
-        if self.image_info_text and self.image_info_text.winfo_exists():
-            try:
-                self.image_info_text.config(state=tk.NORMAL)
-                self.image_info_text.delete(1.0, tk.END)
-                self.image_info_text.insert(tk.END, self.tr("image_info_waiting", default="Image info: waiting..."))
-                self.image_info_text.config(state=tk.DISABLED)
-            except tk.TclError: pass
-
-
-    def refresh_preview_with_current_data(self, apply_stretch_override=None):
-        """
-        Actualise l'aperçu en utilisant les données `original_image_data` stockées.
-        Utile après un zoom, un redimensionnement, ou un changement de paramètre de stretch.
-
-        Args:
-            apply_stretch_override (bool, optional): Si spécifié, utilise cette valeur pour l'étirement,
-                                                      sinon utilise la valeur actuelle de l'interface.
-        """
-        if self.original_image_data is None:
-            # print("Refresh preview called but no original data stored.")
-            return # Nothing to refresh
-
-        # How to get the UI stretch value? Assume it's accessible via a main GUI instance passed somewhere
-        # For now, let's assume apply_stretch_override is passed correctly or handled externally
-        current_stretch_setting = apply_stretch_override if apply_stretch_override is not None else False # Default to False if no override
-
-
-        # Call update_preview with stored data and current settings
-        self.update_preview(
-            image_data=self.original_image_data, # Use the stored data
-            stack_name=self.current_stack_name, # Use the stored name
-            apply_stretch=current_stretch_setting, # Use determined stretch value
-            force_redraw=True # Force redraw as parameters might have changed
-        )
+    def _on_canvas_resize(self, event=None): # Add event=None for direct calls
+        """Redraws the image when the canvas size changes."""
+        # Redraw if we have an image, otherwise show the default message
+        if self.last_displayed_pil_image:
+            self._redraw_canvas()
+        elif self.image_data_raw is None:
+            # Use self.tr() if localization is needed here, otherwise hardcode
+            self.clear_preview("Select input/output folders.")    
+    def trigger_redraw(self): self._redraw_canvas()
 
     def _zoom_on_scroll(self, event):
-        """Gère le zoom avec la molette de la souris (multi-plateforme)."""
-        if self.original_image_data is None: return # No image to zoom
+        if self.last_displayed_pil_image is None: return
+        zoom_factor = 1.15
+        if event.num == 5 or event.delta < 0: new_zoom = self.zoom_level / zoom_factor
+        elif event.num == 4 or event.delta > 0: new_zoom = self.zoom_level * zoom_factor
+        else: return
+        new_zoom = np.clip(new_zoom, self.MIN_ZOOM, self.MAX_ZOOM)
+        if abs(new_zoom - self.zoom_level) < 1e-6: return
+        canvas_x = event.x; canvas_y = event.y
+        canvas_width = self.canvas.winfo_width(); canvas_height = self.canvas.winfo_height()
+        zoom_ratio = new_zoom / self.zoom_level
+        mouse_rel_view_center_x = canvas_x - (canvas_width / 2 + self._view_offset_x)
+        mouse_rel_view_center_y = canvas_y - (canvas_height / 2 + self._view_offset_y)
+        self._view_offset_x += mouse_rel_view_center_x * (1 - zoom_ratio)
+        self._view_offset_y += mouse_rel_view_center_y * (1 - zoom_ratio)
+        self.zoom_level = new_zoom
+        self._redraw_canvas()
 
-        # Determine zoom direction
-        zoom_factor = 1.1 # Zoom in factor
-        if event.num == 5 or event.delta < 0: # Scroll down/away
-            self.zoom_level /= zoom_factor
-        elif event.num == 4 or event.delta > 0: # Scroll up/towards
-            self.zoom_level *= zoom_factor
-        else: # Should not happen with bound events
-            return
+    def reset_zoom_and_pan(self):
+        needs_redraw = False
+        if abs(self.zoom_level - 1.0) > 1e-6: self.zoom_level = 1.0; needs_redraw = True
+        if abs(self._view_offset_x) > 1e-6 or abs(self._view_offset_y) > 1e-6: self._view_offset_x = 0.0; self._view_offset_y = 0.0; needs_redraw = True
+        if needs_redraw and self.last_displayed_pil_image: self._redraw_canvas()
 
-        # Clamp zoom level within min/max bounds
-        self.zoom_level = np.clip(self.zoom_level, self.MIN_ZOOM, self.MAX_ZOOM)
+    def _start_pan(self, event):
+        if self.last_displayed_pil_image is None: return
+        self._is_panning = True; self._pan_start_x = event.x; self._pan_start_y = event.y
+        self.canvas.config(cursor="fleur")
 
-        # Refresh the preview with the new zoom level
-        if self.last_displayed_pil_image: # Redraw directly if we have the PIL image
-            self._redraw_canvas(self.last_displayed_pil_image)
-        # else: # Fallback to full update if PIL image isn't stored (might be slow)
-        #      self.refresh_preview_with_current_data() # Need to implement access to stretch var
+    def _stop_pan(self, event):
+        if self._is_panning: self._is_panning = False; self.canvas.config(cursor="")
 
-    def reset_zoom(self):
-        """Réinitialise le niveau de zoom à 1.0."""
-        if self.original_image_data is not None and self.zoom_level != 1.0:
-            self.zoom_level = 1.0
-            # Refresh the preview
-            if self.last_displayed_pil_image:
-                self._redraw_canvas(self.last_displayed_pil_image)
-            # else: # Fallback (might be slow)
-            #      self.refresh_preview_with_current_data() # Need to implement access to stretch var
-
-    # Helper to get localized text if needed within this class
-    def tr(self, key, default=None):
-         # Placeholder: Assumes access to a localization instance if needed directly
-         # In practice, text comes from the main GUI via update_preview arguments
-         return default or key
+    def _pan_image(self, event):
+        """Déplace l'image et le texte pendant le panoramique.""" # Docstring updated
+        if not self._is_panning or self.last_displayed_pil_image is None: return
+        dx = event.x - self._pan_start_x; dy = event.y - self._pan_start_y
+        self._view_offset_x += dx; self._view_offset_y += dy
+        self._pan_start_x = event.x; self._pan_start_y = event.y
+        if self._img_id_on_canvas:
+            try:
+                 self.canvas.move(self._img_id_on_canvas, dx, dy)
+                 # --- ADD move text item ---
+                 if self._text_id_on_canvas:
+                     self.canvas.move(self._text_id_on_canvas, dx, dy)
+                 # --- END ADD ---
+            except tk.TclError: self._img_id_on_canvas = None; self._text_id_on_canvas = None; self._redraw_canvas()
+            except Exception as e: print(f"Error moving image/text during pan: {e}"); self._redraw_canvas()
+        else: self._redraw_canvas()
+# --- END OF FILE seestar/gui/preview.py ---
