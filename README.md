@@ -1,4 +1,4 @@
-# Seestar Stacker the little stacker for a lot of light :-)
+# Seestar Stacker
 **(English)** User-friendly Astronomical Image Stacker for Seestar S50
 **(Français)** Empileur d'Images Astronomiques Convivial pour Seestar S50
 
@@ -30,10 +30,6 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
 
-![image](https://github.com/user-attachments/assets/719d9fe9-db73-46cc-84b2-4ad5d4853054)
-
-
-
 **(Français)**
 
 *   **Chargement & Validation FITS :** Charge les fichiers `.fit` et `.fits`, effectue une validation de base et gère les variations courantes du format FITS (ex: ordre des canaux).
@@ -54,8 +50,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
 
-
-![image](https://github.com/user-attachments/assets/722832cc-dc1c-4779-a1ee-c2367c6bdc67)
+---
 
 ## Requirements / Prérequis
 
@@ -290,3 +285,61 @@ Ce projet est sous licence GNU General Public License v3.0. Voir le fichier [LIC
 ## Author / Auteur
 
 *   **Tinystork**
+
+## Acknowledgements / Crédits
+
+### EN English version
+
+While this project was primarily designed and developed by your humble Tinystork, it owes much to the contributions, inspiration, and tools provided by others. A heartfelt thank you goes out to:
+
+**AI Assistants**  
+Significant help with design, debugging, code generation, and complex concepts was provided by AI language models, including OpenAI's ChatGPT, Anthropic's Claude, DeepSeek, and Google's AI models. Their ability to quickly translate ideas into working code played a key role in overcoming challenges and speeding up development.
+
+**The Seestar Community**  
+Inspiration and motivation for this project came from discussions and shared enthusiasm within the Seestar user community. Thank you for your feedback, your shared experiences, and for showing that a tool like this was truly needed.
+
+**Open Source Libraries & Their Developers**  
+This software stands on the shoulders of giants — the developers of amazing open-source libraries. Special thanks to the teams behind:
+
+- **NumPy** – Core numerical operations.  
+- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Image processing tasks: debayering, denoising, transformations, and more.  
+- **Astropy** – FITS file handling and astronomy utilities.  
+- **Astroalign** – The alignment engine at the heart of the stacker.  
+- **Matplotlib** – For histogram visualization.  
+- **Pillow** (PIL fork) – For loading, saving, and previewing images.  
+- **Scikit-image** – Dependencies for alignment and other image analysis.  
+- **Tqdm** – Smooth progress bars for terminal and logs.  
+- **Psutil** *(optional)* – System monitoring for auto batch size tuning.  
+- **CuPy** *(optional)* – Optional GPU acceleration for stacking.  
+- **Python & Tkinter** – The foundation of the language and GUI.
+
+Thank you to everyone whose work, directly or indirectly, made ZeSeestarStacker possible!
+
+---
+
+### 🇫🇷 Version française
+
+Bien que ce projet ait été principalement conçu et développé par votre humble Tinystork, il doit énormément aux contributions, à l’inspiration et aux outils offerts par d’autres. Un grand merci à :
+
+**Assistants IA**  
+Une aide précieuse a été apportée pour la conception, le débogage, la génération de code et la compréhension de concepts complexes, grâce à des modèles de langage comme ChatGPT d’OpenAI, Claude d’Anthropic, DeepSeek, et les IA de Google. Leur capacité à transformer rapidement des idées en code fonctionnel a été déterminante dans les moments clés du développement.
+
+**La communauté Seestar**  
+Ce projet tire son inspiration et sa motivation des échanges passionnés au sein de la communauté des utilisateurs du Seestar. Merci pour vos retours, vos expériences partagées, et pour avoir souligné le besoin d’un outil comme celui-ci.
+
+**Les bibliothèques open source & leurs développeurs**  
+Ce logiciel repose sur les épaules de géants : les développeurs de bibliothèques open source exceptionnelles. Merci tout particulier aux équipes derrière :
+
+- **NumPy** – Pour les opérations numériques de base.  
+- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Pour le traitement d’image : débayerisation, débruitage, transformations, etc.  
+- **Astropy** – Pour la gestion des fichiers FITS et les utilitaires astronomiques.  
+- **Astroalign** – Pour l’algorithme d’alignement au cœur du stacker.  
+- **Matplotlib** – Pour l’affichage des histogrammes.  
+- **Pillow** (fork de PIL) – Pour le chargement, la sauvegarde et l’aperçu des images.  
+- **Scikit-image** – En tant que dépendance pour l’alignement et d’autres traitements.  
+- **Tqdm** – Pour les barres de progression en terminal/logs.  
+- **Psutil** *(optionnel)* – Pour la surveillance système et l’estimation automatique de la taille des lots.  
+- **CuPy** *(optionnel)* – Pour l’accélération GPU facultative.  
+- **Python & Tkinter** – Pour le langage et l’interface graphique.
+
+Merci à toutes celles et ceux dont le travail, direct ou indirect, a rendu ZeSeestarStacker possible !
