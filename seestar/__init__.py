@@ -1,3 +1,4 @@
+# --- START OF FILE seestar/__init__.py ---
 """
 Seestar: Un outil d'empilement et de traitement d'images astronomiques.
 
@@ -5,10 +6,10 @@ Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
 """
 
-__version__ = "1.1.0" # Incremented version - Simplified
+__version__ = "1.2.0" # Version incrémentée - Intégration Preview avancée
 __author__ = "Seestar Team"
 
-# Core functionalities
+# Core functionalities (unchanged from your original structure)
 from seestar.core import (
     SeestarAligner,
     load_and_validate_fits,
@@ -17,14 +18,17 @@ from seestar.core import (
     save_fits_image,
     save_preview_image,
     estimate_batch_size,
-    apply_denoise
+    apply_denoise # Keep apply_denoise function available even if GUI option removed
 )
 
-# Tools
+# Tools (updated imports based on the new stretch.py)
 from seestar.tools import (
-    Stretch,
-    apply_stretch,
-    save_fits_as_png
+    StretchPresets, # Changed from Stretch class
+    ColorCorrection, # Added
+    apply_auto_stretch, # Added helper
+    apply_auto_white_balance, # Added helper
+    apply_enhanced_stretch, # Kept this name, assuming it's useful elsewhere
+    save_fits_as_png # Kept
 )
 
 # GUI (expose the main class)
@@ -41,8 +45,11 @@ __all__ = [
     'estimate_batch_size',
     'apply_denoise',
     # Tools
-    'Stretch',
-    'apply_stretch',
+    'StretchPresets',
+    'ColorCorrection',
+    'apply_auto_stretch',
+    'apply_auto_white_balance',
+    'apply_enhanced_stretch',
     'save_fits_as_png',
     # GUI
     'SeestarStackerGUI',
@@ -50,3 +57,4 @@ __all__ = [
     '__version__',
     '__author__'
 ]
+# --- END OF FILE seestar/__init__.py ---

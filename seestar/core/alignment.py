@@ -1,5 +1,7 @@
+# --- START OF FILE seestar/core/alignment.py ---
 """
 Module pour l'alignement des images astronomiques.
+Utilise astroalign pour l'enregistrement des images.
 """
 import os
 import numpy as np
@@ -11,11 +13,16 @@ import warnings
 import gc
 import time
 import shutil
+import concurrent.futures
+from functools import partial
+import traceback # Added for traceback printing
+
 
 from .image_processing import (
-    load_and_validate_fits,
-    debayer_image,
-    save_fits_image
+    load_and_validate_fits, # Returns float32 0-1 or None
+    debayer_image,          # Expects float32 0-1, returns float32 0-1
+    save_fits_image,        # Expects float32 0-1, saves uint16
+    save_preview_image      # For saving reference preview
 )
 from .hot_pixels import detect_and_correct_hot_pixels
 from .utils import estimate_batch_size
@@ -25,426 +32,327 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 class SeestarAligner:
     """
     Classe pour l'alignement des images astronomiques de Seestar.
+    Trouve une image de référence et aligne les autres images sur celle-ci.
     """
+    NUM_IMAGES_FOR_AUTO_REF = 50 # Number of initial images to check for reference
+
     def __init__(self):
         """Initialise l'aligneur avec des valeurs par défaut."""
         self.bayer_pattern = "GRBG"
-        self.batch_size = 0  # 0 signifie auto-détection basée sur la mémoire disponible
+        self.batch_size = 0
         self.reference_image_path = None
         self.correct_hot_pixels = True
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
         self.stop_processing = False
         self.progress_callback = None
-    
+
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
         self.progress_callback = callback
-    
+
     def update_progress(self, message, progress=None):
         """Met à jour la progression en utilisant le callback si disponible."""
+        # Ensure message is a string
+        message = str(message)
         if self.progress_callback:
-            self.progress_callback(message, progress)
+            try:
+                self.progress_callback(message, progress)
+            except Exception as cb_err:
+                print(f"Error in aligner progress callback: {cb_err}")
         else:
-            print(message)
-    
+            # Basic print fallback if no callback set
+            if progress is not None:
+                print(f"[{int(progress)}%] {message}")
+            else:
+                print(message)
+
     def align_images(self, input_folder, output_folder=None, specific_files=None):
         """
-        Aligne les images FITS dans le dossier d'entrée.
-        
-        Args:
-            input_folder (str): Chemin vers le dossier contenant les images FITS
-            output_folder (str): Dossier de sortie (si None, crée un sous-dossier 'aligned_lights')
-            specific_files (list, optional): Liste de noms de fichiers spécifiques à traiter
-                
-        Returns:
-            str: Chemin vers le dossier contenant les images alignées
+        (Primarily used by QueueManager to get reference image info now)
+        Finds reference image. Standalone alignment loop is commented out.
         """
         self.stop_processing = False
-        
-        # Définir le dossier de sortie si non spécifié
-        if output_folder is None:
-            output_folder = os.path.join(input_folder, "aligned_lights")
-        
-        # Créer les dossiers nécessaires
-        os.makedirs(output_folder, exist_ok=True)
-        unaligned_folder = os.path.join(output_folder, "unaligned")
-        os.makedirs(unaligned_folder, exist_ok=True)
-        
-        # Vérifier la taille des lots
+        if output_folder is None: output_folder = os.path.join(input_folder, "aligned_lights")
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+            unaligned_folder = os.path.join(output_folder, "unaligned") # Still create for consistency
+            os.makedirs(unaligned_folder, exist_ok=True)
+        except OSError as e:
+            self.update_progress(f"❌ Erreur création dossier sortie/unaligned: {e}")
+            return None # Critical error
+        try:
+            if specific_files: files = [f for f in specific_files if f.lower().endswith(('.fit', '.fits'))]
+            else: files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
+            files.sort()
+        except FileNotFoundError: self.update_progress(f"❌ Dossier d'entrée non trouvé: {input_folder}"); return None
+        except Exception as e: self.update_progress(f"❌ Erreur lecture dossier entrée: {e}"); return None
+        if not files: self.update_progress("❌ Aucun fichier .fit/.fits trouvé à traiter."); return output_folder
+
+        # Estimate batch size (still useful for other parts or general info)
         if self.batch_size <= 0:
-            sample_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
-            if sample_files:
-                sample_path = os.path.join(input_folder, sample_files[0])
-                self.batch_size = estimate_batch_size(sample_path)
-                self.update_progress(f"🧠 Taille de lot dynamique estimée : {self.batch_size}")
-            else:
-                self.batch_size = 10  # Valeur par défaut
-        
-        # Récupérer la liste des fichiers FITS
-        if specific_files:
-            # Utiliser la liste de fichiers spécifiques si fournie
-            files = specific_files
-        else:
-            # Sinon, récupérer tous les fichiers FITS du dossier
-            files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
-        
-        if not files:
-            self.update_progress("❌ Aucun fichier .fit/.fits trouvé")
-            return output_folder
-        
-        self.update_progress(f"🔍 Analyse de {len(files)} images...")
-        
-        # Obtenir l'image de référence
+            if files: # Check if files list is not empty
+                 sample_path = os.path.join(input_folder, files[0])
+                 try:
+                     self.batch_size = estimate_batch_size(sample_path)
+                     self.update_progress(f"🧠 Taille de lot dynamique estimée : {self.batch_size}")
+                 except Exception as est_err:
+                     self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation valeur défaut 10.")
+                     self.batch_size = 10
+            else: # No files, use default batch size
+                 self.batch_size = 10
+
+        self.update_progress("⭐ Recherche/Préparation image de référence...")
         fixed_reference_image, fixed_reference_header = self._get_reference_image(input_folder, files)
+
         if fixed_reference_image is None:
-            self.update_progress("❌ Impossible de trouver une image de référence valide.")
-            return output_folder
-        
-        # Sauvegarder l'image de référence
-        self._save_reference_image(fixed_reference_image, fixed_reference_header, output_folder)
-        
-        # Traiter les images par lots
-        total_files = len(files)
-        processed_count = 0
-        start_time = time.time()
-        
-        for batch_start in range(0, total_files, self.batch_size):
-            if self.stop_processing:
-                self.update_progress("⛔ Traitement arrêté par l'utilisateur.")
-                break
-            
-            batch_end = min(batch_start + self.batch_size, total_files)
-            batch_files = files[batch_start:batch_end]
-            
-            batch_progress = batch_start * 100 / total_files
-            self.update_progress(
-                f"🚀 Traitement du lot {batch_start//self.batch_size + 1}/{(total_files-1)//self.batch_size + 1} "
-                f"(images {batch_start+1} à {batch_end})...", 
-                batch_progress
-            )
-            
-            # Charger et traiter les images du lot
-            images = []
-            headers = []
-            valid_files = []
-            
-            for i, file in enumerate(batch_files):
-                if self.stop_processing:
-                    break
-                
-                try:
-                    file_path = os.path.join(input_folder, file)
-                    img = load_and_validate_fits(file_path)
-                    
-                    # Vérifier la qualité de l'image
-                    if np.std(img) > 5:
-                        # Convertir en couleur si nécessaire
-                        if img.ndim == 2:
-                            img = debayer_image(img, self.bayer_pattern)
-                        elif img.ndim == 3 and img.shape[0] == 3:
-                            # Pour les images 3D avec la première dimension comme canal
-                            img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
-                        
-                        # Appliquer la correction des pixels chauds si demandé
-                        if self.correct_hot_pixels:
-                            img = detect_and_correct_hot_pixels(
-                                img, 
-                                threshold=self.hot_pixel_threshold,
-                                neighborhood_size=self.neighborhood_size
-                            )
-                        
-                        img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
-                        
-                        images.append(img)
-                        headers.append(fits.getheader(file_path))
-                        valid_files.append(file)
-                        
-                        # Mise à jour de la progression
-                        processed_count += 1
-                        percent_done = (batch_start + i + 1) * 100 / total_files
-                        elapsed_time = time.time() - start_time
-                        
-                        if processed_count > 0:
-                            time_per_image = elapsed_time / processed_count
-                            remaining_images = total_files - (batch_start + i + 1)
-                            estimated_time_remaining = remaining_images * time_per_image
-                            hours, remainder = divmod(int(estimated_time_remaining), 3600)
-                            minutes, seconds = divmod(remainder, 60)
-                            time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-                            
-                            self.update_progress(
-                                f"📊 Traitement de {file}... ({processed_count}/{total_files}) "
-                                f"Temps restant estimé: {time_str}", 
-                                percent_done
-                            )
-                        else:
-                            self.update_progress(
-                                f"📊 Traitement de {file}... ({processed_count}/{total_files})",
-                                percent_done
-                            )
-                    else:
-                        self.update_progress(f"⚠️ Image ignorée (faible variance): {file}")
-                except Exception as e:
-                    self.update_progress(f"⚠️ Erreur lors du traitement de {file}: {e}")
-            
-            # Alignement des images du lot
-            if len(images) < 1:
-                self.update_progress(f"❌ Aucune image valide dans le lot {batch_start//self.batch_size + 1}.")
-                continue
-            
-            self._align_batch(images, headers, valid_files, fixed_reference_image, 
-                            input_folder, output_folder, unaligned_folder, batch_start)
-            
-            # Libérer la mémoire
-            del images
-            del headers
-            gc.collect()
-        
-        self.update_progress(f"✅ Toutes les images alignées ont été sauvegardées dans: {output_folder}")
+            # Error message now generated within _get_reference_image or QueueManager
+            # self.update_progress("❌ Impossible d'obtenir une image de référence valide. Arrêt.")
+            return None # Signal failure
+
+        self.update_progress(f"✅ Recherche référence terminée.")
         return output_folder
-        
+
+
     def _get_reference_image(self, input_folder, files):
         """
-        Obtient l'image de référence pour l'alignement.
-        
-        Args:
-            input_folder (str): Dossier contenant les images
-            files (list): Liste des fichiers FITS
-            
-        Returns:
-            tuple: (reference_image, reference_header) ou (None, None) si échec
+        Obtient l'image de référence (float32, 0-1) et son en-tête.
+        Analyse un nombre fixe d'images initiales pour la sélection auto.
         """
-        fixed_reference_image = None
-        fixed_reference_header = None
-        
-        # Tenter de charger l'image de référence manuelle si fournie
-        if self.reference_image_path:
+        reference_image = None
+        reference_header = None
+        processed_candidates = 0
+        rejected_candidates = 0
+        rejection_reasons = {'load': 0, 'variance': 0, 'preprocess': 0, 'metric': 0}
+
+        # --- Try Manual Reference Path ---
+        if self.reference_image_path and os.path.isfile(self.reference_image_path):
+            manual_ref_basename = os.path.basename(self.reference_image_path)
             try:
-                self.update_progress(f"📌 Chargement de l'image de référence manuelle : {self.reference_image_path}")
-                fixed_reference_image = load_and_validate_fits(self.reference_image_path)
-                fixed_reference_header = fits.getheader(self.reference_image_path)
-                
-                # Appliquer debayer sur l'image de référence si c'est une image brute
-                if fixed_reference_image.ndim == 2:
-                    fixed_reference_image = debayer_image(fixed_reference_image, self.bayer_pattern)
-                elif fixed_reference_image.ndim == 3 and fixed_reference_image.shape[0] == 3:
-                    # Pour les images 3D avec la première dimension comme canal
-                    fixed_reference_image = np.moveaxis(fixed_reference_image, 0, -1)  # Convert to HxWx3
-                
-                # Appliquer la correction des pixels chauds si demandé
+                self.update_progress(f"📌 Chargement référence manuelle: {manual_ref_basename}")
+                ref_img_loaded = load_and_validate_fits(self.reference_image_path)
+                if ref_img_loaded is None: raise ValueError(f"Échec chargement/validation: {manual_ref_basename}")
+
+                ref_hdr_loaded = fits.getheader(self.reference_image_path)
+                prepared_ref = ref_img_loaded
+                if prepared_ref.ndim == 2:
+                    bayer_pat_ref = ref_hdr_loaded.get('BAYERPAT', self.bayer_pattern)
+                    if isinstance(bayer_pat_ref, str) and bayer_pat_ref.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                        try: prepared_ref = debayer_image(prepared_ref, bayer_pat_ref.upper())
+                        except ValueError as deb_err: self.update_progress(f"⚠️ Réf Manuelle: Erreur Debayer {deb_err}. Utilisation N&B.")
                 if self.correct_hot_pixels:
-                    self.update_progress("🔥 Application de la correction des pixels chauds sur l'image de référence...")
-                    fixed_reference_image = detect_and_correct_hot_pixels(
-                        fixed_reference_image, 
-                        threshold=self.hot_pixel_threshold,
-                        neighborhood_size=self.neighborhood_size
-                    )
-                    
-                fixed_reference_image = cv2.normalize(fixed_reference_image, None, 0, 65535, cv2.NORM_MINMAX)
-                self.update_progress(f"✅ Image de référence chargée: dimensions: {fixed_reference_image.shape}")
+                    try:
+                        self.update_progress("🔥 Correction px chauds sur référence manuelle...")
+                        prepared_ref = detect_and_correct_hot_pixels(prepared_ref, self.hot_pixel_threshold, self.neighborhood_size)
+                    except Exception as hp_err: self.update_progress(f"⚠️ Réf Manuelle: Erreur correction px chauds: {hp_err}")
+
+                reference_image = prepared_ref.astype(np.float32)
+                reference_header = ref_hdr_loaded
+                self.update_progress(f"✅ Référence manuelle chargée: dims {reference_image.shape}")
+
             except Exception as e:
-                self.update_progress(f"❌ Erreur lors du chargement de l'image de référence manuelle: {e}")
-                fixed_reference_image = None
-        
-        # Sélection automatique de la meilleure image de référence si aucune n'est spécifiée
-        if fixed_reference_image is None:
-            self.update_progress("⚙️ Recherche de la meilleure image de référence...")
-            sample_images = []
-            sample_headers = []
-            sample_files = []
-            
-            # Analyser un sous-ensemble d'images pour trouver la meilleure référence
-            for f in tqdm(files[:min(self.batch_size*2, len(files))], desc="Analyse des images"):
-                try:
-                    img_path = os.path.join(input_folder, f)
-                    img = load_and_validate_fits(img_path)
-                    hdr = fits.getheader(img_path)
-                    
-                    # S'assurer que l'image a une variance suffisante
-                    if np.std(img) > 3:
-                        # Convertir en couleur si nécessaire
-                        if img.ndim == 2:
-                            img = debayer_image(img, self.bayer_pattern)
-                        elif img.ndim == 3 and img.shape[0] == 3:
-                            # Pour les images 3D avec la première dimension comme canal
-                            img = np.moveaxis(img, 0, -1)  # Convert to HxWx3
-                        
-                        # Appliquer la correction des pixels chauds si demandé
+                self.update_progress(f"❌ Erreur chargement/préparation référence manuelle ({manual_ref_basename}): {e}. Tentative sélection auto...")
+                reference_image = None # Force auto-selection
+
+        # --- Auto-Select Reference if needed ---
+        if reference_image is None:
+            self.update_progress("⚙️ Sélection auto de la meilleure image de référence...")
+            if not files:
+                 self.update_progress("❌ Impossible sélectionner référence: aucun fichier d'entrée fourni.")
+                 return None, None # Cannot find reference if no files exist
+
+            best_image_data = None; best_header_data = None; best_file_name = None
+            max_metric = -np.inf # Start with negative infinity
+
+            num_to_analyze = min(self.NUM_IMAGES_FOR_AUTO_REF, len(files))
+            self.update_progress(f"🔍 Analyse des {num_to_analyze} premières images pour référence...")
+
+            iterable = files[:num_to_analyze]
+            disable_tqdm = self.progress_callback is not None
+            with tqdm(total=num_to_analyze, desc="Analyse réf.", disable=disable_tqdm, leave=False) as pbar:
+                for i, f in enumerate(iterable):
+                    if self.stop_processing: return None, None
+                    file_path = os.path.join(input_folder, f)
+                    processed_candidates += 1
+                    rejection_reason = None # Track why this specific file was rejected
+
+                    try:
+                        # --- Load Candidate ---
+                        img = load_and_validate_fits(file_path)
+                        if img is None: rejection_reason = "load"; raise ValueError("Load fail")
+
+                        hdr = fits.getheader(file_path)
+
+                        # --- Basic Quality Check ---
+                        std_dev = np.std(img)
+                        if std_dev < 0.005: rejection_reason = "variance"; raise ValueError(f"Low variance ({std_dev:.4f})")
+
+                        # --- Preprocess Candidate ---
+                        prepared_img = img
+                        if prepared_img.ndim == 2:
+                             bayer_pat_s = hdr.get('BAYERPAT', self.bayer_pattern)
+                             if isinstance(bayer_pat_s, str) and bayer_pat_s.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                                  try: prepared_img = debayer_image(prepared_img, bayer_pat_s.upper())
+                                  except ValueError as de: print(f"Debug RefScan: Err Debayer {f}: {de}"); # Keep grayscale
                         if self.correct_hot_pixels:
-                            img = detect_and_correct_hot_pixels(
-                                img, 
-                                threshold=self.hot_pixel_threshold,
-                                neighborhood_size=self.neighborhood_size
-                            )
-                        
-                        img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
-                        
-                        sample_images.append(img)
-                        sample_headers.append(hdr)
-                        sample_files.append(f)
-                    else:
-                        self.update_progress(f"⚠️ Image ignorée (faible variance): {f}")
-                except Exception as e:
-                    self.update_progress(f"❌ Erreur lors de l'analyse de {f}: {e}")
-            
-            if sample_images:
-                # Sélectionner l'image avec le meilleur contraste (médiane la plus élevée)
-                medians = [np.median(img) for img in sample_images]
-                ref_idx = np.argmax(medians)
-                fixed_reference_image = sample_images[ref_idx]
-                fixed_reference_header = sample_headers[ref_idx]
-                self.update_progress(f"⭐ Référence utilisée: {sample_files[ref_idx]}")
-        
-        return fixed_reference_image, fixed_reference_header
-    
-    def _save_reference_image(self, reference_image, reference_header, output_folder):
+                             try: prepared_img = detect_and_correct_hot_pixels(prepared_img, self.hot_pixel_threshold, self.neighborhood_size)
+                             except Exception as hpe: print(f"Debug RefScan: Err HPX {f}: {hpe}"); # Continue without correction
+
+                        # Ensure float32 for metric calculation
+                        prepared_img = prepared_img.astype(np.float32)
+
+                        # --- Calculate Metric ---
+                        median_val = np.median(prepared_img)
+                        mad_val = np.median(np.abs(prepared_img - median_val))
+                        approx_std = mad_val * 1.4826
+                        metric = median_val / (approx_std + 1e-6) if median_val > 0 else -np.inf
+                        if not np.isfinite(metric): rejection_reason = "metric"; raise ValueError("Metric non-finite")
+
+
+                        # --- Compare and Store Best ---
+                        if metric > max_metric:
+                            # print(f"Debug RefScan: New best {f}, Metric={metric:.2f} (Prev Max={max_metric:.2f})") # Debug
+                            max_metric = metric
+                            best_image_data = prepared_img # Store preprocessed version
+                            best_header_data = hdr
+                            best_file_name = f
+                        # else: print(f"Debug RefScan: Skip {f}, Metric={metric:.2f} (Best={max_metric:.2f})") # Debug
+
+                    except Exception as e:
+                        # Catch errors during processing of a single candidate
+                        self.update_progress(f"⚠️ Erreur analyse réf {f}: {e}")
+                        rejected_candidates += 1
+                        if rejection_reason: rejection_reasons[rejection_reason] += 1
+                        else: rejection_reasons['preprocess'] += 1 # Count other errors as preprocess errors
+                    finally:
+                        pbar.update(1) # Update tqdm progress bar
+
+            # --- Final Check after loop ---
+            if best_image_data is not None:
+                reference_image = best_image_data
+                reference_header = best_header_data
+                self.update_progress(f"⭐ Référence auto sélectionnée: {best_file_name} (Metric: {max_metric:.2f})")
+                # Report rejection stats if any were rejected
+                if rejected_candidates > 0:
+                     reason_str = ", ".join(f"{k}:{v}" for k,v in rejection_reasons.items() if v > 0)
+                     self.update_progress(f"   (Info: {processed_candidates} analysés, {rejected_candidates} rejetés [{reason_str}])")
+            else:
+                # Report failure and reasons
+                reason_str = ", ".join(f"{k}:{v}" for k,v in rejection_reasons.items() if v > 0)
+                self.update_progress(f"❌ Aucune référence valide trouvée après analyse de {processed_candidates} images. Raisons rejet: [{reason_str}]")
+                return None, None # Explicitly return None to signal failure
+
+        return reference_image, reference_header
+
+
+    # --- _save_reference_image (Unchanged) ---
+    def _save_reference_image(self, reference_image, reference_header, base_output_folder):
         """
-        Sauvegarde l'image de référence dans le dossier de sortie.
-        
-        Args:
-            reference_image (numpy.ndarray): Image de référence
-            reference_header (astropy.io.fits.Header): En-tête de l'image de référence
-            output_folder (str): Dossier de sortie
+        Sauvegarde l'image de référence (float32 0-1) au format FITS (uint16)
+        dans le dossier temporaire DEDANS base_output_folder.
         """
+        if reference_image is None: return
+        temp_folder_ref = os.path.join(base_output_folder, "temp_processing")
         try:
-            ref_output_path = os.path.join(output_folder, "reference_image.fit")
-            ref_data = np.moveaxis(reference_image, -1, 0).astype(np.uint16)  # HxWx3 to 3xHxW
-            
-            new_header = reference_header.copy()
-            new_header['NAXIS'] = 3
-            new_header['NAXIS1'] = reference_image.shape[1]
-            new_header['NAXIS2'] = reference_image.shape[0]
-            new_header['NAXIS3'] = 3
-            new_header['BITPIX'] = 16
-            new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
-            new_header.set('REFRENCE', True, 'stacking reference')
-            
-            fits.writeto(ref_output_path, ref_data, new_header, overwrite=True)
-            self.update_progress(f"📁 Image de référence sauvegardée: {ref_output_path}")
+            os.makedirs(temp_folder_ref, exist_ok=True)
+            ref_output_path = os.path.join(temp_folder_ref, "reference_image.fit")
+            ref_preview_path = os.path.join(temp_folder_ref, "reference_image.png")
+            save_header = reference_header.copy() if reference_header else fits.Header()
+            save_header.set('REFRENCE', True, 'Stacking reference image')
+            if self.correct_hot_pixels: save_header.set('HOTPIXCR', True, 'Hot pixel correction applied to ref')
+            save_header.add_history("Reference image saved by SeestarAligner")
+            save_fits_image(reference_image, ref_output_path, save_header, overwrite=True)
+            self.update_progress(f"📁 Image référence sauvegardée: {ref_output_path}")
+            save_preview_image(reference_image, ref_preview_path, apply_stretch=True)
         except Exception as e:
             self.update_progress(f"⚠️ Erreur lors de la sauvegarde de l'image de référence: {e}")
-    
-    def _align_batch(self, images, headers, filenames, reference_image,
-                     input_folder, output_folder, unaligned_folder, batch_start):
-        import concurrent.futures
-        import os
-        from functools import partial
+            traceback.print_exc(limit=2)
 
-        # Déterminer le nombre optimal de threads
-        num_cores = os.cpu_count()
-        max_workers = min(max(num_cores // 2, 1), 8)  # Utiliser la moitié des cœurs, mais au moins 1 et au plus 8
-        self.update_progress(f"🧵 Démarrage de l'alignement parallèle avec {max_workers} threads...")
+    # --- _align_image (Unchanged) ---
+    def _align_image(self, img_to_align, reference_image, file_name):
+        """Aligns a single image (float32 0-1) to the reference (float32 0-1)."""
+        if reference_image is None: self.update_progress(f"❌ Alignement impossible {file_name}: Référence non disponible."); return img_to_align, False
+        img_to_align = img_to_align.astype(np.float32); reference_image = reference_image.astype(np.float32)
+        try:
+            img_for_detection = img_to_align[:, :, 1] if img_to_align.ndim == 3 else img_to_align
+            ref_for_detection = reference_image[:, :, 1] if reference_image.ndim == 3 else reference_image
+            if img_for_detection.shape != ref_for_detection.shape: self.update_progress(f"❌ Alignement {file_name}: Dimensions incompatibles Réf={ref_for_detection.shape}, Img={img_for_detection.shape}"); return img_to_align, False
+            aligned_img, _ = aa.register(source=img_to_align, target=reference_image, max_control_points=50, detection_sigma=5, min_area=5)
+            if aligned_img is None: raise aa.MaxIterError("Alignement échoué (pas de transformation trouvée)")
+            aligned_img = np.clip(aligned_img.astype(np.float32), 0.0, 1.0); return aligned_img, True
+        except aa.MaxIterError as ae: self.update_progress(f"⚠️ Alignement échoué {file_name}: {ae}"); return img_to_align, False
+        except ValueError as ve: self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}"); return img_to_align, False
+        except Exception as e: self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}"); traceback.print_exc(limit=3); return img_to_align, False
 
-        # Fonction pour aligner une seule image (à exécuter dans un thread)
-        def align_single_image(args):
-            i, img, hdr, fname = args
+# --- _align_batch (Unchanged - returns results, doesn't save aligned files here) ---
+    def _align_batch(self, images_data, original_indices, reference_image, input_folder, output_folder, unaligned_folder):
+        """Aligns a batch of images (data provided) in parallel."""
+        num_cores = os.cpu_count() or 1
+        max_workers = min(max(num_cores // 2, 1), 8)
+        self.update_progress(f"🧵 Alignement parallèle lot avec {max_workers} threads...")
+
+        def align_single_image_task(args):
+            idx_in_batch, (img_float_01, hdr, fname), original_file_index = args
             if self.stop_processing:
                 return None
-
             try:
-                # Alignement canal par canal pour les images couleur
-                if img.ndim == 3:
-                    aligned_channels = []
-                    for c in range(3):
-                        # Normalisation pour l'alignement
-                        img_norm = cv2.normalize(img[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-                        ref_norm = cv2.normalize(reference_image[:, :, c], None, 0, 1, cv2.NORM_MINMAX)
-
-                        aligned_channel, _ = aa.register(img_norm, ref_norm)
-                        aligned_channels.append(aligned_channel)
-
-                    # Recombiner les canaux
-                    aligned_img = np.stack(aligned_channels, axis=-1)
-                    aligned_img = cv2.normalize(aligned_img, None, 0, 65535, cv2.NORM_MINMAX)
-                else:
-                    # Cas d'une image en niveaux de gris
-                    aligned_img, _ = aa.register(img, reference_image)
-                    aligned_img = np.stack((aligned_img,) * 3, axis=-1)
-
-                # Conversion au format FITS pour l'enregistrement (HxWx3 -> 3xHxW)
-                color_cube = np.moveaxis(aligned_img, -1, 0).astype(np.uint16)
-
-                # Mettre à jour l'en-tête
-                new_header = hdr.copy()
-                new_header['NAXIS'] = 3
-                new_header['NAXIS1'] = aligned_img.shape[1]
-                new_header['NAXIS2'] = aligned_img.shape[0]
-                new_header['NAXIS3'] = 3
-                new_header['BITPIX'] = 16
-                new_header.set('CTYPE3', 'RGB', 'Couleurs RGB')
-                new_header.set('ALIGNED', True, 'Image Aligned on ref')
-
-                if self.correct_hot_pixels:
-                    new_header.set('HOTPIXEL', True, 'Hot pixels correction applied')
-                    new_header.set('HOTPXTH', self.hot_pixel_threshold, 'Hot pixels detection threshold')
-                    new_header.set('HOTPXNB', self.neighborhood_size, 'Hot pixels neighborhood size')
-
-                # Enregistrement de l'image alignée
-                out_path = os.path.join(output_folder, f"aligned_{batch_start + i:04}.fit")
-                fits.writeto(out_path, color_cube, new_header, overwrite=True)
-
-                return (i, True, None)  # Succès
+                aligned_img, success = self._align_image(img_float_01, reference_image, fname)
+                if not success:
+                    original_path = os.path.join(input_folder, fname)
+                    out_path = os.path.join(unaligned_folder, f"unaligned_{original_file_index:04d}_{fname}")
+                    if os.path.exists(original_path):
+                        shutil.copy2(original_path, out_path)
+                    return (original_file_index, False, f"Échec alignement: {fname}")
+                return (original_file_index, True, aligned_img, hdr)  # index, success, data, header
             except Exception as e:
-                # Gérer l'erreur, enregistrer l'image non alignée
+                error_msg = f"Erreur tâche alignement {fname}: {e}"
+                self.update_progress(f"❌ {error_msg}")
                 try:
                     original_path = os.path.join(input_folder, fname)
-                    out_path = os.path.join(unaligned_folder, f"unaligned_{fname}")
-                    shutil.copy2(original_path, out_path)
-                    return (i, False, str(e))  # Échec avec erreur
-                except Exception as copy_err:
-                    return (i, False, f"Erreur double: {str(e)} et {str(copy_err)}")  # Échec avec erreur double
+                    out_path = os.path.join(unaligned_folder, f"error_{original_file_index:04d}_{fname}")
+                    if os.path.exists(original_path):
+                        shutil.copy2(original_path, out_path)
+                except Exception:
+                    pass
+                return (original_file_index, False, None, None)  # index, success, data, header
 
-        # Créer les arguments pour chaque image à traiter
-        image_args = [(i, img, hdr, fname) for i, (img, hdr, fname) in enumerate(zip(images, headers, filenames))]
-
-        # Utiliser ThreadPoolExecutor pour paralléliser le traitement
+        task_args = [(i, data_tuple, original_indices[i]) for i, data_tuple in enumerate(images_data)]
+        results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Soumettre toutes les tâches et collecter les futurs
-            futures = [executor.submit(align_single_image, args) for args in image_args]
-
-            # Traiter les résultats au fur et à mesure qu'ils sont disponibles
+            futures = {executor.submit(align_single_image_task, args): args for args in task_args}
             for future in concurrent.futures.as_completed(futures):
                 if self.stop_processing:
-                    executor.shutdown(wait=False)
-                    self.update_progress("⛔ Alignement arrêté par l'utilisateur.")
+                    for f in futures:
+                        f.cancel()
+                    self.update_progress("⛔ Alignement lot interrompu.")
                     break
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except concurrent.futures.CancelledError:
+                    pass
+                except Exception as future_err:
+                    orig_fname = futures[future][1][2]
+                    self.update_progress(f"❗️ Erreur récupération résultat pour {orig_fname}: {future_err}")
+                    results.append((futures[future][2], False, None, None))
 
-                result = future.result()
-                if result:
-                    i, success, error_msg = result
-                    if success:
-                        # Mise à jour de la progression pour chaque image alignée avec succès
-                        self.update_progress(f"✓ Image {batch_start + i:04} alignée avec succès")
-                    else:
-                        # Signaler l'échec
-                        self.update_progress(f"❌ Échec de l'alignement pour l'image {batch_start + i:04}: {error_msg}")
-
-# Fonction d'aide pour la compatibilité avec l'ancien code
-def align_seestar_images_batch(input_folder, bayer_pattern="GRBG", batch_size=10, manual_reference_path=None,
-                               correct_hot_pixels=True, hot_pixel_threshold=3.0, neighborhood_size=5):
-    """
-    Aligne les images Seestar par lots avec une image de référence optionnelle.
-    Cette fonction est maintenue pour la compatibilité avec l'ancien code.
+        success_count = sum(1 for _, success, _, _ in results if success)
+        fail_count = len(results) - success_count
+        self.update_progress(f"🏁 Alignement lot terminé: {success_count} succès, {fail_count} échecs.")
+        return results
     
-    Args:
-        input_folder (str): Chemin vers le dossier d'entrée contenant les fichiers FITS
-        bayer_pattern (str): Motif Bayer pour le débayering
-        batch_size (int): Nombre d'images à traiter par lot
-        manual_reference_path (str): Chemin optionnel vers une image de référence manuelle
-        correct_hot_pixels (bool): Corriger les pixels chauds
-        hot_pixel_threshold (float): Seuil pour la détection des pixels chauds
-        neighborhood_size (int): Taille du voisinage pour le calcul médian
-        
-    Returns:
-        str: Chemin vers le dossier contenant les images alignées
-    """
+# --- Compatibility Function (Unchanged) ---
+def align_seestar_images_batch(*args, **kwargs):
+    """(Compatibility) Use SeestarAligner().align_images(...) directly."""
     aligner = SeestarAligner()
-    aligner.bayer_pattern = bayer_pattern
-    aligner.batch_size = batch_size
-    aligner.reference_image_path = manual_reference_path
-    aligner.correct_hot_pixels = correct_hot_pixels
-    aligner.hot_pixel_threshold = hot_pixel_threshold
-    aligner.neighborhood_size = neighborhood_size
-    
-    return aligner.align_images(input_folder)        
+    if 'bayer_pattern' in kwargs: aligner.bayer_pattern = kwargs['bayer_pattern']
+    if 'batch_size' in kwargs: aligner.batch_size = kwargs['batch_size']
+    if 'reference_image_path' in kwargs: aligner.reference_image_path = kwargs['reference_image_path']
+    if 'correct_hot_pixels' in kwargs: aligner.correct_hot_pixels = kwargs['correct_hot_pixels']
+    if 'hot_pixel_threshold' in kwargs: aligner.hot_pixel_threshold = kwargs['hot_pixel_threshold']
+    if 'neighborhood_size' in kwargs: aligner.neighborhood_size = kwargs['neighborhood_size']
+    if 'progress_callback' in kwargs: aligner.set_progress_callback(kwargs['progress_callback'])
+    # Call the main method, passing only relevant args
+    return aligner.align_images(args[0], kwargs.get('output_folder'), kwargs.get('specific_files'))
+# --- END OF FILE seestar/core/alignment.py ---
