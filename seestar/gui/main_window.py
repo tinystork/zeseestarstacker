@@ -136,6 +136,7 @@ class SeestarStackerGUI:
         # Apply loaded settings to the UI widgets
         self.settings.apply_to_ui(self)
         self._update_weighting_options_state()
+        self._update_show_folders_button_state()
         self.update_ui_language() # Translate UI based on loaded language
 
         # Connect backend callbacks
@@ -290,6 +291,11 @@ class SeestarStackerGUI:
         self.browse_input_button.pack(side=tk.RIGHT)
         self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path)
         self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        
+        self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state)
+        self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state) # Update as user types/deletes
+
+
         # Output Row
         out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5))
         self.output_label = ttk.Label(out_subframe, text=self.tr("output_folder"), width=8, anchor="w"); self.output_label.pack(side=tk.LEFT)
@@ -526,6 +532,11 @@ class SeestarStackerGUI:
         self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text=self.tr("stop"), command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        
+        # Placed before "Add Folder" button
+        self.show_folders_button = ttk.Button(control_frame, text="View Inputs", command=self._show_input_folder_list, state=tk.DISABLED) # Start disabled until input is set
+        self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2) # Pack next
+        
         # Le bouton "Ajouter Dossier" peut maintenant être utilisé avant le démarrage
         self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL) # Commence NORMAL
         self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2) # pack à droite
@@ -563,6 +574,129 @@ class SeestarStackerGUI:
         # Store references AFTER all widgets are created
         self._store_widget_references()
 
+
+    def _update_show_folders_button_state(self, event=None):
+        """Enables/disables the 'View Input Folders' button."""
+        try:
+            if hasattr(self, 'show_folders_button') and self.show_folders_button.winfo_exists():
+                if self.input_path.get() and os.path.isdir(self.input_path.get()):
+                    self.show_folders_button.config(state=tk.NORMAL)
+                else:
+                    self.show_folders_button.config(state=tk.DISABLED)
+        except tk.TclError:
+            pass # Widget might not exist yet or be destroyed
+
+
+
+    def _show_input_folder_list(self):
+        """Displays the list of input folders in a simple pop-up window."""
+
+        main_folder = self.input_path.get()
+
+        if not main_folder or not os.path.isdir(main_folder):
+            messagebox.showwarning(self.tr("warning"), self.tr("no_input_folder_set"))
+            return
+
+        folder_list = []
+        # Always add the main input folder first
+        folder_list.append(os.path.abspath(main_folder))
+
+        additional_folders = []
+        # Get additional folders based on processing state
+        if self.processing and hasattr(self, 'queued_stacker') and self.queued_stacker:
+            try:
+                # Safely access the list using the lock
+                with self.queued_stacker.folders_lock:
+                    # Get a copy to avoid issues if modified during iteration
+                    additional_folders = list(self.queued_stacker.additional_folders)
+            except Exception as e:
+                print(f"Error accessing queued stacker folders: {e}")
+                # Proceed without additional folders from backend if error occurs
+        else:
+            # Get folders added before processing started
+            additional_folders = self.additional_folders_to_process
+
+        # Add absolute paths of additional folders
+        for folder in additional_folders:
+            abs_path = os.path.abspath(folder)
+            if abs_path not in folder_list: # Avoid duplicates if added strangely
+                 folder_list.append(abs_path)
+
+        # --- Format the text ---
+        if len(folder_list) == 1:
+            display_text = f"{self.tr('input_folder')}\n  {folder_list[0]}"
+        else:
+            display_text = f"{self.tr('input_folder')} (Main):\n  {folder_list[0]}\n\n"
+            display_text += f"{self.tr('Additional:')} ({len(folder_list) - 1})\n"
+            for i, folder in enumerate(folder_list[1:], 1):
+                display_text += f"  {i}. {folder}\n"
+
+        # --- Create the Toplevel window ---
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title(self.tr("input_folders_title"))
+            dialog.transient(self.root)  # Associate with main window
+            dialog.grab_set()  # Make modal
+            dialog.resizable(False, False) # Prevent resizing
+
+            # --- Add Frame, Scrollbar, and Text Widget ---
+            frame = ttk.Frame(dialog, padding="10")
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL)
+            # Use a fixed-size font for better alignment if needed
+            # text_font = tkFont.Font(family="Courier New", size=9)
+            list_text = tk.Text(
+                frame,
+                wrap=tk.WORD,
+                height=15, # Adjust height as needed
+                width=80,  # Adjust width as needed
+                yscrollcommand=scrollbar.set,
+                # font=text_font, # Optional fixed font
+                padx=5, pady=5,
+                state=tk.DISABLED # Start disabled
+            )
+            scrollbar.config(command=list_text.yview)
+
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            list_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            # Insert the text
+            list_text.config(state=tk.NORMAL)
+            list_text.delete(1.0, tk.END)
+            list_text.insert(tk.END, display_text)
+            list_text.config(state=tk.DISABLED) # Make read-only
+
+            # --- Add Close Button ---
+            button_frame = ttk.Frame(dialog, padding="0 10 10 10")
+            button_frame.pack(fill=tk.X)
+            close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy) # Add translation if needed
+            # Use pack with anchor or alignment if needed
+            close_button.pack(anchor=tk.CENTER) # Center the button
+            close_button.focus_set() # Set focus to close button
+
+            # --- Center the dialog ---
+            dialog.update_idletasks()
+            root_x = self.root.winfo_rootx(); root_y = self.root.winfo_rooty()
+            root_w = self.root.winfo_width(); root_h = self.root.winfo_height()
+            dlg_w = dialog.winfo_width(); dlg_h = dialog.winfo_height()
+            x = root_x + (root_w // 2) - (dlg_w // 2)
+            y = root_y + (root_h // 2) - (dlg_h // 2)
+            dialog.geometry(f"+{x}+{y}")
+
+            # --- Wait for dialog ---
+            self.root.wait_window(dialog)
+
+        except tk.TclError as e:
+             print(f"Error creating folder list dialog: {e}")
+             # Fallback to simple message box if Toplevel fails
+             messagebox.showinfo(self.tr("input_folders_title"), display_text)
+        except Exception as e:
+             print(f"Unexpected error showing folder list: {e}")
+             traceback.print_exc(limit=2)
+             messagebox.showerror(self.tr("error"), f"Failed to display folder list:\n{e}")
+
+
     def _create_slider_spinbox_group(self, parent, label_key, min_val, max_val, step, tk_var, callback=None):
         """Helper to create a consistent Slider + SpinBox group with debouncing."""
         frame = ttk.Frame(parent); frame.pack(fill=tk.X, padx=5, pady=(1,1))
@@ -597,6 +731,7 @@ class SeestarStackerGUI:
         except Exception as e: print(f"Warning: Could not find Notebook widget: {e}")
 
         self.widgets_to_translate = {
+            
             # Tabs
             "tab_stacking": (notebook_widget, 0) if notebook_widget else None, "tab_preview": (notebook_widget, 1) if notebook_widget else None,
             # LabelFrames
@@ -619,11 +754,13 @@ class SeestarStackerGUI:
             "auto_wb": getattr(self, 'auto_wb_button', None), "reset_wb": getattr(self, 'reset_wb_button', None), "auto_stretch": getattr(self, 'auto_stretch_button', None),
             "reset_stretch": getattr(self, 'reset_stretch_button', None), "reset_bcs": getattr(self, 'reset_bcs_button', None), "start": getattr(self, 'start_button', None),
             "stop": getattr(self, 'stop_button', None), "add_folder_button": getattr(self, 'add_files_button', None),
+            "show_folders_button_text": getattr(self, 'show_folders_button', None), # Key for the button's text
             "copy_log_button_text": getattr(self, 'copy_log_button', None), # NOUVEAU (clé pour texte)
             "open_output_button_text": getattr(self, 'open_output_button', None), # NOUVEAU (clé pour texte)
             # Checkbuttons
             "perform_hot_pixels_correction": getattr(self, 'hot_pixels_check', None), "cleanup_temp_check_label": getattr(self, 'cleanup_temp_check', None),
             "enable_weighting_check": getattr(self, 'use_weighting_check', None), "weight_snr_check": getattr(self, 'weight_snr_check', None), "weight_stars_check": getattr(self, 'weight_stars_check', None),
+        
         }
 
     def change_language(self, event=None):

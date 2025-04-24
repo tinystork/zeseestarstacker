@@ -82,13 +82,16 @@ FR_TRANSLATIONS = {
     # NOUVEAU: Clés pour les nouveaux boutons
     'copy_log_button_text': "Copier",
     'open_output_button_text': "Ouvrir Sortie",
+    'show_folders_button_text': "Voir Entrées",
 
     # --- Titres Dialogues ---
     'Select Input Folder': "Sélectionner Dossier d'Entrée",
     'Select Output Folder': "Sélectionner Dossier de Sortie",
     'Select Reference Image (Optional)': "Sélectionner Image Référence (Optionnel)",
     'Select Additional Images Folder': "Sélectionner Dossier Images Additionnelles",
-
+    'input_folders_title': "Liste Dossiers d'Entrée",
+    'no_input_folder_set': "Aucun dossier d'entrée n'a été sélectionné.",
+    
     # --- Messages & Statuts ---
     'select_folders': "Veuillez sélectionner les dossiers d'entrée et de sortie.",
     'input_folder_invalid': "Dossier d'entrée invalide",

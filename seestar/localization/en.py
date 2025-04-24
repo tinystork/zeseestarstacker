@@ -82,6 +82,11 @@ EN_TRANSLATIONS = {
     # NOUVEAU: Clés pour les nouveaux boutons (utiliser le nom de variable comme référence)
     'copy_log_button_text': "Copy",
     'open_output_button_text': "Open Output",
+    'show_folders_button_text': "View Inputs",
+    'Select Input Folder': "Select Input Folder",
+
+    'input_folders_title': "Input Folder List",
+    'no_input_folder_set': "No input folder has been selected yet.",
 
     # --- Dialog Titles ---
     'Select Input Folder': "Select Input Folder",
