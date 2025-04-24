@@ -288,11 +288,13 @@ class SeestarQueuedStacker:
              num_stars = len(source_list)
              max_stars_for_score = 200.0 # Normalize star count relative to a max expected
              scores['stars'] = np.clip(num_stars / max_stars_for_score, 0.0, 1.0) # Score 0-1
-
-        except (aa.MaxIterError, aa.MIN_AREA_TOO_LOW):
-             # Logged before
-             # self.update_progress("⚠️ Aucune étoile trouvée par astroalign (fichier ?).")
+        
+        except (aa.MaxIterError, aa.MIN_AREA_TOO_LOW, ValueError) as star_err: # Add ValueError here
+             # Logged before (or implicitly by the error message from _process_file)
+             # Print a slightly more specific message now that we catch ValueError
+             self.update_progress(f"      Quality Scores -> Warning: Failed to find enough stars ({type(star_err).__name__}). Stars score set to 0.")
              scores['stars'] = 0.0
+
         except Exception as e:
              # Logged before
              # self.update_progress(f"⚠️ Erreur calcul nb étoiles (astroalign) (fichier ?): {e}")
@@ -324,8 +326,6 @@ class SeestarQueuedStacker:
         return normalized_weights
 
       
-# --- START Replace _process_file in seestar/queuep/queue_manager.py ---
-
     def _process_file(self, file_path, reference_image_data):
         """Processes a single file: load, validate, preprocess, align, calculate quality."""
         file_name = os.path.basename(file_path)

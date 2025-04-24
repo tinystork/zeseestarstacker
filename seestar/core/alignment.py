@@ -185,8 +185,8 @@ class SeestarAligner:
 
                         # --- Basic Quality Check ---
                         std_dev = np.std(img)
-                        if std_dev < 0.005: rejection_reason = "variance"; raise ValueError(f"Low variance ({std_dev:.4f})")
-
+                        variance_threshold = 0.0020 # Lowered threshold
+                        if std_dev < variance_threshold: rejection_reason = "variance"; raise ValueError(f"Low variance ({std_dev:.4f})")
                         # --- Preprocess Candidate ---
                         prepared_img = img
                         if prepared_img.ndim == 2:

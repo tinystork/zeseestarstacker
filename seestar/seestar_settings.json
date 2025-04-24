@@ -1,6 +1,6 @@
 {
     "version": "1.2.0",
-    "input_folder": "F:\\seescan\\env\\zeseestarstacker\\testdataset\\1",
+    "input_folder": "F:\\astro photos\\seestar s 50\\M 94\\tempo",
     "output_folder": "F:\\astro photos\\seestar s 50\\M 94\\tempo\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
@@ -25,5 +25,5 @@
     "preview_g_gain": 0.95,
     "preview_b_gain": 1.24,
     "language": "en",
-    "window_geometry": "1707x937+-19+0"
+    "window_geometry": "1707x937+2+5"
 }

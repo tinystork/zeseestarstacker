@@ -1,88 +1,121 @@
       
 # ---------------------------------------------------------------------------
-# DEPENDENCIES & OPTIONAL GPU ACCELERATION NOTES (CUDA)
+# Seestar Stacker Requirements
 # ---------------------------------------------------------------------------
-# Core libraries needed for basic CPU operation:
-numpy
-astropy
-astroalign
-tqdm
-matplotlib
-Pillow
-scikit-image
-psutil # Optional but recommended for auto batch size
-
-# --- OpenCV (Potential CUDA Use for Denoise/Blur/CLAHE) ---
-# Using opencv-contrib-python *enables the possibility* of using CUDA via OpenCV
-# IF the user has a compatible NVIDIA GPU, CUDA Toolkit, and drivers installed
-# *BEFORE* installing this package.
-# If CUDA is not available or OpenCV wasn't built with CUDA support, it will
-# automatically and safely fall back to using the CPU.
-# You might see "DEBUG: CUDA device not found" or similar messages - this is NORMAL
-# if you don't have the required NVIDIA setup. The program will still work.
-opencv-contrib-python
-
-# --- CuPy (Potential CUDA Use for Stacking) ---
-# CuPy provides significant speedups for stacking *if* you have the correct setup.
-# This is OPTIONAL. The program works perfectly fine using the CPU without CuPy.
-#
-# Requirements for CuPy GPU Acceleration:
-#   1. An NVIDIA GPU with CUDA support.
-#   2. NVIDIA CUDA Toolkit installed (matching the CuPy version below).
-#   3. NVIDIA drivers installed.
-#
-# Installation (MANUAL STEP REQUIRED FOR GPU USERS):
-#   - First, check your installed CUDA Toolkit version by running: nvcc --version
-#   - Then, install the CuPy package matching your CUDA version. Examples:
-#     For CUDA 12.x: pip install cupy-cuda12x
-#     For CUDA 11.x: pip install cupy-cuda11x
-#     (Check CuPy docs for exact package name: https://docs.cupy.dev/en/stable/install.html)
-#
-# WARNING MESSAGES:
-# If you run the program *without* installing CuPy or without a proper CUDA setup,
-# you WILL see messages like "DEBUG: CuPy library not found" or errors related to
-# CUDA libraries (e.g., "nvrtc64_XXX.dll not found", "CUDA runtime error").
-# **These messages are NORMAL and HARMLESS if you are not intending to use GPU acceleration.**
-# The program is designed to detect this and automatically fall back to the CPU for stacking.
-#
-# cupy-cudaXXX # <-- Leave this commented out or remove. User installs manually.
+# Core CPU Libraries (Tested with versions like Python 3.1x, NumPy 2.x)
+# ---------------------------------------------------------------------------
+numpy>=1.21 # Base requirement, see notes below regarding NumPy 2.x
+opencv-contrib-python # For image processing & optional OpenCV CUDA fallback
+astropy>=5.0 # For FITS handling
+astroalign>=1.0 # For image alignment
+tqdm # For progress bars
+matplotlib # For histogram display
+Pillow>=9.0 # For image loading/saving (PNG, JPG etc.) & preview adjustments
+scikit-image # Used by astroalign
+psutil # Optional: For automatic batch size estimation
 
 # ---------------------------------------------------------------------------
-# FIN DES NOTES SUR L'ACCELERATION GPU (CUDA)
+# NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
 # ---------------------------------------------------------------------------
-# --- OpenCV (Utilisation CUDA potentielle pour Denoise/Blur/CLAHE) ---
-# L'utilisation d'opencv-contrib-python *permet potentiellement* l'utilisation de CUDA via OpenCV
-# SI l'utilisateur a une carte graphique NVIDIA compatible, le CUDA Toolkit et les pilotes
-# installés *AVANT* d'installer ce paquet Python.
-# Si CUDA n'est pas disponible ou si OpenCV n'a pas été compilé avec le support CUDA,
-# le programme utilisera automatiquement et sans danger le CPU.
-# Vous pourriez voir des messages comme "DEBUG: CUDA device not found" - c'est NORMAL
-# si vous n'avez pas la configuration NVIDIA requise. Le programme fonctionnera quand même.
+# This project has been tested with NumPy 2.x (e.g., 2.2.4).
+# However, some users with NumPy >= 2.0 might encounter errors when using
+# optional GPU acceleration with certain CuPy versions, specifically errors like:
+# "Unable to avoid copy while creating an array as requested."
+#
+# If you encounter this error *while using the GPU*, it likely indicates a
+# compatibility issue between your specific NumPy 2.x version and your CuPy version.
+#
+# TROUBLESHOOTING: If you see the error above and want to use the GPU:
+#   1. Ensure you have the LATEST CuPy version matching your CUDA Toolkit.
+#   2. If the error persists, try DOWNGRADING NumPy to the latest 1.x release as a
+#      temporary workaround:
+#      pip install "numpy<2.0"
+#
+# If you are *not* using the GPU, NumPy 2.x should generally work fine, and
+# the program's CPU fallback will handle any GPU-specific errors.
+# ---------------------------------------------------------------------------
 
-# --- CuPy (Utilisation CUDA potentielle pour l'Empilement) ---
-# CuPy accélère significativement l'empilement *si* vous avez la bonne configuration.
-# Ceci est OPTIONNEL. Le programme fonctionne parfaitement sur CPU sans CuPy.
+# ---------------------------------------------------------------------------
+# OPTIONAL GPU ACCELERATION (CUDA)
+# ---------------------------------------------------------------------------
+# For potential speedups in denoising, blurring, CLAHE, and STACKING.
+# The program runs correctly on CPU if CUDA/CuPy are not configured.
+# See README.md for full details.
+
+# 1. OpenCV CUDA (via opencv-contrib-python listed above)
+#    - Relies on user having CUDA Toolkit + drivers installed BEFORE pip install.
+#    - Automatic CPU fallback if unavailable. "DEBUG: No CUDA devices detected by OpenCV" is normal.
+
+# 2. CuPy CUDA (Requires MANUAL installation by user)
+#    - Provides significant stacking speedup on compatible NVIDIA GPUs.
+#    - User MUST install the correct CuPy package matching their system's CUDA Toolkit.
+#    - Check your system CUDA version: nvcc --version
+#    - Example (based on your working config: CUDA 12.8 -> cupy-cuda12x):
+#      pip install cupy-cuda12x
+#    - Example for CUDA 11.x systems:
+#      pip install cupy-cuda11x
+#    - Find exact package name: https://docs.cupy.dev/en/stable/install.html
 #
-# Prérequis pour l'accélération GPU avec CuPy :
-#   1. Une carte graphique NVIDIA supportant CUDA.
-#   2. Le NVIDIA CUDA Toolkit installé (correspondant à la version de CuPy ci-dessous).
-#   3. Les pilotes NVIDIA installés.
+#    - WARNING MESSAGES ARE NORMAL if CuPy/CUDA not set up correctly.
+#      Messages like "CuPy library not found", "nvrtc64_XXX.dll not found",
+#      or "CUDA runtime error" during startup or processing mean the GPU path
+#      failed. The program WILL automatically fall back to the CPU.
 #
-# Installation (ÉTAPE MANUELLE REQUISE pour utilisateurs GPU) :
-#   - D'abord, vérifiez la version du CUDA Toolkit installée avec : nvcc --version
-#   - Ensuite, installez le paquet CuPy correspondant à votre version CUDA. Exemples :
-#     Pour CUDA 12.x : pip install cupy-cuda12x
-#     Pour CUDA 11.x : pip install cupy-cuda11x
-#     (Vérifiez la documentation CuPy pour le nom exact : https://docs.cupy.dev/en/stable/install.html)
+# cupy-cudaXXX  # <-- DO NOT UNCOMMENT. User installs manually if desired.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# FIN DES NOTES (Version Française)
+# ---------------------------------------------------------------------------
+# NOTES SUR LA COMPATIBILITÉ NUMPY 2.x (IMPORTANT !)
+# ---------------------------------------------------------------------------
+# Ce projet a été testé avec NumPy 2.x (ex: 2.2.4).
+# Cependant, certains utilisateurs avec NumPy >= 2.0 pourraient rencontrer des
+# erreurs en utilisant l'accélération GPU optionnelle avec certaines versions
+# de CuPy, notamment des erreurs comme :
+# "Unable to avoid copy while creating an array as requested."
 #
-# MESSAGES D'AVERTISSEMENT :
-# Si vous lancez le programme *sans* installer CuPy ou sans configuration CUDA correcte,
-# vous VERREZ des messages comme "DEBUG: CuPy library not found" ou des erreurs liées
-# aux librairies CUDA (ex: "nvrtc64_XXX.dll not found", "CUDA runtime error").
-# **Ces messages sont NORMAUX et SANS DANGER si vous ne comptez pas utiliser l'accélération GPU.**
-# Le programme est conçu pour détecter cela et utiliser automatiquement le CPU pour l'empilement.
+# Si vous rencontrez cette erreur *en utilisant le GPU*, cela indique probablement
+# un problème de compatibilité entre votre version spécifique de NumPy 2.x et
+# votre version de CuPy.
 #
-# cupy-cudaXXX # <-- Laissez commenté ou supprimez. Installation manuelle par l'utilisateur.
+# DÉPANNAGE : Si vous voyez l'erreur ci-dessus et souhaitez utiliser le GPU :
+#   1. Assurez-vous d'avoir la DERNIÈRE version de CuPy correspondant à votre CUDA Toolkit.
+#   2. Si l'erreur persiste, essayez de REVENIR à la dernière version 1.x de NumPy
+#      comme solution temporaire :
+#      pip install "numpy<2.0"
+#
+# Si vous n'utilisez *pas* le GPU, NumPy 2.x devrait fonctionner correctement, et
+# le repli sur CPU du programme gérera les erreurs spécifiques au GPU.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ACCÉLÉRATION GPU OPTIONNELLE (CUDA)
+# ---------------------------------------------------------------------------
+# Pour des accélérations potentielles (débruitage, flou, CLAHE, EMPILEMENT).
+# Le programme fonctionne correctement sur CPU si CUDA/CuPy ne sont pas configurés.
+# Voir README.md pour les détails complets.
+
+# 1. OpenCV CUDA (via opencv-contrib-python listé ci-dessus)
+#    - Nécessite que l'utilisateur ait installé CUDA Toolkit + pilotes AVANT pip install.
+#    - Repli automatique sur CPU si indisponible. "DEBUG: No CUDA devices detected by OpenCV" est normal.
+
+# 2. CuPy CUDA (Nécessite une installation MANUELLE par l'utilisateur)
+#    - Accélère significativement l'empilement sur GPU NVIDIA compatibles.
+#    - L'utilisateur DOIT installer le paquet CuPy correct correspondant à son CUDA Toolkit système.
+#    - Vérifiez votre version CUDA système : nvcc --version
+#    - Exemple (basé sur votre config fonctionnelle : CUDA 12.8 -> cupy-cuda12x):
+#      pip install cupy-cuda12x
+#    - Exemple pour systèmes CUDA 11.x :
+#      pip install cupy-cuda11x
+#    - Trouvez le nom exact du paquet : https://docs.cupy.dev/en/stable/install.html
+#
+#    - LES MESSAGES D'AVERTISSEMENT SONT NORMAUX si CuPy/CUDA ne sont pas bien configurés.
+#      Les messages comme "CuPy library not found", "nvrtc64_XXX.dll not found",
+#      ou "CUDA runtime error" au démarrage ou pendant le traitement signifient que
+#      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
+#
+# cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
 # ---------------------------------------------------------------------------
 
     
