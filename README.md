@@ -293,7 +293,7 @@ Ce projet est sous licence GNU General Public License v3.0. Voir le fichier [LIC
 While this project was primarily designed and developed by your humble Tinystork, it owes much to the contributions, inspiration, and tools provided by others. A heartfelt thank you goes out to:
 
 **AI Assistants**  
-Significant help with design, debugging, code generation, and complex concepts was provided by AI language models, including OpenAI's ChatGPT, Anthropic's Claude, DeepSeek, and Google's AI models. Their ability to quickly translate ideas into working code played a key role in overcoming challenges and speeding up development.
+Significant help with design, debugging, code generation, and complex concepts was provided by AI language models, including OpenAI's ChatGPT, Anthropic's Claude, DeepSeek, and Google's Gemini AI models. Their ability to quickly translate ideas into working code played a key role in overcoming challenges and speeding up development.
 
 **The Seestar Community**  
 Inspiration and motivation for this project came from discussions and shared enthusiasm within the Seestar user community. Thank you for your feedback, your shared experiences, and for showing that a tool like this was truly needed.
@@ -322,7 +322,7 @@ Thank you to everyone whose work, directly or indirectly, made ZeSeestarStacker 
 Bien que ce projet ait été principalement conçu et développé par votre humble Tinystork, il doit énormément aux contributions, à l’inspiration et aux outils offerts par d’autres. Un grand merci à :
 
 **Assistants IA**  
-Une aide précieuse a été apportée pour la conception, le débogage, la génération de code et la compréhension de concepts complexes, grâce à des modèles de langage comme ChatGPT d’OpenAI, Claude d’Anthropic, DeepSeek, et les IA de Google. Leur capacité à transformer rapidement des idées en code fonctionnel a été déterminante dans les moments clés du développement.
+Une aide précieuse a été apportée pour la conception, le débogage, la génération de code et la compréhension de concepts complexes, grâce à des modèles de langage comme ChatGPT d’OpenAI, Claude d’Anthropic, DeepSeek, et Google Gemini . Leur capacité à transformer rapidement des idées en code fonctionnel a été déterminante dans les moments clés du développement.
 
 **La communauté Seestar**  
 Ce projet tire son inspiration et sa motivation des échanges passionnés au sein de la communauté des utilisateurs du Seestar. Merci pour vos retours, vos expériences partagées, et pour avoir souligné le besoin d’un outil comme celui-ci.
