@@ -279,33 +279,28 @@ class SeestarQueuedStacker:
              # self.update_progress(f"⚠️ Erreur calcul SNR (fichier ?): {e}")
              scores['snr'] = 0.0
 
+      
         # --- Calculate Star Count ---
         num_stars = 0
         try:
-             # Use astroalign's transform finding which returns star lists
-             # We pass the image as both source and target just to get the detected stars
-             transform, (source_list, _target_list) = aa.find_transform(image_data, image_data)
-             num_stars = len(source_list)
-             max_stars_for_score = 200.0 # Normalize star count relative to a max expected
-             scores['stars'] = np.clip(num_stars / max_stars_for_score, 0.0, 1.0) # Score 0-1
-        
-        except (aa.MaxIterError, aa.MIN_AREA_TOO_LOW, ValueError) as star_err: # Add ValueError here
-             # Logged before (or implicitly by the error message from _process_file)
-             # Print a slightly more specific message now that we catch ValueError
-             self.update_progress(f"      Quality Scores -> Warning: Failed to find enough stars ({type(star_err).__name__}). Stars score set to 0.")
-             scores['stars'] = 0.0
+            transform, (source_list, _target_list) = aa.find_transform(image_data, image_data)
+            num_stars = len(source_list)
+            max_stars_for_score = 200.0
+            scores['stars'] = np.clip(num_stars / max_stars_for_score, 0.0, 1.0)
 
-        except Exception as e:
-             # Logged before
-             # self.update_progress(f"⚠️ Erreur calcul nb étoiles (astroalign) (fichier ?): {e}")
-             scores['stars'] = 0.0
+        except (aa.MaxIterError, ValueError) as star_err: # Handles specific astroalign errors
+            self.update_progress(f"      Quality Scores -> Warning: Failed finding stars ({type(star_err).__name__}). Stars score set to 0.")
+            scores = {'snr': scores.get('snr', 0.0), 'stars': 0.0} # Explicitly set scores
+            return scores # Return immediately
 
-        # --- ADDED: Print the calculated scores ---
+        except Exception as e: # Handles any other unexpected error
+            self.update_progress(f"      Quality Scores -> Error calculating stars: {e}. Stars score set to 0.")
+            scores = {'snr': scores.get('snr', 0.0), 'stars': 0.0} # Explicitly set scores
+            return scores # Return immediately
+
+        # --- This section is ONLY reached if the 'try' block succeeds ---
         self.update_progress(f"      Quality Scores -> SNR: {scores['snr']:.2f}, Stars: {scores['stars']:.3f} ({num_stars} raw)")
-        # --- END ADDED ---
-
-        return scores
-
+        return scores # Return the successfully calculated scores
 
     def _calculate_weights(self, batch_scores):
         num_images = len(batch_scores);
@@ -841,7 +836,7 @@ class SeestarQueuedStacker:
                 self.total_exposure_seconds += batch_exposure
                 self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
                 self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images')
+                #self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images') was cluterring the header
 
             # Clip final result
             self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)

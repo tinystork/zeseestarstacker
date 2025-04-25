@@ -18,13 +18,13 @@ import platform # NOUVEL import
 import subprocess # NOUVEL import
 import gc #
 from PIL import Image, ImageTk 
-
-    
+ 
 # Seestar imports
 from seestar.core.image_processing import load_and_validate_fits, debayer_image
 from seestar.core.image_processing import load_and_validate_fits, debayer_image
 from seestar.localization import Localization
 from seestar.queuep.queue_manager import SeestarQueuedStacker
+from seestar.core.utils import estimate_batch_size
 try:
     # Import tools for preview adjustments and auto calculations
     from seestar.tools.stretch import StretchPresets, ColorCorrection
@@ -861,23 +861,219 @@ class SeestarStackerGUI:
         self.histogram_widget.update_histogram(data_for_histogram)
         self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
 
+      
+# Inside SeestarStackerGUI class in main_window.py
+
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
-        if stack_data is None: print("GUI received None stack_data for preview."); return
-        self.current_preview_data = stack_data.copy(); self.current_stack_header = stack_header.copy() if stack_header else None
-        self.preview_img_count = img_count; self.preview_total_imgs = total_imgs; self.preview_current_batch = current_batch; self.preview_total_batches = total_batches
+        """Callback function triggered by the backend worker."""
+        print("[DEBUG-HISTO] update_preview_from_stacker called.") # Log entry
+
+        if stack_data is None:
+            print("[DEBUG-HISTO] Received None stack_data. Skipping update.")
+            # Optional: Clear display if None is received consistently
+            # if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview("No Data Received")
+            # if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            return
+
+        # --- Log received data info ---
+        try:
+            # Use np.nanmin and np.nanmax to handle potential NaNs safely
+            print(f"[DEBUG-HISTO] Received stack_data - Shape: {stack_data.shape}, Type: {stack_data.dtype}, Min: {np.nanmin(stack_data):.4f}, Max: {np.nanmax(stack_data):.4f}")
+        except Exception as e:
+            print(f"[DEBUG-HISTO] Error getting info for received stack_data: {e}")
+        # -----------------------------
+
+        # Update the main data store immediately
+        self.current_preview_data = stack_data.copy()
+        self.current_stack_header = stack_header.copy() if stack_header else None
+
+        # Update internal counters used by PreviewManager text overlay
+        self.preview_img_count = img_count
+        self.preview_total_imgs = total_imgs
+        self.preview_current_batch = current_batch
+        self.preview_total_batches = total_batches
+
+        # Get current preview parameters from UI
         try:
             preview_params = {
-                "stretch_method": self.preview_stretch_method.get(), "black_point": self.preview_black_point.get(),
-                "white_point": self.preview_white_point.get(), "gamma": self.preview_gamma.get(),
-                "r_gain": self.preview_r_gain.get(), "g_gain": self.preview_g_gain.get(), "b_gain": self.preview_b_gain.get(),
-                "brightness": self.preview_brightness.get(), "contrast": self.preview_contrast.get(), "saturation": self.preview_saturation.get(),
+                "stretch_method": self.preview_stretch_method.get(),
+                "black_point": self.preview_black_point.get(),
+                "white_point": self.preview_white_point.get(),
+                "gamma": self.preview_gamma.get(),
+                "r_gain": self.preview_r_gain.get(),
+                "g_gain": self.preview_g_gain.get(),
+                "b_gain": self.preview_b_gain.get(),
+                "brightness": self.preview_brightness.get(),
+                "contrast": self.preview_contrast.get(),
+                "saturation": self.preview_saturation.get(),
             }
-            self.root.after_idle(lambda d=self.current_preview_data, p=preview_params, sc=img_count, ti=total_imgs, cb=current_batch, tb=total_batches:
-                self.preview_manager.update_preview(d, p, stack_count=sc, total_images=ti, current_batch=cb, total_batches=tb) if hasattr(self, 'preview_manager') and self.preview_manager else None)
-        except tk.TclError: pass
+        except tk.TclError:
+            print("[DEBUG-HISTO] Error getting preview parameters from UI during callback.")
+            return
+
+        # Schedule the update using after_idle
+        try:
+            def combined_update_tasks():
+                print("[DEBUG-HISTO] combined_update_tasks running via after_idle.") # Log task start
+                # Ensure widgets exist before proceeding
+                if not hasattr(self, 'preview_manager') or not self.preview_manager.canvas.winfo_exists():
+                    print("[DEBUG-HISTO] PreviewManager or canvas not found/exists in combined_update_tasks.")
+                    return
+                if not hasattr(self, 'histogram_widget') or not self.histogram_widget.winfo_exists():
+                    print("[DEBUG-HISTO] HistogramWidget not found/exists in combined_update_tasks.")
+                    return
+
+                try:
+                    # 1. Update the preview image (this also calculates histogram data)
+                    print("[DEBUG-HISTO] Calling preview_manager.update_preview...")
+                    # Ensure self.current_preview_data is valid before calling
+                    if self.current_preview_data is None:
+                        print("[DEBUG-HISTO] self.current_preview_data is None in combined_update_tasks. Aborting update.")
+                        return
+
+                    processed_pil_image, data_for_histogram = self.preview_manager.update_preview(
+                        self.current_preview_data, # Use the data stored in the GUI instance
+                        preview_params,
+                        stack_count=img_count,
+                        total_images=total_imgs,
+                        current_batch=current_batch,
+                        total_batches=total_batches
+                    )
+                    print("[DEBUG-HISTO] Returned from preview_manager.update_preview.")
+
+                    # --- Log histogram data info ---
+                    if data_for_histogram is not None:
+                        try:
+                            # Use np.nanmin/nanmax again
+                            print(f"[DEBUG-HISTO] data_for_histogram - Shape: {data_for_histogram.shape}, Type: {data_for_histogram.dtype}, Min: {np.nanmin(data_for_histogram):.4f}, Max: {np.nanmax(data_for_histogram):.4f}")
+                        except Exception as e:
+                            print(f"[DEBUG-HISTO] Error getting info for data_for_histogram: {e}")
+                    else:
+                        print("[DEBUG-HISTO] data_for_histogram is None.")
+                    # -----------------------------
+
+                    # 2. Update the histogram widget with the returned data
+                    if self.histogram_widget: # Check again just in case
+                        print("[DEBUG-HISTO] Calling histogram_widget.update_histogram...")
+                        self.histogram_widget.update_histogram(data_for_histogram)
+                        print("[DEBUG-HISTO] Returned from histogram_widget.update_histogram.")
+                        # Optional: Reset histogram zoom/range if needed, but usually not desired here
+                        # self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
+                    else:
+                        print("[DEBUG-HISTO] histogram_widget is None, cannot update.")
+
+
+                except Exception as update_err:
+                    print(f"[DEBUG-HISTO] Error during scheduled preview/histogram update: {update_err}")
+                    traceback.print_exc(limit=2)
+                    # Clear histogram on error
+                    if hasattr(self, 'histogram_widget') and self.histogram_widget.winfo_exists():
+                        self.histogram_widget.plot_histogram(None)
+
+            # Schedule the single combined update function
+            self.root.after_idle(combined_update_tasks)
+            print("[DEBUG-HISTO] after_idle scheduled for combined_update_tasks.") # Log scheduling
+
+        except tk.TclError:
+            pass # Ignore if root window is destroyed
+
+        # Schedule image info update separately (this is fine)
         if self.current_stack_header:
-            try: self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h))
-            except tk.TclError: pass
+            try:
+                self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h))
+            except tk.TclError:
+                pass
+
+    def refresh_preview(self):
+        """Refreshes the preview based on current data and UI settings."""
+        print("[DEBUG-HISTO] refresh_preview called (manual trigger/debounce/resize).") # Log entry
+
+        # --- Debounce Timer Cancellation ---
+        if self.debounce_timer_id:
+            try:
+                self.root.after_cancel(self.debounce_timer_id)
+            except tk.TclError:
+                pass
+            self.debounce_timer_id = None
+        # -----------------------------------
+
+        # --- Check if data and managers exist ---
+        if (self.current_preview_data is None or
+                not hasattr(self, 'preview_manager') or self.preview_manager is None or
+                not hasattr(self, 'histogram_widget') or self.histogram_widget is None):
+
+            print("[DEBUG-HISTO] refresh_preview: No data or managers. Checking for first input image.")
+            # If no data but input folder is set, try showing the first image
+            if (not self.processing and self.input_path.get() and os.path.isdir(self.input_path.get())):
+                self._try_show_first_input_image() # This might call refresh_preview again if successful
+            else:
+                # Clear display if no data and cannot load first image
+                if hasattr(self, 'preview_manager') and self.preview_manager:
+                    self.preview_manager.clear_preview(self.tr('Select input/output folders.'))
+                if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                    self.histogram_widget.plot_histogram(None)
+            return # Exit if no data to process
+        # -----------------------------------------
+
+        # --- Get current preview parameters from UI ---
+        try:
+            preview_params = {
+                "stretch_method": self.preview_stretch_method.get(),
+                "black_point": self.preview_black_point.get(),
+                "white_point": self.preview_white_point.get(),
+                "gamma": self.preview_gamma.get(),
+                "r_gain": self.preview_r_gain.get(),
+                "g_gain": self.preview_g_gain.get(),
+                "b_gain": self.preview_b_gain.get(),
+                "brightness": self.preview_brightness.get(),
+                "contrast": self.preview_contrast.get(),
+                "saturation": self.preview_saturation.get(),
+            }
+        except tk.TclError:
+            print("[DEBUG-HISTO] refresh_preview: Error getting preview parameters from UI.")
+            return
+        # ------------------------------------------
+
+        # --- Call PreviewManager to update the image and get histogram data ---
+        try:
+            print("[DEBUG-HISTO] refresh_preview: Calling preview_manager.update_preview...")
+            processed_pil_image, data_for_histogram = self.preview_manager.update_preview(
+                self.current_preview_data,
+                preview_params,
+                stack_count=self.preview_img_count,
+                total_images=self.preview_total_imgs,
+                current_batch=self.preview_current_batch,
+                total_batches=self.preview_total_batches
+            )
+            print("[DEBUG-HISTO] refresh_preview: Returned from preview_manager.update_preview.")
+
+            # --- Log histogram data info ---
+            if data_for_histogram is not None:
+                 try:
+                     print(f"[DEBUG-HISTO] refresh_preview: data_for_histogram - Shape: {data_for_histogram.shape}, Type: {data_for_histogram.dtype}, Min: {np.nanmin(data_for_histogram):.4f}, Max: {np.nanmax(data_for_histogram):.4f}")
+                 except Exception as e:
+                     print(f"[DEBUG-HISTO] refresh_preview: Error getting info for data_for_histogram: {e}")
+            else:
+                 print("[DEBUG-HISTO] refresh_preview: data_for_histogram is None.")
+            # -----------------------------
+
+            # --- Update the histogram widget ---
+            if self.histogram_widget: # Check widget exists
+                print("[DEBUG-HISTO] refresh_preview: Calling histogram_widget.update_histogram...")
+                self.histogram_widget.update_histogram(data_for_histogram)
+                print("[DEBUG-HISTO] refresh_preview: Returned from histogram_widget.update_histogram.")
+                # Also update the slider lines on the histogram to match the UI values
+                self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
+            else:
+                print("[DEBUG-HISTO] refresh_preview: histogram_widget is None, cannot update.")
+
+        except Exception as e:
+            print(f"[DEBUG-HISTO] Error during refresh_preview processing: {e}")
+            traceback.print_exc(limit=2)
+            # Attempt to clear histogram on error
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                self.histogram_widget.plot_histogram(None)
+        # -----------------------------------------------------------------------
 
     def update_image_info(self, header):
         if not header or not hasattr(self, 'preview_manager'):
@@ -1032,71 +1228,189 @@ class SeestarStackerGUI:
             else:
                  messagebox.showinfo(self.tr('info'), self.tr('Folder already added', default='Folder already added to the list.'))
 
-    # --- MODIFIÉ: start_processing ---
+# Inside the SeestarStackerGUI class in seestar/gui/main_window.py
+
+
     def start_processing(self):
-        """Démarre le traitement, en passant les paramètres de pondération."""
-        input_folder = self.input_path.get(); output_folder = self.output_path.get()
-        if not input_folder or not output_folder: messagebox.showerror(self.tr("error"), self.tr("select_folders")); return
-        if not os.path.isdir(input_folder): messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"); return
+        """Démarre le traitement, gère la configuration et lance le thread backend."""
+
+        # --- IMMEDIATE ACTION: Disable Start Button to prevent double clicks ---
+        if hasattr(self, 'start_button'):
+            try:
+                self.start_button.config(state=tk.DISABLED)
+            except tk.TclError:
+                pass # Ignore if widget destroyed
+
+        # --- Validate Paths ---
+        input_folder = self.input_path.get()
+        output_folder = self.output_path.get()
+
+        if not input_folder or not output_folder:
+            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
+            if hasattr(self, 'start_button'): # Re-enable button if validation fails early
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            return
+
+        if not os.path.isdir(input_folder):
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
+            if hasattr(self, 'start_button'): # Re-enable button
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            return
+
         if not os.path.isdir(output_folder):
-            try: os.makedirs(output_folder, exist_ok=True)
-            except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}"); return
-            self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
+            try:
+                os.makedirs(output_folder, exist_ok=True)
+                # Use update_progress_gui here as it's a GUI action log
+                self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
+            except Exception as e:
+                messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}")
+                if hasattr(self, 'start_button'): # Re-enable button
+                    try: self.start_button.config(state=tk.NORMAL)
+                    except tk.TclError: pass
+                return
+
+        # --- Check for FITS files (Optional) ---
         try:
             if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
-                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")): return
-        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}"); return
+                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
+                    if hasattr(self, 'start_button'): # Re-enable button
+                        try: self.start_button.config(state=tk.NORMAL)
+                        except tk.TclError: pass
+                    return
+        except Exception as e:
+            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
+            if hasattr(self, 'start_button'): # Re-enable button
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            return
 
-        self.processing = True; self.time_per_image = 0; self.global_start_time = time.monotonic()
+        # --- Set Processing State ---
+        self.processing = True # GUI processing flag
+        self.time_per_image = 0
+        self.global_start_time = time.monotonic()
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var.set(default_aligned_fmt.format(count=0))
 
-        # *** NOUVEAU : Gérer la liste des dossiers pré-ajoutés ***
+
+        # --- Handle Pre-Added Folders ---
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
-        self.additional_folders_to_process = [] # Vide la liste du GUI
-        self.update_additional_folders_display() # Met à jour l'affichage (vers 0)
-        # --- Fin Nouveau ---
+        self.additional_folders_to_process = [] # Clear the GUI list
+        self.update_additional_folders_display() # Update the UI display
 
+        # --- Disable Controls & Enable Stop Button ---
         self._set_parameter_widgets_state(tk.DISABLED)
-        self.start_button.config(state=tk.DISABLED); self.stop_button.config(state=tk.NORMAL)
-        # Le bouton Add Folder reste NORMAL (géré par _set_parameter_widgets_state ou état initial)
-        # *** NOUVEAU : Désactiver le bouton "Ouvrir Sortie" au démarrage ***
-        if hasattr(self, 'open_output_button'): self.open_output_button.config(state=tk.DISABLED)
+        # Start button should already be disabled from the top of the function
+        if hasattr(self, 'stop_button'):
+             try: self.stop_button.config(state=tk.NORMAL)
+             except tk.TclError: pass
+        if hasattr(self, 'open_output_button'):
+             try: self.open_output_button.config(state=tk.DISABLED)
+             except tk.TclError: pass
 
-        self.progress_manager.reset(); self.progress_manager.start_timer()
+        # --- Reset Progress Manager and Log ---
+        if hasattr(self, 'progress_manager'): self.progress_manager.reset(); self.progress_manager.start_timer()
         if hasattr(self, 'status_text'):
             try:
-                self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END); self.status_text.insert(tk.END, "--- Début du Traitement ---\n"); self.status_text.config(state=tk.DISABLED)
+                self.status_text.config(state=tk.NORMAL)
+                self.status_text.delete(1.0, tk.END)
+                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
+                self.status_text.config(state=tk.DISABLED)
             except tk.TclError: pass
 
-        self.settings.update_from_ui(self); validation_messages = self.settings.validate_settings()
+        # --- Update and Validate Settings ---
+        self.settings.update_from_ui(self)
+        validation_messages = self.settings.validate_settings()
         if validation_messages:
             self.update_progress_gui("⚠️ Paramètres ajustés:", None)
-            for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None)
-            self.settings.apply_to_ui(self)
+            for msg in validation_messages:
+                self.update_progress_gui(f"  - {msg}", None)
+            self.settings.apply_to_ui(self) # Re-apply corrected settings to UI
 
-        # Configure QueuedStacker
-        self.queued_stacker.stacking_mode = self.settings.stacking_mode; self.queued_stacker.kappa = self.settings.kappa
-        self.queued_stacker.batch_size = self.settings.batch_size; self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
-        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold; self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
-        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern; self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
+        # --- Configure QueuedStacker ---
+        self.queued_stacker.stacking_mode = self.settings.stacking_mode
+        self.queued_stacker.kappa = self.settings.kappa
+
+        # --- Batch Size Estimation Logic ---
+        requested_batch_size = self.settings.batch_size # Get value from settings
+        final_batch_size_for_backend = 0 # Initialize
+
+        if requested_batch_size <= 0:
+            self.update_progress_gui("🧠 Taille de lot 'auto' sélectionnée. Estimation...", None)
+            try:
+                sample_img_path = None
+                if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
+                    fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                    if fits_files:
+                        sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
+
+                estimated_size = estimate_batch_size(sample_image_path=sample_img_path) # Call the estimation function
+                final_batch_size_for_backend = estimated_size
+                self.update_progress_gui(f"✅ Taille de lot auto estimée à: {estimated_size}", None)
+            except Exception as est_err:
+                self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None)
+                final_batch_size_for_backend = 10 # Fallback default
+        else:
+            # Use the user-provided batch size (already validated)
+            final_batch_size_for_backend = requested_batch_size
+
+        # Assign the determined batch size to the stacker
+        self.queued_stacker.batch_size = final_batch_size_for_backend
+        # --- End Batch Size Logic ---
+
+        # --- Configure remaining stacker parameters ---
+        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
+        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
+        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
+        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
+        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
         self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
 
-        self.update_progress_gui(self.tr("stacking_start"), 0)
+        # Log the final batch size being used
+        self.update_progress_gui(f"ⓘ Taille de lot configurée pour traitement : {self.queued_stacker.batch_size}", None)
 
-        # --- Start the QueuedStacker with Weighting & Initial Folders ---
+        # Start the actual backend processing thread
+        self.update_progress_gui(self.tr("stacking_start"), 0) # Initial progress message
+
         processing_started = self.queued_stacker.start_processing(
-            self.settings.input_folder, self.settings.output_folder, self.settings.reference_image_path,
-            initial_additional_folders=folders_to_pass_to_backend, # *** NOUVEAU ***
-            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr, weight_stars=self.settings.weight_by_stars,
-            snr_exp=self.settings.snr_exponent, stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight
+            self.settings.input_folder,
+            self.settings.output_folder,
+            self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend,
+            # Pass weighting parameters
+            use_weighting=self.settings.use_quality_weighting,
+            weight_snr=self.settings.weight_by_snr,
+            weight_stars=self.settings.weight_by_stars,
+            snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent,
+            min_w=self.settings.min_weight
         )
 
+        # --- Handle result of starting the backend ---
         if processing_started:
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker"); self.thread.start()
+            # Successfully started, ensure stop button is enabled
+            if hasattr(self, 'stop_button'):
+                try: self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+
+            # Start the GUI progress tracking thread
+            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+            self.thread.start()
         else:
-            self.update_progress_gui("❌ Échec démarrage du thread de traitement.", None); messagebox.showerror(self.tr("error"), self.tr("Failed to start processing."))
-            self._processing_finished()
+            # Failed to start, likely because it was *already* running from a rapid previous call.
+            # DO NOT show an error message or call _processing_finished() here.
+            # Just log that the redundant start request was ignored.
+            self.update_progress_gui("ⓘ Demande de démarrage ignorée (traitement déjà en cours).", None)
+            # Ensure the UI state reflects that processing *is* active:
+            # Start button should remain disabled (done at the top of the function).
+            # Stop button should be enabled.
+            if hasattr(self, 'stop_button'):
+                try:
+                    self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            # Processing flag should remain True (set earlier in the function)
+            self.processing = True
 
 
     def _track_processing_progress(self):
