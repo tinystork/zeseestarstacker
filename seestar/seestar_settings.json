@@ -1,6 +1,6 @@
 {
     "version": "1.2.0",
-    "input_folder": "F:\\astro photos\\seestar s 50\\M 81\\M 81_sub",
+    "input_folder": "F:\\astro photos\\seestar s 50\\M 42\\M 42_sub",
     "output_folder": "F:\\astro photos\\seestar s 50\\M 81\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
@@ -18,12 +18,12 @@
     "stars_exponent": 1.0,
     "min_weight": 0.12,
     "preview_stretch_method": "Asinh",
-    "preview_black_point": 0.13942950977180912,
-    "preview_white_point": 0.22357661753466532,
+    "preview_black_point": 0.010169849531167965,
+    "preview_white_point": 0.01772355626551717,
     "preview_gamma": 0.5501312335958005,
-    "preview_r_gain": 1.242,
-    "preview_g_gain": 1.0,
-    "preview_b_gain": 1.406,
+    "preview_r_gain": 1.1,
+    "preview_g_gain": 0.97,
+    "preview_b_gain": 1.1,
     "language": "en",
-    "window_geometry": "1100x824+233+76"
+    "window_geometry": "1707x937+-10+0"
 }
