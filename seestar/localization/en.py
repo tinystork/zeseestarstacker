@@ -164,5 +164,17 @@ EN_TRANSLATIONS = {
     'weighting_enabled': "Enabled", # Value for WGHT_ON=True
     'weighting_disabled': "Disabled", # Value for WGHT_ON=False
     'drizzle_wht_threshold_label': "WHT Threshold%:",
+
+    # --- NEW: Texts for Drizzle Warning ---
+    'drizzle_warning_title': "Drizzle Warning",
+    'drizzle_warning_text': (
+    "Drizzle processing is enabled.\n\n",
+    "- This is experimental and may be slow.\n",
+    "- It will create temporary files that can consume significant disk space (potentially similar to the input image size).\n",
+    "- The live preview will show a standard stack; Drizzle will be applied at the very end.\n\n",
+    "Continue with Drizzle?"
+    ),
+    # --- End New Texts ---
+
 }
 # --- END OF FILE seestar/localization/en.py ---

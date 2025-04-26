@@ -1440,192 +1440,6 @@ class SeestarStackerGUI:
             else:
                  messagebox.showinfo(self.tr('info'), self.tr('Folder already added', default='Folder already added to the list.'))
 
-# Inside the SeestarStackerGUI class in seestar/gui/main_window.py
-
-
-    def start_processing(self):
-        """Démarre le traitement, gère la configuration et lance le thread backend."""
-
-        # --- IMMEDIATE ACTION: Disable Start Button to prevent double clicks ---
-        if hasattr(self, 'start_button'):
-            try:
-                self.start_button.config(state=tk.DISABLED)
-            except tk.TclError:
-                pass # Ignore if widget destroyed
-
-        # --- Validate Paths ---
-        input_folder = self.input_path.get()
-        output_folder = self.output_path.get()
-
-        if not input_folder or not output_folder:
-            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
-            if hasattr(self, 'start_button'): # Re-enable button if validation fails early
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        if not os.path.isdir(input_folder):
-            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
-            if hasattr(self, 'start_button'): # Re-enable button
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        if not os.path.isdir(output_folder):
-            try:
-                os.makedirs(output_folder, exist_ok=True)
-                # Use update_progress_gui here as it's a GUI action log
-                self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
-            except Exception as e:
-                messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}")
-                if hasattr(self, 'start_button'): # Re-enable button
-                    try: self.start_button.config(state=tk.NORMAL)
-                    except tk.TclError: pass
-                return
-
-        # --- Check for FITS files (Optional) ---
-        try:
-            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
-                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
-                    if hasattr(self, 'start_button'): # Re-enable button
-                        try: self.start_button.config(state=tk.NORMAL)
-                        except tk.TclError: pass
-                    return
-        except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-            if hasattr(self, 'start_button'): # Re-enable button
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        # --- Set Processing State ---
-        self.processing = True # GUI processing flag
-        self.time_per_image = 0
-        self.global_start_time = time.monotonic()
-        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
-
-
-        # --- Handle Pre-Added Folders ---
-        folders_to_pass_to_backend = list(self.additional_folders_to_process)
-        self.additional_folders_to_process = [] # Clear the GUI list
-        self.update_additional_folders_display() # Update the UI display
-
-        # --- Disable Controls & Enable Stop Button ---
-        self._set_parameter_widgets_state(tk.DISABLED)
-        # Start button should already be disabled from the top of the function
-        if hasattr(self, 'stop_button'):
-             try: self.stop_button.config(state=tk.NORMAL)
-             except tk.TclError: pass
-        if hasattr(self, 'open_output_button'):
-             try: self.open_output_button.config(state=tk.DISABLED)
-             except tk.TclError: pass
-
-        # --- Reset Progress Manager and Log ---
-        if hasattr(self, 'progress_manager'): self.progress_manager.reset(); self.progress_manager.start_timer()
-        if hasattr(self, 'status_text'):
-            try:
-                self.status_text.config(state=tk.NORMAL)
-                self.status_text.delete(1.0, tk.END)
-                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
-                self.status_text.config(state=tk.DISABLED)
-            except tk.TclError: pass
-
-        # --- Update and Validate Settings ---
-        self.settings.update_from_ui(self)
-        validation_messages = self.settings.validate_settings()
-        if validation_messages:
-            self.update_progress_gui("⚠️ Paramètres ajustés:", None)
-            for msg in validation_messages:
-                self.update_progress_gui(f"  - {msg}", None)
-            self.settings.apply_to_ui(self) # Re-apply corrected settings to UI
-
-        # --- Configure QueuedStacker ---
-        self.queued_stacker.stacking_mode = self.settings.stacking_mode
-        self.queued_stacker.kappa = self.settings.kappa
-
-        # --- Batch Size Estimation Logic ---
-        requested_batch_size = self.settings.batch_size # Get value from settings
-        final_batch_size_for_backend = 0 # Initialize
-
-        if requested_batch_size <= 0:
-            self.update_progress_gui("🧠 Taille de lot 'auto' sélectionnée. Estimation...", None)
-            try:
-                sample_img_path = None
-                if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
-                    fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
-                    if fits_files:
-                        sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
-
-                estimated_size = estimate_batch_size(sample_image_path=sample_img_path) # Call the estimation function
-                final_batch_size_for_backend = estimated_size
-                self.update_progress_gui(f"✅ Taille de lot auto estimée à: {estimated_size}", None)
-            except Exception as est_err:
-                self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None)
-                final_batch_size_for_backend = 10 # Fallback default
-        else:
-            # Use the user-provided batch size (already validated)
-            final_batch_size_for_backend = requested_batch_size
-
-        # Assign the determined batch size to the stacker
-        self.queued_stacker.batch_size = final_batch_size_for_backend
-        # --- End Batch Size Logic ---
-
-        # --- Configure remaining stacker parameters ---
-        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
-        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
-        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
-        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
-        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
-        self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
-
-        # Log the final batch size being used
-        self.update_progress_gui(f"ⓘ Taille de lot configurée pour traitement : {self.queued_stacker.batch_size}", None)
-
-        # Start the actual backend processing thread
-        self.update_progress_gui(self.tr("stacking_start"), 0) # Initial progress message
-
-        processing_started = self.queued_stacker.start_processing(
-        input_folder,                # Utilise la variable locale lue depuis l'UI
-        output_folder,               # Utilise la variable locale lue depuis l'UI
-        self.settings.reference_image_path, # Garde settings pour celui-ci (ou utilise self.reference_image_path.get() aussi)
-        initial_additional_folders=folders_to_pass_to_backend,
-        # Pass weighting parameters
-        use_weighting=self.settings.use_quality_weighting,
-        weight_snr=self.settings.weight_by_snr,
-        weight_stars=self.settings.weight_by_stars,
-        snr_exp=self.settings.snr_exponent,
-        stars_exp=self.settings.stars_exponent,
-        min_w=self.settings.min_weight,
-        use_drizzle=self.use_drizzle_var.get(),
-        drizzle_scale=float(self.drizzle_scale_var.get()), # Lire la variable et convertir en float
-        drizzle_wht_threshold=self.drizzle_wht_threshold_var.get() # Lire la variable (0.1-1.0)
-        )
-
-        # --- Handle result of starting the backend ---
-        if processing_started:
-            # Successfully started, ensure stop button is enabled
-            if hasattr(self, 'stop_button'):
-                try: self.stop_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-
-            # Start the GUI progress tracking thread
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
-            self.thread.start()
-        else:
-            # Failed to start, likely because it was *already* running from a rapid previous call.
-            # DO NOT show an error message or call _processing_finished() here.
-            # Just log that the redundant start request was ignored.
-            self.update_progress_gui("ⓘ Demande de démarrage ignorée (traitement déjà en cours).", None)
-            # Ensure the UI state reflects that processing *is* active:
-            # Start button should remain disabled (done at the top of the function).
-            # Stop button should be enabled.
-            if hasattr(self, 'stop_button'):
-                try:
-                    self.stop_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            # Processing flag should remain True (set earlier in the function)
-            self.processing = True
 
 
     def _track_processing_progress(self):
@@ -1760,171 +1574,6 @@ class SeestarStackerGUI:
         elif self.processing:
             self.update_progress_gui("Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None); self._processing_finished()
 
-
-    def _processing_finished(self):
-        """Actions performed in the main GUI thread after processing ends/stops. Uses custom summary dialog."""
-        if not self.processing: return # Avoid running multiple times
-
-        self.processing = False # Set flag FIRST
-        # print("DEBUG: Entering _processing_finished (Custom Dialog Version)") # Keep disabled unless debugging
-
-        if hasattr(self, 'progress_manager'):
-            self.progress_manager.stop_timer()
-
-        # --- Gather final state from the worker ---
-        final_message_for_status_bar = self.tr("stacking_finished") # Default status bar message
-        final_stack_path = None
-        processing_error_details = None
-        images_stacked = 0
-        aligned_count = 0
-        failed_align_count = 0
-        failed_stack_count = 0
-        skipped_count = 0
-        processed_files_count = 0 # Total files attempted by the worker
-        total_exposure = 0.0
-        was_stopped_by_user = False
-        output_folder_exists = False
-        can_open_output = False
-        final_stack_exists = False
-
-        if hasattr(self, "queued_stacker"):
-            q_stacker = self.queued_stacker
-            # Retrieve final state variables safely
-            final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
-            images_stacked = getattr(q_stacker, 'images_in_cumulative_stack', 0)
-            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
-            failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
-            failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
-            skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
-            processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
-            total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
-            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False)
-            processing_error_details = getattr(q_stacker, 'processing_error', None)
-
-            # Update aligned count display one last time
-            default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-            try:
-                if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
-            except tk.TclError: pass
-
-            # Check output folder state for 'Open Output' button
-            if hasattr(self, 'output_path') and self.output_path.get():
-                output_folder_exists = os.path.isdir(self.output_path.get())
-
-            # Determine if final stack exists and if output can be opened
-            final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
-            if not processing_error_details and output_folder_exists:
-                can_open_output = True
-
-        else: # Should not happen if started correctly
-            final_message_for_status_bar = "Erreur: Stacker non initialisé."
-            processing_error_details = final_message_for_status_bar # Treat as an error
-            if hasattr(self, 'output_path') and self.output_path.get():
-                output_folder_exists = os.path.isdir(self.output_path.get())
-            can_open_output = output_folder_exists and not processing_error_details
-
-        # --- Set Status Bar Message based on outcome ---
-        if was_stopped_by_user:
-            final_message_for_status_bar = self.tr("processing_stopped")
-        elif processing_error_details:
-            final_message_for_status_bar = self.tr('stacking_error_msg')
-        elif images_stacked == 0 and aligned_count == 0:
-            final_message_for_status_bar = self.tr("no_stacks_created")
-        elif images_stacked > 0:
-             final_message_for_status_bar = self.tr("stacking_complete_msg") # Short success message
-        # Update the simple status label/bar message
-        self.update_progress_gui(final_message_for_status_bar, None)
-
-        # --- Try Loading Final Preview ---
-        preview_load_error_msg = None # Store potential preview error message
-        if not was_stopped_by_user and not processing_error_details and final_stack_exists:
-            try:
-                # Optional: add status update for loading preview
-                # self.update_progress_gui(f"Chargement aperçu final: {os.path.basename(final_stack_path)}...", None)
-                final_image_data = load_and_validate_fits(final_stack_path)
-                if final_image_data is not None:
-                    final_header = fits.getheader(final_stack_path)
-                    self.current_preview_data = final_image_data
-                    self.current_stack_header = final_header
-                    self.refresh_preview()
-                    if final_header: self.update_image_info(final_header)
-                else:
-                    preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: load_and_validate_fits returned None."
-            except Exception as preview_load_error:
-                preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: {preview_load_error}"
-                traceback.print_exc(limit=2)
-                # Show a separate error box JUST for the preview failure
-                messagebox.showerror(self.tr("Preview Error"), f"{self.tr('Error loading final preview')}:\n{preview_load_error}")
-
-        # --- Generate the Final Summary String ---
-        # (This part is largely the same as the previous step)
-        summary_lines = []
-        # Use a slightly different title for the pop-up
-        summary_title = self.tr("processing_report_title", default="Processing Summary")
-
-        # Overall Status for summary text
-        status_text = ""
-        if was_stopped_by_user: status_text = self.tr('processing_stopped')
-        elif processing_error_details: status_text = f"ERREUR ({processing_error_details})"
-        elif images_stacked > 0: status_text = "Terminé avec succès"
-        else: status_text = "Terminé (Aucun stack final créé)"
-        summary_lines.append(f"Statut: {status_text}")
-
-        # Timing
-        elapsed_total_seconds = 0
-        if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
-        summary_lines.append(f"Temps Total Traitement: {self._format_duration(elapsed_total_seconds)}")
-
-        # File Counts
-        summary_lines.append(f"Fichiers Traités (Tentatives): {processed_files_count}")
-        total_rejected = failed_align_count + failed_stack_count + skipped_count
-        summary_lines.append(f"Fichiers Rejetés (Total): {total_rejected}")
-        summary_lines.append(f"  - Échec Alignement: {failed_align_count}")
-        summary_lines.append(f"  - Échec Empilement Lot: {failed_stack_count}")
-        summary_lines.append(f"  - Autres (Variance, Erreur...): {skipped_count}")
-
-        # Stack Info
-        summary_lines.append(f"Images Alignées avec Succès: {aligned_count}")
-        summary_lines.append(f"Images dans Stack Final: {images_stacked}")
-        summary_lines.append(f"Temps Pose Total (Stack Final): {self._format_duration(total_exposure)}")
-        if final_stack_exists: summary_lines.append(f"Fichier Stack Final:\n  {final_stack_path}") # Add newline for long paths
-        else: summary_lines.append("Fichier Stack Final: Non créé ou introuvable.")
-
-        # Combine lines for the dialog
-        full_summary_text_for_dialog = "\n".join(summary_lines)
-
-        # --- Display Final Dialog (Custom or Error) ---
-        # IMPORTANT: Do NOT add the summary to the main log here anymore
-        # self.update_progress_gui(full_summary_text_for_dialog, None) # REMOVED THIS LINE
-
-        if processing_error_details:
-            # Show critical error in a standard error box
-             messagebox.showerror(self.tr("error"), f"{self.tr('stacking_error_msg')}\n{processing_error_details}")
-        elif not was_stopped_by_user:
-            # Show the custom summary dialog if not stopped and no critical error
-            self._show_summary_dialog(summary_title, full_summary_text_for_dialog)
-
-        # --- Reset UI State ---
-        self._set_parameter_widgets_state(tk.NORMAL)
-        if hasattr(self, 'start_button'):
-            try: self.start_button.config(state=tk.NORMAL)
-            except tk.TclError: pass
-        if hasattr(self, 'stop_button'):
-            try: self.stop_button.config(state=tk.DISABLED)
-            except tk.TclError: pass
-        if hasattr(self, 'open_output_button'):
-            try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
-            except tk.TclError: pass
-        if hasattr(self, 'remaining_time_var'):
-            try: self.remaining_time_var.set("00:00:00")
-            except tk.TclError: pass
-
-        # Final garbage collection hint
-        # Check if gc was imported before calling
-        if 'gc' in globals() or 'gc' in locals():
-             gc.collect()
-        # print("DEBUG: Exiting _processing_finished (Custom Dialog Version)") # Keep disabled
-
     def _format_duration(self, seconds):
         try:
             secs = int(round(float(seconds)));
@@ -2027,79 +1676,6 @@ class SeestarStackerGUI:
              try: self.histogram_widget.canvas.draw_idle()
              except tk.TclError: pass
 
-    def _show_summary_dialog(self, summary_title, summary_text):
-        """Displays a custom modal dialog with the processing summary and a copy button."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title(summary_title)
-        dialog.transient(self.root) # Associate with main window
-        dialog.grab_set() # Make it modal (blocks interaction with main window)
-        dialog.resizable(False, False)
-
-        # --- Content Frame ---
-        content_frame = ttk.Frame(dialog, padding="10 10 10 10")
-        content_frame.pack(expand=True, fill=tk.BOTH)
-
-        # --- Icon (Optional, mimics standard messagebox) ---
-        try:
-            # Try to use a standard icon (might depend on OS/Tk version)
-            icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
-            icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
-        except tk.TclError:
-            # Fallback if icon not found
-             icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
-             icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
-
-
-        # --- Summary Text ---
-        # Use a read-only Text widget for better text selection/display if needed, or Label
-        # Using Label for simplicity here, assuming summary isn't excessively long
-        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450) # Adjust wraplength as needed
-        summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
-
-        # --- Button Frame ---
-        button_frame = ttk.Frame(content_frame)
-        # Place button frame below the text, spanning both columns
-        button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
-
-        # --- Copy Summary Button ---
-
-        def copy_action():
-            try:
-                dialog.clipboard_clear()
-                dialog.clipboard_append(summary_text)
-                # Optional: Briefly change button text or show status
-                copy_button.config(text=self.tr("Copied!", default="Copied!"))
-                dialog.after(1500, lambda: copy_button.config(text=self.tr("Copy Summary", default="Copy Summary")) if copy_button.winfo_exists() else None)
-            except Exception as copy_e:
-                print(f"Error copying summary: {copy_e}")
-                # Optionally show a small error message within the dialog?
-
-        copy_button = ttk.Button(button_frame, text=self.tr("Copy Summary", default="Copy Summary"), command=copy_action)
-        copy_button.pack(side=tk.RIGHT, padx=(5, 0))
-
-        # --- OK Button ---
-        ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy, style='Accent.TButton' if 'Accent.TButton' in ttk.Style().element_names() else 'TButton')
-        ok_button.pack(side=tk.RIGHT)
-        ok_button.focus_set() # Set initial focus on OK
-
-        # --- Center the dialog ---
-        dialog.update_idletasks() # Update geometry calculations
-        # Get main window geometry
-        root_x = self.root.winfo_x()
-        root_y = self.root.winfo_y()
-        root_width = self.root.winfo_width()
-        root_height = self.root.winfo_height()
-        # Get dialog geometry
-        dialog_width = dialog.winfo_width()
-        dialog_height = dialog.winfo_height()
-        # Calculate position
-        pos_x = root_x + (root_width // 2) - (dialog_width // 2)
-        pos_y = root_y + (root_height // 2) - (dialog_height // 2)
-        dialog.geometry(f"+{pos_x}+{pos_y}")
-
-        # --- Wait for the dialog to be closed ---
-        self.root.wait_window(dialog)
-
     def _on_closing(self):
         if self.processing:
             if messagebox.askokcancel(self.tr("quit"), self.tr("quit_while_processing")):
@@ -2140,33 +1716,613 @@ class SeestarStackerGUI:
             self.update_progress_gui(f"ⓘ Ouverture du dossier: {output_folder}", None)
         except FileNotFoundError: messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier.\nCommande non trouvée pour votre système ({system}).")
         except Exception as e: print(f"Erreur ouverture dossier: {e}"); messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}"); self.update_progress_gui(f"❌ Erreur ouverture dossier: {e}", None)
-    # --- Fin Nouvelles Méthodes ---
-
+########################################################
+    # --- MÉTHODE update_progress_gui MODIFIÉE ---
     def update_progress_gui(self, message, progress=None):
+        """Met à jour l'interface de progression, en gérant les messages Drizzle."""
+        # Gérer le message spécial pour le compteur de dossiers
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try: self.root.after_idle(self.update_additional_folders_display)
-            except tk.TclError: pass
-            return
+            except tk.TclError: pass # Ignorer si fenêtre fermée
+            return # Ne pas afficher ce message dans le log
+
+        # Procéder à la mise à jour via ProgressManager si disponible
         if hasattr(self, "progress_manager") and self.progress_manager:
+            final_drizzle_active = False
+            # Détecter les messages indiquant l'étape Drizzle finale
+            if isinstance(message, str):
+                if "💧 Exécution Drizzle final" in message:
+                    final_drizzle_active = True
+                    message = "⏳ " + message # Ajouter indicateur visuel
+
+            # Mettre à jour la barre et le log texte via ProgressManager
             self.progress_manager.update_progress(message, progress)
+
+            # Gérer le mode indéterminé de la barre de progression
+            try:
+                pb = self.progress_manager.progress_bar
+                if pb.winfo_exists():
+                    current_mode = pb['mode']
+                    if final_drizzle_active and current_mode != 'indeterminate':
+                        pb.config(mode='indeterminate')
+                        pb.start(15) # Vitesse animation (ms)
+                    elif not final_drizzle_active and current_mode == 'indeterminate':
+                        pb.stop()
+                        pb.config(mode='determinate')
+                        # Optionnel : Forcer la valeur si on a une progression
+                        if progress is not None:
+                            try: pb.configure(value=max(0.0, min(100.0, float(progress))))
+                            except ValueError: pass
+            except (tk.TclError, AttributeError):
+                pass # Ignorer si widgets détruits
+
+    # --- MÉTHODE _processing_finished MODIFIÉE ---
+    def _processing_finished(self):
+        """Actions finales après la fin ou l'arrêt du traitement."""
+        if not self.processing: return # Évite exécutions multiples
+        self.processing = False # Marquer comme terminé
+
+        if hasattr(self, 'progress_manager'):
+            self.progress_manager.stop_timer()
+            # Arrêter la barre de progression indéterminée si elle l'était
+            try:
+                pb = self.progress_manager.progress_bar
+                if pb.winfo_exists() and pb['mode'] == 'indeterminate':
+                    pb.stop()
+                    pb.config(mode='determinate')
+                # Optionnel: Mettre la barre à 100% (ou à la dernière valeur connue)
+                # last_progress = pb['value'] # Récupérer la valeur avant indeterminate? Non fiable.
+                if not self.queued_stacker.processing_error: # Mettre à 100 si pas d'erreur
+                    pb.configure(value=100)
+            except (tk.TclError, AttributeError): pass
+
+        # --- Récupération état final du backend ---
+        final_message_for_status_bar = self.tr("stacking_finished")
+        final_stack_path = None; processing_error_details = None; images_stacked = 0
+        aligned_count = 0; failed_align_count = 0; failed_stack_count = 0; skipped_count = 0
+        processed_files_count = 0; total_exposure = 0.0
+        was_stopped_by_user = False; output_folder_exists = False; can_open_output = False
+        final_stack_exists = False; is_drizzle_result = False # Flag Drizzle
+
+        if hasattr(self, "queued_stacker"):
+            q_stacker = self.queued_stacker
+            final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
+            # Utiliser aligned_count pour Drizzle, images_in_cumulative_stack pour classique
+            is_drizzle_result = getattr(q_stacker, 'drizzle_active_session', False) and not getattr(q_stacker, 'stop_processing', False) and getattr(q_stacker, 'processing_error', None) is None and final_stack_path is not None
+            images_stacked = getattr(q_stacker, 'aligned_files_count', 0) if is_drizzle_result else getattr(q_stacker, 'images_in_cumulative_stack', 0)
+
+            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
+            failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
+            failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
+            skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
+            processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
+            total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
+            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False)
+            processing_error_details = getattr(q_stacker, 'processing_error', None)
+
+            default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+            try:
+                if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
+            except tk.TclError: pass
+
+            if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
+            final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
+            # On peut ouvrir si le dossier existe ET (le stack final existe OU il n'y a pas eu d'erreur critique)
+            can_open_output = output_folder_exists and (final_stack_exists or not processing_error_details)
+        else:
+            final_message_for_status_bar = "Erreur: Stacker non trouvé."; processing_error_details = final_message_for_status_bar
+            if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
+            can_open_output = output_folder_exists and not processing_error_details
+
+        # --- Déterminer message statut final ---
+        if was_stopped_by_user: final_message_for_status_bar = self.tr("processing_stopped")
+        elif processing_error_details: final_message_for_status_bar = self.tr('stacking_error_msg')
+        elif not final_stack_exists: final_message_for_status_bar = self.tr("no_stacks_created")
+        elif is_drizzle_result: final_message_for_status_bar = self.tr("Drizzle complete!", default="Drizzle complete!")
+        else: final_message_for_status_bar = self.tr("stacking_complete_msg")
+        # Mettre à jour la barre de statut simple (pas le log principal)
+        if hasattr(self, 'progress_manager'): self.progress_manager.update_progress(final_message_for_status_bar, 100)
+
+        # --- Charger aperçu final ---
+        preview_load_error_msg = None
+        if final_stack_exists:
+            try:
+                # self.update_progress_gui(f"Chargement aperçu final...", None) # Optionnel
+                final_image_data = load_and_validate_fits(final_stack_path)
+                if final_image_data is not None:
+                    final_header = fits.getheader(final_stack_path)
+                    self.current_preview_data = final_image_data; self.current_stack_header = final_header
+                    self.refresh_preview();
+                    if final_header: self.update_image_info(final_header)
+                else: preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: load returned None."
+            except Exception as preview_load_error:
+                preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: {preview_load_error}"; traceback.print_exc(limit=2)
+                messagebox.showerror(self.tr("Preview Error"), f"{self.tr('Error loading final preview')}:\n{preview_load_error}")
+
+        # --- Générer le résumé ---
+        summary_lines = []; summary_title = self.tr("processing_report_title")
+        status_text = ""; final_stack_type = self.tr("Classic", default="Classic") # <-- Traduisible
+        if was_stopped_by_user: status_text = self.tr('processing_stopped')
+        elif processing_error_details: status_text = f"ERREUR ({processing_error_details})"
+        elif not final_stack_exists: status_text = "Terminé (Aucun stack final créé)"
+        elif is_drizzle_result: status_text = self.tr("Drizzle Complete", default="Drizzle Complete"); final_stack_type = "Drizzle"
+        else: status_text = self.tr("Stacking Complete", default="Stacking Complete")
+        summary_lines.append(f"{self.tr('Status', default='Status')}: {status_text}")
+
+        elapsed_total_seconds = 0;
+        if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
+        summary_lines.append(f"{self.tr('Total Processing Time', default='Total Processing Time')}: {self._format_duration(elapsed_total_seconds)}")
+        summary_lines.append(f"{self.tr('Final Stack Type', default='Final Stack Type')}: {final_stack_type}")
+        summary_lines.append(f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}")
+        total_rejected = failed_align_count + failed_stack_count + skipped_count
+        summary_lines.append(f"{self.tr('Files Rejected (Total)', default='Files Rejected (Total)')}: {total_rejected} ({self.tr('Align', default='Align')}: {failed_align_count}, {self.tr('Stack Err', default='Stack Err')}: {failed_stack_count}, {self.tr('Other', default='Other')}: {skipped_count})")
+        summary_lines.append(f"{self.tr('Images in Final Stack', default='Images in Final Stack')} ({final_stack_type}): {images_stacked}") # Utilise le bon compte
+        summary_lines.append(f"{self.tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {self._format_duration(total_exposure)}")
+        if final_stack_exists: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
+        else: summary_lines.append(self.tr('Final Stack File: Not created or not found.', default='Final Stack File: Not created or not found.'))
+        full_summary_text_for_dialog = "\n".join(summary_lines)
+
+# --- Afficher Dialogue (ou erreur) ---
+        if processing_error_details:
+            messagebox.showerror(
+                self.tr("error"), f"{self.tr('stacking_error_msg')}\n{processing_error_details}"
+            )
+        elif not was_stopped_by_user:
+            # Passer can_open_output au dialogue
+            self._show_summary_dialog(
+                summary_title, full_summary_text_for_dialog, can_open_output
+            )  # Modifié ici
+
+        # --- Réinitialiser UI ---
+        self._set_parameter_widgets_state(tk.NORMAL)  # Réactive les contrôles
+        if hasattr(self, "start_button"):
+            try:
+                self.start_button.config(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        if hasattr(self, "stop_button"):
+            try:
+                self.stop_button.config(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+        # Activer/Désactiver bouton Ouvrir Sortie basé sur can_open_output
+        if hasattr(self, "open_output_button"):
+            try:
+                self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
+            except tk.TclError:
+                pass
+        if hasattr(self, "remaining_time_var"):
+            try:
+                self.remaining_time_var.set("00:00:00")
+            except tk.TclError:
+                pass
+        # GC final
+        if 'gc' in globals() or 'gc' in locals(): gc.collect()
+
+    # --- MÉTHODE _show_summary_dialog MODIFIÉE ---
+    def _show_summary_dialog(self, summary_title, summary_text, can_open_output): # Ajout argument
+        """Displays a custom modal dialog with the processing summary."""
+        dialog = tk.Toplevel(self.root); dialog.title(summary_title); dialog.transient(self.root); dialog.grab_set(); dialog.resizable(False, False)
+        content_frame = ttk.Frame(dialog, padding="10 10 10 10"); content_frame.pack(expand=True, fill=tk.BOTH)
+        try: icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
+        except tk.TclError: icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
+        icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
+        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450); summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
+        button_frame = ttk.Frame(content_frame); button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
+
+        # --- Bouton Ouvrir Dossier (Conditionnel) ---
+        # L'état est basé sur l'argument can_open_output passé depuis _processing_finished
+        open_button = ttk.Button(button_frame, text=self.tr("Open Output", default="Open Output"), command=self._open_output_folder, state=tk.NORMAL if can_open_output else tk.DISABLED)
+        open_button.pack(side=tk.LEFT, padx=(0, 10)) # Toujours packé, l'état le contrôle
+######################################################
+        # --- Boutons Copier et OK (inchangés) ---
+        def copy_action():
+            try:
+                dialog.clipboard_clear()
+                dialog.clipboard_append(summary_text)
+                copy_button.config(text=self.tr("Copied!", default="Copied!"))
+                dialog.after(
+                    1500,
+                    lambda: copy_button.config(text=self.tr("Copy Summary", default="Copy Summary"))
+                    if copy_button.winfo_exists()
+                    else None,
+                )
+            except Exception as copy_e:
+                print(f"Error copying summary: {copy_e}")
+
+        copy_button = ttk.Button(
+            button_frame, text=self.tr("Copy Summary", default="Copy Summary"), command=copy_action
+        )
+        copy_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        ok_button = ttk.Button(
+            button_frame,
+            text="OK",
+            command=dialog.destroy,
+            style="Accent.TButton" if "Accent.TButton" in ttk.Style().element_names() else "TButton",
+        )
+        ok_button.pack(side=tk.RIGHT)
+        ok_button.focus_set()
+
+        # Centrer dialogue (inchangé)
+        dialog.update_idletasks()
+        root_x = self.root.winfo_x(); root_y = self.root.winfo_y(); root_width = self.root.winfo_width(); root_height = self.root.winfo_height()
+        dialog_width = dialog.winfo_width(); dialog_height = dialog.winfo_height()
+        pos_x = root_x + (root_width // 2) - (dialog_width // 2); pos_y = root_y + (root_height // 2) - (dialog_height // 2)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+        self.root.wait_window(dialog)
+
+    # --- MÉTHODE start_processing MODIFIÉE ---
+    def start_processing(self):
+        """Démarre le traitement, affiche l'avertissement Drizzle, gère la config et lance le thread backend."""
+
+        # --- Désactivation immédiate bouton Start ---
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+
+######################################################
+        # --- Validation des chemins (inchangée) ---
+        input_folder = self.input_path.get()
+        output_folder = self.output_path.get()
+
+        if not input_folder or not output_folder:
+            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
+            if hasattr(self, "start_button"):
+                try:
+                    self.start_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+            return
+
+        if not os.path.isdir(input_folder):
+            messagebox.showerror(
+                self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"
+            )
+            if hasattr(self, "start_button"):
+                try:
+                    self.start_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+            return
+
+        if not os.path.isdir(output_folder):
+            try:
+                os.makedirs(output_folder, exist_ok=True)
+                self.update_progress_gui(
+                    f"{self.tr('Output folder created')}: {output_folder}", None
+                )
+            except Exception as e:
+                messagebox.showerror(
+                    self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}"
+                )
+            if hasattr(self, "start_button"):
+                try:
+                    self.start_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+            return
+
+        try:
+            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
+                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
+                    if hasattr(self, "start_button"):
+                        try:
+                            self.start_button.config(state=tk.NORMAL)
+                        except tk.TclError:
+                            pass
+                    return
+        except Exception as e:
+            messagebox.showerror(
+                self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}"
+            )
+
+        if hasattr(self, "start_button"):
+            try:
+                self.start_button.config(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        return
+            ### === NOUVEAU : AVERTISSEMENT DRIZZLE === ###
+        # Vérifier si la variable Drizzle existe et est cochée
+        drizzle_enabled = False
+        if hasattr(self, 'use_drizzle_var'):
+            try:
+                drizzle_enabled = self.use_drizzle_var.get()
+            except tk.TclError: pass # Ignorer si le widget n'existe pas encore
+
+        if drizzle_enabled:
+            # Récupérer les textes traduits
+            warning_title = self.tr('drizzle_warning_title')
+            warning_text = self.tr('drizzle_warning_text')
+            # Afficher la boîte de dialogue modale
+            continue_with_drizzle = messagebox.askyesno(warning_title, warning_text, parent=self.root) # parent=self.root est important
+            # Si l'utilisateur clique "Non", annuler le démarrage
+            if not continue_with_drizzle:
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur (Drizzle).", None)
+                # Réactiver le bouton Start et sortir
+                if hasattr(self, 'start_button'):
+                    try: self.start_button.config(state=tk.NORMAL)
+                    except tk.TclError: pass
+                return # Arrêter la fonction ici
+        ### === FIN AVERTISSEMENT DRIZZLE === ###
+##############
+        # --- Le reste de la logique de démarrage (inchangée par rapport à avant) ---
+        self.processing = True
+        self.time_per_image = 0
+        self.global_start_time = time.monotonic()
+
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+
+        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        self.additional_folders_to_process = []
+        self.update_additional_folders_display()
+
+        self._set_parameter_widgets_state(tk.DISABLED)  # Désactiver les contrôles
+
+        if hasattr(self, "stop_button"):
+            try:
+                self.stop_button.config(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+
+        if hasattr(self, "open_output_button"):
+            try:
+                self.open_output_button.config(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+
+        if hasattr(self, "progress_manager"):
+            self.progress_manager.reset()
+            self.progress_manager.start_timer()
+
+        if hasattr(self, "status_text"):
+            try:
+                self.status_text.config(state=tk.NORMAL)
+                self.status_text.delete(1.0, tk.END)
+                self.status_text.insert(
+                    tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n"
+                )
+                self.status_text.config(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+                self.settings.update_from_ui(self); validation_messages = self.settings.validate_settings()
+        if validation_messages: self.update_progress_gui("⚠️ Paramètres ajustés:", None);
+        for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None); self.settings.apply_to_ui(self)
+
+        # Configurer QueuedStacker (inclut batch size auto)
+        self.queued_stacker.stacking_mode = self.settings.stacking_mode; self.queued_stacker.kappa = self.settings.kappa
+        requested_batch_size = self.settings.batch_size; final_batch_size_for_backend = 0
+        if requested_batch_size <= 0:
+             self.update_progress_gui("🧠 Estimation taille lot auto...", None); sample_img_path = None
+             if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
+                 fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                 if fits_files: sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
+             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); final_batch_size_for_backend = estimated_size; self.update_progress_gui(f"✅ Taille lot auto estimée: {estimated_size}", None)
+             except Exception as est_err: self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); final_batch_size_for_backend = 10
+        else: final_batch_size_for_backend = requested_batch_size
+        self.queued_stacker.batch_size = final_batch_size_for_backend
+
+        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels; self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
+        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size; self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
+        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get(); self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
+        self.update_progress_gui(f"ⓘ Taille de lot pour traitement : {self.queued_stacker.batch_size}", None)
+
+        # Démarrer le backend (passe maintenant use_drizzle depuis la variable UI)
+        processing_started = self.queued_stacker.start_processing(
+            input_folder, output_folder, self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend,
+            # Pondération
+            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr,
+            weight_stars=self.settings.weight_by_stars, snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight,
+            # Drizzle (prend la valeur depuis la variable UI)
+            use_drizzle=self.use_drizzle_var.get(), # <--- Utilise la variable ici
+            drizzle_scale=float(self.drizzle_scale_var.get()),
+            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get()
+        )
+##################
+        if processing_started:
+            if hasattr(self, 'stop_button'):
+                try:
+                    self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+            self.thread.start()
+        else:  # Échec démarrage backend (très rare maintenant)
+            self.update_progress_gui("ⓘ Demande démarrage ignorée (traitement déjà en cours?).", None)
+            if hasattr(self, 'stop_button'):
+                try:
+                    self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+            self.processing = True  # Assurer état actif
+# --- DANS seestar/gui/main_window.py ---
+# ... (imports, classe SeestarStackerGUI, autres méthodes...) ...
+
+    # --- MÉTHODE start_processing CORRIGÉE ---
+    def start_processing(self):
+        """Démarre le traitement, affiche l'avertissement Drizzle, gère la config et lance le thread backend."""
+
+        # --- Désactivation immédiate bouton Start ---
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+
+        # --- Validation des chemins ---
+        input_folder = self.input_path.get()
+        output_folder = self.output_path.get()
+        if not input_folder or not output_folder:
+            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        if not os.path.isdir(input_folder):
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        if not os.path.isdir(output_folder):
+            try: os.makedirs(output_folder, exist_ok=True); self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
+            except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}");
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        try:
+            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
+                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
+                    if hasattr(self, 'start_button'):
+                        try: self.start_button.config(state=tk.NORMAL)
+                        except tk.TclError: pass; return
+        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}");
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.NORMAL)
+            except tk.TclError: pass; return #<-- Correction: Ajout return ici en cas d'erreur lecture
+
+        # === AVERTISSEMENT DRIZZLE ===
+        drizzle_enabled = False
+        if hasattr(self, 'use_drizzle_var'):
+            try: drizzle_enabled = self.use_drizzle_var.get()
+            except tk.TclError: pass
+
+        if drizzle_enabled:
+            warning_title = self.tr('drizzle_warning_title')
+            warning_text = self.tr('drizzle_warning_text')
+            continue_with_drizzle = messagebox.askyesno(warning_title, warning_text, parent=self.root)
+            if not continue_with_drizzle:
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur (Drizzle).", None)
+                if hasattr(self, 'start_button'):
+                    try: self.start_button.config(state=tk.NORMAL)
+                    except tk.TclError: pass
+                return # Arrêter la fonction ici si l'utilisateur dit non
+
+        # === FIN AVERTISSEMENT DRIZZLE ===
+
+        ### !!! CORRECTION INDENTATION : Ce bloc DOIT être au même niveau que le `if drizzle_enabled:` précédent !!! ###
+        # --- Logique principale de démarrage (maintenant exécutée dans tous les cas sauf annulation) ---
+        self.processing = True
+        self.time_per_image = 0
+        self.global_start_time = time.monotonic()
+
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+
+        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        self.additional_folders_to_process = []
+        self.update_additional_folders_display()
+
+        self._set_parameter_widgets_state(tk.DISABLED)  # Désactiver les contrôles
+
+        if hasattr(self, "stop_button"):
+            try: self.stop_button.config(state=tk.NORMAL)
+            except tk.TclError: pass
+        if hasattr(self, "open_output_button"):
+            try: self.open_output_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+        if hasattr(self, "progress_manager"):
+            self.progress_manager.reset(); self.progress_manager.start_timer()
+        if hasattr(self, "status_text"):
+            try:
+                self.status_text.config(state=tk.NORMAL)
+                self.status_text.delete(1.0, tk.END)
+                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
+                self.status_text.config(state=tk.DISABLED)
+            except tk.TclError: pass
+
+        # MAJ et Validation Settings
+        self.settings.update_from_ui(self)
+        validation_messages = self.settings.validate_settings()
+        if validation_messages:
+             self.update_progress_gui("⚠️ Paramètres ajustés:", None);
+             for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None);
+             self.settings.apply_to_ui(self) # Appliquer corrections à l'UI
+
+        # Configurer QueuedStacker (inclut batch size auto)
+        self.queued_stacker.stacking_mode = self.settings.stacking_mode
+        self.queued_stacker.kappa = self.settings.kappa
+        requested_batch_size = self.settings.batch_size; final_batch_size_for_backend = 0
+        if requested_batch_size <= 0:
+             self.update_progress_gui("🧠 Estimation taille lot auto...", None); sample_img_path = None
+             if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
+                 fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                 if fits_files: sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
+             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); final_batch_size_for_backend = estimated_size; self.update_progress_gui(f"✅ Taille lot auto estimée: {estimated_size}", None)
+             except Exception as est_err: self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); final_batch_size_for_backend = 10
+        else: final_batch_size_for_backend = requested_batch_size
+        self.queued_stacker.batch_size = final_batch_size_for_backend
+
+        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
+        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
+        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
+        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
+        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
+        self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
+        self.update_progress_gui(f"ⓘ Taille de lot pour traitement : {self.queued_stacker.batch_size}", None)
+
+        # Démarrer le backend (passe maintenant use_drizzle depuis la variable UI)
+        processing_started = self.queued_stacker.start_processing(
+            input_folder, output_folder, self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend,
+            # Pondération
+            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr,
+            weight_stars=self.settings.weight_by_stars, snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight,
+            # Drizzle
+            use_drizzle=self.use_drizzle_var.get(), # Utilise la variable UI
+            drizzle_scale=float(self.drizzle_scale_var.get()),
+            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get()
+        )
+
+        # Gérer résultat démarrage backend
+        if processing_started:
+            if hasattr(self, 'stop_button'):
+                try: self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            # Démarrer le thread de suivi de la progression GUI
+            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+            self.thread.start()
+        else: # Échec démarrage backend (rare, normalement déjà en cours)
+            self.update_progress_gui("ⓘ Demande démarrage ignorée (traitement déjà en cours?).", None)
+            if hasattr(self, 'stop_button'):
+                try: self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            # S'assurer que l'état processing est bien True si le backend tournait déjà
+            self.processing = True
+        ### !!! FIN BLOC CORRIGÉ !!! ###
+
 
 # --- Main Execution ---
 if __name__ == "__main__":
     try:
-        _dummy_root = tk.Tk(); _dummy_root.withdraw(); style = ttk.Style(); available_themes = style.theme_names()
-        theme_to_use = 'default'; preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
+        _dummy_root = tk.Tk()
+        _dummy_root.withdraw()
+        style = ttk.Style()
+        available_themes = style.theme_names()
+        theme_to_use = 'default'
+        preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
         for t in preferred_themes:
-            if t in available_themes: theme_to_use = t; break
-        print(f"Using theme: {theme_to_use}"); style.theme_use(theme_to_use)
-        try: style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
-        except tk.TclError: print("Warning: Could not configure Accent.TButton style.")
-        try: style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
-        except tk.TclError: print("Warning: Could not configure Toolbutton.TButton style.")
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
-    except tk.TclError as theme_err: print(f"Error initializing Tk themes: {theme_err}. Using Tk default.");
-    if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
+            if t in available_themes:
+                theme_to_use = t
+                break
+        print(f"Using theme: {theme_to_use}")
+        style.theme_use(theme_to_use)
+        try:
+            style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
+        except tk.TclError:
+            print("Warning: Could not configure Accent.TButton style.")
+        try:
+            style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
+        except tk.TclError:
+            print("Warning: Could not configure Toolbutton.TButton style.")
+        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
+            _dummy_root.destroy()
+    except tk.TclError as theme_err:
+        print(f"Error initializing Tk themes: {theme_err}. Using Tk default.")
+        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
+            _dummy_root.destroy()
 
     gui = SeestarStackerGUI()
     gui.root.mainloop()
-
-# --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---
+    # --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---

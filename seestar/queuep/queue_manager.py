@@ -72,31 +72,33 @@ class SeestarQueuedStacker:
         self.current_folder = None
         self.output_folder = None
         self.unaligned_folder = None
+        ### NOUVEAU : Chemin pour les entrées temporaires Drizzle (sera défini dans initialize) ###
+        self.drizzle_temp_dir = None
+        ### NOUVEAU : Flag pour savoir si Drizzle est actif pour cette session (sera défini dans start_processing) ###
+        self.drizzle_active_session = False
         # --- Reference Image & Alignment ---
-        self.aligner = SeestarAligner() # Uses astroalign
-        # --- Batch & Cumulative Stack ---
-        # Now stores (aligned_data, header, quality_scores)
-        self.current_batch_data = []
-        self.current_stack_data = None
+        self.aligner = SeestarAligner()
+        ### NOUVEAU : Pour stocker le header de référence pour le WCS Drizzle (sera défini dans _worker) ###
+        self.reference_header_for_wcs = None
+        # --- Batch & Cumulative Stack (pour l'aperçu classique) ---
+        self.current_batch_data = [] # Stocke (aligned_data, header, quality_scores)
+        self.current_stack_data = None # Stack CLASSIQUE cumulé pour l'aperçu
         self.current_stack_header = None
-        self.images_in_cumulative_stack = 0
-        self.total_exposure_seconds = 0.0
-        self.final_stacked_path = None
-        # --- Processing Parameters ---
+        self.images_in_cumulative_stack = 0 # Pour le stack CLASSIQUE
+        self.total_exposure_seconds = 0.0 # Pour le stack CLASSIQUE
+        self.final_stacked_path = None # Chemin du fichier FITS final (classique OU drizzle)
+        # --- Processing Parameters (Valeurs par défaut, seront écrasées par start_processing) ---
         self.stacking_mode = "kappa-sigma"
         self.kappa = 2.5
-        self.batch_size = 10
+        self.batch_size = 10 # Valeur par défaut si non fournie
         self.correct_hot_pixels = True
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
         self.bayer_pattern = "GRBG"
         self.perform_cleanup = True
-
-        # --- AJOUTER les attributs pour les paramètres Drizzle ---
-        self.use_drizzle_processing = False # Sera défini par start_processing
-        self.drizzle_scale = 2.0           # Sera défini par start_processing
-        self.drizzle_wht_threshold = 0.7 # Stocker la valeur seuil (0-1)
-
+        self.use_drizzle_processing = False # Valeur par défaut initiale
+        self.drizzle_scale = 2.0
+        self.drizzle_wht_threshold = 0.7
         # --- Quality Weighting Parameters ---
         self.use_quality_weighting = False
         self.weight_by_snr = True
@@ -108,35 +110,75 @@ class SeestarQueuedStacker:
         self.files_in_queue = 0
         self.processed_files_count = 0
         self.aligned_files_count = 0
-        self.stacked_batches_count = 0
+        self.stacked_batches_count = 0 # Nombre de batchs classiques traités
         self.total_batches_estimated = 0
         self.failed_align_count = 0
-        self.failed_stack_count = 0
+        self.failed_stack_count = 0 # Échecs DANS _stack_batch (ccdproc)
         self.skipped_files_count = 0
+        # --- Assurer que l'aligneur a aussi un callback progress (au cas où) ---
+        if self.progress_callback:
+             self.aligner.set_progress_callback(self.progress_callback)
 
     def initialize(self, output_dir):
+        """Prépare les dossiers et réinitialise l'état complet avant un nouveau traitement."""
         try:
             self.output_folder = os.path.abspath(output_dir)
             self.unaligned_folder = os.path.join(self.output_folder, "unaligned_files")
+            ### NOUVEAU : Définir et créer/nettoyer le dossier temp Drizzle ###
+            self.drizzle_temp_dir = os.path.join(self.output_folder, "drizzle_temp_inputs") # Définit le chemin
+
             os.makedirs(self.output_folder, exist_ok=True)
             os.makedirs(self.unaligned_folder, exist_ok=True)
-            self.update_progress(f"🗄️ Dossiers prêts: Sortie='{os.path.basename(self.output_folder)}', NonAlign='{os.path.basename(self.unaligned_folder)}'")
-        except OSError as e: self.update_progress(f"❌ Erreur création dossiers: {e}", 0); return False
+
+            # Gérer le dossier temporaire Drizzle :
+            # Si le nettoyage est activé ET que le dossier existe d'une session précédente, le supprimer.
+            if self.perform_cleanup and os.path.isdir(self.drizzle_temp_dir):
+                try:
+                    shutil.rmtree(self.drizzle_temp_dir)
+                    self.update_progress(f"🧹 Ancien dossier temp Drizzle nettoyé.")
+                except Exception as e:
+                    # Ne pas bloquer si le nettoyage échoue, mais prévenir.
+                    self.update_progress(f"⚠️ Erreur nettoyage ancien dossier temp Drizzle: {e}")
+            # Dans tous les cas (sauf erreur ci-dessus), s'assurer que le dossier existe pour la session courante.
+            os.makedirs(self.drizzle_temp_dir, exist_ok=True)
+
+            # Message de log mis à jour pour inclure le dossier Drizzle
+            self.update_progress(f"🗄️ Dossiers prêts: Sortie='{os.path.basename(self.output_folder)}', NonAlign='{os.path.basename(self.unaligned_folder)}', TempDrizzle='{os.path.basename(self.drizzle_temp_dir)}'")
+
+        except OSError as e:
+            # Erreur critique si on ne peut pas créer les dossiers principaux
+            self.update_progress(f"❌ Erreur critique création dossiers: {e}", 0)
+            return False # Échec de l'initialisation
+
+        # --- Réinitialisations standard (inchangées par rapport à avant) ---
         self.processed_files.clear()
-        with self.folders_lock: self.additional_folders = [] # *** Assure que la liste est vide ***
+        with self.folders_lock: self.additional_folders = []
         self.current_batch_data = []
         self.current_stack_data = None; self.current_stack_header = None; self.images_in_cumulative_stack = 0
         self.total_exposure_seconds = 0.0; self.final_stacked_path = None; self.processing_error = None
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
         self.stacked_batches_count = 0; self.total_batches_estimated = 0
         self.failed_align_count = 0; self.failed_stack_count = 0; self.skipped_files_count = 0
+
+        ### NOUVEAU : Réinitialiser aussi les flags/infos spécifiques à Drizzle et référence ###
+        self.drizzle_active_session = False # Sera redéfini par start_processing
+        self.reference_header_for_wcs = None
+
+        # Vider la queue
         while not self.queue.empty():
              try: self.queue.get_nowait(); self.queue.task_done()
              except Empty: break
-             except Exception: pass
-        if self.perform_cleanup: self.cleanup_unaligned_files(); self.cleanup_temp_reference()
+             except Exception: pass # Ignorer autres erreurs pour le vidage
+
+        # Nettoyage optionnel des anciens fichiers (NON Drizzle)
+        if self.perform_cleanup:
+             self.cleanup_unaligned_files()
+             self.cleanup_temp_reference()
+             # Note: Le nettoyage du dossier temp Drizzle est géré plus haut dans cette méthode
+
+        # Réinitialiser le flag d'arrêt de l'aligneur
         self.aligner.stop_processing = False
-        return True
+        return True # Initialisation réussie
 
     def set_progress_callback(self, callback):
         self.progress_callback = callback
@@ -234,305 +276,307 @@ class SeestarQueuedStacker:
 
 
     def _worker(self):
-            """Thread principal pour le traitement des images."""
-            self.processing_active = True
-            self.processing_error = None
-            start_time_session = time.monotonic()
-            reference_image_data = None
-            reference_header = None
+        """Thread principal pour le traitement des images."""
+        self.processing_active = True # S'assurer que le flag est bien True au début
+        self.processing_error = None
+        start_time_session = time.monotonic()
+        reference_image_data = None
+        reference_header = None # Garder pour la sauvegarde optionnelle
 
-            # Liste pour accumuler les images alignées si Drizzle est activé
-            # Stocke (aligned_data, header) tuples
-            all_aligned_images_for_drizzle = [] if self.use_drizzle_processing else None
+        ### NOUVEAU : Liste pour stocker les CHEMINS des fichiers Drizzle temporaires ###
+        # Sera None si Drizzle n'est pas actif
+        accumulated_drizzle_temp_files = [] if self.drizzle_active_session else None
 
-            try:
-                # --- Préparation de l'image de référence ---
-                self.update_progress("⭐ Recherche/Préparation image référence...")
-                initial_files = []
-                if self.current_folder and os.path.isdir(self.current_folder):
-                    try:
-                        initial_files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.fit', '.fits'))])
-                    except Exception as e:
-                        self.update_progress(f"Warning: Could not list initial files for ref finding: {e}")
+        try:
+            # --- 1. Préparation de l'image de référence ---
+            self.update_progress("⭐ Recherche/Préparation image référence...")
+            initial_files = []
+            if self.current_folder and os.path.isdir(self.current_folder):
+                try:
+                    initial_files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.fit', '.fits'))])
+                except Exception as e:
+                    self.update_progress(f"Warning: Could not list initial files for ref finding: {e}")
 
-                # Configurer l'aligneur avant de chercher la référence
-                self.aligner.correct_hot_pixels = self.correct_hot_pixels
-                self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
-                self.aligner.neighborhood_size = self.neighborhood_size
-                self.aligner.bayer_pattern = self.bayer_pattern
+            # Configurer aligneur (déjà fait dans start_processing, mais on peut le garder par sécurité)
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels
+            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
+            self.aligner.neighborhood_size = self.neighborhood_size
+            self.aligner.bayer_pattern = self.bayer_pattern
 
-                # Obtenir l'image de référence (traitée) et son en-tête
-                reference_image_data, reference_header = self.aligner._get_reference_image(self.current_folder, initial_files)
-                self.reference_header_for_wcs = reference_header # Store for WCS creation
+            # Obtenir l'image de référence (traitée) et son en-tête
+            reference_image_data, reference_header = self.aligner._get_reference_image(self.current_folder, initial_files)
+            self.reference_header_for_wcs = reference_header # Stocker pour WCS Drizzle
 
-                # Gérer l'échec de l'obtention de la référence
-                if reference_image_data is None:
-                    user_ref_path = self.aligner.reference_image_path
-                    if user_ref_path and os.path.isfile(user_ref_path): error_msg = f"Échec chargement/prétraitement référence MANUELLE: {os.path.basename(user_ref_path)}"
-                    elif user_ref_path: error_msg = f"Fichier référence MANUELLE introuvable/invalide: {user_ref_path}"
-                    else: error_msg = "Échec sélection automatique image référence (vérifiez les premières images et logs)."
-                    raise RuntimeError(error_msg) # Stoppe le worker si pas de référence
-                else:
-                    # Sauvegarder la référence trouvée/préparée (optionnel mais utile pour debug)
-                    self.aligner._save_reference_image(reference_image_data, reference_header, self.output_folder)
-                    self.update_progress("⭐ Image de référence prête.", 5)
+            if reference_image_data is None:
+                user_ref_path = self.aligner.reference_image_path
+                error_msg = ""
+                if user_ref_path and os.path.isfile(user_ref_path): error_msg = f"Échec chargement/prétraitement référence MANUELLE: {os.path.basename(user_ref_path)}"
+                elif user_ref_path: error_msg = f"Fichier référence MANUELLE introuvable/invalide: {user_ref_path}"
+                else: error_msg = "Échec sélection automatique image référence (vérifiez logs)."
+                raise RuntimeError(error_msg) # Stoppe le worker si pas de référence
+            else:
+                # Sauvegarder la référence (utile pour debug)
+                self.aligner._save_reference_image(reference_image_data, reference_header, self.output_folder)
+                self.update_progress("⭐ Image de référence prête.", 5)
 
-                # Recalculer le nombre total de lots estimé basé sur la file initiale
-                self._recalculate_total_batches()
-                if self.use_quality_weighting:
-                    self.update_progress(f"⚖️ Pondération qualité activée (SNR: {self.weight_by_snr}, Stars: {self.weight_by_stars})")
+            # Recalculer le nombre total de lots estimé basé sur la file initiale
+            self._recalculate_total_batches()
 
-                # --- Boucle de traitement de la file ---
-                while not self.stop_processing:
-                    file_path = None
-                    try:
-                        # Obtenir le prochain fichier de la file
-                        file_path = self.queue.get(timeout=1.0) # Timeout pour vérifier stop_processing
-                        file_name = os.path.basename(file_path)
+            # --- 2. Boucle de traitement de la file ---
+            self.update_progress(f"▶️ Démarrage boucle traitement (File: {self.files_in_queue} | Lots Est.: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})")
+            while not self.stop_processing:
+                file_path = None
+                try:
+                    # Obtenir le prochain fichier (avec timeout)
+                    file_path = self.queue.get(timeout=1.0)
+                    file_name = os.path.basename(file_path)
 
-                        # Traiter le fichier (chargement, prétraitement, alignement, scores qualité)
-                        aligned_data, header, quality_scores = self._process_file(file_path, reference_image_data)
+                    # --- Traiter le fichier ---
+                    # _process_file gère: load, validate, preprocess, align, quality scores
+                    aligned_data, header, quality_scores = self._process_file(file_path, reference_image_data)
+                    self.processed_files_count += 1 # Compter chaque tentative
 
-                        self.processed_files_count += 1 # Compter chaque tentative
+                    # --- Actions si traitement réussi ---
+                    if aligned_data is not None:
+                        self.aligned_files_count += 1
 
-                        # Si le traitement a réussi (image alignée)
-                        if aligned_data is not None:
-                            self.aligned_files_count += 1
-
-                            # --- Gestion différente selon si Drizzle est activé ou non ---
-                            if self.use_drizzle_processing:
-                                # **Mode Drizzle : Accumuler les données alignées**
-                                # MODIFIÉ ICI pour stocker tuple (data, header)
-                                all_aligned_images_for_drizzle.append((aligned_data, header))
-                                # Log simple pour Drizzle
-                                self.update_progress(f"   -> Image {self.aligned_files_count} alignée pour Drizzle.")
+                        ### NOUVEAU : Gérer chemin Drizzle vs Classique ###
+                        if self.drizzle_active_session:
+                            # --- MODE DRIZZLE ACTIF ---
+                            # Sauvegarder l'image alignée dans le dossier temporaire
+                            temp_file_path = self._save_drizzle_input_temp(aligned_data, header)
+                            if temp_file_path:
+                                # Ajouter le CHEMIN à la liste pour le Drizzle final
+                                accumulated_drizzle_temp_files.append(temp_file_path)
                             else:
-                                # **Mode Classique : Ajouter au batch en cours**
-                                # AJOUTÉ quality_scores ici
-                                self.current_batch_data.append((aligned_data, header, quality_scores))
-                                # Si le batch est plein (ET PAS en mode Drizzle), le traiter
-                                if len(self.current_batch_data) >= self.batch_size:
-                                    self.stacked_batches_count += 1
-                                    # --- Utiliser la nouvelle méthode _process_completed_batch ---
-                                    # Elle ne gère que le cas NON-Drizzle
-                                    self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
-                                    # Le batch est vidé à l'intérieur de _process_completed_batch
+                                # Si la sauvegarde échoue, on compte comme un échec/skip
+                                self.update_progress(f"   ⚠️ Échec sauvegarde temp Drizzle pour {file_name}")
+                                self.skipped_files_count += 1 # ou failed_stack_count ?
+                                # On ne l'ajoute PAS au batch classique non plus si la sauvegarde échoue
 
-                        # Marquer la tâche comme terminée dans la queue
-                        self.queue.task_done()
+                        ### --- Toujours ajouter au batch pour l'aperçu CLASSIQUE --- ###
+                        # Même si Drizzle est actif, on maintient un stack classique pour voir la progression
+                        # Si la sauvegarde Drizzle a échoué, on ne l'ajoute pas ici non plus
+                        if not self.drizzle_active_session or temp_file_path: # Ajouter seulement si Drizzle inactif OU si sauvegarde temp Drizzle ok
+                             self.current_batch_data.append((aligned_data, header, quality_scores))
 
-                        # --- Mise à jour de la progression et ETA (peut être mise à l'extérieur du if aligned_data) ---
-                        current_progress = (self.processed_files_count / self.files_in_queue) * 100 if self.files_in_queue > 0 else 0
-                        elapsed_time = time.monotonic() - start_time_session
-                        if self.processed_files_count > 0:
-                            time_per_file = elapsed_time / self.processed_files_count
-                            remaining_files_estimate = max(0, self.files_in_queue - self.processed_files_count)
-                            eta_seconds = remaining_files_estimate * time_per_file
-                            h, rem = divmod(int(eta_seconds), 3600); m, s = divmod(rem, 60)
-                            time_str = f"{h:02}:{m:02}:{s:02}"
-                            progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name} | ETA: {time_str}"
-                        else: progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name}"
-                        self.update_progress(progress_msg, current_progress)
+                             # Traiter le batch classique s'il est plein
+                             if len(self.current_batch_data) >= self.batch_size:
+                                 self.stacked_batches_count += 1
+                                 self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                                 # _process_completed_batch vide self.current_batch_data
 
-                        # Appel périodique à gc.collect
-                        if self.processed_files_count % 20 == 0: gc.collect()
+                    # --- Fin actions si traitement réussi ---
 
-                    # --- Gérer la file d'attente vide et les dossiers supplémentaires ---
-                    except Empty:
-                        # La file est vide, vérifier s'il reste un batch à traiter ou des dossiers
-                        self.update_progress("ⓘ File d'attente vide. Vérification batch final / dossiers sup...")
+                    # Marquer la tâche comme terminée dans la queue (après traitement réussi ou échec géré)
+                    self.queue.task_done()
 
-                        # --- Traiter le dernier batch si mode NON-Drizzle ---
-                        # MODIFIÉ : Ajouté `not self.use_drizzle_processing`
-                        if not self.use_drizzle_processing and self.current_batch_data:
-                            self.update_progress(f"⏳ Traitement du dernier batch ({len(self.current_batch_data)} images)...")
-                            self.stacked_batches_count += 1
-                            # --- Utiliser la nouvelle méthode _process_completed_batch ---
-                            self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
-                            # Le batch est vidé à l'intérieur
+                    # --- Mise à jour de la progression et ETA (reste identique) ---
+                    current_progress = (self.processed_files_count / self.files_in_queue) * 100 if self.files_in_queue > 0 else 0
+                    elapsed_time = time.monotonic() - start_time_session
+                    if self.processed_files_count > 0:
+                        time_per_file = elapsed_time / self.processed_files_count
+                        remaining_files_estimate = max(0, self.files_in_queue - self.processed_files_count)
+                        eta_seconds = remaining_files_estimate * time_per_file
+                        h, rem = divmod(int(eta_seconds), 3600); m, s = divmod(rem, 60)
+                        time_str = f"{h:02}:{m:02}:{s:02}"
+                        progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name} | ETA: {time_str}"
+                    else: progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name}"
+                    self.update_progress(progress_msg, current_progress)
 
-                        # --- Vérifier s'il y a des dossiers supplémentaires ---
-                        folder_to_process = None
-                        with self.folders_lock:
-                            if self.additional_folders:
-                                folder_to_process = self.additional_folders.pop(0)
-                                folder_count = len(self.additional_folders)
-                                self.update_progress(f"folder_count_update:{folder_count}") # Informe l'UI
+                    # GC périodique
+                    if self.processed_files_count % 20 == 0: gc.collect()
 
-                        if folder_to_process:
-                            # Si un dossier supplémentaire est trouvé, l'ajouter à la queue
-                            folder_name = os.path.basename(folder_to_process)
-                            self.update_progress(f"📂 Traitement dossier sup: {folder_name}")
-                            self.current_folder = folder_to_process # Mettre à jour le dossier courant
-                            files_added = self._add_files_to_queue(folder_to_process)
-                            if files_added > 0:
-                                self.update_progress(f"📋 {files_added} fichiers ajoutés depuis {folder_name}. Total file d'attente: {self.files_in_queue}. Total lots estimé: {self.total_batches_estimated}")
-                                continue # Reprendre la boucle pour traiter les nouveaux fichiers
-                            else:
-                                self.update_progress(f"⚠️ Aucun nouveau FITS trouvé dans {folder_name}")
-                                continue # Vérifier s'il y a encore d'autres dossiers
+                # --- Gérer la file d'attente vide et les dossiers supplémentaires ---
+                except Empty:
+                    self.update_progress("ⓘ File vide. Vérification batch final / dossiers sup...")
+
+                    # Traiter le dernier batch classique si besoin
+                    if self.current_batch_data:
+                        self.update_progress(f"⏳ Traitement dernier batch classique ({len(self.current_batch_data)} images)...")
+                        self.stacked_batches_count += 1
+                        self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                        # _process_completed_batch vide self.current_batch_data
+
+                    # Vérifier s'il y a des dossiers supplémentaires
+                    folder_to_process = None
+                    with self.folders_lock:
+                        if self.additional_folders:
+                            folder_to_process = self.additional_folders.pop(0)
+                            folder_count = len(self.additional_folders)
+                            self.update_progress(f"folder_count_update:{folder_count}")
+
+                    if folder_to_process:
+                        # Si un dossier supplémentaire est trouvé, l'ajouter à la queue
+                        folder_name = os.path.basename(folder_to_process)
+                        self.update_progress(f"📂 Traitement dossier sup: {folder_name}")
+                        self.current_folder = folder_to_process
+                        files_added = self._add_files_to_queue(folder_to_process)
+                        if files_added > 0:
+                            # Recalculer après ajout
+                            self._recalculate_total_batches()
+                            self.update_progress(f"📋 {files_added} fichiers ajoutés depuis {folder_name}. File: {self.files_in_queue}. Lots: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
+                            continue # Reprendre la boucle pour traiter les nouveaux fichiers
                         else:
-                            # Plus de fichiers dans la queue ET plus de dossiers supplémentaires
-                            self.update_progress("✅ Fin de la file et des dossiers supplémentaires.")
-                            break # Sortir de la boucle while principale
+                            self.update_progress(f"⚠️ Aucun nouveau FITS trouvé dans {folder_name}")
+                            continue # Vérifier s'il y a encore d'autres dossiers
+                    else:
+                        # Plus de fichiers dans la queue ET plus de dossiers supplémentaires
+                        self.update_progress("✅ Fin de la file et des dossiers supplémentaires.")
+                        break # Sortir de la boucle while principale
 
-                    # --- Gérer les erreurs de traitement d'un fichier ---
-                    except Exception as e:
-                        error_context = f" de {file_name}" if file_path else " (file inconnu)"
-                        self.update_progress(f"❌ Erreur boucle worker{error_context}: {e}")
-                        traceback.print_exc(limit=3)
-                        self.processing_error = f"Erreur boucle worker: {e}"
-                        # Si l'erreur ne vient pas de la queue vide, marquer comme skipped
-                        if file_path: self.skipped_files_count += 1
+                # --- Gérer les erreurs de traitement d'un fichier ---
+                except Exception as e:
+                    error_context = f" de {file_name}" if file_path else " (file inconnu)"
+                    self.update_progress(f"❌ Erreur boucle worker{error_context}: {e}")
+                    traceback.print_exc(limit=3) # Afficher la trace pour le débogage
+                    self.processing_error = f"Erreur boucle worker: {e}"
+                    if file_path:
+                        self.skipped_files_count += 1 # Compter comme "skipped"
                         # Essayer de marquer la tâche comme terminée pour éviter blocage
                         try: self.queue.task_done()
-                        except ValueError: pass # Si déjà terminée ou jamais commencée
-                        time.sleep(0.1) # Petite pause après erreur
+                        except ValueError: pass # Si déjà terminée
+                    time.sleep(0.1) # Petite pause après erreur
 
-                # --- FIN DE LA BOUCLE WHILE ---
+            # --- FIN DE LA BOUCLE WHILE ---
 
-                # --- Étape Finale: Exécution Drizzle ou Sauvegarde Stack Classique ---
-                if self.stop_processing:
-                    self.update_progress("🛑 Traitement interrompu avant l'étape finale.")
-                elif self.use_drizzle_processing:
-                    # --- Exécuter Drizzle si activé ET s'il y a des images ---
-                    if all_aligned_images_for_drizzle: # Contient maintenant des tuples (data, header)
-                        self.update_progress(f"💧 Exécution du Drizzle final sur {len(all_aligned_images_for_drizzle)} images...")
-                        try:
-                            # Extraire juste les données d'image et les headers
-                            images_data_list = [item[0] for item in all_aligned_images_for_drizzle]
-                            images_headers_list = [item[1] for item in all_aligned_images_for_drizzle]
+            # --- 3. Étape Finale (après la boucle) ---
+            if self.stop_processing:
+                self.update_progress("🛑 Traitement interrompu avant étape finale.")
+                # Sauvegarder le stack classique courant si arrêt manuel
+                if self.current_stack_data is not None:
+                     self.update_progress("💾 Sauvegarde du stack classique intermédiaire (arrêt)...")
+                     self._save_final_stack(stopped_early=True)
 
-                            # --- Appel DrizzleProcessor ---
-                            drizzle_proc = DrizzleProcessor(
-                                scale_factor=self.drizzle_scale,
-                                pixfrac=1.0 # 
-                            )
-                            # Passer les listes séparées
-                            drizzled_image_np, weight_map = drizzle_proc.apply_drizzle(
-                                images_data_list,
-                                images_headers=images_headers_list
-                            )
-
-                            # --- Vérifier le résultat AVANT de déballer ---
-                            if drizzled_image_np is not None:
-                                # --- Succès Drizzle ---
-                                self.current_stack_data = drizzled_image_np.astype(np.float32)
-                                self.images_in_cumulative_stack = len(all_aligned_images_for_drizzle)
-
-                                # --- Créer un en-tête FITS pour le résultat Drizzle ---
-                                self.current_stack_header = fits.Header()
-                                # Essayer de copier des infos de base du header de référence
-                                if self.reference_header_for_wcs:
-                                    try:
-                                        keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS']
-                                        for key in keys_to_copy:
-                                            if key in self.reference_header_for_wcs:
-                                                self.current_stack_header[key] = (self.reference_header_for_wcs[key], self.reference_header_for_wcs.comments[key])
-                                    except Exception: pass # Ignorer si erreur copie header réf
-
-                                self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images combined in Drizzle stack')
-                                self.current_stack_header['STACKTYP'] = ('Drizzle', 'Stacking method')
-                                self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
-                                self.current_stack_header['DRZWHTTH'] = (self.drizzle_wht_threshold, 'Drizzle WHT threshold used for masking')
-                                self.current_stack_header['DRZKERNEL'] = ('square', 'Drizzle kernel used') # Ajuster si configurable
-                                self.current_stack_header['DRZPIXFR'] = (1.0, 'Drizzle pixfrac used') # Ajuster si configurable
-                                self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
-
-                                # Recalculer l'exposition totale (estimation basée sur dernier header)
-                                try:
-                                     last_header = images_headers_list[-1] if images_headers_list else None
-                                     self.total_exposure_seconds = self.images_in_cumulative_stack * float(last_header.get('EXPTIME', 10.0)) if last_header else 0.0
-                                except Exception: self.total_exposure_seconds = 0.0
-                                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Estimated total exposure time')
-
-                                self._update_preview() # Mettre à jour l'aperçu final
-                                self._save_final_stack() # Sauvegarder le stack Drizzle
-                            else:
-                                # Échec retourné par drizzle_proc.apply_drizzle
-                                self.update_progress("❌ Échec du traitement Drizzle final.")
-                                self.processing_error = "Drizzle processing failed"
-                                self.final_stacked_path = None
-
-                        except Exception as drizzle_final_err:
-                            self.update_progress(f"❌ Erreur pendant l'exécution Drizzle finale: {drizzle_final_err}")
-                            traceback.print_exc(limit=3)
-                            self.processing_error = f"Drizzle final error: {drizzle_final_err}"
-                            self.final_stacked_path = None
-                    else:
-                        # Drizzle activé mais aucune image alignée
-                        self.update_progress("⚠️ Drizzle activé mais aucune image alignée à traiter.")
-                        self.final_stacked_path = None
-
-                # --- Sauvegarder le stack final Classique (NON-DRIZZLE) ---
-                elif self.current_stack_data is not None:
-                    # --- APPLY FINAL POST-PROCESSING (Cropping, CLAHE) HERE ---
-                    # Only for non-drizzle results, as Drizzle WHT masking handles edges
-                    self.update_progress(f"✨ Application post-traitement final (Rognage/CLAHE)...")
+            ### NOUVEAU : Logique pour Drizzle Final ou Sauvegarde Classique ###
+            elif self.drizzle_active_session:
+                # --- Cas Drizzle Final ---
+                if accumulated_drizzle_temp_files: # Vérifier s'il y a des fichiers à Drizzler
+                    self.update_progress(f"💧 Exécution Drizzle final sur {len(accumulated_drizzle_temp_files)} images...")
                     try:
-                        post_proc_config = {
-                            'edge_crop_percent': 0.02, # Example: 2% crop
-                            'clahe_params': {'clip_limit': 2.0, 'tile_grid_size': (8, 8)}, # Example CLAHE
-                            # Ensure normalization doesn't re-scale the combined data unnecessarily
-                            'normalization': 'none' # Use the 'none' option
-                        }
-                        post_enhancer = StackEnhancer(config=post_proc_config)
-                        # Apply only cropping and CLAHE (using the new method)
-                        # Note: CLAHE est désactivé dans StackEnhancer pour l'instant
-                        self.current_stack_data = post_enhancer.apply_postprocessing(self.current_stack_data)
-                        if self.current_stack_data is None:
-                             raise ValueError("Post-processing returned None.") # Should not happen
+                        # Instancier DrizzleProcessor avec les bons paramètres
+                        drizzle_proc = DrizzleProcessor(
+                            scale_factor=self.drizzle_scale,
+                            pixfrac=1.0 # Modifier si configurable
+                            # kernel='square' # Modifier si configurable
+                        )
+                        # Passer la liste des CHEMINS des fichiers temporaires
+                        # La méthode apply_drizzle doit maintenant gérer la lecture des fichiers
+                        drizzled_image_np, weight_map = drizzle_proc.apply_drizzle(
+                            accumulated_drizzle_temp_files
+                        )
+
+                        if drizzled_image_np is not None:
+                            self.update_progress(f"   -> Drizzle terminé (Shape: {drizzled_image_np.shape}). Application masque WHT...")
+                            # --- Masquage basé sur WHT ---
+                            if weight_map is not None:
+                                try:
+                                    max_wht = np.nanmax(weight_map)
+                                    if max_wht > 1e-9:
+                                        threshold_wht_val = max_wht * self.drizzle_wht_threshold
+                                        mask = weight_map >= threshold_wht_val
+                                        print(f"      (Seuil WHT appliqué: {threshold_wht_val:.2f})")
+                                        if drizzled_image_np.ndim == 3 and mask.ndim == 2:
+                                            mask = np.repeat(mask[:, :, np.newaxis], 3, axis=2)
+                                        drizzled_image_np = np.where(mask, drizzled_image_np, 0.0) # Appliquer masque
+                                    else: print("      (Warning: WHT Map vide/nulle, pas de masquage WHT)")
+                                except Exception as wht_mask_err: print(f"      (Warning: Erreur masquage WHT: {wht_mask_err})")
+
+                            # Remplacer le stack courant par le résultat Drizzle
+                            self.current_stack_data = drizzled_image_np.astype(np.float32)
+                            self.images_in_cumulative_stack = len(accumulated_drizzle_temp_files)
+
+                            # --- Créer header Drizzle ---
+                            self.current_stack_header = fits.Header()
+                            if self.reference_header_for_wcs: # Utiliser header référence WCS
+                                try:
+                                    keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS']
+                                    for key in keys_to_copy:
+                                        if key in self.reference_header_for_wcs:
+                                            self.current_stack_header[key] = (self.reference_header_for_wcs[key], self.reference_header_for_wcs.comments.get(key, ''))
+                                except Exception: pass
+                            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images combined in Drizzle stack')
+                            self.current_stack_header['STACKTYP'] = ('Drizzle', 'Stacking method')
+                            self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
+                            self.current_stack_header['DRZWHTTH'] = (self.drizzle_wht_threshold, 'Drizzle WHT threshold used for masking')
+                            self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
+                            # Recalculer exposition totale (estimation)
+                            try:
+                                first_temp_hdr = fits.getheader(accumulated_drizzle_temp_files[0])
+                                single_exp = float(first_temp_hdr.get('EXPTIME', 10.0))
+                                self.total_exposure_seconds = self.images_in_cumulative_stack * single_exp
+                            except Exception: self.total_exposure_seconds = 0.0
+                            self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Estimated total exposure')
+
+                            self._update_preview() # MAJ aperçu avec résultat Drizzle
+                            self._save_final_stack() # Sauvegarder résultat Drizzle
                         else:
-                             self.update_progress("   -> Post-traitement terminé.")
-                    except NameError: # If StackEnhancer import failed
-                         self.update_progress(f"⚠️ Erreur: StackEnhancer non disponible pour post-traitement.")
-                    except Exception as post_err:
-                        self.update_progress(f"⚠️ Erreur post-traitement final: {post_err}")
-                        traceback.print_exc(limit=1)
+                            # apply_drizzle a retourné None
+                            self.update_progress("❌ Échec traitement Drizzle final.")
+                            self.processing_error = "Drizzle processing failed"
+                            self.final_stacked_path = None
+                            # Fallback? Sauvegarder le stack classique ?
+                            # self.update_progress("💾 Sauvegarde du stack classique en fallback...")
+                            # self._save_final_stack() # Sauvegarder le classique s'il existe
 
-                    # Sauvegarder le résultat (potentiellement post-traité)
-                    self._save_final_stack()
+                    except ImportError:
+                         self.update_progress("❌ ERREUR: DrizzleProcessor non trouvé pour exécution finale.")
+                         self.processing_error = "DrizzleProcessor import failed"; self.final_stacked_path = None
+                    except Exception as drizzle_final_err:
+                        self.update_progress(f"❌ Erreur Drizzle final: {drizzle_final_err}")
+                        traceback.print_exc(limit=3); self.processing_error = f"Drizzle final error: {drizzle_final_err}"; self.final_stacked_path = None
                 else:
-                    # Aucun stack cumulatif n'a été créé (probablement aucune image valide)
-                    self.update_progress("ⓘ Aucun stack cumulatif à sauvegarder (aucune image traitée?).")
+                    # Drizzle activé mais aucun fichier accumulé
+                    self.update_progress("⚠️ Drizzle activé mais aucun fichier temporaire trouvé.")
                     self.final_stacked_path = None
+                    # Sauvegarder le stack classique s'il existe
+                    if self.current_stack_data is not None:
+                         self.update_progress("💾 Sauvegarde du stack classique (aucun fichier Drizzle)...")
+                         self._save_final_stack()
 
-            # --- Erreur critique avant la boucle principale (ex: référence) ---
-            except RuntimeError as ref_err:
-                self.update_progress(f"❌ ERREUR CRITIQUE: {ref_err}")
-                self.processing_error = str(ref_err)
-            # --- Erreur générale imprévue ---
-            except Exception as e:
-                self.update_progress(f"❌ Erreur critique thread worker: {e}")
-                traceback.print_exc(limit=5)
-                self.processing_error = f"Erreur critique: {e}"
+            # --- Cas Sauvegarde Finale Classique (si Drizzle inactif) ---
+            elif self.current_stack_data is not None:
+                 # Le post-processing (crop/clahe) est maintenant géré dans _save_final_stack pour classique
+                self._save_final_stack()
+            else:
+                # Aucun stack cumulatif n'a été créé
+                self.update_progress("ⓘ Aucun stack cumulatif (classique ou Drizzle) à sauvegarder.")
+                self.final_stacked_path = None
+            ### FIN NOUVELLE LOGIQUE FINALE ###
 
-            # --- Nettoyage final et arrêt ---
-            finally:
-                if self.perform_cleanup:
-                    self.update_progress("🧹 Nettoyage fichiers temporaires...")
-                    self.cleanup_unaligned_files()
-                    self.cleanup_temp_reference()
-                else:
-                    self.update_progress(f"ⓘ Fichiers temporaires/non alignés conservés.")
+        # --- Gestion Erreurs Critiques ---
+        except RuntimeError as ref_err: # Erreur référence
+            self.update_progress(f"❌ ERREUR CRITIQUE: {ref_err}")
+            self.processing_error = str(ref_err)
+        except Exception as e: # Erreur générale worker
+            self.update_progress(f"❌ Erreur critique thread worker: {e}")
+            traceback.print_exc(limit=5)
+            self.processing_error = f"Erreur critique: {e}"
 
-                # Vider la queue au cas où (si arrêt prématuré)
-                while not self.queue.empty():
-                    try: self.queue.get_nowait(); self.queue.task_done()
-                    except Exception: break
+        # --- Nettoyage Final ---
+        finally:
+            if self.perform_cleanup:
+                self.update_progress("🧹 Nettoyage final fichiers temporaires...")
+                self.cleanup_unaligned_files()
+                self.cleanup_temp_reference()
+                ### NOUVEAU : Nettoyer dossier temp Drizzle si actif ###
+                if self.drizzle_active_session:
+                    self._cleanup_drizzle_temp_files()
+            else:
+                self.update_progress(f"ⓘ Fichiers temporaires conservés.")
 
-                # Réinitialiser les données temporaires
-                self.current_batch_data = []
-                if all_aligned_images_for_drizzle is not None:
-                    all_aligned_images_for_drizzle.clear() # Vider la liste Drizzle
-                gc.collect() # Appel final à gc
-
-                # Marquer la fin du traitement
-                self.processing_active = False
-                self.update_progress("🚪 Thread traitement terminé.")
-
-
-# --- FIN DE LA MÉTHODE _worker ---
+            # Vider la queue (sécurité)
+            while not self.queue.empty():
+                try: self.queue.get_nowait(); self.queue.task_done()
+                except Exception: break
+            # Réinitialiser données temporaires
+            self.current_batch_data = []
+            if accumulated_drizzle_temp_files is not None:
+                accumulated_drizzle_temp_files.clear()
+            gc.collect()
+            # Fin traitement
+            self.processing_active = False # Mettre flag à False à la toute fin
+            self.update_progress("🚪 Thread traitement terminé.")
 
     def _calculate_weights(self, batch_scores):
         num_images = len(batch_scores);
@@ -1307,67 +1351,182 @@ class SeestarQueuedStacker:
         except PermissionError: self.update_progress(f"❌ Erreur scan: Permission refusée {os.path.basename(folder_path)}"); return 0
         except Exception as e: self.update_progress(f"❌ Erreur scan dossier {os.path.basename(folder_path)}: {e}"); return 0
 
-    # --- MODIFIED start_processing ---
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
-                     initial_additional_folders=None,
-                     # Weighting
-                     use_weighting=False, weight_snr=True, weight_stars=True,
-                     snr_exp=1.0, stars_exp=0.5, min_w=0.1,
-                     # Drizzle
-                     use_drizzle=False, drizzle_scale=2, drizzle_wht_threshold=0.7): # Ajouter le paramètre avec défaut
-        """Démarre le thread de traitement avec configuration de pondération et dossiers initiaux."""
-        if self.processing_active: self.update_progress("⚠️ Traitement déjà en cours."); return False
-        self.stop_processing = False; self.current_folder = os.path.abspath(input_dir)
-        # ---> AJOUTER CETTE LIGNE <---
-        print(f"DEBUG [start_processing]: self.current_folder = '{self.current_folder}'")
-        # ------------------------------
-        # *** Initialize vide self.additional_folders ***
-        if not self.initialize(output_dir): self.processing_active = False; return False
+                         initial_additional_folders=None,
+                         # Weighting params
+                         use_weighting=False, weight_snr=True, weight_stars=True,
+                         snr_exp=1.0, stars_exp=0.5, min_w=0.1,
+                         # >>> NOUVEAU : Paramètres Drizzle ajoutés ici <<<
+                         use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7):
+        """
+        Démarre le thread de traitement principal avec la configuration spécifiée,
+        y compris les options de pondération et Drizzle.
+        """
+        # Vérifier si un traitement est déjà actif
+        if self.processing_active:
+            self.update_progress("⚠️ Tentative de démarrer un traitement alors qu'un autre est déjà en cours.")
+            return False # Ne pas démarrer un second thread
 
-        if self.batch_size < 3: self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None); self.batch_size = 3
-        self.update_progress(f"ⓘ Taille de lot utilisée : {self.batch_size}")
+        # Réinitialiser l'état d'arrêt et définir le dossier courant
+        self.stop_processing = False
+        self.current_folder = os.path.abspath(input_dir)
 
-        # --- Apply Weighting Config ---
-        self.use_quality_weighting = use_weighting; self.weight_by_snr = weight_snr; self.weight_by_stars = weight_stars
-        self.snr_exponent = max(0.1, snr_exp); self.stars_exponent = max(0.1, stars_exp); self.min_weight = max(0.01, min(1.0, min_w))
+        # Initialiser les dossiers et l'état (TRÈS IMPORTANT)
+        if not self.initialize(output_dir):
+            # Si l'initialisation échoue (ex: impossible de créer les dossiers)
+            self.processing_active = False # S'assurer que le flag est bien False
+            # L'erreur est déjà loggée par initialize()
+            return False # Échec du démarrage
 
-        # New Apply Drizzle Config ---
-        self.use_drizzle_processing = use_drizzle
-        self.drizzle_scale = float(drizzle_scale) # Assurer float
-        self.drizzle_pixfrac = float(drizzle_wht_threshold) # Si configurable plus tard
-        if self.use_drizzle_processing:
-            self.update_progress(f"💧 Drizzle activé (Échelle: x{self.drizzle_scale})")
-            
-        # --- NOUVEAU : Ajouter les dossiers initiaux ---
+        ### NOUVEAU : Stocker l'état Drizzle et ses paramètres pour cette session ###
+        self.drizzle_active_session = use_drizzle # Stocke si Drizzle est demandé
+        if self.drizzle_active_session:
+            # Stocker les paramètres Drizzle reçus
+            self.drizzle_scale = float(drizzle_scale)
+            # Assurer que le seuil est bien entre 0 et 1 (la validation finale est dans DrizzleProcessor mais une sécurité ici est bien)
+            self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
+            self.update_progress(f"💧 Mode Drizzle Activé pour cette session (Échelle: x{self.drizzle_scale:.1f}, Seuil WHT: {self.drizzle_wht_threshold*100:.0f}%)")
+        else:
+            self.update_progress("⚙️ Mode Stack Classique Activé pour cette session")
+        ### FIN NOUVEAU ###
+
+        # Vérifier et ajuster la taille de lot
+        if self.batch_size < 3:
+            self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None)
+            self.batch_size = 3
+        # Log final de la taille de lot utilisée
+        self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
+
+        # Appliquer la configuration de la pondération qualité
+        self.use_quality_weighting = use_weighting
+        self.weight_by_snr = weight_snr
+        self.weight_by_stars = weight_stars
+        # Appliquer les bornes aux exposants et poids min
+        self.snr_exponent = max(0.1, snr_exp)
+        self.stars_exponent = max(0.1, stars_exp)
+        self.min_weight = max(0.01, min(1.0, min_w))
+        if self.use_quality_weighting:
+            self.update_progress(f"⚖️ Pondération Qualité Activée (SNR^{self.snr_exponent:.1f}, Stars^{self.stars_exponent:.1f}, MinW: {self.min_weight:.2f})")
+
+
+        # Gérer les dossiers supplémentaires initiaux
         initial_folders_to_add_count = 0
         with self.folders_lock:
-            # Assurer que la liste est vide avant d'ajouter
-            self.additional_folders = []
+            self.additional_folders = [] # Assurer que la liste est vide
             if initial_additional_folders:
                 for folder in initial_additional_folders:
                     abs_folder = os.path.abspath(folder)
                     if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders:
-                         self.additional_folders.append(abs_folder)
-                         initial_folders_to_add_count += 1
-                    else: print(f"Debug QMgr: Skipped invalid/duplicate initial folder: {folder}")
+                        self.additional_folders.append(abs_folder)
+                        initial_folders_to_add_count += 1
+            # Log seulement si des dossiers ont été effectivement ajoutés
             if initial_folders_to_add_count > 0:
-                 self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) seront traités.")
+                 self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
+                 # Informe l'UI pour mettre à jour son compteur
                  self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
-        # --- Fin Nouveau ---
 
+        # Ajouter les fichiers du dossier initial à la file d'attente
         initial_files_added = self._add_files_to_queue(self.current_folder)
-        # ---> AJOUTER CETTE LIGNE <---
-        print(f"DEBUG [start_processing]: initial_files_added = {initial_files_added}")
-        # ------------------------------
-        if initial_files_added > 0: self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated}")
-        elif not self.additional_folders:
-             if reference_path_ui: self.update_progress("⚠️ Aucun fichier initial. Attente ajout dossiers via bouton...")
-             else: self.update_progress("⚠️ Aucun fichier initial trouvé et aucun dossier supp. pré-ajouté. Démarrage quand même pour référence auto...")
+        if initial_files_added > 0:
+            # Recalculer le total des lots ici est important
+            self._recalculate_total_batches()
+            self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
+        elif not self.additional_folders: # Si aucun fichier initial ET aucun dossier supp
+            self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
+            # Que faire ? On pourrait arrêter ici, ou démarrer quand même (pour ref auto ?)
+            # Pour l'instant, on continue mais on log l'avertissement.
 
-        # Start Thread
+        # Configurer l'image de référence pour l'aligneur
         self.aligner.reference_image_path = reference_path_ui or None
-        self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker"); self.processing_thread.daemon = True; self.processing_thread.start(); self.processing_active = True
-        return True
+
+        # Démarrer le thread worker
+        self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
+        self.processing_thread.daemon = True # Permet à l'app de quitter même si ce thread est bloqué
+        self.processing_thread.start()
+        self.processing_active = True # Mettre le flag APRÈS le démarrage réussi
+        self.update_progress("🚀 Thread de traitement démarré.")
+        return True # Succès du démarrage
+
+    # --- MÉTHODE _save_drizzle_input_temp CORRIGÉE ---
+    def _save_drizzle_input_temp(self, aligned_data, header):
+        """
+        Sauvegarde une image alignée (float32) et son header dans le dossier temp Drizzle.
+        Utilise fits.writeto pour sauvegarder en float32 sans compression.
+
+        Args:
+            aligned_data (np.ndarray): Données alignées (supposées float32, 0-1).
+            header (fits.Header): Header FITS associé (devrait contenir WCS).
+
+        Returns:
+            str or None: Chemin complet du fichier sauvegardé, ou None en cas d'erreur.
+        """
+        if self.drizzle_temp_dir is None:
+            self.update_progress("❌ Erreur interne: Dossier temp Drizzle non défini pour sauvegarde.")
+            return None
+        os.makedirs(self.drizzle_temp_dir, exist_ok=True)
+
+        try:
+            temp_filename = f"aligned_input_{self.aligned_files_count:05d}.fits"
+            temp_filepath = os.path.join(self.drizzle_temp_dir, temp_filename)
+            data_to_save = aligned_data.astype(np.float32)
+            hdu = fits.PrimaryHDU(data=data_to_save, header=header)
+            hdul = fits.HDUList([hdu])
+
+            # --- CORRECTION ICI : Remplacer 'silent' par 'ignore' ---
+            hdul.writeto(temp_filepath, overwrite=True, checksum=False, output_verify='ignore')
+            # --------------------------------------------------------
+            hdul.close()
+
+            return temp_filepath
+
+        except Exception as e:
+            temp_filename_for_error = f"aligned_input_{self.aligned_files_count:05d}.fits"
+            self.update_progress(f"❌ Erreur sauvegarde fichier temp Drizzle {temp_filename_for_error}: {e}")
+            traceback.print_exc(limit=2)
+            return None
+        
+
+    # --- NOUVELLE MÉTHODE HELPER 2 : _list_drizzle_temp_files ---
+    def _list_drizzle_temp_files(self):
+        """
+        Retourne la liste triée des chemins complets des fichiers FITS
+        présents dans le dossier temporaire Drizzle.
+        """
+        # Vérifier si le dossier est défini et existe
+        if self.drizzle_temp_dir is None or not os.path.isdir(self.drizzle_temp_dir):
+            self.update_progress("⚠️ Dossier temp Drizzle non trouvé pour listage.")
+            return [] # Retourner liste vide
+
+        try:
+            # Lister les fichiers correspondant au pattern attendu
+            files = [
+                os.path.join(self.drizzle_temp_dir, f)
+                for f in os.listdir(self.drizzle_temp_dir)
+                if f.lower().endswith('.fits') and f.startswith('aligned_input_')
+            ]
+            # Trier la liste pour un ordre cohérent
+            files.sort()
+            return files
+
+        except Exception as e:
+            # Gérer les erreurs de listage (permissions, etc.)
+            self.update_progress(f"❌ Erreur listage fichiers temp Drizzle: {e}")
+            return [] # Retourner liste vide en cas d'erreur
+
+    # --- NOUVELLE MÉTHODE HELPER 3 : _cleanup_drizzle_temp_files ---
+    def _cleanup_drizzle_temp_files(self):
+        """Supprime le dossier temporaire Drizzle et tout son contenu."""
+        # Vérifier si le dossier est défini et existe
+        if self.drizzle_temp_dir and os.path.isdir(self.drizzle_temp_dir):
+            try:
+                # Utiliser shutil.rmtree pour supprimer le dossier et son contenu
+                shutil.rmtree(self.drizzle_temp_dir)
+                self.update_progress(f"🧹 Dossier temporaire Drizzle supprimé: {os.path.basename(self.drizzle_temp_dir)}")
+            except Exception as e:
+                # Log l'erreur si la suppression échoue
+                self.update_progress(f"⚠️ Erreur suppression dossier temp Drizzle ({os.path.basename(self.drizzle_temp_dir)}): {e}")
+        # else: # Log optionnel si le dossier n'existait pas
+            # self.update_progress("ⓘ Dossier temp Drizzle non trouvé pour nettoyage (normal si Drizzle inactif ou déjà nettoyé).")     
     def stop(self):
         if not self.processing_active: return
         self.update_progress("⛔ Arrêt demandé..."); self.stop_processing = True; self.aligner.stop_processing = True

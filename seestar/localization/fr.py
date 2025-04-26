@@ -161,6 +161,19 @@ FR_TRANSLATIONS = {
     'W. Metrics': 'Métr. Poids', # Clé pour label 'WGHT_MET'
     'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
     'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
-    'drizzle_wht_threshold_label': "Seuil WHT%:"
+    'drizzle_wht_threshold_label': "Seuil WHT%:",
+
+    # --- NOUVEAU : Textes pour Avertissement Drizzle ---
+    'drizzle_warning_title': "Avertissement Drizzle",
+    'drizzle_warning_text': (
+        "Le traitement Drizzle est activé.\n\n"
+        "- Il est expérimental et peut être lent.\n"
+        "- Il créera des fichiers temporaires pouvant occuper beaucoup d'espace disque (potentiellement autant que les images d'entrée).\n",
+        "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
+        "Continuer avec Drizzle ?"
+    ),
+    # --- Fin Nouveaux Textes ---
+
+
 }
 # --- END OF FILE seestar/localization/fr.py ---

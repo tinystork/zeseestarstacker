@@ -1,25 +1,29 @@
-      
 # ---------------------------------------------------------------------------
-# Seestar Stacker Requirements
+# Seestar Stacker - Requirements
 # ---------------------------------------------------------------------------
-# Core CPU Libraries (Tested with versions like Python 3.1x, NumPy 2.x)
+# Core CPU Libraries for the main Seestar Stacker GUI application
+# (Tested with Python 3.8+, NumPy 1.x/2.x)
 # ---------------------------------------------------------------------------
-numpy>=1.21 # Base requirement, see notes below regarding NumPy 2.x
-opencv-contrib-python # For image processing & optional OpenCV CUDA fallback
-astropy>=5.0 # For FITS handling
-astroalign>=1.0 # For image alignment
-tqdm # For progress bars
-matplotlib # For histogram display
-Pillow>=9.0 # For image loading/saving (PNG, JPG etc.) & preview adjustments
-scikit-image # Used by astroalign
-psutil # Optional: For automatic batch size estimation
-ccdproc
+numpy>=1.21             # Fundamental package for numerical operations
+opencv-contrib-python   # Image processing (debayer, hotpix, denoising, etc.) + potential CUDA fallback
+astropy>=5.0            # FITS file handling, WCS, stats
+astroalign>=1.0         # Core image alignment algorithm
+tqdm                    # Progress bars (console/log)
+matplotlib              # Histogram display widget (GUI)
+Pillow>=9.0             # Image loading/saving (PNG, JPG etc.), preview adjustments (GUI)
+scikit-image            # Used by astroalign, ccdproc, maybe enhancement steps
+ccdproc                 # Used for robust image combination (alternative to basic mean/median)
+drizzle                 # Used for the Drizzle algorithm (via enhancement/drizzle_integration.py)
+
 # ---------------------------------------------------------------------------
-drizzle # Replaces drizzlepac for core drizzle algorithm
+# Optional Core Dependencies
+# ---------------------------------------------------------------------------
+psutil                  # Highly recommended for automatic batch size estimation in GUI/core
+
 # ---------------------------------------------------------------------------
 # NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
 # ---------------------------------------------------------------------------
-# This project has been tested with NumPy 2.x (e.g., 2.2.4).
+# This project has been tested with NumPy 2.x (e.g., 2.0.0).
 # However, some users with NumPy >= 2.0 might encounter errors when using
 # optional GPU acceleration with certain CuPy versions, specifically errors like:
 # "Unable to avoid copy while creating an array as requested."
@@ -38,7 +42,7 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# OPTIONAL GPU ACCELERATION (CUDA)
+# OPTIONAL GPU ACCELERATION (CUDA for Core App)
 # ---------------------------------------------------------------------------
 # For potential speedups in denoising, blurring, CLAHE, and STACKING.
 # The program runs correctly on CPU if CUDA/CuPy are not configured.
@@ -48,11 +52,11 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 #    - Relies on user having CUDA Toolkit + drivers installed BEFORE pip install.
 #    - Automatic CPU fallback if unavailable. "DEBUG: No CUDA devices detected by OpenCV" is normal.
 
-# 2. CuPy CUDA (Requires MANUAL installation by user)
+# 2. CuPy CUDA (Requires MANUAL installation by user AFTER base install)
 #    - Provides significant stacking speedup on compatible NVIDIA GPUs.
 #    - User MUST install the correct CuPy package matching their system's CUDA Toolkit.
 #    - Check your system CUDA version: nvcc --version
-#    - Example (based on your working config: CUDA 12.8 -> cupy-cuda12x):
+#    - Example (if you have CUDA 12.x installed):
 #      pip install cupy-cuda12x
 #    - Example for CUDA 11.x systems:
 #      pip install cupy-cuda11x
@@ -66,12 +70,29 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 # cupy-cudaXXX  # <-- DO NOT UNCOMMENT. User installs manually if desired.
 # ---------------------------------------------------------------------------
 
+# ===========================================================================
+# DEPENDENCIES FOR STANDALONE TOOLS (Not required for Seestar Stacker GUI)
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
+# Dependencies ONLY for sat_trail.py (Satellite Trail Analyzer Tool)
+# ---------------------------------------------------------------------------
+# acstools                # For satellite trail detection (satdet.detsat using Hough)
+# scipy                   # Dependency for acstools/skimage/other scientific tasks
+
+# ---------------------------------------------------------------------------
+# Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
+# ---------------------------------------------------------------------------
+# PyQt5                   # GUI framework for the standalone visu.py viewer
+
+# ===========================================================================
 # FIN DES NOTES (Version Française)
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
 # NOTES SUR LA COMPATIBILITÉ NUMPY 2.x (IMPORTANT !)
 # ---------------------------------------------------------------------------
-# Ce projet a été testé avec NumPy 2.x (ex: 2.2.4).
+# Ce projet a été testé avec NumPy 2.x (ex: 2.0.0).
 # Cependant, certains utilisateurs avec NumPy >= 2.0 pourraient rencontrer des
 # erreurs en utilisant l'accélération GPU optionnelle avec certaines versions
 # de CuPy, notamment des erreurs comme :
@@ -92,7 +113,7 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# ACCÉLÉRATION GPU OPTIONNELLE (CUDA)
+# ACCÉLÉRATION GPU OPTIONNELLE (CUDA pour l'App Principale)
 # ---------------------------------------------------------------------------
 # Pour des accélérations potentielles (débruitage, flou, CLAHE, EMPILEMENT).
 # Le programme fonctionne correctement sur CPU si CUDA/CuPy ne sont pas configurés.
@@ -102,11 +123,11 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 #    - Nécessite que l'utilisateur ait installé CUDA Toolkit + pilotes AVANT pip install.
 #    - Repli automatique sur CPU si indisponible. "DEBUG: No CUDA devices detected by OpenCV" est normal.
 
-# 2. CuPy CUDA (Nécessite une installation MANUELLE par l'utilisateur)
+# 2. CuPy CUDA (Nécessite une installation MANUELLE par l'utilisateur APRÈS l'install de base)
 #    - Accélère significativement l'empilement sur GPU NVIDIA compatibles.
 #    - L'utilisateur DOIT installer le paquet CuPy correct correspondant à son CUDA Toolkit système.
 #    - Vérifiez votre version CUDA système : nvcc --version
-#    - Exemple (basé sur votre config fonctionnelle : CUDA 12.8 -> cupy-cuda12x):
+#    - Exemple (si vous avez CUDA 12.x installé):
 #      pip install cupy-cuda12x
 #    - Exemple pour systèmes CUDA 11.x :
 #      pip install cupy-cuda11x
@@ -119,5 +140,3 @@ drizzle # Replaces drizzlepac for core drizzle algorithm
 #
 # cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
 # ---------------------------------------------------------------------------
-
-    
