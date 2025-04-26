@@ -11,6 +11,12 @@ EN_TRANSLATIONS = {
     'browse_input_button': "Browse...", # Unique key for button
     'browse_output_button': "Browse...", # Unique key for button
     'browse_ref_button': "Browse...", # Unique key for button
+    'drizzle_options_frame_label': "Drizzle Options",
+    'drizzle_activate_check': "Enable Drizzle (experimental, slow)",
+    'drizzle_scale_label': "Scale Factor:",
+    'drizzle_radio_2x_label': "x2",
+    'drizzle_radio_3x_label': "x3",
+    'drizzle_radio_4x_label': "x4",
 
     # --- Control Tabs ---
     'tab_stacking': "Stacking",
@@ -82,6 +88,11 @@ EN_TRANSLATIONS = {
     # NOUVEAU: Clés pour les nouveaux boutons (utiliser le nom de variable comme référence)
     'copy_log_button_text': "Copy",
     'open_output_button_text': "Open Output",
+    'show_folders_button_text': "View Inputs",
+    'Select Input Folder': "Select Input Folder",
+
+    'input_folders_title': "Input Folder List",
+    'no_input_folder_set': "No input folder has been selected yet.",
 
     # --- Dialog Titles ---
     'Select Input Folder': "Select Input Folder",
@@ -152,5 +163,6 @@ EN_TRANSLATIONS = {
     'W. Metrics': 'W. Metrics', # Key for label 'WGHT_MET' in header
     'weighting_enabled': "Enabled", # Value for WGHT_ON=True
     'weighting_disabled': "Disabled", # Value for WGHT_ON=False
+    'drizzle_wht_threshold_label': "WHT Threshold%:",
 }
 # --- END OF FILE seestar/localization/en.py ---

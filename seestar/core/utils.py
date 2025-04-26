@@ -15,7 +15,187 @@ try:
 except ImportError:
     _psutil_available = False
     print("Optional dependency 'psutil' not found. Automatic batch size estimation may be limited.")
+# --- Add a global check for CUDA availability ONCE ---
+_cuda_available = False
+_cuda_checked = False
+# --- Global check for CuPy and CUDA availability ---
+_cupy_available = False
+_cupy_checked = False
 
+def check_cuda():
+    """Checks if OpenCV reports CUDA devices and sets a global flag."""
+    global _cuda_available, _cuda_checked
+    if _cuda_checked:
+        return _cuda_available
+    try:
+        # Make sure opencv-contrib-python is potentially installed
+        if not hasattr(cv2, 'cuda'):
+             print("DEBUG: cv2.cuda module not found (likely opencv-python, not opencv-contrib-python or CUDA not supported in build).")
+             _cuda_available = False
+        elif cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            print("DEBUG: CUDA device(s) detected by OpenCV.")
+            cv2.cuda.printCudaDeviceInfo(cv2.cuda.getDevice()) # Print info about the default device
+            _cuda_available = True
+        else:
+            print("DEBUG: No CUDA devices detected by OpenCV.")
+            _cuda_available = False
+    except Exception as e:
+        print(f"DEBUG: Error checking for CUDA devices: {e}")
+        _cuda_available = False
+    finally:
+        _cuda_checked = True
+    return _cuda_available
+
+def check_cupy_cuda():
+    """Checks if CuPy is installed and can access a CUDA device."""
+    global _cupy_available, _cupy_checked
+    if _cupy_checked:
+        return _cupy_available
+
+    try:
+        import cupy
+        # Check if CuPy can detect a CUDA device
+        if cupy.cuda.is_available():
+            device_id = cupy.cuda.runtime.getDevice()
+            device_props = cupy.cuda.runtime.getDeviceProperties(device_id)
+            print(f"DEBUG: CuPy detected CUDA Device {device_id}: {device_props['name'].decode()}")
+            # Optional: Check compute capability if needed
+            # major = device_props['major']
+            # minor = device_props['minor']
+            # if major < 3: # Example: Require compute capability 3.0+
+            #     print(f"Warning: CuPy detected GPU compute capability {major}.{minor}, which might be too low.")
+            #     _cupy_available = False
+            # else:
+            _cupy_available = True
+        else:
+            print("DEBUG: CuPy imported, but no CUDA device is available/detected by CuPy.")
+            _cupy_available = False
+    except ImportError:
+        print("DEBUG: CuPy library not found. Stacking will use CPU (NumPy).")
+        _cupy_available = False
+    except cupy.cuda.runtime.CUDARuntimeError as e:
+         print(f"DEBUG: CuPy CUDA runtime error during check: {e}. Falling back to CPU.")
+         _cupy_available = False
+    except Exception as e:
+        print(f"DEBUG: Unexpected error during CuPy check: {e}")
+        _cupy_available = False
+    finally:
+        _cupy_checked = True
+
+    return _cupy_available
+
+def apply_denoise(image, strength=1):
+    """
+    Applies Non-Local Means denoising using OpenCV. Uses CUDA if available,
+    otherwise falls back to CPU.
+    Input image is expected to be float32 (0-1 range).
+
+    Parameters:
+        image (numpy.ndarray): Image to denoise (HxW or HxWx3, float32, 0-1).
+        strength (int): Denoising strength ('h' parameter). Recommended: 3 to 15.
+
+    Returns:
+        numpy.ndarray: Denoised image (float32, 0-1).
+    """
+    if image is None:
+        print("Warning: apply_denoise received a None image.")
+        return None
+
+    # Check CUDA availability (only performs the check once)
+    use_cuda = check_cuda()
+
+    # Convert image float (0-1) to uint8 (0-255) for OpenCV
+    image_uint8 = (np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    denoised_uint8 = None
+    h_param = float(strength) # Parameter 'h' in OpenCV functions
+
+    try:
+        # --- Grayscale Image ---
+        if image_uint8.ndim == 2:
+            if use_cuda:
+                try:
+                    # print(f"DEBUG: Attempting CUDA denoising (grayscale) h={h_param}")
+                    # Upload image data to GPU memory
+                    gpu_frame = cv2.cuda_GpuMat()
+                    gpu_frame.upload(image_uint8)
+
+                    # Create denoising object and apply
+                    # Note: CUDA version might have slightly different parameter names/needs
+                    # Adjust templateWindowSize and searchWindowSize if needed
+                    dn = cv2.cuda.createFastNlMeansDenoising()
+                    gpu_denoised = dn.compute(gpu_frame, h=h_param) # Result is also a GpuMat
+
+                    # Download result back from GPU memory to CPU memory
+                    denoised_uint8 = gpu_denoised.download()
+                    # print("DEBUG: CUDA grayscale denoising successful.")
+                except cv2.error as cuda_err:
+                    print(f"Warning: CUDA grayscale denoising failed: {cuda_err}. Falling back to CPU.")
+                    use_cuda = False # Fallback for this call if CUDA fails
+                except Exception as e: # Catch other potential CUDA errors
+                    print(f"Warning: Unexpected error during CUDA grayscale denoising: {e}. Falling back to CPU.")
+                    traceback.print_exc(limit=1)
+                    use_cuda = False # Fallback
+
+            # Fallback to CPU if CUDA not available or failed
+            if not use_cuda or denoised_uint8 is None:
+                # print(f"DEBUG: Using CPU denoising (grayscale) h={h_param}")
+                denoised_uint8 = cv2.fastNlMeansDenoising(
+                    image_uint8, None, h=h_param, templateWindowSize=7, searchWindowSize=21)
+
+        # --- Color Image ---
+        elif image_uint8.ndim == 3 and image_uint8.shape[-1] == 3:
+             # OpenCV color functions expect BGR format
+             image_bgr_uint8 = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2BGR)
+
+             if use_cuda:
+                 try:
+                     # print(f"DEBUG: Attempting CUDA denoising (color) h={h_param}, hColor={h_param}")
+                     gpu_frame = cv2.cuda_GpuMat()
+                     gpu_frame.upload(image_bgr_uint8)
+
+                     # Create color denoising object and apply
+                     # Note: CUDA version might handle hColor differently or automatically
+                     dn = cv2.cuda.createFastNlMeansDenoisingColored()
+                     gpu_denoised = dn.compute(gpu_frame, h_luminance=h_param, h_color=h_param)
+
+                     denoised_bgr_uint8 = gpu_denoised.download()
+                     # print("DEBUG: CUDA color denoising successful.")
+                 except cv2.error as cuda_err:
+                    print(f"Warning: CUDA color denoising failed: {cuda_err}. Falling back to CPU.")
+                    use_cuda = False # Fallback
+                 except Exception as e:
+                    print(f"Warning: Unexpected error during CUDA color denoising: {e}. Falling back to CPU.")
+                    traceback.print_exc(limit=1)
+                    use_cuda = False # Fallback
+
+             # Fallback to CPU if CUDA not available or failed
+             if not use_cuda or denoised_uint8 is None:
+                 # print(f"DEBUG: Using CPU denoising (color) h={h_param}, hColor={h_param}")
+                 denoised_bgr_uint8 = cv2.fastNlMeansDenoisingColored(
+                     image_bgr_uint8, None, h=h_param, hColor=h_param,
+                     templateWindowSize=7, searchWindowSize=21)
+
+             # Convert result back to RGB
+             denoised_uint8 = cv2.cvtColor(denoised_bgr_uint8, cv2.COLOR_BGR2RGB)
+
+        # --- Invalid Input Shape ---
+        else:
+            print(f"Warning: apply_denoise received image with unexpected shape {image.shape}. Returning original.")
+            return image # Return original float32 image if shape is wrong
+
+        # Convert denoised uint8 back to float32 (0-1 range)
+        denoised_float = denoised_uint8.astype(np.float32) / 255.0
+        return denoised_float
+
+    except cv2.error as cv_err: # Catch general OpenCV errors
+         print(f"OpenCV Error during denoising setup/conversion: {cv_err}")
+         traceback.print_exc()
+         return image # Return original float32 image
+    except Exception as e:
+        print(f"Unexpected error during denoising: {e}")
+        traceback.print_exc()
+        return image # Return original float32 image
 
 def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
     """
@@ -109,62 +289,3 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         print(f"Utilisation de la taille de lot par défaut : {default_batch_size}")
         return default_batch_size
 
-def apply_denoise(image, strength=1):
-    """
-    Applique le débruitage Non-Local Means d'OpenCV sur une image 2D (mono) ou 3D (RGB).
-    Le paramètre 'strength' (h) contrôle la réduction de bruit (valeurs recommandées : 3 à 15).
-    Input image is expected to be float32 (0-1 range).
-
-    Parameters:
-        image (numpy.ndarray): Image à débruiter (HxW ou HxWx3, float32, 0-1).
-        strength (int): Force du débruitage (paramètre 'h' de fastNlMeansDenoising*).
-
-    Returns:
-        numpy.ndarray: Image débruitée (float32, 0-1).
-    """
-    if image is None:
-        print("Warning: apply_denoise received a None image.")
-        return None
-
-    # Convert image float (0-1) to uint8 (0-255) for OpenCV
-    # Use np.clip for safety before conversion
-    image_uint8 = (np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
-
-    try:
-        denoised_uint8 = None
-        h_param = float(strength) # Parameter 'h' in OpenCV functions
-
-        if image_uint8.ndim == 2:
-            # Image monochrome
-            # print(f"Applying fastNlMeansDenoising with h={h_param}")
-            denoised_uint8 = cv2.fastNlMeansDenoising(
-                image_uint8, None, h=h_param, templateWindowSize=7, searchWindowSize=21)
-
-        elif image_uint8.ndim == 3 and image_uint8.shape[-1] == 3:
-             # Image couleur RGB (input is uint8 HxWx3)
-             # fastNlMeansDenoisingColored expects BGR uint8.
-             # print(f"Applying fastNlMeansDenoisingColored with h={h_param}, hColor={h_param}")
-             image_bgr_uint8 = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2BGR)
-             denoised_bgr_uint8 = cv2.fastNlMeansDenoisingColored(
-                 image_bgr_uint8, None, h=h_param, hColor=h_param, # Use same strength for luma and chroma
-                 templateWindowSize=7, searchWindowSize=21)
-             # Convert back to RGB for consistency
-             denoised_uint8 = cv2.cvtColor(denoised_bgr_uint8, cv2.COLOR_BGR2RGB)
-        else:
-            print(f"Warning: apply_denoise received image with unexpected shape {image.shape}. Returning original.")
-            return image # Return original float32 image
-
-
-        # Convert denoised uint8 back to float32 (0-1 range)
-        denoised_float = denoised_uint8.astype(np.float32) / 255.0
-        return denoised_float
-
-    except cv2.error as cv_err:
-         print(f"OpenCV Error during denoising: {cv_err}")
-         traceback.print_exc()
-         return image # Return original float32 image
-    except Exception as e:
-        print(f"Unexpected error during denoising: {e}")
-        traceback.print_exc()
-        return image # Return original float32 image
-# --- END OF FILE seestar/core/utils.py ---

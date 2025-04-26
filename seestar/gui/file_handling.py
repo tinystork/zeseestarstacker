@@ -32,6 +32,8 @@ class FileHandlingManager:
             self.gui.input_path.set(abs_folder)
             self.gui.settings.input_folder = abs_folder # Save absolute path
             self.gui.settings.save_settings() # Save settings after modification
+            if hasattr(self.gui, '_update_show_folders_button_state'):
+                self.gui.root.after_idle(self.gui._update_show_folders_button_state) # Use after_idle
             # Try to display the first image from the newly selected folder
             self.gui._try_show_first_input_image()
 

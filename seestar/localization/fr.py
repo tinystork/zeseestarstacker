@@ -11,7 +11,13 @@ FR_TRANSLATIONS = {
     'browse_input_button': "Parcourir...", # Unique
     'browse_output_button': "Parcourir...", # Unique
     'browse_ref_button': "Parcourir...", # Unique
-
+    'drizzle_options_frame_label': "Options Drizzle",
+    'drizzle_activate_check': "Activer Drizzle (expérimental, lent)",
+    'drizzle_scale_label': "Facteur Échelle :",
+    'drizzle_radio_2x_label': "x2",
+    'drizzle_radio_3x_label': "x3",
+    'drizzle_radio_4x_label': "x4",
+    
     # --- Onglets Contrôles ---
     'tab_stacking': "Empilement",
     'tab_preview': "Aperçu",
@@ -82,13 +88,16 @@ FR_TRANSLATIONS = {
     # NOUVEAU: Clés pour les nouveaux boutons
     'copy_log_button_text': "Copier",
     'open_output_button_text': "Ouvrir Sortie",
+    'show_folders_button_text': "Voir Entrées",
 
     # --- Titres Dialogues ---
     'Select Input Folder': "Sélectionner Dossier d'Entrée",
     'Select Output Folder': "Sélectionner Dossier de Sortie",
     'Select Reference Image (Optional)': "Sélectionner Image Référence (Optionnel)",
     'Select Additional Images Folder': "Sélectionner Dossier Images Additionnelles",
-
+    'input_folders_title': "Liste Dossiers d'Entrée",
+    'no_input_folder_set': "Aucun dossier d'entrée n'a été sélectionné.",
+    
     # --- Messages & Statuts ---
     'select_folders': "Veuillez sélectionner les dossiers d'entrée et de sortie.",
     'input_folder_invalid': "Dossier d'entrée invalide",
@@ -152,5 +161,6 @@ FR_TRANSLATIONS = {
     'W. Metrics': 'Métr. Poids', # Clé pour label 'WGHT_MET'
     'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
     'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
+    'drizzle_wht_threshold_label': "Seuil WHT%:"
 }
 # --- END OF FILE seestar/localization/fr.py ---

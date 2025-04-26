@@ -8,6 +8,8 @@ import os
 import sys
 import tkinter as tk
 import traceback # Keep for detailed error reporting
+import warnings
+from astropy.io.fits.verify import VerifyWarning
 
 # --- Robust PYTHONPATH Modification ---
 # Goal: Ensure the directory *containing* the 'seestar' package is in sys.path
@@ -34,6 +36,18 @@ except Exception as path_e:
     print(f"Error setting up sys.path: {path_e}")
     # Attempt to continue, import might still work if installed
 
+# --- Filter specific Astropy warnings globally --- ## THIS IS THE FIX ##
+warnings.filterwarnings(
+    'ignore',
+    category=VerifyWarning,
+    message="Keyword name.*is greater than 8 characters.*"
+)
+warnings.filterwarnings(
+    'ignore',
+    category=VerifyWarning,
+    message="Keyword name.*contains characters not allowed.*"
+)
+# --- End global filter --- ## END OF FIX ##
 # --- Import Application and Version ---
 try:
     # Now import using the package structure (e.g., from seestar.gui...)
