@@ -4,17 +4,18 @@
 # Core CPU Libraries for the main Seestar Stacker GUI application
 # (Tested with Python 3.8+, NumPy 1.x/2.x)
 # ---------------------------------------------------------------------------
-numpy>=1.21             # Fundamental package for numerical operations
-opencv-contrib-python   # Image processing (debayer, hotpix, denoising, etc.) + potential CUDA fallback
-astropy>=5.0            # FITS file handling, WCS, stats
-astroalign>=1.0         # Core image alignment algorithm
-tqdm                    # Progress bars (console/log)
-matplotlib              # Histogram display widget (GUI)
-Pillow>=9.0             # Image loading/saving (PNG, JPG etc.), preview adjustments (GUI)
-scikit-image            # Used by astroalign, ccdproc, maybe enhancement steps
-ccdproc                 # Used for robust image combination (alternative to basic mean/median)
-drizzle                 # Used for the Drizzle algorithm (via enhancement/drizzle_integration.py)
-
+numpy
+opencv-python
+astropy
+astroalign
+tqdm
+matplotlib
+Pillow
+scikit-image
+colour-demosaicing # Ajouté pour le dématriçage dans le nouveau code Drizzle
+drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
+ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
+# scipy # Souvent une dépendance indirecte, mais peut être listée si besoin explicite
 # ---------------------------------------------------------------------------
 # Optional Core Dependencies
 # ---------------------------------------------------------------------------

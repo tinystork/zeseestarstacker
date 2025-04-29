@@ -98,6 +98,7 @@ def check_dependencies():
         ('matplotlib', 'matplotlib'), # Needed for histogram widget
         ('PIL', 'Pillow'), # Needed for preview image handling
         ('skimage', 'scikit-image'), # Used by astroalign internally? Check if truly needed. Keeping for now.
+        ('colour_demosaicing', 'colour-demosaicing'), # Needed for debayering in new drizzle code
     ]
 
     missing_deps = []

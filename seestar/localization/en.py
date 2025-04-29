@@ -17,6 +17,11 @@ EN_TRANSLATIONS = {
     'drizzle_radio_2x_label': "x2",
     'drizzle_radio_3x_label': "x3",
     'drizzle_radio_4x_label': "x4",
+    # --- NOUVELLES CLÉS POUR LE MODE DRIZZLE ---
+    'drizzle_mode_label': "Drizzle Mode:",
+    'drizzle_radio_final': "Standard (Final)",
+    'drizzle_radio_incremental': "Incremental (Disk Saving)",
+    # --- FIN NOUVELLES CLÉS ---
 
     # --- Control Tabs ---
     'tab_stacking': "Stacking",
@@ -164,8 +169,8 @@ EN_TRANSLATIONS = {
     'weighting_enabled': "Enabled", # Value for WGHT_ON=True
     'weighting_disabled': "Disabled", # Value for WGHT_ON=False
     'drizzle_wht_threshold_label': "WHT Threshold%:",
-
-    # --- NEW: Texts for Drizzle Warning ---
+    'drizzle_kernel_label': "Kernel:",
+    'drizzle_pixfrac_label': "Pixfrac:",
     'drizzle_warning_title': "Drizzle Warning",
     'drizzle_warning_text': (
     "Drizzle processing is enabled.\n\n",

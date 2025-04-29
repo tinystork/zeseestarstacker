@@ -17,6 +17,11 @@ FR_TRANSLATIONS = {
     'drizzle_radio_2x_label': "x2",
     'drizzle_radio_3x_label': "x3",
     'drizzle_radio_4x_label': "x4",
+    'drizzle_mode_label': "Mode Drizzle :",
+    'drizzle_radio_final': "Standard (Final)",
+    'drizzle_radio_incremental': "Incrémental (Éco. Disque)",
+    'drizzle_kernel_label': "Noyau :",
+    'drizzle_pixfrac_label': "Pixfrac :",
     
     # --- Onglets Contrôles ---
     'tab_stacking': "Empilement",

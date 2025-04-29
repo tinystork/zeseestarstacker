@@ -51,6 +51,9 @@ class SettingsManager:
         self.use_drizzle = False        # Drizzle désactivé par défaut
         self.drizzle_scale = 2          # Échelle (sera int 2, 3, ou 4)
         self.drizzle_wht_threshold = 0.7 # Seuil pour masque WHT (70%)
+        self.drizzle_mode = "Final"
+        self.drizzle_kernel = "square"  # Noyau Drizzle ('square', 'gaussian', etc.)
+        self.drizzle_pixfrac = 1.0      # Fraction Pixel Drizzle (0.01 - 1.0)
 
         # Preview Settings
         self.preview_stretch_method = "Asinh" # Bon défaut pour l'astro
@@ -106,7 +109,9 @@ class SettingsManager:
                 self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
             # Lire le seuil WHT
             self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=self.drizzle_wht_threshold)).get()
-
+            self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
+            self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
+            self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=self.drizzle_pixfrac)).get()
 
             # --- Preview Settings ---
             self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=self.preview_stretch_method)).get()
@@ -116,7 +121,8 @@ class SettingsManager:
             self.preview_r_gain = getattr(gui_instance, 'preview_r_gain', tk.DoubleVar(value=self.preview_r_gain)).get()
             self.preview_g_gain = getattr(gui_instance, 'preview_g_gain', tk.DoubleVar(value=self.preview_g_gain)).get()
             self.preview_b_gain = getattr(gui_instance, 'preview_b_gain', tk.DoubleVar(value=self.preview_b_gain)).get()
-
+           
+            
             # --- UI Settings ---
             self.language = getattr(gui_instance, 'language_var', tk.StringVar(value=self.language)).get()
             # Sauvegarder la géométrie seulement si la fenêtre existe
@@ -162,6 +168,9 @@ class SettingsManager:
             # Convertir l'échelle numérique en string pour la variable UI
             getattr(gui_instance, 'drizzle_scale_var', tk.StringVar()).set(str(self.drizzle_scale))
             getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar()).set(self.drizzle_wht_threshold)
+            getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
+            getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
+            getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
 
             # --- Preview Settings ---
             getattr(gui_instance, 'preview_stretch_method', tk.StringVar()).set(self.preview_stretch_method)
@@ -237,7 +246,35 @@ class SettingsManager:
                       original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = np.clip(self.drizzle_wht_threshold, 0.1, 1.0); messages.append(f"Seuil Drizzle WHT ({original:.2f}) ajusté à {self.drizzle_wht_threshold:.2f}")
              except (ValueError, TypeError):
                  original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = defaults['drizzle_wht_threshold']; messages.append(f"Seuil Drizzle WHT invalide ({original}), réinitialisé à {self.drizzle_wht_threshold:.2f}")
+            # Drizzle Mode Validation
+                 valid_drizzle_modes = ["Final", "Incremental"]
+                 if not isinstance(self.drizzle_mode, str) or self.drizzle_mode not in valid_drizzle_modes:
+                  original = self.drizzle_mode
+                 self.drizzle_mode = defaults['drizzle_mode'] # Reset to default 'Final'
+                 messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
+            # --->>> FIN DU BLOC À INSÉRER <<<---
 
+            # Drizzle Kernel and Pixfrac Validation
+             valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
+             if not isinstance(self.drizzle_kernel, str) or self.drizzle_kernel.lower() not in valid_kernels:
+                original = self.drizzle_kernel
+                self.drizzle_kernel = defaults['drizzle_kernel'] # Reset to default 'square'
+                messages.append(f"Noyau Drizzle ('{original}') invalide, réinitialisé à '{self.drizzle_kernel}'")
+             else:
+                # S'assurer qu'il est en minuscule pour la comparaison future
+                self.drizzle_kernel = self.drizzle_kernel.lower()
+
+             try:
+                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
+                 if not (0.01 <= self.drizzle_pixfrac <= 1.0):
+                      original = self.drizzle_pixfrac
+                      self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 1.0)
+                      messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}")
+             except (ValueError, TypeError):
+                 original = self.drizzle_pixfrac
+                 self.drizzle_pixfrac = defaults['drizzle_pixfrac'] # Reset to default 1.0
+                 messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
+            # --- FIN NOUVEAU BLOC ---
 
              # --- Preview Settings Validation ---
              self.preview_black_point = float(self.preview_black_point); self.preview_white_point = float(self.preview_white_point)
@@ -292,6 +329,9 @@ class SettingsManager:
             'use_drizzle': bool(self.use_drizzle),
             'drizzle_scale': int(self.drizzle_scale), # Stocker comme int
             'drizzle_wht_threshold': float(self.drizzle_wht_threshold),
+            'drizzle_mode': str(self.drizzle_mode),
+            'drizzle_kernel': str(self.drizzle_kernel),
+            'drizzle_pixfrac': float(self.drizzle_pixfrac),
             # Preview
             'preview_stretch_method': str(self.preview_stretch_method),
             'preview_black_point': float(self.preview_black_point),
@@ -352,7 +392,10 @@ class SettingsManager:
             self.use_drizzle = settings_data.get('use_drizzle', defaults['use_drizzle'])
             self.drizzle_scale = settings_data.get('drizzle_scale', defaults['drizzle_scale'])
             self.drizzle_wht_threshold = settings_data.get('drizzle_wht_threshold', defaults['drizzle_wht_threshold'])
-
+            self.drizzle_mode = settings_data.get('drizzle_mode', defaults['drizzle_mode'])
+            self.drizzle_kernel = settings_data.get('drizzle_kernel', defaults['drizzle_kernel'])
+            self.drizzle_pixfrac = settings_data.get('drizzle_pixfrac', defaults['drizzle_pixfrac'])
+            
             # Preview
             self.preview_stretch_method = settings_data.get('preview_stretch_method', defaults['preview_stretch_method'])
             self.preview_black_point = settings_data.get('preview_black_point', defaults['preview_black_point'])
@@ -373,6 +416,7 @@ class SettingsManager:
                  print("Loaded settings adjusted after validation:")
                  for msg in validation_messages: print(f"  - {msg}")
                  self.save_settings() # Save the corrected settings
+
 
             return True
 
