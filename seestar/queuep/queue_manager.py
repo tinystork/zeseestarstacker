@@ -543,14 +543,17 @@ class SeestarQueuedStacker:
                                     try: self.current_stack_header.update(self.reference_wcs_object.to_header(relax=True))
                                     except Exception as wcs_hdr_err: print(f"Warning: Failed to update header from ref WCS object: {wcs_hdr_err}")
                                 # Copier autres métadonnées utiles si header référence brut existe
-                                if reference_header:
-                                     keys_to_copy = ['INSTRUME','TELESCOP','OBJECT','FILTER','DATE-OBS','GAIN','OFFSET','CCD-TEMP']
-                                     for key in keys_to_copy:
-                                         if key in reference_header: self.current_stack_header[key] = (reference_header[key], reference_header.comments.get(key, ''))
-                                self.current_stack_header['STACKTYP'] = (f'Drizzle Final ({self.drizzle_scale}x)', 'Final Drizzle')
-                                self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor'); self.current_stack_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle kernel'); self.current_stack_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle pixfrac')
-                                self.current_stack_header['DRZWHTTH'] = (self.drizzle_wht_threshold, 'Drizzle WHT threshold used for masking')
-                                self.total_exposure_seconds = 0.0
+                                if reference_header: # Utiliser le header brut original
+                                 keys_to_copy = ['INSTRUME','TELESCOP','OBJECT','FILTER','DATE-OBS','GAIN','OFFSET','CCD-TEMP']
+                                 for key in keys_to_copy:
+                                     if key in reference_header:
+                                         # --- CORRECTION ACCÈS COMMENTAIRE ---
+                                         try:
+                                             comment = reference_header.comments[key]
+                                         except (KeyError, IndexError): # Gérer si commentaire absent
+                                             comment = ''
+                                         self.current_stack_header[key] = (reference_header[key], comment)
+                                         # --- FIN CORRECTION ---
                                 try:
                                     first_temp_hdr = fits.getheader(self.all_aligned_temp_files[0])
                                     single_exp = float(first_temp_hdr.get('EXPTIME', 10.0))

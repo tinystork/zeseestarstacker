@@ -11,15 +11,15 @@
     "hot_pixel_threshold": 3.0,
     "neighborhood_size": 5,
     "cleanup_temp": true,
-    "use_quality_weighting": true,
+    "use_quality_weighting": false,
     "weight_by_snr": true,
     "weight_by_stars": true,
     "snr_exponent": 1.0,
     "stars_exponent": 0.5,
     "min_weight": 0.1,
-    "use_drizzle": true,
+    "use_drizzle": false,
     "drizzle_scale": 2,
-    "drizzle_wht_threshold": 70.0,
+    "drizzle_wht_threshold": 0.7,
     "drizzle_mode": "Final",
     "drizzle_kernel": "square",
     "drizzle_pixfrac": 1.0,
@@ -31,5 +31,5 @@
     "preview_g_gain": 1.0,
     "preview_b_gain": 1.0,
     "language": "en",
-    "window_geometry": "1707x937+78+78"
+    "window_geometry": "1200x750"
 }
