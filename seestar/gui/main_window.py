@@ -1546,75 +1546,137 @@ class SeestarStackerGUI:
                             except ValueError: pass
             except (tk.TclError, AttributeError):
                 pass # Ignorer si widgets détruits
+#############################################################################################################################################
 
-    # --- MÉTHODE _processing_finished MODIFIÉE ---
+
+
     def _processing_finished(self):
         """Actions finales après la fin ou l'arrêt du traitement."""
-        if not self.processing: return # Évite exécutions multiples
+        if not self.processing:
+            # print("DEBUG: _processing_finished called but not processing. Skipping.") # Optionnel
+            return # Évite exécutions multiples
+
+        print("DEBUG: Entering _processing_finished...") # Log entrée
         self.processing = False # Marquer comme terminé
 
+        # Arrêter le timer de la barre de progression
         if hasattr(self, 'progress_manager'):
             self.progress_manager.stop_timer()
             # Arrêter la barre de progression indéterminée si elle l'était
             try:
                 pb = self.progress_manager.progress_bar
-                if pb.winfo_exists() and pb['mode'] == 'indeterminate':
-                    pb.stop()
-                    pb.config(mode='determinate')
-                # Optionnel: Mettre la barre à 100% (ou à la dernière valeur connue)
-                # last_progress = pb['value'] # Récupérer la valeur avant indeterminate? Non fiable.
-                if not self.queued_stacker.processing_error: # Mettre à 100 si pas d'erreur
-                    pb.configure(value=100)
-            except (tk.TclError, AttributeError): pass
+                if pb.winfo_exists():
+                     current_mode = pb['mode']
+                     if current_mode == 'indeterminate':
+                         pb.stop()
+                         pb.config(mode='determinate')
+                     # Optionnel: Mettre la barre à 100% si pas d'erreur critique
+                     if not hasattr(self, 'queued_stacker') or not getattr(self.queued_stacker, 'processing_error', True): # Si pas d'erreur
+                         pb.configure(value=100)
+                     else: # Laisser la valeur où elle était si erreur
+                          pass
+            except (tk.TclError, AttributeError): pass # Ignorer si widgets détruits
 
         # --- Récupération état final du backend ---
-        final_message_for_status_bar = self.tr("stacking_finished")
+        final_message_for_status_bar = self.tr("stacking_finished") # Message par défaut
         final_stack_path = None; processing_error_details = None; images_stacked = 0
         aligned_count = 0; failed_align_count = 0; failed_stack_count = 0; skipped_count = 0
         processed_files_count = 0; total_exposure = 0.0
         was_stopped_by_user = False; output_folder_exists = False; can_open_output = False
-        final_stack_exists = False; is_drizzle_result = False # Flag Drizzle
+        final_stack_exists = False; is_drizzle_result = False; final_stack_type = "Classic" # Défaut
 
         if hasattr(self, "queued_stacker"):
             q_stacker = self.queued_stacker
+            # Récupérer les informations depuis le backend
             final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
-            # Utiliser aligned_count pour Drizzle, images_in_cumulative_stack pour classique
-            is_drizzle_result = getattr(q_stacker, 'drizzle_active_session', False) and not getattr(q_stacker, 'stop_processing', False) and getattr(q_stacker, 'processing_error', None) is None and final_stack_path is not None
-            images_stacked = getattr(q_stacker, 'aligned_files_count', 0) if is_drizzle_result else getattr(q_stacker, 'images_in_cumulative_stack', 0)
-
-            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
+            drizzle_active_session = getattr(q_stacker, 'drizzle_active_session', False)
+            drizzle_mode = getattr(q_stacker, 'drizzle_mode', 'Final')
+            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False) # Flag d'arrêt demandé
+            processing_error_details = getattr(q_stacker, 'processing_error', None) # Erreur critique interne
+            images_in_cumulative = getattr(q_stacker, 'images_in_cumulative_stack', 0) # Compteur pour Classique ET Drizzle Incr
+            aligned_count = getattr(q_stacker, 'aligned_files_count', 0) # Compteur total alignés
             failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
             failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
             skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
             processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
             total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
-            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False)
-            processing_error_details = getattr(q_stacker, 'processing_error', None)
 
+            print(f"DEBUG [_processing_finished]: final_stack_path from backend = {final_stack_path}") # Log
+
+            # Déterminer si le résultat final EST un résultat Drizzle valide
+            is_drizzle_result = (
+                drizzle_active_session and
+                not was_stopped_by_user and
+                processing_error_details is None and
+                final_stack_path is not None and
+                ( # Vérifier que le nom de fichier correspond à un Drizzle
+                    "_drizzle_final" in os.path.basename(final_stack_path) or
+                    "_drizzle_incr" in os.path.basename(final_stack_path)
+                )
+            )
+            print(f"DEBUG [_processing_finished]: is_drizzle_result = {is_drizzle_result}") # Log
+
+            # --- Correction Compteur Images Stackées ---
+            if is_drizzle_result:
+                # Pour Drizzle (Final ou Incrémental réussi), le nombre d'images
+                # est celui qui a été effectivement combiné dans ce stack final.
+                # Pour le Final, c'est aligned_count. Pour l'Incrémental, c'est images_in_cumulative_stack.
+                # Le plus simple est de se fier à NIMAGES dans le header final si possible,
+                # mais utilisons les compteurs pour l'instant.
+                if drizzle_mode == "Final":
+                    images_stacked = aligned_count # Toutes les images alignées ont contribué
+                else: # Incremental
+                    images_stacked = images_in_cumulative # Le cumulatif drizzle
+            else: # Cas Classique (ou Drizzle échoué/stoppé)
+                images_stacked = images_in_cumulative # Le cumulatif classique
+            print(f"DEBUG [_processing_finished]: images_stacked calculated = {images_stacked}") # Log
+            # --- Fin Correction Compteur ---
+
+            # Mettre à jour l'affichage du compteur d'alignés une dernière fois
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
             try:
                 if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
             except tk.TclError: pass
 
+            # Vérifier existence dossier/fichier sortie
             if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
             final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
-            # On peut ouvrir si le dossier existe ET (le stack final existe OU il n'y a pas eu d'erreur critique)
+            print(f"DEBUG [_processing_finished]: final_stack_exists = {final_stack_exists}") # Log
+            # Déterminer si on peut ouvrir le dossier sortie
             can_open_output = output_folder_exists and (final_stack_exists or not processing_error_details)
+
         else:
+            # Cas où le backend n'existe pas (ne devrait pas arriver si processing=True)
             final_message_for_status_bar = "Erreur: Stacker non trouvé."; processing_error_details = final_message_for_status_bar
             if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
             can_open_output = output_folder_exists and not processing_error_details
 
-        # --- Déterminer message statut final ---
-        if was_stopped_by_user: final_message_for_status_bar = self.tr("processing_stopped")
-        elif processing_error_details: final_message_for_status_bar = self.tr('stacking_error_msg')
-        elif not final_stack_exists: final_message_for_status_bar = self.tr("no_stacks_created")
-        elif is_drizzle_result: final_message_for_status_bar = self.tr("Drizzle complete!", default="Drizzle complete!")
-        else: final_message_for_status_bar = self.tr("stacking_complete_msg")
-        # Mettre à jour la barre de statut simple (pas le log principal)
-        if hasattr(self, 'progress_manager'): self.progress_manager.update_progress(final_message_for_status_bar, 100)
+        # --- Déterminer message statut final et type de stack ---
+        if was_stopped_by_user:
+            status_text = self.tr('processing_stopped')
+            # Essayer de déterminer le type de stack même si arrêté
+            if final_stack_path and ("_drizzle" in os.path.basename(final_stack_path)): final_stack_type = "Drizzle (Stopped)"
+            elif final_stack_path and ("_classic" in os.path.basename(final_stack_path)): final_stack_type = "Classic (Stopped)"
+            else: final_stack_type = "Unknown (Stopped)"
+        elif processing_error_details:
+            status_text = f"{self.tr('stacking_error_msg')} {processing_error_details}"
+            final_stack_type = "Error"
+        elif not final_stack_exists:
+            status_text = self.tr("Terminé (Aucun stack final créé)", default="Finished (No final stack created)")
+            final_stack_type = "None"
+        elif is_drizzle_result:
+            status_text = self.tr("Drizzle Complete", default="Drizzle Complete")
+            final_stack_type = "Drizzle" # Mode Drizzle réussi
+        else: # Stack classique réussi
+            status_text = self.tr("Stacking Complete", default="Stacking Complete")
+            final_stack_type = "Classic"
 
-        # --- Charger aperçu final ---
+        # Mettre à jour la barre de statut simple
+        if hasattr(self, 'progress_manager'):
+             try: self.progress_manager.update_progress(status_text, self.progress_bar['value']) # Garder la valeur actuelle ou 100
+             except tk.TclError: pass
+
+        # --- Charger aperçu final (si possible) ---
         preview_load_error_msg = None
         if final_stack_exists:
             try:
@@ -1632,65 +1694,60 @@ class SeestarStackerGUI:
 
         # --- Générer le résumé ---
         summary_lines = []; summary_title = self.tr("processing_report_title")
-        status_text = ""; final_stack_type = self.tr("Classic", default="Classic") # <-- Traduisible
-        if was_stopped_by_user: status_text = self.tr('processing_stopped')
-        elif processing_error_details: status_text = f"ERREUR ({processing_error_details})"
-        elif not final_stack_exists: status_text = "Terminé (Aucun stack final créé)"
-        elif is_drizzle_result: status_text = self.tr("Drizzle Complete", default="Drizzle Complete"); final_stack_type = "Drizzle"
-        else: status_text = self.tr("Stacking Complete", default="Stacking Complete")
         summary_lines.append(f"{self.tr('Status', default='Status')}: {status_text}")
-
-        elapsed_total_seconds = 0;
+        elapsed_total_seconds = 0
         if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
         summary_lines.append(f"{self.tr('Total Processing Time', default='Total Processing Time')}: {self._format_duration(elapsed_total_seconds)}")
         summary_lines.append(f"{self.tr('Final Stack Type', default='Final Stack Type')}: {final_stack_type}")
         summary_lines.append(f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}")
         total_rejected = failed_align_count + failed_stack_count + skipped_count
         summary_lines.append(f"{self.tr('Files Rejected (Total)', default='Files Rejected (Total)')}: {total_rejected} ({self.tr('Align', default='Align')}: {failed_align_count}, {self.tr('Stack Err', default='Stack Err')}: {failed_stack_count}, {self.tr('Other', default='Other')}: {skipped_count})")
-        summary_lines.append(f"{self.tr('Images in Final Stack', default='Images in Final Stack')} ({final_stack_type}): {images_stacked}") # Utilise le bon compte
+        # Utiliser la variable images_stacked corrigée
+        summary_lines.append(f"{self.tr('Images in Final Stack', default='Images in Final Stack')} ({final_stack_type}): {images_stacked}")
         summary_lines.append(f"{self.tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {self._format_duration(total_exposure)}")
         if final_stack_exists: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
+        elif final_stack_path: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path} (Not Found!)")
         else: summary_lines.append(self.tr('Final Stack File: Not created or not found.', default='Final Stack File: Not created or not found.'))
+        if preview_load_error_msg: summary_lines.append(f"\n{preview_load_error_msg}") # Ajouter erreur preview si besoin
         full_summary_text_for_dialog = "\n".join(summary_lines)
 
-# --- Afficher Dialogue (ou erreur) ---
-        if processing_error_details:
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('stacking_error_msg')}\n{processing_error_details}"
-            )
-        elif not was_stopped_by_user:
-            # Passer can_open_output au dialogue
-            self._show_summary_dialog(
-                summary_title, full_summary_text_for_dialog, can_open_output
-            )  # Modifié ici
+        # --- Afficher Dialogue (ou erreur) ---
+        # Ne pas montrer le résumé si arrêté par l'utilisateur, juste loguer
+        if was_stopped_by_user:
+             print("--- Processing Stopped by User ---")
+             print(full_summary_text_for_dialog)
+             print("---------------------------------")
+        elif processing_error_details:
+            # Afficher l'erreur critique dans une messagebox
+             messagebox.showerror(self.tr("error"), f"{status_text}") # status_text contient déjà les détails
+        else:
+            # Afficher le dialogue résumé normal
+            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output)
 
         # --- Réinitialiser UI ---
         self._set_parameter_widgets_state(tk.NORMAL)  # Réactive les contrôles
         if hasattr(self, "start_button"):
-            try:
-                self.start_button.config(state=tk.NORMAL)
-            except tk.TclError:
-                pass
+            try: self.start_button.config(state=tk.NORMAL)
+            except tk.TclError: pass
         if hasattr(self, "stop_button"):
-            try:
-                self.stop_button.config(state=tk.DISABLED)
-            except tk.TclError:
-                pass
+            try: self.stop_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
         # Activer/Désactiver bouton Ouvrir Sortie basé sur can_open_output
         if hasattr(self, "open_output_button"):
-            try:
-                self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
-            except tk.TclError:
-                pass
+            try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
+            except tk.TclError: pass
         if hasattr(self, "remaining_time_var"):
-            try:
-                self.remaining_time_var.set("00:00:00")
-            except tk.TclError:
-                pass
+            try: self.remaining_time_var.set("00:00:00")
+            except tk.TclError: pass
+
         # GC final
         if 'gc' in globals() or 'gc' in locals(): gc.collect()
+        print("DEBUG: Exiting _processing_finished.") # Log sortie
 
-    # --- MÉTHODE _show_summary_dialog MODIFIÉE ---
+
+
+
+################################################################################################################################################
     def _show_summary_dialog(self, summary_title, summary_text, can_open_output): # Ajout argument
         """Displays a custom modal dialog with the processing summary."""
         dialog = tk.Toplevel(self.root); dialog.title(summary_title); dialog.transient(self.root); dialog.grab_set(); dialog.resizable(False, False)

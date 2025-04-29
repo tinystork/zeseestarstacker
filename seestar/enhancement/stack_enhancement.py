@@ -39,7 +39,7 @@ class StackEnhancer:
             'drizzle_pixfrac': 1.0,     # Fraction de pixel Drizzle
             'normalization': 'skimage', # 'astropy' | 'skimage' | 'basic' | 'none' <-- Ajouté 'none'
             'clahe_params': {'clip_limit': 2.0, 'tile_grid_size': (8, 8)},
-            'edge_crop_percent': 0.1   # % à rogner sur chaque bord (0 = pas de rognage)
+            'edge_crop_percent': 0.3   # % à rogner sur chaque bord (0 = pas de rognage)
         }
 
 ####################################################################################################################################################
