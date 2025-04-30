@@ -1,55 +1,49 @@
-zeseestarstacker/
-├── .gitignore                  # Specifies intentionally untracked files that Git should ignore
-├── LICENSE                     # Contains the software license (e.g., GPL-3.0)
-├── README.md                   # Project description, instructions, features, etc.
-├── requirements.txt            # Lists Python package dependencies
-├── seestar_settings.json       # Default/saved user settings for the GUI
-├── testimg.py                  # Standalone script for inspecting FITS headers (utility)
-├── visu.py                     # Standalone PyQt5 FITS viewer (utility, separate from main GUI)
+.
+├── seestar/                     # Package principal de l'application
+│   ├── core/                    # Noyau : Fonctions de base du traitement d'image
+│   │   ├── __init__.py          # Exporte les éléments du 'core'
+│   │   ├── image_processing.py  # Chargement/Sauvegarde FITS, Debayer, Normalisation, Aperçu PNG
+│   │   ├── alignment.py         # Classe SeestarAligner pour l'alignement (astroalign)
+│   │   ├── hot_pixels.py        # Détection/Correction pixels chauds (OpenCV +/- CUDA)
+│   │   └── utils.py             # Utilitaires : Estimation taille lot, Débruitage, Checks CUDA/CuPy
+│   │
+│   ├── gui/                     # Interface Graphique Utilisateur (Tkinter)
+│   │   ├── __init__.py          # Exporte les éléments du 'gui'
+│   │   ├── main_window.py       # Fenêtre principale, orchestration UI, lien avec backend
+│   │   ├── preview.py           # Gestionnaire Canvas Aperçu (Zoom/Pan, Ajustements visuels)
+│   │   ├── histogram_widget.py  # Widget Histogramme interactif (Matplotlib intégré)
+│   │   ├── file_handling.py     # Gestionnaire dialogues sélection fichiers/dossiers
+│   │   ├── progress.py          # Gestionnaire affichage progression (barre, texte, timers)
+│   │   └── settings.py          # Gestionnaire chargement/sauvegarde paramètres (JSON)
+│   │
+│   ├── queuep/                  # Backend : Traitement asynchrone en file d'attente
+│   │   ├── __init__.py          # Exporte le QueueManager
+│   │   └── queue_manager.py     # SeestarQueuedStacker : Moteur principal (thread, file, align, stack, drizzle, poids)
+│   │
+│   ├── tools/                   # Outils : Fonctions avancées pour traitement/aperçu
+│   │   ├── __init__.py          # Exporte les éléments 'tools'
+│   │   └── stretch.py           # Presets Stretch, Correction Couleur, Auto-ajustements, Sauvegarde PNG
+│   │
+│   ├── enhancement/             # Améliorations : Drizzle et post-traitement
+│   │   ├── __init__.py          # Exporte les éléments 'enhancement'
+│   │   ├── drizzle_integration.py # Fonctions/Classes utilitaires pour Drizzle (WCS, chargement temp)
+│   │   └── stack_enhancement.py   # StackEnhancer (potentiellement pour post-traitement : crop, CLAHE)
+│   │
+│   ├── localization/            # Support multi-langues
+│   │   ├── __init__.py          # Exporte la classe Localization
+│   │   ├── fr.py                # Traductions françaises
+│   │   ├── en.py                # Traductions anglaises
+│   │   └── localization.py      # Classe Localization pour gérer les traductions
+│   │
+│   └── __init__.py              # Init package seestar, exporte éléments clés
 │
-├── examples/                   # Directory for example data/results (Best Practice)
-│   └── ...                     # (Populate with example FITS, darks, output)
+├── icon/                        # Dossier pour les icônes et images de fond
+│   ├── icon.png                 # Icône de l'application
+│   └── back.png                 # Image de fond pour l'aperçu
 │
-├── icon/                       # Directory for icons and UI images (As used in main_window.py)
-│   ├── icon.png                # Application icon
-│   └── back.png                # Background image for preview canvas
-│
-├── seestar/                    # Main package directory for the application code
-│   ├── __init__.py             # Makes 'seestar' a Python package, exports main symbols
-│   ├── main.py                 # Primary script to launch the Tkinter GUI application
-│   │
-│   ├── core/                   # Core image processing logic (non-GUI)
-│   │   ├── __init__.py         # Core sub-package initializer
-│   │   ├── alignment.py        # Image alignment functionality (SeestarAligner class)
-│   │   ├── hot_pixels.py       # Hot pixel detection and correction logic
-│   │   ├── image_processing.py # Low-level image ops: FITS load/save, debayer, preview save
-│   │   ├── stacking.py         # (Seems unused/superseded by queue_manager.py based on imports)
-│   │   └── utils.py            # Helper functions: CUDA/CuPy checks, denoising, batch size estimation
-│   │
-│   ├── gui/                    # Graphical User Interface components (Tkinter)
-│   │   ├── __init__.py         # GUI sub-package initializer
-│   │   ├── file_handling.py    # Manages file/folder browsing dialogs
-│   │   ├── histogram_widget.py # Matplotlib histogram widget integration
-│   │   ├── main_window.py      # Defines the main SeestarStackerGUI class and layout
-│   │   ├── preview.py          # Manages the preview canvas, zoom/pan, preview rendering pipeline
-│   │   ├── progress.py         # Manages progress bar, status text, and timers
-│   │   └── settings.py         # Manages loading and saving UI/processing settings
-│   │
-│   ├── localization/           # Language translation files and logic
-│   │   ├── __init__.py         # Localization sub-package initializer
-│   │   ├── en.py               # English translation dictionary
-│   │   ├── fr.py               # French translation dictionary
-│   │   └── localization.py     # Localization class for handling translations
-│   │
-│   ├── queuep/                 # Queued processing logic (handles background work)
-│   │   ├── __init__.py         # Queue Processing sub-package initializer
-│   │   ├── image_db.py         # (Seems unused based on queuep/__init__.py)
-│   │   ├── image_info.py       # (Seems unused based on queuep/__init__.py)
-│   │   └── queue_manager.py    # Main worker class (SeestarQueuedStacker) managing the queue and thread
-│   │
-│   └── tools/                  # Standalone image processing tools/algorithms
-│       ├── __init__.py         # Tools sub-package initializer
-│       └── stretch.py          # Contains StretchPresets, ColorCorrection, auto functions
-│
-└── tests/                      # Directory for unit tests (Best Practice)
-    └── ...                     # (Test files for core, utils, etc.)
+├── main.py                      # Script principal pour lancer l'application GUI
+├── README.md                    # Documentation principale
+├── requirements.txt             # Dépendances Python
+├── seestar_settings.json        # Fichier de configuration utilisateur (exemple/généré)
+├── LICENSE                      # Fichier de licence (ex: GPL-3.0)
+└── quality weighting explained.txt # Documentation spécifique sur la pondération
