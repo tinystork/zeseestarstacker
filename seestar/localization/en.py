@@ -11,6 +11,17 @@ EN_TRANSLATIONS = {
     'browse_input_button': "Browse...", # Unique key for button
     'browse_output_button': "Browse...", # Unique key for button
     'browse_ref_button': "Browse...", # Unique key for button
+    'drizzle_options_frame_label': "Drizzle Options",
+    'drizzle_activate_check': "Enable Drizzle (experimental, slow)",
+    'drizzle_scale_label': "Scale Factor:",
+    'drizzle_radio_2x_label': "x2",
+    'drizzle_radio_3x_label': "x3",
+    'drizzle_radio_4x_label': "x4",
+    # --- NOUVELLES CLÉS POUR LE MODE DRIZZLE ---
+    'drizzle_mode_label': "Drizzle Mode:",
+    'drizzle_radio_final': "Standard (Final)",
+    'drizzle_radio_incremental': "Incremental (Disk Saving)",
+    # --- FIN NOUVELLES CLÉS ---
 
     # --- Control Tabs ---
     'tab_stacking': "Stacking",
@@ -157,5 +168,18 @@ EN_TRANSLATIONS = {
     'W. Metrics': 'W. Metrics', # Key for label 'WGHT_MET' in header
     'weighting_enabled': "Enabled", # Value for WGHT_ON=True
     'weighting_disabled': "Disabled", # Value for WGHT_ON=False
+    'drizzle_wht_threshold_label': "WHT Threshold%:",
+    'drizzle_kernel_label': "Kernel:",
+    'drizzle_pixfrac_label': "Pixfrac:",
+    'drizzle_warning_title': "Drizzle Warning",
+    'drizzle_warning_text': (
+    "Drizzle processing is enabled.\n\n",
+    "- This is experimental and may be slow.\n",
+    "- It will create temporary files that can consume significant disk space (potentially similar to the input image size).\n",
+    "- The live preview will show a standard stack; Drizzle will be applied at the very end.\n\n",
+    "Continue with Drizzle?"
+    ),
+    # --- End New Texts ---
+
 }
 # --- END OF FILE seestar/localization/en.py ---

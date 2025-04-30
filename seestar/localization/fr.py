@@ -11,7 +11,18 @@ FR_TRANSLATIONS = {
     'browse_input_button': "Parcourir...", # Unique
     'browse_output_button': "Parcourir...", # Unique
     'browse_ref_button': "Parcourir...", # Unique
-
+    'drizzle_options_frame_label': "Options Drizzle",
+    'drizzle_activate_check': "Activer Drizzle (expérimental, lent)",
+    'drizzle_scale_label': "Facteur Échelle :",
+    'drizzle_radio_2x_label': "x2",
+    'drizzle_radio_3x_label': "x3",
+    'drizzle_radio_4x_label': "x4",
+    'drizzle_mode_label': "Mode Drizzle :",
+    'drizzle_radio_final': "Standard (Final)",
+    'drizzle_radio_incremental': "Incrémental (Éco. Disque)",
+    'drizzle_kernel_label': "Noyau :",
+    'drizzle_pixfrac_label': "Pixfrac :",
+    
     # --- Onglets Contrôles ---
     'tab_stacking': "Empilement",
     'tab_preview': "Aperçu",
@@ -155,5 +166,19 @@ FR_TRANSLATIONS = {
     'W. Metrics': 'Métr. Poids', # Clé pour label 'WGHT_MET'
     'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
     'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
+    'drizzle_wht_threshold_label': "Seuil WHT%:",
+
+    # --- NOUVEAU : Textes pour Avertissement Drizzle ---
+    'drizzle_warning_title': "Avertissement Drizzle",
+    'drizzle_warning_text': (
+        "Le traitement Drizzle est activé.\n\n"
+        "- Il est expérimental et peut être lent.\n"
+        "- Il créera des fichiers temporaires pouvant occuper beaucoup d'espace disque (potentiellement autant que les images d'entrée).\n",
+        "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
+        "Continuer avec Drizzle ?"
+    ),
+    # --- Fin Nouveaux Textes ---
+
+
 }
 # --- END OF FILE seestar/localization/fr.py ---

@@ -172,6 +172,19 @@ class SeestarStackerGUI:
         self.neighborhood_size = tk.IntVar(value=5)
         self.cleanup_temp_var = tk.BooleanVar(value=True) # Renamed from remove_aligned
 
+        # ... (Variables existantes : input_path, output_path, etc.) ...
+        self.cleanup_temp_var = tk.BooleanVar(value=True) # Renamed from remove_aligned
+
+        # --- AJOUTER ICI les variables Drizzle ---
+        self.use_drizzle_var = tk.BooleanVar(value=False) # Drizzle désactivé par défaut
+        self.drizzle_scale_var = tk.StringVar(value="2") # Échelle Drizzle (sous forme de string pour Combobox/Radio)
+        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7)
+        # --- FIN AJOUT ---
+
+        # Preview settings variables
+        self.preview_stretch_method = tk.StringVar(value="Asinh")
+        # ... (Reste des variables existantes) ...
+
         # Preview settings variables
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
@@ -194,7 +207,86 @@ class SeestarStackerGUI:
         self.remaining_time_var = tk.StringVar(value="--:--:--") # ETA
         self.elapsed_time_var = tk.StringVar(value="00:00:00")
         self._after_id_resize = None # For debouncing resize events
+        # --- NOUVELLE LIGNE CI-DESSOUS ---
+        self.drizzle_mode_var = tk.StringVar(value="Final") # Nouveau: Choix mode Drizzle ('Final' ou 'Incremental')
+        self.drizzle_kernel_var = tk.StringVar(value="square") # Nouveau: Noyau Drizzle
+        self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)    # Nouveau: Fraction Pixel Drizzle
+#######################################################################################################################
 
+
+
+    def _update_drizzle_options_state(self):
+        """Active ou désactive les options Drizzle (mode, échelle, seuil WHT)."""
+        try:
+            # Déterminer l'état souhaité (NORMAL ou DISABLED) basé sur la checkbox Drizzle
+            global_drizzle_enabled = self.use_drizzle_var.get()
+            state = tk.NORMAL if global_drizzle_enabled else tk.DISABLED
+
+            # --- NOUVEAU : Désactiver aussi l'échelle/WHT si mode Incrémental ---
+            # Certaines options peuvent ne pas être pertinentes en mode incrémental
+            # Pour l'instant, on les laisse actives dans les deux modes si Drizzle est coché.
+            # On pourrait ajouter une logique ici plus tard si nécessaire.
+            # Par exemple:
+            # is_incremental = self.drizzle_mode_var.get() == "Incremental"
+            # scale_state = state if not is_incremental else tk.DISABLED # Désactiver échelle si incrémental?
+
+            # Liste des widgets qui dépendent de l'activation GLOBALE de Drizzle
+            widgets_to_toggle = [
+                # Widgets pour le CHOIX DU MODE (Nouveau)
+                getattr(self, 'drizzle_mode_label', None),
+                getattr(self, 'drizzle_radio_final', None),
+                getattr(self, 'drizzle_radio_incremental', None),
+
+                # Widgets pour l'ÉCHELLE Drizzle (Existant)
+                getattr(self, 'drizzle_scale_label', None),
+                getattr(self, 'drizzle_radio_2x', None),
+                getattr(self, 'drizzle_radio_3x', None),
+                getattr(self, 'drizzle_radio_4x', None),
+                # getattr(self, 'drizzle_scale_combo', None), # Si Combobox
+
+                # Widgets pour le SEUIL WHT (Existant)
+                getattr(self, 'drizzle_wht_label', None),
+                getattr(self, 'drizzle_wht_spinbox', None),
+                                
+                # Kernel Drizzle
+                getattr(self, 'drizzle_kernel_label', None),
+                getattr(self, 'drizzle_kernel_combo', None),
+
+                # Pixfrac Drizzle
+                getattr(self, 'drizzle_pixfrac_label', None),
+                getattr(self, 'drizzle_pixfrac_spinbox', None),
+                # --- FIN DES NOUVELLES LIGNES ---
+            ]
+
+            # Boucle pour appliquer l'état (NORMAL ou DISABLED) à chaque widget de la liste
+            for widget in widgets_to_toggle:
+                # Vérifier si le widget existe réellement avant de tenter de le configurer
+                if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+                    # Appliquer l'état global (activé/désactivé par la checkbox principale)
+                    widget.config(state=state)
+
+                    # --- Logique Optionnelle (pour plus tard) : Désactivation spécifique au mode ---
+                    # Si Drizzle est activé ET que le mode est Incrémental ET que le widget est lié à une option non pertinente
+                    # if global_drizzle_enabled and self.drizzle_mode_var.get() == "Incremental":
+                    #     if widget in [widget_echelle_1, widget_echelle_2, ...]: # Liste des widgets à désactiver en mode incrémental
+                    #         widget.config(state=tk.DISABLED)
+                    #     # Sinon (widget pertinent ou mode final), il garde l'état 'state' défini plus haut
+
+
+        except tk.TclError:
+            # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
+            pass
+        except AttributeError:
+            # Ignorer si un attribut n'existe pas encore (peut arriver pendant l'init)
+            pass
+        except Exception as e:
+            # Loguer les erreurs inattendues
+            print(f"Error in _update_drizzle_options_state: {e}")
+            # traceback.print_exc(limit=1) # Décommenter pour débogage
+
+
+#########################################################################################################################
+    
     def init_managers(self):
         """Initialise les gestionnaires (Progress, Preview, FileHandling)."""
         # Progress Manager
@@ -257,324 +349,164 @@ class SeestarStackerGUI:
         """ Raccourci pour la localisation. """
         return self.localization.get(key, default=default)
 
+    def _convert_spinbox_percent_to_float(self, *args):
+        """Lit le Spinbox (%) et met à jour la variable (0-1)."""
+        try:
+            percent_value = float(self.drizzle_wht_spinbox.get())
+            float_value = np.clip(percent_value / 100.0, 0.01, 1.0) # Assurer 0.01-1.0
+            # Mettre à jour directement la variable
+            self.drizzle_wht_threshold_var.set(float_value)
+        except (ValueError, tk.TclError):
+            pass # Ignorer erreurs de conversion
+
+    def _update_spinbox_from_float(self, *args):
+        """Lit la variable (0-1) et met à jour le Spinbox (%). Appelé manuellement."""
+        try:
+            # Vérifier si le widget existe avant d'y accéder
+            if hasattr(self, 'drizzle_wht_spinbox') and self.drizzle_wht_spinbox.winfo_exists():
+                float_value = self.drizzle_wht_threshold_var.get()
+                percent_value = round(float_value * 100.0)
+                # Mettre à jour le Spinbox sans déclencher sa propre commande
+                self.drizzle_wht_spinbox.config(textvariable=tk.StringVar(value=f"{percent_value:.0f}"))
+                # Remettre la liaison à la variable correcte pour la lecture future
+                self.drizzle_wht_spinbox.config(textvariable=self.drizzle_wht_threshold_var) # Reconnecter pour la saisie? Non, on utilise command.
+                # Juste mettre la valeur est plus simple:
+                # self.drizzle_wht_spinbox.delete(0, tk.END)
+                # self.drizzle_wht_spinbox.insert(0, f"{percent_value:.0f}") # Ceci est plus sûr
+                # Encore plus simple: utiliser set() si Spinbox le supporte bien
+                self.drizzle_wht_spinbox.set(f"{percent_value:.0f}")
+
+
+        except (tk.TclError, AttributeError):
+            # Peut arriver si appelé avant que spinbox soit prêt ou après destruction
+            pass
+    # --- FIN VERSION SIMPLIFIÉE ---
+
+    # Nécéssite d'ajouter self._trace_id_wht = None dans __init__
+    # et de lier la trace après la création du spinbox
+    # -> Simplifions : On va juste appeler la mise à jour manuellement après chargement
+    # Supprimer les lignes concernant _trace_id_wht et trace_add/trace_remove dans les 2 fonctions ci-dessus
+    # Et dans apply_to_ui, après avoir set la variable, appeler _update_spinbox_from_float()
+###########################################################################################################################
+
+
+
+# --- DANS LA CLASSE SeestarStackerGUI de seestar/gui/main_window.py ---
+
     def create_layout(self):
-        """Crée la disposition des widgets."""
-        # --- Structure principale ---
+        """Crée la disposition des widgets avec les boutons de contrôle SOUS l'aperçu."""
+        # --- Structure principale (inchangée) ---
         main_frame = ttk.Frame(self.root); main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL); paned_window.pack(fill=tk.BOTH, expand=True)
         left_frame = ttk.Frame(paned_window, width=450, height=700); left_frame.pack_propagate(False); paned_window.add(left_frame, weight=1)
         right_frame = ttk.Frame(paned_window, width=750, height=700); right_frame.pack_propagate(False); paned_window.add(right_frame, weight=3)
 
-        # --- Panneau Gauche ---
-        # Language selection
-        lang_frame = ttk.Frame(left_frame); lang_frame.pack(fill=tk.X, pady=(5, 5), padx=5)
+        # ==============================================================
+        # --- Panneau Gauche (Simplifié: Langue + Notebook Options) ---
+        # ==============================================================
+
+        # 1. Sélection Langue
+        lang_frame = ttk.Frame(left_frame); lang_frame.pack(side=tk.TOP, fill=tk.X, pady=(5, 5), padx=5)
         ttk.Label(lang_frame, text="Language/Langue:").pack(side=tk.LEFT, padx=(0, 5))
         self.language_combo = ttk.Combobox(lang_frame, textvariable=self.language_var, values=("en", "fr"), width=8, state="readonly")
         self.language_combo.pack(side=tk.LEFT)
         self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
 
-        # Notebook for control tabs
+        # 2. Notebook pour les onglets (Options) - Prend l'espace restant
         control_notebook = ttk.Notebook(left_frame)
-        control_notebook.pack(fill=tk.BOTH, expand=True, pady=(0,5), padx=5)
+        control_notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5), padx=5) # expand=True pour remplir
 
         # --- Onglet Empilement ---
         tab_stacking = ttk.Frame(control_notebook)
-        control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking")} ') # Add padding in text
-
-        # Folders Group
-        self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders"))
-        self.folders_frame.pack(fill=tk.X, pady=5, padx=5)
-        # Input Row
-        in_subframe = ttk.Frame(self.folders_frame); in_subframe.pack(fill=tk.X, padx=5, pady=(5, 2))
-        self.input_label = ttk.Label(in_subframe, text=self.tr("input_folder"), width=8, anchor="w"); self.input_label.pack(side=tk.LEFT)
-        self.browse_input_button = ttk.Button(in_subframe, text=self.tr("browse_input_button"), command=self.file_handler.browse_input, width=10)
-        self.browse_input_button.pack(side=tk.RIGHT)
-        self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path)
-        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        
-        self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state)
-        self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state) # Update as user types/deletes
-
-
-        # Output Row
-        out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5))
-        self.output_label = ttk.Label(out_subframe, text=self.tr("output_folder"), width=8, anchor="w"); self.output_label.pack(side=tk.LEFT)
-        self.browse_output_button = ttk.Button(out_subframe, text=self.tr("browse_output_button"), command=self.file_handler.browse_output, width=10)
-        self.browse_output_button.pack(side=tk.RIGHT)
-        self.output_entry = ttk.Entry(out_subframe, textvariable=self.output_path)
-        self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        # Reference Row
-        ref_frame = ttk.Frame(self.folders_frame); ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
-        self.reference_label = ttk.Label(ref_frame, text=self.tr("reference_image"), width=8, anchor="w"); self.reference_label.pack(side=tk.LEFT)
-        self.browse_ref_button = ttk.Button(ref_frame, text=self.tr("browse_ref_button"), command=self.file_handler.browse_reference, width=10)
-        self.browse_ref_button.pack(side=tk.RIGHT)
-        self.ref_entry = ttk.Entry(ref_frame, textvariable=self.reference_image_path)
-        self.ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-
-        # Stacking Options Group
-        self.options_frame = ttk.LabelFrame(tab_stacking, text=self.tr("options"))
-        self.options_frame.pack(fill=tk.X, pady=5, padx=5)
-        # Method Row
-        method_frame = ttk.Frame(self.options_frame); method_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.stacking_method_label = ttk.Label(method_frame, text=self.tr("stacking_method")); self.stacking_method_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.stacking_combo = ttk.Combobox(method_frame, textvariable=self.stacking_mode, values=("mean", "median", "kappa-sigma", "winsorized-sigma"), width=15, state="readonly")
-        self.stacking_combo.pack(side=tk.LEFT)
-        self.kappa_label = ttk.Label(method_frame, text=self.tr("kappa_value")); self.kappa_label.pack(side=tk.LEFT, padx=(10, 2))
-        self.kappa_spinbox = ttk.Spinbox(method_frame, from_=1.0, to=5.0, increment=0.1, textvariable=self.kappa, width=5)
-        self.kappa_spinbox.pack(side=tk.LEFT)
-        # Batch Row
-        batch_frame = ttk.Frame(self.options_frame); batch_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.batch_size_label = ttk.Label(batch_frame, text=self.tr("batch_size")); self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.batch_spinbox = ttk.Spinbox(batch_frame, from_=3, to=500, increment=1, textvariable=self.batch_size, width=5) # Min batch size 3 for stats
-        self.batch_spinbox.pack(side=tk.LEFT)
-
-# --- END OF FILE seestar/gui/main_window.py (Part 1/3) ---
-# --- START OF FILE seestar/gui/main_window.py (Part 2/3) ---
-
-        # Hot Pixels Group
-        self.hp_frame = ttk.LabelFrame(tab_stacking, text=self.tr("hot_pixels_correction"))
-        self.hp_frame.pack(fill=tk.X, pady=5, padx=5)
-        # HP Check Row
-        hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2)
-        self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text=self.tr("perform_hot_pixels_correction"), variable=self.correct_hot_pixels)
-        self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10))
-        # HP Params Row
-        hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5))
-        self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text=self.tr("hot_pixel_threshold")); self.hot_pixel_threshold_label.pack(side=tk.LEFT)
-        self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5)
-        self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5)
-        self.neighborhood_size_label = ttk.Label(hp_params_frame, text=self.tr("neighborhood_size")); self.neighborhood_size_label.pack(side=tk.LEFT)
-        self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4) # Must be odd
-        self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
-
-        # Quality Weighting Group
-        self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Pondération par Qualité") # Sera traduit par update_ui_language
-        self.weighting_frame.pack(fill=tk.X, pady=5, padx=5)
-
-        self.use_weighting_check = ttk.Checkbutton(
-            self.weighting_frame,
-            text="Activer la pondération", # Sera traduit
-            variable=self.use_weighting_var,
-            command=self._update_weighting_options_state # Lie la commande
-        )
-        self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2))
-
-        self.weighting_options_frame = ttk.Frame(self.weighting_frame)
-        self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)) # Indentation
-
-        metrics_frame = ttk.Frame(self.weighting_options_frame)
-        metrics_frame.pack(fill=tk.X, pady=2)
-        self.weight_metrics_label = ttk.Label(metrics_frame, text="Métriques:") # Sera traduit
-        self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.weight_snr_check = ttk.Checkbutton(metrics_frame, text="SNR", variable=self.weight_snr_var) # Sera traduit
-        self.weight_snr_check.pack(side=tk.LEFT, padx=5)
-        self.weight_stars_check = ttk.Checkbutton(metrics_frame, text="Nb Étoiles", variable=self.weight_stars_var) # Sera traduit
-        self.weight_stars_check.pack(side=tk.LEFT, padx=5)
-
-        params_frame = ttk.Frame(self.weighting_options_frame)
-        params_frame.pack(fill=tk.X, pady=2)
-        self.snr_exp_label = ttk.Label(params_frame, text="Exp. SNR:") # Sera traduit
-        self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5)
-        self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.stars_exp_label = ttk.Label(params_frame, text="Exp. Étoiles:") # Sera traduit
-        self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5)
-        self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.min_w_label = ttk.Label(params_frame, text="Poids Min:") # Sera traduit
-        self.min_w_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5)
-        self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
-
-        # Initialiser état des widgets de pondération
-        self._update_weighting_options_state()
-
-        # Post Processing Group
-        self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text=self.tr('post_proc_opts_frame_label'))
-        self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text=self.tr("cleanup_temp_check_label"), variable=self.cleanup_temp_var)
-        self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5)
+        # Contenu de l'onglet (Folders, Options, Drizzle, HP, Weighting, PostProc)
+        self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders")); self.folders_frame.pack(fill=tk.X, pady=5, padx=5)
+        in_subframe = ttk.Frame(self.folders_frame); in_subframe.pack(fill=tk.X, padx=5, pady=(5, 2)); self.input_label = ttk.Label(in_subframe, text=self.tr("input_folder"), width=8, anchor="w"); self.input_label.pack(side=tk.LEFT); self.browse_input_button = ttk.Button(in_subframe, text=self.tr("browse_input_button"), command=self.file_handler.browse_input, width=10); self.browse_input_button.pack(side=tk.RIGHT); self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path); self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)); self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state); self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state)
+        out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5)); self.output_label = ttk.Label(out_subframe, text=self.tr("output_folder"), width=8, anchor="w"); self.output_label.pack(side=tk.LEFT); self.browse_output_button = ttk.Button(out_subframe, text=self.tr("browse_output_button"), command=self.file_handler.browse_output, width=10); self.browse_output_button.pack(side=tk.RIGHT); self.output_entry = ttk.Entry(out_subframe, textvariable=self.output_path); self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        ref_frame = ttk.Frame(self.folders_frame); ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5)); self.reference_label = ttk.Label(ref_frame, text=self.tr("reference_image"), width=8, anchor="w"); self.reference_label.pack(side=tk.LEFT); self.browse_ref_button = ttk.Button(ref_frame, text=self.tr("browse_ref_button"), command=self.file_handler.browse_reference, width=10); self.browse_ref_button.pack(side=tk.RIGHT); self.ref_entry = ttk.Entry(ref_frame, textvariable=self.reference_image_path); self.ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        self.options_frame = ttk.LabelFrame(tab_stacking, text=self.tr("options")); self.options_frame.pack(fill=tk.X, pady=5, padx=5)
+        method_frame = ttk.Frame(self.options_frame); method_frame.pack(fill=tk.X, padx=5, pady=5); self.stacking_method_label = ttk.Label(method_frame, text=self.tr("stacking_method")); self.stacking_method_label.pack(side=tk.LEFT, padx=(0, 5)); self.stacking_combo = ttk.Combobox(method_frame, textvariable=self.stacking_mode, values=("mean", "median", "kappa-sigma", "winsorized-sigma"), width=15, state="readonly"); self.stacking_combo.pack(side=tk.LEFT); self.kappa_label = ttk.Label(method_frame, text=self.tr("kappa_value")); self.kappa_label.pack(side=tk.LEFT, padx=(10, 2)); self.kappa_spinbox = ttk.Spinbox(method_frame, from_=1.0, to=5.0, increment=0.1, textvariable=self.kappa, width=5); self.kappa_spinbox.pack(side=tk.LEFT)
+        batch_frame = ttk.Frame(self.options_frame); batch_frame.pack(fill=tk.X, padx=5, pady=5); self.batch_size_label = ttk.Label(batch_frame, text=self.tr("batch_size")); self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5)); self.batch_spinbox = ttk.Spinbox(batch_frame, from_=3, to=500, increment=1, textvariable=self.batch_size, width=5); self.batch_spinbox.pack(side=tk.LEFT)
+        self.drizzle_options_frame = ttk.LabelFrame(tab_stacking, text=self.tr("drizzle_options_frame_label")); self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
+        self.drizzle_check = ttk.Checkbutton(self.drizzle_options_frame, text=self.tr("drizzle_activate_check"), variable=self.use_drizzle_var, command=self._update_drizzle_options_state); self.drizzle_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
+        self.drizzle_mode_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_mode_frame.pack(fill=tk.X, padx=(20, 5), pady=(2, 5)); self.drizzle_mode_label = ttk.Label(self.drizzle_mode_frame, text=self.tr("drizzle_mode_label")); self.drizzle_mode_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_final = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_final"), variable=self.drizzle_mode_var, value="Final", command=self._update_drizzle_options_state); self.drizzle_radio_incremental = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_incremental"), variable=self.drizzle_mode_var, value="Incremental", command=self._update_drizzle_options_state); self.drizzle_radio_final.pack(side=tk.LEFT, padx=3); self.drizzle_radio_incremental.pack(side=tk.LEFT, padx=3)
+        self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text=self.tr("drizzle_scale_label")); self.drizzle_scale_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_2x = ttk.Radiobutton(self.drizzle_scale_frame, text="x2", variable=self.drizzle_scale_var, value="2"); self.drizzle_radio_3x = ttk.Radiobutton(self.drizzle_scale_frame, text="x3", variable=self.drizzle_scale_var, value="3"); self.drizzle_radio_4x = ttk.Radiobutton(self.drizzle_scale_frame, text="x4", variable=self.drizzle_scale_var, value="4"); self.drizzle_radio_2x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_3x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_4x.pack(side=tk.LEFT, padx=3)
+        wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5)); self.drizzle_wht_label = ttk.Label(wht_frame, text=self.tr("drizzle_wht_threshold_label")); self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_wht_spinbox = ttk.Spinbox(wht_frame, from_=10.0, to=100.0, increment=5.0, textvariable=self.drizzle_wht_threshold_var, width=6, command=self._convert_spinbox_percent_to_float, format="%.0f"); self.drizzle_wht_threshold_var.trace_add("write", self._update_spinbox_from_float); self._update_spinbox_from_float(); self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
+        kernel_frame = ttk.Frame(self.drizzle_options_frame); kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_kernel_label = ttk.Label(kernel_frame, text=self.tr("drizzle_kernel_label")); self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
+        pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text=self.tr("drizzle_pixfrac_label")); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        self.hp_frame = ttk.LabelFrame(tab_stacking, text=self.tr("hot_pixels_correction")); self.hp_frame.pack(fill=tk.X, pady=5, padx=5); hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text=self.tr("perform_hot_pixels_correction"), variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text=self.tr("hot_pixel_threshold")); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text=self.tr("neighborhood_size")); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
+        self.weighting_frame = ttk.LabelFrame(tab_stacking, text=self.tr("quality_weighting_frame")); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5); self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text=self.tr("enable_weighting_check"), variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text=self.tr("weighting_metrics_label")); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_snr_check"), variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_stars_check"), variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text=self.tr("snr_exponent_label")); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text=self.tr("stars_exponent_label")); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text=self.tr("min_weight_label")); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5)); self._update_weighting_options_state()
+        self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text=self.tr('post_proc_opts_frame_label')); self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5); self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text=self.tr("cleanup_temp_check_label"), variable=self.cleanup_temp_var); self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5)
+        control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking")} ')
 
         # --- Onglet Aperçu ---
         tab_preview = ttk.Frame(control_notebook)
-        control_notebook.add(tab_preview, text=f' {self.tr("tab_preview")} ') # Add padding in text
+        # Contenu de l'onglet (WB, Stretch, Adjustments)
+        self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance")); self.wb_frame.pack(fill=tk.X, pady=5, padx=5); self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain); self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain); self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain); wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5); self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_wb_button.pack(side=tk.LEFT, padx=5); self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
+        self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text=self.tr("stretch_options")); self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5); stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2); self.stretch_method_label = ttk.Label(stretch_method_frame, text=self.tr("stretch_method")); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5)); self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly"); self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview); self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders); self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders); self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma); stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5); self.auto_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("auto_stretch"), command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_stretch_button.pack(side=tk.LEFT, padx=5); self.reset_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("reset_stretch"), command=self.reset_stretch); self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
+        self.bcs_frame = ttk.LabelFrame(tab_preview, text=self.tr("image_adjustments")); self.bcs_frame.pack(fill=tk.X, pady=5, padx=5); self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness); self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast); self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation); bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5); self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation); self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
+        control_notebook.add(tab_preview, text=f' {self.tr("tab_preview")} ')
 
-        # White Balance Group
-        self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance"))
-        self.wb_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain)
-        self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain)
-        self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain)
-        wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5)
-        self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED)
-        self.auto_wb_button.pack(side=tk.LEFT, padx=5)
-        self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance)
-        self.reset_wb_button.pack(side=tk.LEFT, padx=5)
+        # ==============================================================
+        # --- Panneau Droit (Aperçu, Boutons, Histogramme) ---
+        # ==============================================================
 
-        # Stretch Group
-        self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text=self.tr("stretch_options"))
-        self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5)
-        # Stretch Method Row
-        stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2)
-        self.stretch_method_label = ttk.Label(stretch_method_frame, text=self.tr("stretch_method")); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5))
-        self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly")
-        self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview)
-        # Stretch Sliders
-        self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders)
-        self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders)
-        self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma) # Gamma uses general debounce
-        # Stretch Buttons
-        stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5)
-        self.auto_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("auto_stretch"), command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED)
-        self.auto_stretch_button.pack(side=tk.LEFT, padx=5)
-        self.reset_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("reset_stretch"), command=self.reset_stretch)
-        self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
-
-        # Adjustments Group (BCS)
-        self.bcs_frame = ttk.LabelFrame(tab_preview, text=self.tr("image_adjustments"))
-        self.bcs_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness)
-        self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast)
-        self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation)
-        bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5)
-        self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation)
-        self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
-
-        # --- Zone Progression (à la fin du panneau gauche) ---
-        self.progress_frame = ttk.LabelFrame(left_frame, text=self.tr("progress"))
-        self.progress_frame.pack(fill=tk.X, pady=(10, 0), padx=5, side=tk.BOTTOM) # Pack at bottom
-
-        # Progress Bar
-        self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode='determinate')
-        self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2))
-
-        # Time Info Row (New version using grid)
-        time_frame = ttk.Frame(self.progress_frame)
-        time_frame.pack(fill=tk.X, padx=5, pady=2)
-
-        # Configure columns for the grid within time_frame
-        time_frame.columnconfigure(0, weight=0) # Column for "ETA:" label (no extra space)
-        time_frame.columnconfigure(1, weight=1) # Column for ETA value (takes available space)
-        time_frame.columnconfigure(2, weight=0) # Column for "Elapsed:" label (no extra space)
-        time_frame.columnconfigure(3, weight=0) # Column for Elapsed value (no extra space)
-
-        # Place widgets using grid
-        self.remaining_time_label = ttk.Label(time_frame, text=self.tr("estimated_time"))
-        self.remaining_time_label.grid(row=0, column=0, sticky='w') # West alignment
-
-        # Removed width=9 to allow it to expand naturally
-        self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), anchor='w')
-        self.remaining_time_value.grid(row=0, column=1, sticky='w', padx=(2, 10)) # West alignment, pad right
-
-        self.elapsed_time_label = ttk.Label(time_frame, text=self.tr("elapsed_time"))
-        self.elapsed_time_label.grid(row=0, column=2, sticky='e', padx=(5,0)) # East alignment, pad left
-
-        # Kept width=9 and anchor='e' for consistent spacing of time value itself
-        self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='e')
-        self.elapsed_time_value.grid(row=0, column=3, sticky='e', padx=(2,0)) # East alignment, pad left
-
-    
-        # File Count Info Row
-        files_info_frame = ttk.Frame(self.progress_frame)
-        files_info_frame.pack(fill=tk.X, padx=5, pady=2)
-        # Combined Remaining/Total Label
-        self.remaining_static_label = ttk.Label(files_info_frame, text=self.tr("Remaining:"))
-        self.remaining_static_label.pack(side=tk.LEFT)
-        self.remaining_value_label = ttk.Label(files_info_frame, textvariable=self.remaining_files_var, width=12, anchor='w') # Combined R/T
-        self.remaining_value_label.pack(side=tk.LEFT, padx=(2,10))
-        # Aligned Count Label
-        self.aligned_files_label = ttk.Label(files_info_frame, textvariable=self.aligned_files_var, width=12, anchor='w') # Dynamic count
-        self.aligned_files_label.pack(side=tk.LEFT, padx=(10,0))
-        # Additional Folders Count (Right Aligned)
-        self.additional_value_label = ttk.Label(files_info_frame, textvariable=self.additional_folders_var, anchor='e')
-        self.additional_value_label.pack(side=tk.RIGHT)
-        self.additional_static_label = ttk.Label(files_info_frame, text=self.tr("Additional:"))
-        self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2))
-
-
-        # --- MODIFIÉ: Status Text Area ---
-        status_text_frame = ttk.Frame(self.progress_frame)
-        status_text_font = tkFont.Font(family="Arial", size=8) # Police ok
-        status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5)) # expand=False est important
-
-        # --- NOUVEAU: Bouton Copier Log ---
-        self.copy_log_button = ttk.Button(status_text_frame, text="Copy",
-                                          command=self._copy_log_to_clipboard, width=5)
-        self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor='ne') # Pack à droite, en haut
-
-        # --- Barre de défilement ---
-        self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical") # Command sera lié plus bas
-        self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0)
-
-        # --- Zone de Texte (plus haute) ---
-        # AUGMENTER LA HAUTEUR ICI (par exemple de 5 à 8 ou 10)
-        self.status_text = tk.Text(status_text_frame, height=8, wrap=tk.WORD, bd=0,
-                                   font=status_text_font, relief=tk.FLAT, state=tk.DISABLED,
-                                   yscrollcommand=self.status_scrollbar.set) # Lier scrollbar ici
-        self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=0)
-        self.status_scrollbar.config(command=self.status_text.yview) # Lier scrollbar au Text
-        # --- Fin Modification Log ---
-
-# --- END OF FILE seestar/gui/main_window.py (Part 2/3) ---
-# --- START OF FILE seestar/gui/main_window.py (Part 3/3) ---
-
-        # --- Boutons de Contrôle (sous la zone de progression) ---
-        control_frame = ttk.Frame(left_frame)
-        control_frame.pack(fill=tk.X, pady=(5, 5), padx=5, side=tk.BOTTOM) # Pack at bottom
-
-        # Use Accent style if available
-        try:
-            style = ttk.Style()
-            accent_style = 'Accent.TButton' if 'Accent.TButton' in style.element_names() else 'TButton'
-        except tk.TclError:
-            accent_style = 'TButton'
+        # 1. Définition du Cadre des Boutons (maintenant associé à right_frame)
+        control_frame = ttk.Frame(right_frame)
+        # Contenu du control_frame (boutons)
+        try: style = ttk.Style(); accent_style = 'Accent.TButton' if 'Accent.TButton' in style.element_names() else 'TButton'
+        except tk.TclError: accent_style = 'TButton'
         self.start_button = ttk.Button(control_frame, text=self.tr("start"), command=self.start_processing, style=accent_style)
         self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text=self.tr("stop"), command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        
-        # Placed before "Add Folder" button
-        self.show_folders_button = ttk.Button(control_frame, text="View Inputs", command=self._show_input_folder_list, state=tk.DISABLED) # Start disabled until input is set
-        self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2) # Pack next
-        
-        # Le bouton "Ajouter Dossier" peut maintenant être utilisé avant le démarrage
-        self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL) # Commence NORMAL
-        self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2) # pack à droite
-
-        # --- NOUVEAU : Bouton Ouvrir Dossier Sortie ---
-        # Placé à gauche du bouton Ajouter Dossier
-        self.open_output_button = ttk.Button(control_frame, text="Open Output", # Sera traduit
-                                              command=self._open_output_folder, state=tk.DISABLED) # Commence Désactivé
+        self.open_output_button = ttk.Button(control_frame, text=self.tr("open_output_button_text"), command=self._open_output_folder, state=tk.DISABLED)
         self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
-        # --- Fin Nouveau Bouton ---
+        self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL)
+        self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+        self.show_folders_button = ttk.Button(control_frame, text=self.tr("show_folders_button_text"), command=self._show_input_folder_list, state=tk.DISABLED)
+        self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
 
-        # --- Panneau Droit (Aperçu et Histogramme) ---
-        # Preview Frame
-        self.preview_frame = ttk.LabelFrame(right_frame, text=self.tr("preview"))
-        self.preview_frame.pack(fill=tk.BOTH, expand=True, pady=(5,5), padx=5) # Pad top and bottom
-        # Canvas for image display
-        self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0) # Dark background
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
-
-        # Histogram Frame (at the bottom of right panel)
+        # 2. Définition du Cadre de l'Histogramme (packé en bas)
         self.histogram_frame = ttk.LabelFrame(right_frame, text=self.tr("histogram"))
-        hist_fig_height_inches = 2.2; hist_fig_dpi = 80
-        hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1)
-        self.histogram_frame.pack(fill=tk.X, expand=False, pady=(0,5), padx=5, side=tk.BOTTOM)
-        self.histogram_frame.pack_propagate(False); self.histogram_frame.config(height=hist_height_pixels)
-
-        # Create and pack HistogramWidget inside its frame
+        hist_fig_height_inches = 2.2; hist_fig_dpi = 80; hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1)
+        self.histogram_frame.config(height=hist_height_pixels) # Configurer hauteur AVANT pack
+        self.histogram_frame.pack_propagate(False) # Empêcher réduction
+        # Contenu de l'histogram_frame
         self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram)
         self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2))
-
-        # Add Reset Zoom button next to histogram
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2)
         self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
 
-        # Store references AFTER all widgets are created
+        # 3. Définition du Cadre de l'Aperçu (packé en haut, prend l'espace)
+        self.preview_frame = ttk.LabelFrame(right_frame, text=self.tr("preview"))
+        # Contenu du preview_frame
+        self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 4. Packing FINAL dans le right_frame (ORDRE IMPORTANT)
+        self.histogram_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5)) # Histogramme en bas
+        control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))       # Boutons juste au-dessus
+        self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))       # Preview prend le reste en haut
+
+        # 5. Zone Progression (REMETTRE ICI, packé en bas du left_frame)
+        self.progress_frame = ttk.LabelFrame(left_frame, text=self.tr("progress"))
+        # Contenu de progress_frame (Barre, Temps, Fichiers, Statut)
+        self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode='determinate'); self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2))
+        time_frame = ttk.Frame(self.progress_frame); time_frame.pack(fill=tk.X, padx=5, pady=2); time_frame.columnconfigure(0, weight=0); time_frame.columnconfigure(1, weight=1); time_frame.columnconfigure(2, weight=0); time_frame.columnconfigure(3, weight=0); self.remaining_time_label = ttk.Label(time_frame, text=self.tr("estimated_time")); self.remaining_time_label.grid(row=0, column=0, sticky='w'); self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), anchor='w'); self.remaining_time_value.grid(row=0, column=1, sticky='w', padx=(2, 10)); self.elapsed_time_label = ttk.Label(time_frame, text=self.tr("elapsed_time")); self.elapsed_time_label.grid(row=0, column=2, sticky='e', padx=(5,0)); self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='e'); self.elapsed_time_value.grid(row=0, column=3, sticky='e', padx=(2,0))
+        files_info_frame = ttk.Frame(self.progress_frame); files_info_frame.pack(fill=tk.X, padx=5, pady=2); self.remaining_static_label = ttk.Label(files_info_frame, text=self.tr("Remaining:")); self.remaining_static_label.pack(side=tk.LEFT); self.remaining_value_label = ttk.Label(files_info_frame, textvariable=self.remaining_files_var, width=12, anchor='w'); self.remaining_value_label.pack(side=tk.LEFT, padx=(2,10)); self.aligned_files_label = ttk.Label(files_info_frame, textvariable=self.aligned_files_var, width=12, anchor='w'); self.aligned_files_label.pack(side=tk.LEFT, padx=(10,0)); self.additional_value_label = ttk.Label(files_info_frame, textvariable=self.additional_folders_var, anchor='e'); self.additional_value_label.pack(side=tk.RIGHT); self.additional_static_label = ttk.Label(files_info_frame, text=self.tr("Additional:")); self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2))
+        status_text_frame = ttk.Frame(self.progress_frame); status_text_font = tkFont.Font(family="Arial", size=8); status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5)); self.copy_log_button = ttk.Button(status_text_frame, text="Copy", command=self._copy_log_to_clipboard, width=5); self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor='ne'); self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical"); self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0); self.status_text = tk.Text(status_text_frame, height=6, wrap=tk.WORD, bd=0, font=status_text_font, relief=tk.FLAT, state=tk.DISABLED, yscrollcommand=self.status_scrollbar.set); self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=0); self.status_scrollbar.config(command=self.status_text.yview)
+        # Packing final de progress_frame dans left_frame
+        self.progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(5, 5)) # TOUT EN BAS DU PANNEAU GAUCHE
+
+        # Store references AFTER all widgets are created (appel inchangé)
         self._store_widget_references()
 
+# --- FIN DE LA MÉTHODE create_layout ---
 
+
+
+
+#############################################################################################################################
     def _update_show_folders_button_state(self, event=None):
         """Enables/disables the 'View Input Folders' button."""
         try:
@@ -722,45 +654,116 @@ class SeestarStackerGUI:
 
     def _store_widget_references(self):
         """Stores references to widgets that need language updates."""
+        # Essayer de trouver le widget Notebook de manière robuste
         notebook_widget = None
         try:
-            main_frame = self.root.winfo_children()[0]; paned_window = main_frame.winfo_children()[0]
-            left_frame_widget = self.root.nametowidget(paned_window.panes()[0])
+            # Trouver le widget Notebook pour pouvoir référencer les onglets
+            # Cette partie dépend de la structure exacte de create_layout
+            # On suppose: root -> main_frame -> paned_window -> left_frame -> control_notebook
+            main_frame = self.root.winfo_children()[0]
+            paned_window = main_frame.winfo_children()[0]
+            # Obtient le widget du panneau de gauche via l'API PanedWindow
+            left_frame_widget_name = paned_window.panes()[0]
+            left_frame_widget = self.root.nametowidget(left_frame_widget_name)
+            # Cherche le Notebook dans les enfants directs du panneau gauche
             for child in left_frame_widget.winfo_children():
-                if isinstance(child, ttk.Notebook): notebook_widget = child; break
-        except Exception as e: print(f"Warning: Could not find Notebook widget: {e}")
+                if isinstance(child, ttk.Notebook):
+                    notebook_widget = child
+                    break
+        except tk.TclError: # Erreur si les widgets n'existent pas encore
+            pass
+        except IndexError: # Erreur si la structure attendue n'est pas là
+             pass
+        except Exception as e:
+            print(f"Warning: Could not find Notebook widget reliably: {e}")
 
+        # Le dictionnaire qui fait le lien entre clé de traduction et widget
         self.widgets_to_translate = {
-            
-            # Tabs
-            "tab_stacking": (notebook_widget, 0) if notebook_widget else None, "tab_preview": (notebook_widget, 1) if notebook_widget else None,
-            # LabelFrames
-            "Folders": getattr(self, 'folders_frame', None), "options": getattr(self, 'options_frame', None), "hot_pixels_correction": getattr(self, 'hp_frame', None),
-            "post_proc_opts_frame_label": getattr(self, 'post_proc_opts_frame', None), "white_balance": getattr(self, 'wb_frame', None), "stretch_options": getattr(self, 'stretch_frame_controls', None),
-            "image_adjustments": getattr(self, 'bcs_frame', None), "progress": getattr(self, 'progress_frame', None), "preview": getattr(self, 'preview_frame', None),
-            "histogram": getattr(self, 'histogram_frame', None), "quality_weighting_frame": getattr(self, 'weighting_frame', None),
-            # Labels
-            "input_folder": getattr(self, 'input_label', None), "output_folder": getattr(self, 'output_label', None), "reference_image": getattr(self, 'reference_label', None),
-            "stacking_method": getattr(self, 'stacking_method_label', None), "kappa_value": getattr(self, 'kappa_label', None), "batch_size": getattr(self, 'batch_size_label', None),
-            "hot_pixel_threshold": getattr(self, 'hot_pixel_threshold_label', None), "neighborhood_size": getattr(self, 'neighborhood_size_label', None),
-            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'), "wb_g": getattr(self, 'wb_g_ctrls', {}).get('label'), "wb_b": getattr(self, 'wb_b_ctrls', {}).get('label'),
-            "stretch_method": getattr(self, 'stretch_method_label', None), "stretch_bp": getattr(self, 'stretch_bp_ctrls', {}).get('label'), "stretch_wp": getattr(self, 'stretch_wp_ctrls', {}).get('label'),
-            "stretch_gamma": getattr(self, 'stretch_gamma_ctrls', {}).get('label'), "brightness": getattr(self, 'brightness_ctrls', {}).get('label'), "contrast": getattr(self, 'contrast_ctrls', {}).get('label'),
-            "saturation": getattr(self, 'saturation_ctrls', {}).get('label'), "estimated_time": getattr(self, 'remaining_time_label', None), "elapsed_time": getattr(self, 'elapsed_time_label', None),
-            "Remaining:": getattr(self, 'remaining_static_label', None), "Additional:": getattr(self, 'additional_static_label', None), "weighting_metrics_label": getattr(self, 'weight_metrics_label', None),
-            "snr_exponent_label": getattr(self, 'snr_exp_label', None), "stars_exponent_label": getattr(self, 'stars_exp_label', None), "min_weight_label": getattr(self, 'min_w_label', None),
-            # Buttons
-            "browse_input_button": getattr(self, 'browse_input_button', None), "browse_output_button": getattr(self, 'browse_output_button', None), "browse_ref_button": getattr(self, 'browse_ref_button', None),
-            "auto_wb": getattr(self, 'auto_wb_button', None), "reset_wb": getattr(self, 'reset_wb_button', None), "auto_stretch": getattr(self, 'auto_stretch_button', None),
-            "reset_stretch": getattr(self, 'reset_stretch_button', None), "reset_bcs": getattr(self, 'reset_bcs_button', None), "start": getattr(self, 'start_button', None),
-            "stop": getattr(self, 'stop_button', None), "add_folder_button": getattr(self, 'add_files_button', None),
-            "show_folders_button_text": getattr(self, 'show_folders_button', None), # Key for the button's text
-            "copy_log_button_text": getattr(self, 'copy_log_button', None), # NOUVEAU (clé pour texte)
-            "open_output_button_text": getattr(self, 'open_output_button', None), # NOUVEAU (clé pour texte)
-            # Checkbuttons
-            "perform_hot_pixels_correction": getattr(self, 'hot_pixels_check', None), "cleanup_temp_check_label": getattr(self, 'cleanup_temp_check', None),
-            "enable_weighting_check": getattr(self, 'use_weighting_check', None), "weight_snr_check": getattr(self, 'weight_snr_check', None), "weight_stars_check": getattr(self, 'weight_stars_check', None),
-        
+
+            # --- Onglets du Notebook ---
+            # La valeur est un tuple: (widget_notebook, index_onglet)
+            "tab_stacking": (notebook_widget, 0) if notebook_widget and notebook_widget.index("end") > 0 else None,
+            "tab_preview": (notebook_widget, 1) if notebook_widget and notebook_widget.index("end") > 1 else None,
+
+            # --- LabelFrames (cadres avec titre) ---
+            "Folders": getattr(self, 'folders_frame', None),
+            "options": getattr(self, 'options_frame', None),
+            "drizzle_options_frame_label": getattr(self, 'drizzle_options_frame', None), # Titre groupe Drizzle
+            "hot_pixels_correction": getattr(self, 'hp_frame', None),
+            "quality_weighting_frame": getattr(self, 'weighting_frame', None), # Titre groupe Poids
+            "post_proc_opts_frame_label": getattr(self, 'post_proc_opts_frame', None),
+            "white_balance": getattr(self, 'wb_frame', None),
+            "stretch_options": getattr(self, 'stretch_frame_controls', None),
+            "image_adjustments": getattr(self, 'bcs_frame', None),
+            "progress": getattr(self, 'progress_frame', None),
+            "preview": getattr(self, 'preview_frame', None),
+            "histogram": getattr(self, 'histogram_frame', None),
+
+            # --- Labels (étiquettes simples) ---
+            "input_folder": getattr(self, 'input_label', None),
+            "output_folder": getattr(self, 'output_label', None),
+            "reference_image": getattr(self, 'reference_label', None),
+            "stacking_method": getattr(self, 'stacking_method_label', None),
+            "kappa_value": getattr(self, 'kappa_label', None),
+            "batch_size": getattr(self, 'batch_size_label', None),
+            "drizzle_scale_label": getattr(self, 'drizzle_scale_label', None), # Label Échelle Drizzle
+            "drizzle_mode_label": getattr(self, 'drizzle_mode_label', None), # Label Mode Drizzle
+            "drizzle_kernel_label": getattr(self, 'drizzle_kernel_label', None), # Label Noyau Drizzle
+            "drizzle_pixfrac_label": getattr(self, 'drizzle_pixfrac_label', None), # Label Pixfrac Drizzle
+            "drizzle_wht_threshold_label": getattr(self, 'drizzle_wht_label', None), # Label Seuil WHT
+            # ---> FIN AJOUT <---
+            "hot_pixel_threshold": getattr(self, 'hot_pixel_threshold_label', None),
+            "neighborhood_size": getattr(self, 'neighborhood_size_label', None),
+            "weighting_metrics_label": getattr(self, 'weight_metrics_label', None),
+            "snr_exponent_label": getattr(self, 'snr_exp_label', None),
+            "stars_exponent_label": getattr(self, 'stars_exp_label', None),
+            "min_weight_label": getattr(self, 'min_w_label', None),
+            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'), # Labels dans les groupes slider/spinbox
+            "wb_g": getattr(self, 'wb_g_ctrls', {}).get('label'),
+            "wb_b": getattr(self, 'wb_b_ctrls', {}).get('label'),
+            "stretch_method": getattr(self, 'stretch_method_label', None),
+            "stretch_bp": getattr(self, 'stretch_bp_ctrls', {}).get('label'),
+            "stretch_wp": getattr(self, 'stretch_wp_ctrls', {}).get('label'),
+            "stretch_gamma": getattr(self, 'stretch_gamma_ctrls', {}).get('label'),
+            "brightness": getattr(self, 'brightness_ctrls', {}).get('label'),
+            "contrast": getattr(self, 'contrast_ctrls', {}).get('label'),
+            "saturation": getattr(self, 'saturation_ctrls', {}).get('label'),
+            "estimated_time": getattr(self, 'remaining_time_label', None),
+            "elapsed_time": getattr(self, 'elapsed_time_label', None),
+            "Remaining:": getattr(self, 'remaining_static_label', None), # Label statique
+            "Additional:": getattr(self, 'additional_static_label', None), # Label statique
+
+            # --- Buttons ---
+            "browse_input_button": getattr(self, 'browse_input_button', None),
+            "browse_output_button": getattr(self, 'browse_output_button', None),
+            "browse_ref_button": getattr(self, 'browse_ref_button', None),
+            "auto_wb": getattr(self, 'auto_wb_button', None),
+            "reset_wb": getattr(self, 'reset_wb_button', None),
+            "auto_stretch": getattr(self, 'auto_stretch_button', None),
+            "reset_stretch": getattr(self, 'reset_stretch_button', None),
+            "reset_bcs": getattr(self, 'reset_bcs_button', None),
+            "start": getattr(self, 'start_button', None),
+            "stop": getattr(self, 'stop_button', None),
+            "add_folder_button": getattr(self, 'add_files_button', None),
+            "show_folders_button_text": getattr(self, 'show_folders_button', None),
+            "copy_log_button_text": getattr(self, 'copy_log_button', None),
+            "open_output_button_text": getattr(self, 'open_output_button', None),
+            # hist_reset_btn n'a pas besoin de traduction (juste "R")
+
+            # --- Checkbuttons ---
+            "drizzle_activate_check": getattr(self, 'drizzle_check', None), # Checkbox Drizzle
+            "perform_hot_pixels_correction": getattr(self, 'hot_pixels_check', None),
+            "enable_weighting_check": getattr(self, 'use_weighting_check', None),
+            "weight_snr_check": getattr(self, 'weight_snr_check', None),
+            "weight_stars_check": getattr(self, 'weight_stars_check', None),
+            "cleanup_temp_check_label": getattr(self, 'cleanup_temp_check', None),
+
+            # --- Radiobuttons (pour leur texte si besoin) ---
+            "drizzle_radio_2x_label": getattr(self, 'drizzle_radio_2x', None),
+            "drizzle_radio_3x_label": getattr(self, 'drizzle_radio_3x', None),
+            "drizzle_radio_4x_label": getattr(self, 'drizzle_radio_4x', None),
+            "drizzle_radio_final": getattr(self, 'drizzle_radio_final', None), # Bouton radio Mode Final
+            "drizzle_radio_incremental": getattr(self, 'drizzle_radio_incremental', None), # Bouton radio Mode Incrémental
         }
 
     def change_language(self, event=None):
@@ -1228,189 +1231,6 @@ class SeestarStackerGUI:
             else:
                  messagebox.showinfo(self.tr('info'), self.tr('Folder already added', default='Folder already added to the list.'))
 
-# Inside the SeestarStackerGUI class in seestar/gui/main_window.py
-
-
-    def start_processing(self):
-        """Démarre le traitement, gère la configuration et lance le thread backend."""
-
-        # --- IMMEDIATE ACTION: Disable Start Button to prevent double clicks ---
-        if hasattr(self, 'start_button'):
-            try:
-                self.start_button.config(state=tk.DISABLED)
-            except tk.TclError:
-                pass # Ignore if widget destroyed
-
-        # --- Validate Paths ---
-        input_folder = self.input_path.get()
-        output_folder = self.output_path.get()
-
-        if not input_folder or not output_folder:
-            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
-            if hasattr(self, 'start_button'): # Re-enable button if validation fails early
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        if not os.path.isdir(input_folder):
-            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
-            if hasattr(self, 'start_button'): # Re-enable button
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        if not os.path.isdir(output_folder):
-            try:
-                os.makedirs(output_folder, exist_ok=True)
-                # Use update_progress_gui here as it's a GUI action log
-                self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
-            except Exception as e:
-                messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}")
-                if hasattr(self, 'start_button'): # Re-enable button
-                    try: self.start_button.config(state=tk.NORMAL)
-                    except tk.TclError: pass
-                return
-
-        # --- Check for FITS files (Optional) ---
-        try:
-            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
-                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
-                    if hasattr(self, 'start_button'): # Re-enable button
-                        try: self.start_button.config(state=tk.NORMAL)
-                        except tk.TclError: pass
-                    return
-        except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-            if hasattr(self, 'start_button'): # Re-enable button
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
-
-        # --- Set Processing State ---
-        self.processing = True # GUI processing flag
-        self.time_per_image = 0
-        self.global_start_time = time.monotonic()
-        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
-
-
-        # --- Handle Pre-Added Folders ---
-        folders_to_pass_to_backend = list(self.additional_folders_to_process)
-        self.additional_folders_to_process = [] # Clear the GUI list
-        self.update_additional_folders_display() # Update the UI display
-
-        # --- Disable Controls & Enable Stop Button ---
-        self._set_parameter_widgets_state(tk.DISABLED)
-        # Start button should already be disabled from the top of the function
-        if hasattr(self, 'stop_button'):
-             try: self.stop_button.config(state=tk.NORMAL)
-             except tk.TclError: pass
-        if hasattr(self, 'open_output_button'):
-             try: self.open_output_button.config(state=tk.DISABLED)
-             except tk.TclError: pass
-
-        # --- Reset Progress Manager and Log ---
-        if hasattr(self, 'progress_manager'): self.progress_manager.reset(); self.progress_manager.start_timer()
-        if hasattr(self, 'status_text'):
-            try:
-                self.status_text.config(state=tk.NORMAL)
-                self.status_text.delete(1.0, tk.END)
-                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
-                self.status_text.config(state=tk.DISABLED)
-            except tk.TclError: pass
-
-        # --- Update and Validate Settings ---
-        self.settings.update_from_ui(self)
-        validation_messages = self.settings.validate_settings()
-        if validation_messages:
-            self.update_progress_gui("⚠️ Paramètres ajustés:", None)
-            for msg in validation_messages:
-                self.update_progress_gui(f"  - {msg}", None)
-            self.settings.apply_to_ui(self) # Re-apply corrected settings to UI
-
-        # --- Configure QueuedStacker ---
-        self.queued_stacker.stacking_mode = self.settings.stacking_mode
-        self.queued_stacker.kappa = self.settings.kappa
-
-        # --- Batch Size Estimation Logic ---
-        requested_batch_size = self.settings.batch_size # Get value from settings
-        final_batch_size_for_backend = 0 # Initialize
-
-        if requested_batch_size <= 0:
-            self.update_progress_gui("🧠 Taille de lot 'auto' sélectionnée. Estimation...", None)
-            try:
-                sample_img_path = None
-                if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
-                    fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
-                    if fits_files:
-                        sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
-
-                estimated_size = estimate_batch_size(sample_image_path=sample_img_path) # Call the estimation function
-                final_batch_size_for_backend = estimated_size
-                self.update_progress_gui(f"✅ Taille de lot auto estimée à: {estimated_size}", None)
-            except Exception as est_err:
-                self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None)
-                final_batch_size_for_backend = 10 # Fallback default
-        else:
-            # Use the user-provided batch size (already validated)
-            final_batch_size_for_backend = requested_batch_size
-
-        # Assign the determined batch size to the stacker
-        self.queued_stacker.batch_size = final_batch_size_for_backend
-        # --- End Batch Size Logic ---
-
-        # --- Configure remaining stacker parameters ---
-        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
-        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
-        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
-        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
-        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
-        self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
-
-        # Log the final batch size being used
-        self.update_progress_gui(f"ⓘ Taille de lot configurée pour traitement : {self.queued_stacker.batch_size}", None)
-
-        # Start the actual backend processing thread
-        self.update_progress_gui(self.tr("stacking_start"), 0) # Initial progress message
-
-        processing_started = self.queued_stacker.start_processing(
-            self.settings.input_folder,
-            self.settings.output_folder,
-            self.settings.reference_image_path,
-            initial_additional_folders=folders_to_pass_to_backend,
-            # Pass weighting parameters
-            use_weighting=self.settings.use_quality_weighting,
-            weight_snr=self.settings.weight_by_snr,
-            weight_stars=self.settings.weight_by_stars,
-            snr_exp=self.settings.snr_exponent,
-            stars_exp=self.settings.stars_exponent,
-            min_w=self.settings.min_weight
-        )
-
-        # --- Handle result of starting the backend ---
-        if processing_started:
-            # Successfully started, ensure stop button is enabled
-            if hasattr(self, 'stop_button'):
-                try: self.stop_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-
-            # Start the GUI progress tracking thread
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
-            self.thread.start()
-        else:
-            # Failed to start, likely because it was *already* running from a rapid previous call.
-            # DO NOT show an error message or call _processing_finished() here.
-            # Just log that the redundant start request was ignored.
-            self.update_progress_gui("ⓘ Demande de démarrage ignorée (traitement déjà en cours).", None)
-            # Ensure the UI state reflects that processing *is* active:
-            # Start button should remain disabled (done at the top of the function).
-            # Stop button should be enabled.
-            if hasattr(self, 'stop_button'):
-                try:
-                    self.stop_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            # Processing flag should remain True (set earlier in the function)
-            self.processing = True
 
 
     def _track_processing_progress(self):
@@ -1545,171 +1365,6 @@ class SeestarStackerGUI:
         elif self.processing:
             self.update_progress_gui("Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None); self._processing_finished()
 
-
-    def _processing_finished(self):
-        """Actions performed in the main GUI thread after processing ends/stops. Uses custom summary dialog."""
-        if not self.processing: return # Avoid running multiple times
-
-        self.processing = False # Set flag FIRST
-        # print("DEBUG: Entering _processing_finished (Custom Dialog Version)") # Keep disabled unless debugging
-
-        if hasattr(self, 'progress_manager'):
-            self.progress_manager.stop_timer()
-
-        # --- Gather final state from the worker ---
-        final_message_for_status_bar = self.tr("stacking_finished") # Default status bar message
-        final_stack_path = None
-        processing_error_details = None
-        images_stacked = 0
-        aligned_count = 0
-        failed_align_count = 0
-        failed_stack_count = 0
-        skipped_count = 0
-        processed_files_count = 0 # Total files attempted by the worker
-        total_exposure = 0.0
-        was_stopped_by_user = False
-        output_folder_exists = False
-        can_open_output = False
-        final_stack_exists = False
-
-        if hasattr(self, "queued_stacker"):
-            q_stacker = self.queued_stacker
-            # Retrieve final state variables safely
-            final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
-            images_stacked = getattr(q_stacker, 'images_in_cumulative_stack', 0)
-            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
-            failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
-            failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
-            skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
-            processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
-            total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
-            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False)
-            processing_error_details = getattr(q_stacker, 'processing_error', None)
-
-            # Update aligned count display one last time
-            default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-            try:
-                if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
-            except tk.TclError: pass
-
-            # Check output folder state for 'Open Output' button
-            if hasattr(self, 'output_path') and self.output_path.get():
-                output_folder_exists = os.path.isdir(self.output_path.get())
-
-            # Determine if final stack exists and if output can be opened
-            final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
-            if not processing_error_details and output_folder_exists:
-                can_open_output = True
-
-        else: # Should not happen if started correctly
-            final_message_for_status_bar = "Erreur: Stacker non initialisé."
-            processing_error_details = final_message_for_status_bar # Treat as an error
-            if hasattr(self, 'output_path') and self.output_path.get():
-                output_folder_exists = os.path.isdir(self.output_path.get())
-            can_open_output = output_folder_exists and not processing_error_details
-
-        # --- Set Status Bar Message based on outcome ---
-        if was_stopped_by_user:
-            final_message_for_status_bar = self.tr("processing_stopped")
-        elif processing_error_details:
-            final_message_for_status_bar = self.tr('stacking_error_msg')
-        elif images_stacked == 0 and aligned_count == 0:
-            final_message_for_status_bar = self.tr("no_stacks_created")
-        elif images_stacked > 0:
-             final_message_for_status_bar = self.tr("stacking_complete_msg") # Short success message
-        # Update the simple status label/bar message
-        self.update_progress_gui(final_message_for_status_bar, None)
-
-        # --- Try Loading Final Preview ---
-        preview_load_error_msg = None # Store potential preview error message
-        if not was_stopped_by_user and not processing_error_details and final_stack_exists:
-            try:
-                # Optional: add status update for loading preview
-                # self.update_progress_gui(f"Chargement aperçu final: {os.path.basename(final_stack_path)}...", None)
-                final_image_data = load_and_validate_fits(final_stack_path)
-                if final_image_data is not None:
-                    final_header = fits.getheader(final_stack_path)
-                    self.current_preview_data = final_image_data
-                    self.current_stack_header = final_header
-                    self.refresh_preview()
-                    if final_header: self.update_image_info(final_header)
-                else:
-                    preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: load_and_validate_fits returned None."
-            except Exception as preview_load_error:
-                preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: {preview_load_error}"
-                traceback.print_exc(limit=2)
-                # Show a separate error box JUST for the preview failure
-                messagebox.showerror(self.tr("Preview Error"), f"{self.tr('Error loading final preview')}:\n{preview_load_error}")
-
-        # --- Generate the Final Summary String ---
-        # (This part is largely the same as the previous step)
-        summary_lines = []
-        # Use a slightly different title for the pop-up
-        summary_title = self.tr("processing_report_title", default="Processing Summary")
-
-        # Overall Status for summary text
-        status_text = ""
-        if was_stopped_by_user: status_text = self.tr('processing_stopped')
-        elif processing_error_details: status_text = f"ERREUR ({processing_error_details})"
-        elif images_stacked > 0: status_text = "Terminé avec succès"
-        else: status_text = "Terminé (Aucun stack final créé)"
-        summary_lines.append(f"Statut: {status_text}")
-
-        # Timing
-        elapsed_total_seconds = 0
-        if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
-        summary_lines.append(f"Temps Total Traitement: {self._format_duration(elapsed_total_seconds)}")
-
-        # File Counts
-        summary_lines.append(f"Fichiers Traités (Tentatives): {processed_files_count}")
-        total_rejected = failed_align_count + failed_stack_count + skipped_count
-        summary_lines.append(f"Fichiers Rejetés (Total): {total_rejected}")
-        summary_lines.append(f"  - Échec Alignement: {failed_align_count}")
-        summary_lines.append(f"  - Échec Empilement Lot: {failed_stack_count}")
-        summary_lines.append(f"  - Autres (Variance, Erreur...): {skipped_count}")
-
-        # Stack Info
-        summary_lines.append(f"Images Alignées avec Succès: {aligned_count}")
-        summary_lines.append(f"Images dans Stack Final: {images_stacked}")
-        summary_lines.append(f"Temps Pose Total (Stack Final): {self._format_duration(total_exposure)}")
-        if final_stack_exists: summary_lines.append(f"Fichier Stack Final:\n  {final_stack_path}") # Add newline for long paths
-        else: summary_lines.append("Fichier Stack Final: Non créé ou introuvable.")
-
-        # Combine lines for the dialog
-        full_summary_text_for_dialog = "\n".join(summary_lines)
-
-        # --- Display Final Dialog (Custom or Error) ---
-        # IMPORTANT: Do NOT add the summary to the main log here anymore
-        # self.update_progress_gui(full_summary_text_for_dialog, None) # REMOVED THIS LINE
-
-        if processing_error_details:
-            # Show critical error in a standard error box
-             messagebox.showerror(self.tr("error"), f"{self.tr('stacking_error_msg')}\n{processing_error_details}")
-        elif not was_stopped_by_user:
-            # Show the custom summary dialog if not stopped and no critical error
-            self._show_summary_dialog(summary_title, full_summary_text_for_dialog)
-
-        # --- Reset UI State ---
-        self._set_parameter_widgets_state(tk.NORMAL)
-        if hasattr(self, 'start_button'):
-            try: self.start_button.config(state=tk.NORMAL)
-            except tk.TclError: pass
-        if hasattr(self, 'stop_button'):
-            try: self.stop_button.config(state=tk.DISABLED)
-            except tk.TclError: pass
-        if hasattr(self, 'open_output_button'):
-            try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
-            except tk.TclError: pass
-        if hasattr(self, 'remaining_time_var'):
-            try: self.remaining_time_var.set("00:00:00")
-            except tk.TclError: pass
-
-        # Final garbage collection hint
-        # Check if gc was imported before calling
-        if 'gc' in globals() or 'gc' in locals():
-             gc.collect()
-        # print("DEBUG: Exiting _processing_finished (Custom Dialog Version)") # Keep disabled
-
     def _format_duration(self, seconds):
         try:
             secs = int(round(float(seconds)));
@@ -1742,6 +1397,13 @@ class SeestarStackerGUI:
         if hasattr(self, 'snr_exp_spinbox'): processing_widgets.append(self.snr_exp_spinbox)
         if hasattr(self, 'stars_exp_spinbox'): processing_widgets.append(self.stars_exp_spinbox)
         if hasattr(self, 'min_w_spinbox'): processing_widgets.append(self.min_w_spinbox)
+        if hasattr(self, 'drizzle_check'): processing_widgets.append(self.drizzle_check)
+        if hasattr(self, 'drizzle_scale_label'): processing_widgets.append(self.drizzle_scale_label)
+        if hasattr(self, 'drizzle_radio_2x'): processing_widgets.append(self.drizzle_radio_2x) # Si Radiobuttons
+        if hasattr(self, 'drizzle_radio_3x'): processing_widgets.append(self.drizzle_radio_3x) # Si Radiobuttons
+        if hasattr(self, 'drizzle_radio_4x'): processing_widgets.append(self.drizzle_radio_4x) # Si Radiobuttons
+        # if hasattr(self, 'drizzle_scale_combo'): processing_widgets.append(self.drizzle_scale_combo) # Si Combobox
+
 
         preview_widgets = []
         if hasattr(self, 'wb_r_ctrls'): preview_widgets.extend([self.wb_r_ctrls['slider'], self.wb_r_ctrls['spinbox']])
@@ -1763,28 +1425,34 @@ class SeestarStackerGUI:
 
         widgets_to_set = []
         if state == tk.NORMAL:
-            # Activer TOUS les widgets quand le traitement finit
+            # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
-            # S'assurer que les options de pondération sont dans le bon état
+            # S'assurer que les options de pondération ET DRIZZLE sont dans le bon état initial
             self._update_weighting_options_state()
-            # Le bouton Ajouter Dossier reste NORMAL par défaut ici
-            if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
+            self._update_drizzle_options_state() # <-- Appel ajouté ici
+            # ... (reste de la logique pour state == tk.NORMAL) ...
 
         else: # tk.DISABLED (Pendant le traitement)
-            # Désactiver SEULEMENT les paramètres de traitement
+            # Désactiver les paramètres de traitement (y compris Drizzle)
             widgets_to_set = processing_widgets
             # Les widgets de preview restent actifs
             for widget in preview_widgets:
-                 if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
-                     try: widget.config(state=tk.NORMAL)
-                     except tk.TclError: pass
+                # ... (logique existante) ...
             # Le bouton Ajouter Dossier reste NORMAL
-            if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
+                if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
 
+        # Appliquer l'état aux widgets sélectionnés
         for widget in widgets_to_set:
             if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
                 try: widget.config(state=state)
                 except tk.TclError: pass
+
+        # Exceptionnellement, si on désactive (pendant traitement), on s'assure que
+        # les options internes (scale drizzle, options poids) sont aussi désactivées,
+        # même si la case principale était déjà décochée.
+        if state == tk.DISABLED:
+            self._update_weighting_options_state()
+            self._update_drizzle_options_state()
 
     def _debounce_resize(self, event=None):
         if self._after_id_resize:
@@ -1798,79 +1466,6 @@ class SeestarStackerGUI:
         if hasattr(self, 'histogram_widget') and self.histogram_widget.winfo_exists():
              try: self.histogram_widget.canvas.draw_idle()
              except tk.TclError: pass
-
-    def _show_summary_dialog(self, summary_title, summary_text):
-        """Displays a custom modal dialog with the processing summary and a copy button."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title(summary_title)
-        dialog.transient(self.root) # Associate with main window
-        dialog.grab_set() # Make it modal (blocks interaction with main window)
-        dialog.resizable(False, False)
-
-        # --- Content Frame ---
-        content_frame = ttk.Frame(dialog, padding="10 10 10 10")
-        content_frame.pack(expand=True, fill=tk.BOTH)
-
-        # --- Icon (Optional, mimics standard messagebox) ---
-        try:
-            # Try to use a standard icon (might depend on OS/Tk version)
-            icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
-            icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
-        except tk.TclError:
-            # Fallback if icon not found
-             icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
-             icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
-
-
-        # --- Summary Text ---
-        # Use a read-only Text widget for better text selection/display if needed, or Label
-        # Using Label for simplicity here, assuming summary isn't excessively long
-        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450) # Adjust wraplength as needed
-        summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
-
-        # --- Button Frame ---
-        button_frame = ttk.Frame(content_frame)
-        # Place button frame below the text, spanning both columns
-        button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
-
-        # --- Copy Summary Button ---
-
-        def copy_action():
-            try:
-                dialog.clipboard_clear()
-                dialog.clipboard_append(summary_text)
-                # Optional: Briefly change button text or show status
-                copy_button.config(text=self.tr("Copied!", default="Copied!"))
-                dialog.after(1500, lambda: copy_button.config(text=self.tr("Copy Summary", default="Copy Summary")) if copy_button.winfo_exists() else None)
-            except Exception as copy_e:
-                print(f"Error copying summary: {copy_e}")
-                # Optionally show a small error message within the dialog?
-
-        copy_button = ttk.Button(button_frame, text=self.tr("Copy Summary", default="Copy Summary"), command=copy_action)
-        copy_button.pack(side=tk.RIGHT, padx=(5, 0))
-
-        # --- OK Button ---
-        ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy, style='Accent.TButton' if 'Accent.TButton' in ttk.Style().element_names() else 'TButton')
-        ok_button.pack(side=tk.RIGHT)
-        ok_button.focus_set() # Set initial focus on OK
-
-        # --- Center the dialog ---
-        dialog.update_idletasks() # Update geometry calculations
-        # Get main window geometry
-        root_x = self.root.winfo_x()
-        root_y = self.root.winfo_y()
-        root_width = self.root.winfo_width()
-        root_height = self.root.winfo_height()
-        # Get dialog geometry
-        dialog_width = dialog.winfo_width()
-        dialog_height = dialog.winfo_height()
-        # Calculate position
-        pos_x = root_x + (root_width // 2) - (dialog_width // 2)
-        pos_y = root_y + (root_height // 2) - (dialog_height // 2)
-        dialog.geometry(f"+{pos_x}+{pos_y}")
-
-        # --- Wait for the dialog to be closed ---
-        self.root.wait_window(dialog)
 
     def _on_closing(self):
         if self.processing:
@@ -1912,33 +1507,486 @@ class SeestarStackerGUI:
             self.update_progress_gui(f"ⓘ Ouverture du dossier: {output_folder}", None)
         except FileNotFoundError: messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier.\nCommande non trouvée pour votre système ({system}).")
         except Exception as e: print(f"Erreur ouverture dossier: {e}"); messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}"); self.update_progress_gui(f"❌ Erreur ouverture dossier: {e}", None)
-    # --- Fin Nouvelles Méthodes ---
-
+########################################################
+    # --- MÉTHODE update_progress_gui MODIFIÉE ---
     def update_progress_gui(self, message, progress=None):
+        """Met à jour l'interface de progression, en gérant les messages Drizzle."""
+        # Gérer le message spécial pour le compteur de dossiers
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try: self.root.after_idle(self.update_additional_folders_display)
-            except tk.TclError: pass
-            return
+            except tk.TclError: pass # Ignorer si fenêtre fermée
+            return # Ne pas afficher ce message dans le log
+
+        # Procéder à la mise à jour via ProgressManager si disponible
         if hasattr(self, "progress_manager") and self.progress_manager:
+            final_drizzle_active = False
+            # Détecter les messages indiquant l'étape Drizzle finale
+            if isinstance(message, str):
+                if "💧 Exécution Drizzle final" in message:
+                    final_drizzle_active = True
+                    message = "⏳ " + message # Ajouter indicateur visuel
+
+            # Mettre à jour la barre et le log texte via ProgressManager
             self.progress_manager.update_progress(message, progress)
+
+            # Gérer le mode indéterminé de la barre de progression
+            try:
+                pb = self.progress_manager.progress_bar
+                if pb.winfo_exists():
+                    current_mode = pb['mode']
+                    if final_drizzle_active and current_mode != 'indeterminate':
+                        pb.config(mode='indeterminate')
+                        pb.start(15) # Vitesse animation (ms)
+                    elif not final_drizzle_active and current_mode == 'indeterminate':
+                        pb.stop()
+                        pb.config(mode='determinate')
+                        # Optionnel : Forcer la valeur si on a une progression
+                        if progress is not None:
+                            try: pb.configure(value=max(0.0, min(100.0, float(progress))))
+                            except ValueError: pass
+            except (tk.TclError, AttributeError):
+                pass # Ignorer si widgets détruits
+#############################################################################################################################################
+
+
+
+    def _processing_finished(self):
+        """Actions finales après la fin ou l'arrêt du traitement."""
+        if not self.processing:
+            # print("DEBUG: _processing_finished called but not processing. Skipping.") # Optionnel
+            return # Évite exécutions multiples
+
+        print("DEBUG: Entering _processing_finished...") # Log entrée
+        self.processing = False # Marquer comme terminé
+
+        # Arrêter le timer de la barre de progression
+        if hasattr(self, 'progress_manager'):
+            self.progress_manager.stop_timer()
+            # Arrêter la barre de progression indéterminée si elle l'était
+            try:
+                pb = self.progress_manager.progress_bar
+                if pb.winfo_exists():
+                     current_mode = pb['mode']
+                     if current_mode == 'indeterminate':
+                         pb.stop()
+                         pb.config(mode='determinate')
+                     # Optionnel: Mettre la barre à 100% si pas d'erreur critique
+                     if not hasattr(self, 'queued_stacker') or not getattr(self.queued_stacker, 'processing_error', True): # Si pas d'erreur
+                         pb.configure(value=100)
+                     else: # Laisser la valeur où elle était si erreur
+                          pass
+            except (tk.TclError, AttributeError): pass # Ignorer si widgets détruits
+
+        # --- Récupération état final du backend ---
+        final_message_for_status_bar = self.tr("stacking_finished") # Message par défaut
+        final_stack_path = None; processing_error_details = None; images_stacked = 0
+        aligned_count = 0; failed_align_count = 0; failed_stack_count = 0; skipped_count = 0
+        processed_files_count = 0; total_exposure = 0.0
+        was_stopped_by_user = False; output_folder_exists = False; can_open_output = False
+        final_stack_exists = False; is_drizzle_result = False; final_stack_type = "Classic" # Défaut
+
+        if hasattr(self, "queued_stacker"):
+            q_stacker = self.queued_stacker
+            # Récupérer les informations depuis le backend
+            final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
+            drizzle_active_session = getattr(q_stacker, 'drizzle_active_session', False)
+            drizzle_mode = getattr(q_stacker, 'drizzle_mode', 'Final')
+            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False) # Flag d'arrêt demandé
+            processing_error_details = getattr(q_stacker, 'processing_error', None) # Erreur critique interne
+            images_in_cumulative = getattr(q_stacker, 'images_in_cumulative_stack', 0) # Compteur pour Classique ET Drizzle Incr
+            aligned_count = getattr(q_stacker, 'aligned_files_count', 0) # Compteur total alignés
+            failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
+            failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
+            skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
+            processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
+            total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
+
+            print(f"DEBUG [_processing_finished]: final_stack_path from backend = {final_stack_path}") # Log
+
+            # Déterminer si le résultat final EST un résultat Drizzle valide
+            is_drizzle_result = (
+                drizzle_active_session and
+                not was_stopped_by_user and
+                processing_error_details is None and
+                final_stack_path is not None and
+                ( # Vérifier que le nom de fichier correspond à un Drizzle
+                    "_drizzle_final" in os.path.basename(final_stack_path) or
+                    "_drizzle_incr" in os.path.basename(final_stack_path)
+                )
+            )
+            print(f"DEBUG [_processing_finished]: is_drizzle_result = {is_drizzle_result}") # Log
+
+            # --- Correction Compteur Images Stackées ---
+            if is_drizzle_result:
+                # Pour Drizzle (Final ou Incrémental réussi), le nombre d'images
+                # est celui qui a été effectivement combiné dans ce stack final.
+                # Pour le Final, c'est aligned_count. Pour l'Incrémental, c'est images_in_cumulative_stack.
+                # Le plus simple est de se fier à NIMAGES dans le header final si possible,
+                # mais utilisons les compteurs pour l'instant.
+                if drizzle_mode == "Final":
+                    images_stacked = aligned_count # Toutes les images alignées ont contribué
+                else: # Incremental
+                    images_stacked = images_in_cumulative # Le cumulatif drizzle
+            else: # Cas Classique (ou Drizzle échoué/stoppé)
+                images_stacked = images_in_cumulative # Le cumulatif classique
+            print(f"DEBUG [_processing_finished]: images_stacked calculated = {images_stacked}") # Log
+            # --- Fin Correction Compteur ---
+
+            # Mettre à jour l'affichage du compteur d'alignés une dernière fois
+            default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+            try:
+                if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
+            except tk.TclError: pass
+
+            # Vérifier existence dossier/fichier sortie
+            if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
+            final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
+            print(f"DEBUG [_processing_finished]: final_stack_exists = {final_stack_exists}") # Log
+            # Déterminer si on peut ouvrir le dossier sortie
+            can_open_output = output_folder_exists and (final_stack_exists or not processing_error_details)
+
+        else:
+            # Cas où le backend n'existe pas (ne devrait pas arriver si processing=True)
+            final_message_for_status_bar = "Erreur: Stacker non trouvé."; processing_error_details = final_message_for_status_bar
+            if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
+            can_open_output = output_folder_exists and not processing_error_details
+
+        # --- Déterminer message statut final et type de stack ---
+        if was_stopped_by_user:
+            status_text = self.tr('processing_stopped')
+            # Essayer de déterminer le type de stack même si arrêté
+            if final_stack_path and ("_drizzle" in os.path.basename(final_stack_path)): final_stack_type = "Drizzle (Stopped)"
+            elif final_stack_path and ("_classic" in os.path.basename(final_stack_path)): final_stack_type = "Classic (Stopped)"
+            else: final_stack_type = "Unknown (Stopped)"
+        elif processing_error_details:
+            status_text = f"{self.tr('stacking_error_msg')} {processing_error_details}"
+            final_stack_type = "Error"
+        elif not final_stack_exists:
+            status_text = self.tr("Terminé (Aucun stack final créé)", default="Finished (No final stack created)")
+            final_stack_type = "None"
+        elif is_drizzle_result:
+            status_text = self.tr("Drizzle Complete", default="Drizzle Complete")
+            final_stack_type = "Drizzle" # Mode Drizzle réussi
+        else: # Stack classique réussi
+            status_text = self.tr("Stacking Complete", default="Stacking Complete")
+            final_stack_type = "Classic"
+
+        # Mettre à jour la barre de statut simple
+        if hasattr(self, 'progress_manager'):
+             try: self.progress_manager.update_progress(status_text, self.progress_bar['value']) # Garder la valeur actuelle ou 100
+             except tk.TclError: pass
+
+        # --- Charger aperçu final (si possible) ---
+        preview_load_error_msg = None
+        if final_stack_exists:
+            try:
+                # self.update_progress_gui(f"Chargement aperçu final...", None) # Optionnel
+                final_image_data = load_and_validate_fits(final_stack_path)
+                if final_image_data is not None:
+                    final_header = fits.getheader(final_stack_path)
+                    self.current_preview_data = final_image_data; self.current_stack_header = final_header
+                    self.refresh_preview();
+                    if final_header: self.update_image_info(final_header)
+                else: preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: load returned None."
+            except Exception as preview_load_error:
+                preview_load_error_msg = f"{self.tr('Error loading final stack preview')}: {preview_load_error}"; traceback.print_exc(limit=2)
+                messagebox.showerror(self.tr("Preview Error"), f"{self.tr('Error loading final preview')}:\n{preview_load_error}")
+
+        # --- Générer le résumé ---
+        summary_lines = []; summary_title = self.tr("processing_report_title")
+        summary_lines.append(f"{self.tr('Status', default='Status')}: {status_text}")
+        elapsed_total_seconds = 0
+        if self.global_start_time: elapsed_total_seconds = time.monotonic() - self.global_start_time
+        summary_lines.append(f"{self.tr('Total Processing Time', default='Total Processing Time')}: {self._format_duration(elapsed_total_seconds)}")
+        summary_lines.append(f"{self.tr('Final Stack Type', default='Final Stack Type')}: {final_stack_type}")
+        summary_lines.append(f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}")
+        total_rejected = failed_align_count + failed_stack_count + skipped_count
+        summary_lines.append(f"{self.tr('Files Rejected (Total)', default='Files Rejected (Total)')}: {total_rejected} ({self.tr('Align', default='Align')}: {failed_align_count}, {self.tr('Stack Err', default='Stack Err')}: {failed_stack_count}, {self.tr('Other', default='Other')}: {skipped_count})")
+        # Utiliser la variable images_stacked corrigée
+        summary_lines.append(f"{self.tr('Images in Final Stack', default='Images in Final Stack')} ({final_stack_type}): {images_stacked}")
+        summary_lines.append(f"{self.tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {self._format_duration(total_exposure)}")
+        if final_stack_exists: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
+        elif final_stack_path: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path} (Not Found!)")
+        else: summary_lines.append(self.tr('Final Stack File: Not created or not found.', default='Final Stack File: Not created or not found.'))
+        if preview_load_error_msg: summary_lines.append(f"\n{preview_load_error_msg}") # Ajouter erreur preview si besoin
+        full_summary_text_for_dialog = "\n".join(summary_lines)
+
+        # --- Afficher Dialogue (ou erreur) ---
+        # Ne pas montrer le résumé si arrêté par l'utilisateur, juste loguer
+        if was_stopped_by_user:
+             print("--- Processing Stopped by User ---")
+             print(full_summary_text_for_dialog)
+             print("---------------------------------")
+        elif processing_error_details:
+            # Afficher l'erreur critique dans une messagebox
+             messagebox.showerror(self.tr("error"), f"{status_text}") # status_text contient déjà les détails
+        else:
+            # Afficher le dialogue résumé normal
+            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output)
+
+        # --- Réinitialiser UI ---
+        self._set_parameter_widgets_state(tk.NORMAL)  # Réactive les contrôles
+        if hasattr(self, "start_button"):
+            try: self.start_button.config(state=tk.NORMAL)
+            except tk.TclError: pass
+        if hasattr(self, "stop_button"):
+            try: self.stop_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+        # Activer/Désactiver bouton Ouvrir Sortie basé sur can_open_output
+        if hasattr(self, "open_output_button"):
+            try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
+            except tk.TclError: pass
+        if hasattr(self, "remaining_time_var"):
+            try: self.remaining_time_var.set("00:00:00")
+            except tk.TclError: pass
+
+        # GC final
+        if 'gc' in globals() or 'gc' in locals(): gc.collect()
+        print("DEBUG: Exiting _processing_finished.") # Log sortie
+
+
+
+
+################################################################################################################################################
+    def _show_summary_dialog(self, summary_title, summary_text, can_open_output): # Ajout argument
+        """Displays a custom modal dialog with the processing summary."""
+        dialog = tk.Toplevel(self.root); dialog.title(summary_title); dialog.transient(self.root); dialog.grab_set(); dialog.resizable(False, False)
+        content_frame = ttk.Frame(dialog, padding="10 10 10 10"); content_frame.pack(expand=True, fill=tk.BOTH)
+        try: icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
+        except tk.TclError: icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
+        icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
+        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450); summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
+        button_frame = ttk.Frame(content_frame); button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
+
+        # --- Bouton Ouvrir Dossier (Conditionnel) ---
+        # L'état est basé sur l'argument can_open_output passé depuis _processing_finished
+        open_button = ttk.Button(button_frame, text=self.tr("Open Output", default="Open Output"), command=self._open_output_folder, state=tk.NORMAL if can_open_output else tk.DISABLED)
+        open_button.pack(side=tk.LEFT, padx=(0, 10)) # Toujours packé, l'état le contrôle
+######################################################
+        # --- Boutons Copier et OK (inchangés) ---
+        def copy_action():
+            try:
+                dialog.clipboard_clear()
+                dialog.clipboard_append(summary_text)
+                copy_button.config(text=self.tr("Copied!", default="Copied!"))
+                dialog.after(
+                    1500,
+                    lambda: copy_button.config(text=self.tr("Copy Summary", default="Copy Summary"))
+                    if copy_button.winfo_exists()
+                    else None,
+                )
+            except Exception as copy_e:
+                print(f"Error copying summary: {copy_e}")
+
+        copy_button = ttk.Button(
+            button_frame, text=self.tr("Copy Summary", default="Copy Summary"), command=copy_action
+        )
+        copy_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        ok_button = ttk.Button(
+            button_frame,
+            text="OK",
+            command=dialog.destroy,
+            style="Accent.TButton" if "Accent.TButton" in ttk.Style().element_names() else "TButton",
+        )
+        ok_button.pack(side=tk.RIGHT)
+        ok_button.focus_set()
+
+        # Centrer dialogue (inchangé)
+        dialog.update_idletasks()
+        root_x = self.root.winfo_x(); root_y = self.root.winfo_y(); root_width = self.root.winfo_width(); root_height = self.root.winfo_height()
+        dialog_width = dialog.winfo_width(); dialog_height = dialog.winfo_height()
+        pos_x = root_x + (root_width // 2) - (dialog_width // 2); pos_y = root_y + (root_height // 2) - (dialog_height // 2)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+        self.root.wait_window(dialog)
+#######################################################################################################################################
+
+
+#########################################################################################################################################
+    # --- MÉTHODE start_processing CORRIGÉE ---
+    def start_processing(self):
+        """Démarre le traitement, affiche l'avertissement Drizzle, gère la config et lance le thread backend."""
+
+        # --- Désactivation immédiate bouton Start ---
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+
+        # --- Validation des chemins ---
+        input_folder = self.input_path.get()
+        output_folder = self.output_path.get()
+        if not input_folder or not output_folder:
+            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        if not os.path.isdir(input_folder):
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        if not os.path.isdir(output_folder):
+            try: os.makedirs(output_folder, exist_ok=True); self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
+            except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}");
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass; return
+        try:
+            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
+                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
+                    if hasattr(self, 'start_button'):
+                        try: self.start_button.config(state=tk.NORMAL)
+                        except tk.TclError: pass; return
+        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}");
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.NORMAL)
+            except tk.TclError: pass; return #<-- Correction: Ajout return ici en cas d'erreur lecture
+
+        # === AVERTISSEMENT DRIZZLE ===
+        drizzle_enabled = False
+        if hasattr(self, 'use_drizzle_var'):
+            try: drizzle_enabled = self.use_drizzle_var.get()
+            except tk.TclError: pass
+
+        if drizzle_enabled:
+            warning_title = self.tr('drizzle_warning_title')
+            warning_text = self.tr('drizzle_warning_text')
+            continue_with_drizzle = messagebox.askyesno(warning_title, warning_text, parent=self.root)
+            if not continue_with_drizzle:
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur (Drizzle).", None)
+                if hasattr(self, 'start_button'):
+                    try: self.start_button.config(state=tk.NORMAL)
+                    except tk.TclError: pass
+                return # Arrêter la fonction ici si l'utilisateur dit non
+
+        # === FIN AVERTISSEMENT DRIZZLE ===
+
+        ### !!! CORRECTION INDENTATION : Ce bloc DOIT être au même niveau que le `if drizzle_enabled:` précédent !!! ###
+        # --- Logique principale de démarrage (maintenant exécutée dans tous les cas sauf annulation) ---
+        self.processing = True
+        self.time_per_image = 0
+        self.global_start_time = time.monotonic()
+
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+
+        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        self.additional_folders_to_process = []
+        self.update_additional_folders_display()
+
+        self._set_parameter_widgets_state(tk.DISABLED)  # Désactiver les contrôles
+
+        if hasattr(self, "stop_button"):
+            try: self.stop_button.config(state=tk.NORMAL)
+            except tk.TclError: pass
+        if hasattr(self, "open_output_button"):
+            try: self.open_output_button.config(state=tk.DISABLED)
+            except tk.TclError: pass
+        if hasattr(self, "progress_manager"):
+            self.progress_manager.reset(); self.progress_manager.start_timer()
+        if hasattr(self, "status_text"):
+            try:
+                self.status_text.config(state=tk.NORMAL)
+                self.status_text.delete(1.0, tk.END)
+                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
+                self.status_text.config(state=tk.DISABLED)
+            except tk.TclError: pass
+
+        # MAJ et Validation Settings
+        self.settings.update_from_ui(self)
+        validation_messages = self.settings.validate_settings()
+        if validation_messages:
+             self.update_progress_gui("⚠️ Paramètres ajustés:", None);
+             for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None);
+             self.settings.apply_to_ui(self) # Appliquer corrections à l'UI
+
+        # Configurer QueuedStacker (inclut batch size auto)
+        self.queued_stacker.stacking_mode = self.settings.stacking_mode
+        self.queued_stacker.kappa = self.settings.kappa
+        requested_batch_size = self.settings.batch_size; final_batch_size_for_backend = 0
+        if requested_batch_size <= 0:
+             self.update_progress_gui("🧠 Estimation taille lot auto...", None); sample_img_path = None
+             if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
+                 fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
+                 if fits_files: sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
+             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); final_batch_size_for_backend = estimated_size; self.update_progress_gui(f"✅ Taille lot auto estimée: {estimated_size}", None)
+             except Exception as est_err: self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); final_batch_size_for_backend = 10
+        else: final_batch_size_for_backend = requested_batch_size
+        self.queued_stacker.batch_size = final_batch_size_for_backend
+
+        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
+        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
+        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
+        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
+        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
+        self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
+        self.update_progress_gui(f"ⓘ Taille de lot pour traitement : {self.queued_stacker.batch_size}", None)
+
+        # Démarrer le backend (passe maintenant use_drizzle depuis la variable UI)
+        processing_started = self.queued_stacker.start_processing(
+            input_folder, output_folder, self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend,
+            # Pondération
+            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr,
+            weight_stars=self.settings.weight_by_stars, snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight,
+            # Drizzle
+            use_drizzle=self.use_drizzle_var.get(), # Utilise la variable UI
+            drizzle_scale=float(self.drizzle_scale_var.get()),
+            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get(),
+            drizzle_mode=self.drizzle_mode_var.get(), # Passe la valeur ('Final' ou 'Incremental')
+            drizzle_kernel=self.drizzle_kernel_var.get(),     # Passe la valeur du Combobox
+            drizzle_pixfrac=self.drizzle_pixfrac_var.get()     # Passe la valeur du Spinbox
+        )
+
+        # Gérer résultat démarrage backend
+        if processing_started:
+            if hasattr(self, 'stop_button'):
+                try: self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            # Démarrer le thread de suivi de la progression GUI
+            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+            self.thread.start()
+        else: # Échec démarrage backend (rare, normalement déjà en cours)
+            self.update_progress_gui("ⓘ Demande démarrage ignorée (traitement déjà en cours?).", None)
+            if hasattr(self, 'stop_button'):
+                try: self.stop_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            # S'assurer que l'état processing est bien True si le backend tournait déjà
+            self.processing = True
+        ### !!! FIN BLOC CORRIGÉ !!! ###
+
 
 # --- Main Execution ---
 if __name__ == "__main__":
     try:
-        _dummy_root = tk.Tk(); _dummy_root.withdraw(); style = ttk.Style(); available_themes = style.theme_names()
-        theme_to_use = 'default'; preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
+        _dummy_root = tk.Tk()
+        _dummy_root.withdraw()
+        style = ttk.Style()
+        available_themes = style.theme_names()
+        theme_to_use = 'default'
+        preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
         for t in preferred_themes:
-            if t in available_themes: theme_to_use = t; break
-        print(f"Using theme: {theme_to_use}"); style.theme_use(theme_to_use)
-        try: style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
-        except tk.TclError: print("Warning: Could not configure Accent.TButton style.")
-        try: style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
-        except tk.TclError: print("Warning: Could not configure Toolbutton.TButton style.")
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
-    except tk.TclError as theme_err: print(f"Error initializing Tk themes: {theme_err}. Using Tk default.");
-    if '_dummy_root' in locals() and _dummy_root.winfo_exists(): _dummy_root.destroy()
+            if t in available_themes:
+                theme_to_use = t
+                break
+        print(f"Using theme: {theme_to_use}")
+        style.theme_use(theme_to_use)
+        try:
+            style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
+        except tk.TclError:
+            print("Warning: Could not configure Accent.TButton style.")
+        try:
+            style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
+        except tk.TclError:
+            print("Warning: Could not configure Toolbutton.TButton style.")
+        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
+            _dummy_root.destroy()
+    except tk.TclError as theme_err:
+        print(f"Error initializing Tk themes: {theme_err}. Using Tk default.")
+        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
+            _dummy_root.destroy()
 
     gui = SeestarStackerGUI()
     gui.root.mainloop()
-
-# --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---
+    # --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---
