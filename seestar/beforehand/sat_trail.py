@@ -257,6 +257,20 @@ class AstroImageAnalyzerGUI:
         # Assurer l'exécution dans le thread principal de Tkinter
         self.root.after(0, self.progress_var.set, value)
         # self.root.update_idletasks()
+        # Cette fonction est appelée via root.after, donc elle s'exécute dans le thread principal.
+        # Met à jour la variable Tkinter liée à la barre de progression
+        self.progress_var.set(value)
+
+        # Force Tkinter à traiter les événements IDLE en attente,
+        # ce qui inclut le redessin des widgets dont l'état a changé.
+        # C'est souvent la clé pour voir la mise à jour visuelle.
+        try:
+            # Vérifier si la racine existe toujours (au cas où la fenêtre serait fermée pendant l'analyse)
+            if self.root.winfo_exists():
+                 self.root.update_idletasks()
+        except tk.TclError:
+             # Ignorer l'erreur si la fenêtre a été détruite entre le check et l'appel
+             pass
 
     def update_results_text(self, text, clear=False):
         # Fonction interne pour la mise à jour dans le thread Tkinter
@@ -420,9 +434,9 @@ class AstroImageAnalyzerGUI:
 
         # --- VALEURS À AJUSTER POUR LA DÉTECTION ---
         # Essayez de diminuer ces valeurs si la détection échoue
-        test_line_len = 20      # Longueur min. segment (défaut acstools: 200 - souvent trop grand)
-        test_small_edge = 10    # Taille min. contour (défaut acstools: 60)
-        test_line_gap = 100      # Écart max autorisé (défaut acstools: 75)
+        test_line_len = 150      # Longueur min. segment (défaut acstools: 200 - souvent trop grand)
+        test_small_edge = 60    # Taille min. contour (défaut acstools: 60)
+        test_line_gap = 75      # Écart max autorisé (défaut acstools: 75)
         # ------------------------------------------
 
         # Mise à jour du statut (via root.after pour thread-safety)

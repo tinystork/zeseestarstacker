@@ -17,11 +17,12 @@ EN_TRANSLATIONS = {
     'drizzle_radio_2x_label': "x2",
     'drizzle_radio_3x_label': "x3",
     'drizzle_radio_4x_label': "x4",
-    # --- NOUVELLES CLÉS POUR LE MODE DRIZZLE ---
     'drizzle_mode_label': "Drizzle Mode:",
     'drizzle_radio_final': "Standard (Final)",
     'drizzle_radio_incremental': "Incremental (Disk Saving)",
-    # --- FIN NOUVELLES CLÉS ---
+    'drizzle_kernel_label': "Kernel:",
+    'drizzle_pixfrac_label': "Pixfrac:",
+    'drizzle_wht_threshold_label': "WHT Threshold%:",
 
     # --- Control Tabs ---
     'tab_stacking': "Stacking",
@@ -90,20 +91,18 @@ EN_TRANSLATIONS = {
     'start': "Start",
     'stop': "Stop",
     'add_folder_button': "Add Folder",
-    # NOUVEAU: Clés pour les nouveaux boutons (utiliser le nom de variable comme référence)
     'copy_log_button_text': "Copy",
     'open_output_button_text': "Open Output",
     'show_folders_button_text': "View Inputs",
-    'Select Input Folder': "Select Input Folder",
-
-    'input_folders_title': "Input Folder List",
-    'no_input_folder_set': "No input folder has been selected yet.",
+    'analyze_folder_button': "Analyze Input Folder", # <-- NOUVELLE LIGNE AJOUTÉE ICI
 
     # --- Dialog Titles ---
     'Select Input Folder': "Select Input Folder",
     'Select Output Folder': "Select Output Folder",
     'Select Reference Image (Optional)': "Select Reference Image (Optional)",
     'Select Additional Images Folder': "Select Folder with Additional Images",
+    'input_folders_title': "Input Folder List",
+    'no_input_folder_set': "No input folder has been selected yet.",
 
     # --- Status Messages & Errors ---
     'select_folders': "Please select input and output folders.",
@@ -126,7 +125,7 @@ EN_TRANSLATIONS = {
     'no_additional_folders': "None",
     '1 additional folder': "1 add. folder",
     '{count} additional folders': "{count} add. folders",
-    'Start processing to add folders': "Processing must be started to add additional folders.", # Reste pertinent pour l'ajout pendant le process
+    'Start processing to add folders': "Processing must be started to add additional folders.",
     'Processing not active or finished.': 'Processing not active or finished.',
     'Folder not found': "Folder not found",
     'Input folder cannot be added': "The main input folder cannot be added.",
@@ -163,23 +162,23 @@ EN_TRANSLATIONS = {
     'report_minutes': "minutes",
     'report_hours': "hours",
     'eta_calculating': "Calculating...",
-    # --- Weighting Info Display ---
-    'Weighting': 'Weighting', # Key for label 'WGHT_ON' in header
-    'W. Metrics': 'W. Metrics', # Key for label 'WGHT_MET' in header
-    'weighting_enabled': "Enabled", # Value for WGHT_ON=True
-    'weighting_disabled': "Disabled", # Value for WGHT_ON=False
-    'drizzle_wht_threshold_label': "WHT Threshold%:",
-    'drizzle_kernel_label': "Kernel:",
-    'drizzle_pixfrac_label': "Pixfrac:",
+    'Weighting': 'Weighting',
+    'W. Metrics': 'W. Metrics',
+    'weighting_enabled': "Enabled",
+    'weighting_disabled': "Disabled",
     'drizzle_warning_title': "Drizzle Warning",
     'drizzle_warning_text': (
-    "Drizzle processing is enabled.\n\n",
-    "- This is experimental and may be slow.\n",
-    "- It will create temporary files that can consume significant disk space (potentially similar to the input image size).\n",
-    "- The live preview will show a standard stack; Drizzle will be applied at the very end.\n\n",
-    "Continue with Drizzle?"
+        "Drizzle processing is enabled.\n\n"
+        "- This is experimental and may be slow.\n"
+        "- It will create temporary files that can consume significant disk space (potentially similar to the input image size).\n"
+        "- The live preview will show a standard stack; Drizzle will be applied at the very end.\n\n"
+        "Continue with Drizzle?"
     ),
-    # --- End New Texts ---
+    # --- Analyzer Launch ---
+    'analyzer_launch_error_title': "Analyzer Launch Error",
+    'analyzer_script_not_found': "Analyzer script not found at:\n{path}\nPlease check the installation.",
+    'analyzer_launch_failed': "Failed to launch the analyzer script:\n{error}",
+    'analyzer_launched': "Folder analyzer launched.",
 
 }
 # --- END OF FILE seestar/localization/en.py ---

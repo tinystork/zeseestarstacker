@@ -18,18 +18,21 @@ import platform # NOUVEL import
 import subprocess # NOUVEL import
 import gc #
 from PIL import Image, ImageTk 
+# --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
+import sys # Pour sys.executable
+# ----------------------------------------------------
  
 # Seestar imports
-from seestar.core.image_processing import load_and_validate_fits, debayer_image
-from seestar.core.image_processing import load_and_validate_fits, debayer_image
-from seestar.localization import Localization
-from seestar.queuep.queue_manager import SeestarQueuedStacker
-from seestar.core.utils import estimate_batch_size
+from ..core.image_processing import load_and_validate_fits, debayer_image
+from ..core.image_processing import load_and_validate_fits, debayer_image
+from ..localization import Localization
+from ..queuep.queue_manager import SeestarQueuedStacker
+from ..core.utils import estimate_batch_size
 try:
     # Import tools for preview adjustments and auto calculations
-    from seestar.tools.stretch import StretchPresets, ColorCorrection
-    from seestar.tools.stretch import apply_auto_stretch as calculate_auto_stretch
-    from seestar.tools.stretch import apply_auto_white_balance as calculate_auto_wb
+    from ..tools.stretch import StretchPresets, ColorCorrection
+    from ..tools.stretch import apply_auto_stretch as calculate_auto_stretch
+    from ..tools.stretch import apply_auto_white_balance as calculate_auto_wb
     _tools_available = True
 except ImportError as tool_err:
     print(f"Warning: Could not import stretch/color tools: {tool_err}.")
@@ -380,7 +383,7 @@ class SeestarStackerGUI:
         except (tk.TclError, AttributeError):
             # Peut arriver si appelé avant que spinbox soit prêt ou après destruction
             pass
-    # --- FIN VERSION SIMPLIFIÉE ---
+    
 
     # Nécéssite d'ajouter self._trace_id_wht = None dans __init__
     # et de lier la trace après la création du spinbox
@@ -390,8 +393,6 @@ class SeestarStackerGUI:
 ###########################################################################################################################
 
 
-
-# --- DANS LA CLASSE SeestarStackerGUI de seestar/gui/main_window.py ---
 
     def create_layout(self):
         """Crée la disposition des widgets avec les boutons de contrôle SOUS l'aperçu."""
@@ -444,7 +445,20 @@ class SeestarStackerGUI:
         self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance")); self.wb_frame.pack(fill=tk.X, pady=5, padx=5); self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain); self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain); self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain); wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5); self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_wb_button.pack(side=tk.LEFT, padx=5); self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
         self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text=self.tr("stretch_options")); self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5); stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2); self.stretch_method_label = ttk.Label(stretch_method_frame, text=self.tr("stretch_method")); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5)); self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly"); self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview); self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders); self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders); self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma); stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5); self.auto_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("auto_stretch"), command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_stretch_button.pack(side=tk.LEFT, padx=5); self.reset_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("reset_stretch"), command=self.reset_stretch); self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
         self.bcs_frame = ttk.LabelFrame(tab_preview, text=self.tr("image_adjustments")); self.bcs_frame.pack(fill=tk.X, pady=5, padx=5); self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness); self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast); self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation); bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5); self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation); self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
+
+        # --- Suppression du bouton Analyseur de l'onglet Preview ---
+        # Les lignes suivantes sont SUPPRIMÉES de cette version :
+        # analyzer_separator_frame = ttk.Frame(tab_preview)
+        # analyzer_separator_frame.pack(fill=tk.X, pady=(10, 5), padx=5)
+        # ttk.Separator(analyzer_separator_frame).pack(fill=tk.X)
+        # analyzer_button_frame = ttk.Frame(tab_preview)
+        # analyzer_button_frame.pack(fill=tk.X, pady=(5, 10), padx=5)
+        # self.analyze_folder_button = ttk.Button(...) # Définition supprimée ici
+        # self.analyze_folder_button.pack(...) # Packing supprimé ici
+        # --- Fin Suppression ---
+
         control_notebook.add(tab_preview, text=f' {self.tr("tab_preview")} ')
+
 
         # ==============================================================
         # --- Panneau Droit (Aperçu, Boutons, Histogramme) ---
@@ -459,12 +473,25 @@ class SeestarStackerGUI:
         self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text=self.tr("stop"), command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+
+        # --- AJOUT DU BOUTON ANALYSEUR ICI ---
+        self.analyze_folder_button = ttk.Button(
+            control_frame,
+            text=self.tr("analyze_folder_button"), # Texte sera mis à jour par la localisation
+            command=self._launch_folder_analyzer,
+            state=tk.DISABLED # Désactivé par défaut
+        )
+        # Placer AVANT les boutons de droite existants
+        self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        # --- FIN AJOUT ---
+
         self.open_output_button = ttk.Button(control_frame, text=self.tr("open_output_button_text"), command=self._open_output_folder, state=tk.DISABLED)
         self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL)
         self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.show_folders_button = ttk.Button(control_frame, text=self.tr("show_folders_button_text"), command=self._show_input_folder_list, state=tk.DISABLED)
         self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+
 
         # 2. Définition du Cadre de l'Histogramme (packé en bas)
         self.histogram_frame = ttk.LabelFrame(right_frame, text=self.tr("histogram"))
@@ -501,24 +528,126 @@ class SeestarStackerGUI:
         # Store references AFTER all widgets are created (appel inchangé)
         self._store_widget_references()
 
-# --- FIN DE LA MÉTHODE create_layout ---
+
+
+
+
+
+
+
+##############################################################################################################################
+
+
+
+
+    def _launch_folder_analyzer(self):
+        """Launches the external folder analyzer script."""
+        input_folder = self.input_path.get()
+
+        # 1. Validation du dossier d'entrée
+        if not input_folder:
+            messagebox.showerror(self.tr("error"), self.tr("select_folders")) # Réutilise message existant
+            return
+        if not os.path.isdir(input_folder):
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
+            return
+
+        # 2. Déterminer le chemin vers le script analyse_gui.py
+        try:
+            # Chemin vers ce fichier (main_window.py)
+            gui_file_path = os.path.abspath(__file__)
+            # Chemin vers le dossier gui/
+            gui_dir = os.path.dirname(gui_file_path)
+            # Chemin vers le dossier seestar/
+            seestar_dir = os.path.dirname(gui_dir)
+            # Chemin vers le dossier parent de seestar/
+            project_root_parent = os.path.dirname(seestar_dir)
+            # Construire le chemin vers le script cible
+            analyzer_script_path = os.path.join(project_root_parent, 'seestar', 'beforehand', 'analyse_gui.py')
+            analyzer_script_path = os.path.normpath(analyzer_script_path) # Normaliser pour OS
+
+            print(f"DEBUG: Tentative de lancement de: {analyzer_script_path}") # Debug
+
+        except Exception as e:
+            messagebox.showerror(
+                self.tr("analyzer_launch_error_title"),
+                f"Erreur interne lors de la détermination du chemin de l'analyseur:\n{e}"
+            )
+            return
+
+        # 3. Vérifier si le script existe
+        if not os.path.exists(analyzer_script_path):
+            messagebox.showerror(
+                self.tr("analyzer_launch_error_title"),
+                self.tr("analyzer_script_not_found").format(path=analyzer_script_path)
+            )
+            return
+
+        # 4. Construire et lancer la commande
+        try:
+            # Utiliser sys.executable pour s'assurer qu'on utilise le même interpréteur Python
+            command = [
+                sys.executable,
+                analyzer_script_path,
+                "--input-dir",
+                input_folder # Passer le dossier d'entrée actuel
+            ]
+
+            print(f"DEBUG: Lancement commande: {' '.join(command)}") # Debug
+
+            # Lancer comme processus séparé non bloquant
+            # Utiliser Popen pour ne pas attendre la fin du script
+            process = subprocess.Popen(command)
+
+            # Optionnel: Afficher un message dans la barre de statut
+            self.update_progress_gui(self.tr("analyzer_launched"), None)
+
+        except FileNotFoundError:
+             messagebox.showerror(
+                self.tr("analyzer_launch_error_title"),
+                self.tr("analyzer_launch_failed").format(error=f"Python executable '{sys.executable}' or script not found.")
+            )
+        except OSError as e:
+             messagebox.showerror(
+                self.tr("analyzer_launch_error_title"),
+                self.tr("analyzer_launch_failed").format(error=f"OS error: {e}")
+            )
+        except Exception as e:
+            messagebox.showerror(
+                self.tr("analyzer_launch_error_title"),
+                self.tr("analyzer_launch_failed").format(error=str(e))
+            )
+            traceback.print_exc(limit=2) # Afficher traceback pour erreurs inattendues
 
 
 
 
 #############################################################################################################################
+
+
     def _update_show_folders_button_state(self, event=None):
-        """Enables/disables the 'View Input Folders' button."""
+        """Enables/disables the 'View Inputs' and 'Analyze Input' buttons."""
         try:
+            # Déterminer l'état basé sur la validité du dossier d'entrée
+            is_input_valid = self.input_path.get() and os.path.isdir(self.input_path.get())
+            new_state = tk.NORMAL if is_input_valid else tk.DISABLED
+
+            # Mettre à jour le bouton "View Inputs"
             if hasattr(self, 'show_folders_button') and self.show_folders_button.winfo_exists():
-                if self.input_path.get() and os.path.isdir(self.input_path.get()):
-                    self.show_folders_button.config(state=tk.NORMAL)
-                else:
-                    self.show_folders_button.config(state=tk.DISABLED)
+                self.show_folders_button.config(state=new_state)
+
+            # Mettre à jour le bouton "Analyze Input Folder"
+            if hasattr(self, 'analyze_folder_button') and self.analyze_folder_button.winfo_exists():
+                self.analyze_folder_button.config(state=new_state)
+
         except tk.TclError:
-            pass # Widget might not exist yet or be destroyed
+            # Ignorer les erreurs si les widgets n'existent pas encore ou sont détruits
+            pass
+        except Exception as e:
+             print(f"Error in _update_show_folders_button_state: {e}")
 
 
+#############################################################################################################################
 
     def _show_input_folder_list(self):
         """Displays the list of input folders in a simple pop-up window."""
@@ -651,6 +780,9 @@ class SeestarStackerGUI:
         slider = ttk.Scale(frame, from_=min_val, to=max_val, variable=tk_var, orient=tk.HORIZONTAL, command=on_scale_change)
         slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ctrls = {'frame': frame, 'label': label_widget, 'slider': slider, 'spinbox': spinbox}; return ctrls
+##################################################################################################################
+
+
 
     def _store_widget_references(self):
         """Stores references to widgets that need language updates."""
@@ -748,6 +880,7 @@ class SeestarStackerGUI:
             "show_folders_button_text": getattr(self, 'show_folders_button', None),
             "copy_log_button_text": getattr(self, 'copy_log_button', None),
             "open_output_button_text": getattr(self, 'open_output_button', None),
+            "analyze_folder_button": getattr(self, 'analyze_folder_button', None),
             # hist_reset_btn n'a pas besoin de traduction (juste "R")
 
             # --- Checkbuttons ---
@@ -766,6 +899,10 @@ class SeestarStackerGUI:
             "drizzle_radio_incremental": getattr(self, 'drizzle_radio_incremental', None), # Bouton radio Mode Incrémental
         }
 
+
+
+
+##################################################################################################################
     def change_language(self, event=None):
         """ Change l'interface à la langue sélectionnée. """
         selected_lang = self.language_var.get()
