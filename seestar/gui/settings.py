@@ -71,13 +71,17 @@ class SettingsManager:
         # Retourner les défauts peut être utile dans certains cas
         return self.__dict__
 
+
+
     def update_from_ui(self, gui_instance):
         """ Met à jour les paramètres depuis les variables Tkinter de l'interface. """
+        # ... (validation gui_instance inchangée) ...
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning: Cannot update settings from invalid GUI instance.")
             return
         try:
             # --- Processing Settings ---
+            # ... (inchangé) ...
             self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar()).get()
             self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar()).get()
             self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar()).get()
@@ -88,9 +92,9 @@ class SettingsManager:
             self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=self.hot_pixel_threshold)).get()
             self.neighborhood_size = getattr(gui_instance, 'neighborhood_size', tk.IntVar(value=self.neighborhood_size)).get()
             self.cleanup_temp = getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar(value=self.cleanup_temp)).get()
-            # Note: bayer_pattern n'est pas modifié par l'UI dans cette version
 
             # --- Quality Weighting Settings ---
+            # ... (inchangé) ...
             self.use_quality_weighting = getattr(gui_instance, 'use_weighting_var', tk.BooleanVar(value=self.use_quality_weighting)).get()
             self.weight_by_snr = getattr(gui_instance, 'weight_snr_var', tk.BooleanVar(value=self.weight_by_snr)).get()
             self.weight_by_stars = getattr(gui_instance, 'weight_stars_var', tk.BooleanVar(value=self.weight_by_stars)).get()
@@ -100,20 +104,22 @@ class SettingsManager:
 
             # --- Drizzle Settings ---
             self.use_drizzle = getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar(value=self.use_drizzle)).get()
-            # Lire l'échelle Drizzle (string) et convertir en int
             scale_str = getattr(gui_instance, 'drizzle_scale_var', tk.StringVar(value=str(self.drizzle_scale))).get()
-            try:
-                self.drizzle_scale = int(float(scale_str)) # Convertir en float puis int
-            except ValueError:
-                print(f"Warning: Invalid Drizzle scale value '{scale_str}' from UI. Using default {self.reset_to_defaults()['drizzle_scale']}.")
-                self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
-            # Lire le seuil WHT
+            try: self.drizzle_scale = int(float(scale_str))
+            except ValueError: print(f"Warning: Invalid Drizzle scale value '{scale_str}' from UI."); self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
+
+            # --- MODIFIÉ: Lecture Seuil WHT ---
+            # Lire directement la variable DoubleVar (0.0-1.0)
             self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=self.drizzle_wht_threshold)).get()
+            print(f"DEBUG (Settings update_from_ui): WHT Threshold (0-1) lu: {self.drizzle_wht_threshold}") # <-- AJOUTÉ DEBUG
+            # --- FIN MODIFICATION ---
+
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
             self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=self.drizzle_pixfrac)).get()
 
             # --- Preview Settings ---
+            # ... (inchangé) ...
             self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=self.preview_stretch_method)).get()
             self.preview_black_point = getattr(gui_instance, 'preview_black_point', tk.DoubleVar(value=self.preview_black_point)).get()
             self.preview_white_point = getattr(gui_instance, 'preview_white_point', tk.DoubleVar(value=self.preview_white_point)).get()
@@ -121,29 +127,30 @@ class SettingsManager:
             self.preview_r_gain = getattr(gui_instance, 'preview_r_gain', tk.DoubleVar(value=self.preview_r_gain)).get()
             self.preview_g_gain = getattr(gui_instance, 'preview_g_gain', tk.DoubleVar(value=self.preview_g_gain)).get()
             self.preview_b_gain = getattr(gui_instance, 'preview_b_gain', tk.DoubleVar(value=self.preview_b_gain)).get()
-           
-            
+
             # --- UI Settings ---
+            # ... (inchangé) ...
             self.language = getattr(gui_instance, 'language_var', tk.StringVar(value=self.language)).get()
-            # Sauvegarder la géométrie seulement si la fenêtre existe
             if gui_instance.root.winfo_exists():
                  current_geo = gui_instance.root.geometry()
-                 # Vérifier que la géométrie est valide avant de sauvegarder
-                 if isinstance(current_geo, str) and 'x' in current_geo and '+' in current_geo:
-                      self.window_geometry = current_geo
+                 if isinstance(current_geo, str) and 'x' in current_geo and '+' in current_geo: self.window_geometry = current_geo
 
+        # ... (gestion erreurs inchangée) ...
         except AttributeError as ae: print(f"Error updating settings from UI (AttributeError): {ae}")
         except tk.TclError as te: print(f"Error updating settings from UI (TclError): {te}")
         except Exception as e: print(f"Unexpected error updating settings from UI: {e}"); traceback.print_exc(limit=2)
 
-
     def apply_to_ui(self, gui_instance):
         """ Applique les paramètres chargés/actuels aux variables Tkinter. """
+        # ... (validation gui_instance inchangée) ...
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning: Cannot apply settings to invalid GUI instance.")
             return
         try:
+            print("DEBUG (Settings apply_to_ui): Application des paramètres à l'UI...") # <-- AJOUTÉ DEBUG
+
             # --- Processing Settings ---
+            # ... (inchangé) ...
             getattr(gui_instance, 'input_path', tk.StringVar()).set(self.input_folder or "")
             getattr(gui_instance, 'output_path', tk.StringVar()).set(self.output_folder or "")
             getattr(gui_instance, 'reference_image_path', tk.StringVar()).set(self.reference_image_path or "")
@@ -156,6 +163,7 @@ class SettingsManager:
             getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar()).set(self.cleanup_temp)
 
             # --- Quality Weighting Settings ---
+            # ... (inchangé) ...
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
             getattr(gui_instance, 'weight_snr_var', tk.BooleanVar()).set(self.weight_by_snr)
             getattr(gui_instance, 'weight_stars_var', tk.BooleanVar()).set(self.weight_by_stars)
@@ -165,14 +173,34 @@ class SettingsManager:
 
             # --- Drizzle Settings ---
             getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar()).set(self.use_drizzle)
-            # Convertir l'échelle numérique en string pour la variable UI
             getattr(gui_instance, 'drizzle_scale_var', tk.StringVar()).set(str(self.drizzle_scale))
-            getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar()).set(self.drizzle_wht_threshold)
+
+            # --- MODIFIÉ: Application Seuil WHT ---
+            # 1. Définir la variable de stockage (0.0-1.0)
+            wht_value_01 = self.drizzle_wht_threshold
+            getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar()).set(wht_value_01)
+            print(f"DEBUG (Settings apply_to_ui): WHT Threshold (0-1) appliqué: {wht_value_01}") # <-- AJOUTÉ DEBUG
+
+            # 2. Calculer et définir la variable d'affichage (0-100)
+            try:
+                 wht_value_percent = round(wht_value_01 * 100.0)
+                 # S'assurer que la valeur est dans la plage du Spinbox (10-100)
+                 wht_display_value = np.clip(wht_value_percent, 10, 100)
+                 wht_display_str = f"{wht_display_value:.0f}" # Format string pour le Spinbox
+                 getattr(gui_instance, 'drizzle_wht_display_var', tk.StringVar()).set(wht_display_str)
+                 print(f"DEBUG (Settings apply_to_ui): WHT Display (%) appliqué: {wht_display_str}") # <-- AJOUTÉ DEBUG
+            except Exception as e_conv:
+                 print(f"ERREUR (Settings apply_to_ui): Échec conversion/application WHT display: {e_conv}")
+                 # Fallback: essayer de mettre une valeur par défaut sûre à l'affichage
+                 getattr(gui_instance, 'drizzle_wht_display_var', tk.StringVar()).set("70")
+            # --- FIN MODIFICATION ---
+
             getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
             getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
             getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
 
             # --- Preview Settings ---
+            # ... (inchangé) ...
             getattr(gui_instance, 'preview_stretch_method', tk.StringVar()).set(self.preview_stretch_method)
             getattr(gui_instance, 'preview_black_point', tk.DoubleVar()).set(self.preview_black_point)
             getattr(gui_instance, 'preview_white_point', tk.DoubleVar()).set(self.preview_white_point)
@@ -182,25 +210,24 @@ class SettingsManager:
             getattr(gui_instance, 'preview_b_gain', tk.DoubleVar()).set(self.preview_b_gain)
 
             # --- UI Settings ---
+            # ... (inchangé) ...
             getattr(gui_instance, 'language_var', tk.StringVar()).set(self.language)
-            # Appliquer la géométrie seulement si elle est valide
             if isinstance(self.window_geometry, str) and 'x' in self.window_geometry and '+' in self.window_geometry:
-                try:
-                    gui_instance.root.geometry(self.window_geometry)
-                except tk.TclError: # Ignorer si la géométrie est invalide au moment de l'appliquer
-                    print(f"Warning: Could not apply window geometry '{self.window_geometry}'.")
+                try: gui_instance.root.geometry(self.window_geometry)
+                except tk.TclError: print(f"Warning: Could not apply window geometry '{self.window_geometry}'.")
 
             # --- Mettre à jour l'état des widgets dépendants ---
-            if hasattr(gui_instance, '_update_weighting_options_state'):
-                gui_instance._update_weighting_options_state()
-            if hasattr(gui_instance, '_update_drizzle_options_state'):
-                gui_instance._update_drizzle_options_state()
+            # (inchangé)
+            if hasattr(gui_instance, '_update_weighting_options_state'): gui_instance._update_weighting_options_state()
+            if hasattr(gui_instance, '_update_drizzle_options_state'): gui_instance._update_drizzle_options_state()
+            # Note: L'appel à _update_spinbox_from_float n'est plus nécessaire ici car on le gère directement
 
+            print("DEBUG (Settings apply_to_ui): Fin application paramètres UI.") # <-- AJOUTÉ DEBUG
+
+        # ... (gestion erreurs inchangée) ...
         except AttributeError as ae: print(f"Error applying settings to UI (AttributeError): {ae}")
         except tk.TclError as te: print(f"Error applying settings to UI (TclError - widget likely destroyed?): {te}")
         except Exception as e: print(f"Unexpected error applying settings to UI: {e}"); traceback.print_exc(limit=2)
-
-
     def validate_settings(self):
         """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
         messages = []
