@@ -20,6 +20,9 @@ from ..enhancement.drizzle_integration import DrizzleProcessor
 # --- NOUVELLE LIGNE D'IMPORT ---
 from astropy.wcs import WCS, FITSFixedWarning # Importer WCS (et peut-être le warning)
 import warnings # Si FITSFixedWarning est importé, il faut aussi warnings
+# Ajouter cette importation avec les autres importations
+from ..enhancement.color_correction import ChromaticBalancer  # Ajustez le chemin selon votre structure
+
 
 try:
     import cupy
@@ -69,6 +72,10 @@ class SeestarQueuedStacker:
     Ajout de la pondération basée sur la qualité (SNR, Nombre d'étoiles).
     """
     def __init__(self):
+
+        # Chroma aberation fix
+        self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15)
+        self.apply_chroma_correction = True  # Activé par défaut
         # --- State Flags & Control ---
         self.stop_processing = False
         self.processing_active = False
@@ -929,11 +936,31 @@ class SeestarQueuedStacker:
             # Puisque l'image est alignée sur la référence, elle partage son WCS.
             wcs_object = self.reference_wcs_object
             # --- FIN NOUVEAU ---
-
+            #                      
             # 5. Calcul des métriques de qualité
             if self.use_quality_weighting:
                 self.update_progress(f"      Calcul Scores Qualité...")
                 quality_scores = self._calculate_quality_metrics(aligned_img)
+                #4-1 application correction de bord 
+                if aligned_img is not None and self.apply_chroma_correction:
+                    if aligned_img.ndim == 3 and aligned_img.shape[2] == 3:
+                # Correction subtile des bords uniquement
+                        edge_mask = self.chroma_balancer.create_edge_mask(aligned_img.shape[:2])
+                
+                # Analyse du centre comme référence
+                        h, w = aligned_img.shape[:2]
+                        center_slice = aligned_img[h//4:3*h//4, w//4:3*w//4]
+                        ref_ratios = self.chroma_balancer.calculate_channel_ratios(center_slice)
+                
+                    # Corriger uniquement les bords
+                    for i in range(aligned_img.shape[0]):
+                        for j in range(aligned_img.shape[1]):
+                            if edge_mask[i, j] < 0.5:  # Seulement les bords
+                                strength = 1.0 - edge_mask[i, j]
+                                aligned_img[i, j, 0] *= (1 + 0.2 * (ref_ratios[0] - 1.0) * strength)
+                                aligned_img[i, j, 2] *= (1 + 0.2 * (ref_ratios[1] - 1.0) * strength)
+                    
+                    aligned_img = np.clip(aligned_img, 0.0, 1.0)
 
             # 6. Retourner les résultats (incluant l'objet WCS)
             # --- MODIFIÉ : Retourner 4 valeurs ---
@@ -1491,6 +1518,15 @@ class SeestarQueuedStacker:
                 self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
                 self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
                 #self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images') was cluterring the header
+            
+            
+                # Appliquer la correction chromatique si activée et si l'image est en couleur        
+                if self.apply_chroma_correction and self.current_stack_data is not None:
+                    if self.current_stack_data.ndim == 3 and self.current_stack_data.shape[2] == 3:
+                        self.update_progress("   -> Application de la correction chromatique...")
+                        self.current_stack_data = self.chroma_balancer.normalize_stack(self.current_stack_data)
+                        self.update_progress("   -> Correction chromatique terminée.")
+
 
             # Clip final result
             self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
@@ -1868,7 +1904,14 @@ class SeestarQueuedStacker:
             # Assembler en HxWxC
             final_sci_image_hxwxc = np.stack(final_output_images, axis=-1).astype(np.float32)
             final_wht_map_hxwxc = np.stack(final_output_weights, axis=-1).astype(np.float32)
+            if self.apply_chroma_correction and final_sci_image_hxwxc is not None:
+                self.update_progress("   -> Application de la correction chromatique sur résultat Drizzle...")
+                final_sci_image_hxwxc = self.chroma_balancer.normalize_stack(final_sci_image_hxwxc)
+                self.update_progress("   -> Correction chromatique Drizzle terminée.")
 
+            # Retourner les résultats
+            return final_sci_image_hxwxc, final_wht_map_hxwxc
+            
             # Nettoyer les résultats finaux (sécurité)
             final_sci_image_hxwxc[~np.isfinite(final_sci_image_hxwxc)] = 0.0
             final_wht_map_hxwxc[~np.isfinite(final_wht_map_hxwxc)] = 0.0
@@ -2151,6 +2194,9 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
+# --- START OF METHOD SeestarQueuedStacker.start_processing (dans queue_manager.py) ---
+# (Assurez-vous d'être dans la classe SeestarQueuedStacker)
+
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
                          initial_additional_folders=None,
                          # Weighting params
@@ -2158,22 +2204,33 @@ class SeestarQueuedStacker:
                          snr_exp=1.0, stars_exp=0.5, min_w=0.1,
                          # Drizzle params
                          use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7,
-                         drizzle_mode="Final",
-                         # --- NOUVEAUX PARAMÈTRES DANS LA SIGNATURE ---
-                         drizzle_kernel="square", # Défaut 'square'
-                         drizzle_pixfrac=1.0):     # Défaut 1.0
+                         drizzle_mode="Final", drizzle_kernel="square", drizzle_pixfrac=1.0,
+                         # --- NOUVEAU PARAMÈTRE DANS LA SIGNATURE ---
+                         apply_chroma_correction=True): # Ajouté ici avec une valeur par défaut
         """
         Démarre le thread de traitement principal avec la configuration spécifiée,
-        y compris les options de pondération, le MODE, le NOYAU et PIXFRAC Drizzle.
+        y compris les options de pondération, Drizzle, et la correction chroma.
         """
+        print("DEBUG (Backend start_processing): Début tentative démarrage...") # <-- AJOUTÉ DEBUG
+
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement alors qu'un autre est déjà en cours.")
             return False
 
-        # --- Stockage des paramètres reçus ---
+        # --- Stockage des paramètres reçus (Ajouter le nouveau) ---
+        # ... (Stockage des autres paramètres comme avant : drizzle_mode, kernel, pixfrac...)
         self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
-        self.drizzle_kernel = drizzle_kernel # Stocker la valeur reçue
-        self.drizzle_pixfrac = drizzle_pixfrac   # Stocker la valeur reçue
+        self.drizzle_kernel = drizzle_kernel
+        self.drizzle_pixfrac = drizzle_pixfrac
+
+        # --- STOCKAGE DU NOUVEAU PARAMÈTRE ---
+        # Stocke la valeur reçue dans l'attribut de l'instance.
+        # La classe ChromaBalancer est déjà initialisée dans __init__
+        self.apply_chroma_correction = apply_chroma_correction
+        print(f"DEBUG (Backend start_processing): apply_chroma_correction stocké: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
+        if self.apply_chroma_correction:
+             self.update_progress("🎨 Correction chromatique des bords activée pour cette session.")
+        # --- FIN STOCKAGE ---
 
         # Réinitialiser l'état d'arrêt et définir le dossier courant
         self.stop_processing = False
@@ -2181,37 +2238,34 @@ class SeestarQueuedStacker:
 
         # Initialiser les dossiers et l'état (TRÈS IMPORTANT)
         if not self.initialize(output_dir):
-            self.processing_active = False
+            self.processing_active = False # S'assurer que le flag est False si l'init échoue
             return False
 
-        # Stocker l'état Drizzle et ses paramètres pour cette session
-        self.drizzle_active_session = use_drizzle # Stocke si Drizzle est demandé
+        # Stocker l'état Drizzle et ses paramètres pour cette session (inchangé)
+        self.drizzle_active_session = use_drizzle
         if self.drizzle_active_session:
             self.drizzle_scale = float(drizzle_scale)
             self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
-            # Log incluant le mode choisi
-            self.update_progress(f"💧 Mode Drizzle Activé (Mode: {self.drizzle_mode}, Échelle: x{self.drizzle_scale:.1f}, Seuil WHT: {self.drizzle_wht_threshold*100:.0f}%)")
+            self.update_progress(f"💧 Mode Drizzle Activé (Mode: {self.drizzle_mode}, Échelle: x{self.drizzle_scale:.1f}, Seuil WHT: {self.drizzle_wht_threshold*100:.0f}%, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f})") # Log amélioré
         else:
             self.update_progress("⚙️ Mode Stack Classique Activé pour cette session")
 
-        # Vérifier et ajuster la taille de lot
+        # Vérifier et ajuster la taille de lot (inchangé)
         if self.batch_size < 3:
             self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None)
             self.batch_size = 3
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
 
-        # Appliquer la configuration de la pondération qualité
+        # Appliquer la configuration de la pondération qualité (inchangé)
         self.use_quality_weighting = use_weighting
-        self.weight_by_snr = weight_snr
-        self.weight_by_stars = weight_stars
-        self.snr_exponent = max(0.1, snr_exp)
-        self.stars_exponent = max(0.1, stars_exp)
+        # ... (autres paramètres de pondération) ...
         self.min_weight = max(0.01, min(1.0, min_w))
         if self.use_quality_weighting:
             self.update_progress(f"⚖️ Pondération Qualité Activée (SNR^{self.snr_exponent:.1f}, Stars^{self.stars_exponent:.1f}, MinW: {self.min_weight:.2f})")
 
-        # Gérer les dossiers supplémentaires initiaux
+        # Gérer les dossiers supplémentaires initiaux (inchangé)
         initial_folders_to_add_count = 0
+        # ... (logique ajout dossiers initiaux) ...
         with self.folders_lock:
             self.additional_folders = []
             if initial_additional_folders:
@@ -2224,7 +2278,8 @@ class SeestarQueuedStacker:
                  self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
                  self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
 
-        # Ajouter les fichiers du dossier initial à la file d'attente
+
+        # Ajouter les fichiers du dossier initial à la file d'attente (inchangé)
         initial_files_added = self._add_files_to_queue(self.current_folder)
         if initial_files_added > 0:
             self._recalculate_total_batches()
@@ -2232,16 +2287,20 @@ class SeestarQueuedStacker:
         elif not self.additional_folders:
              self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
 
-        # Configurer l'image de référence pour l'aligneur
+        # Configurer l'image de référence pour l'aligneur (inchangé)
         self.aligner.reference_image_path = reference_path_ui or None
 
-        # Démarrer le thread worker
+        # Démarrer le thread worker (inchangé)
+        print("DEBUG (Backend start_processing): Démarrage du thread worker...") # <-- AJOUTÉ DEBUG
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
         self.processing_thread.daemon = True
         self.processing_thread.start()
-        self.processing_active = True # Mettre le flag APRÈS le démarrage réussi
+        self.processing_active = True
         self.update_progress("🚀 Thread de traitement démarré.")
-        return True # Succès du démarrage
+        print("DEBUG (Backend start_processing): Fin.") # <-- AJOUTÉ DEBUG
+        return True
+
+# --- END OF METHOD SeestarQueuedStacker.start_processing ---
 
 
 ###############################################################################################################################################

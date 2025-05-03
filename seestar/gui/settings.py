@@ -55,6 +55,10 @@ class SettingsManager:
         self.drizzle_kernel = "square"  # Noyau Drizzle ('square', 'gaussian', etc.)
         self.drizzle_pixfrac = 1.0      # Fraction Pixel Drizzle (0.01 - 1.0)
 
+        # --- Correction Chroma ---
+        self.apply_chroma_correction = True # Activé par défaut
+        print("DEBUG (Settings reset_to_defaults): apply_chroma_correction mis à True (défaut).") # <-- AJOUTÉ DEBUG
+        
         # Preview Settings
         self.preview_stretch_method = "Asinh" # Bon défaut pour l'astro
         self.preview_black_point = 0.01
@@ -79,6 +83,7 @@ class SettingsManager:
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning: Cannot update settings from invalid GUI instance.")
             return
+        print("DEBUG (Settings update_from_ui): Lecture des paramètres depuis l'UI...") # <-- AJOUTÉ DEBUG
         try:
             # --- Processing Settings ---
             # ... (inchangé) ...
@@ -108,11 +113,16 @@ class SettingsManager:
             try: self.drizzle_scale = int(float(scale_str))
             except ValueError: print(f"Warning: Invalid Drizzle scale value '{scale_str}' from UI."); self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
 
-            # --- MODIFIÉ: Lecture Seuil WHT ---
+            # --- LECTURE CORRECTION CHROMA ---
+            self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=self.apply_chroma_correction)).get()
+            print(f"DEBUG (Settings update_from_ui): apply_chroma_correction lu depuis UI: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
+            # ---  ---
+
+            # ---  Lecture Seuil WHT ---
             # Lire directement la variable DoubleVar (0.0-1.0)
             self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=self.drizzle_wht_threshold)).get()
             print(f"DEBUG (Settings update_from_ui): WHT Threshold (0-1) lu: {self.drizzle_wht_threshold}") # <-- AJOUTÉ DEBUG
-            # --- FIN MODIFICATION ---
+            # ---  ---
 
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
@@ -228,6 +238,9 @@ class SettingsManager:
         except AttributeError as ae: print(f"Error applying settings to UI (AttributeError): {ae}")
         except tk.TclError as te: print(f"Error applying settings to UI (TclError - widget likely destroyed?): {te}")
         except Exception as e: print(f"Unexpected error applying settings to UI: {e}"); traceback.print_exc(limit=2)
+
+
+
     def validate_settings(self):
         """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
         messages = []
@@ -279,7 +292,7 @@ class SettingsManager:
                   original = self.drizzle_mode
                  self.drizzle_mode = defaults['drizzle_mode'] # Reset to default 'Final'
                  messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
-            # --->>> FIN DU BLOC À INSÉRER <<<---
+            # --->>>  <<<---
 
             # Drizzle Kernel and Pixfrac Validation
              valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
@@ -301,7 +314,13 @@ class SettingsManager:
                  original = self.drizzle_pixfrac
                  self.drizzle_pixfrac = defaults['drizzle_pixfrac'] # Reset to default 1.0
                  messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
-            # --- FIN NOUVEAU BLOC ---
+            # --- FIN  BLOC ---
+
+            # --- CORRECTION CHROMA ---
+            # Assigner la valeur chargée/actuelle à la variable Tkinter correspondante
+                 getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar()).set(self.apply_chroma_correction)
+                 print(f"DEBUG (Settings apply_to_ui): apply_chroma_correction appliqué à l'UI: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
+            # --- FIN AJOUT ---
 
              # --- Preview Settings Validation ---
              self.preview_black_point = float(self.preview_black_point); self.preview_white_point = float(self.preview_white_point)
@@ -359,6 +378,9 @@ class SettingsManager:
             'drizzle_mode': str(self.drizzle_mode),
             'drizzle_kernel': str(self.drizzle_kernel),
             'drizzle_pixfrac': float(self.drizzle_pixfrac),
+            # --- CORRECTION CHROMA ---
+            'apply_chroma_correction': bool(self.apply_chroma_correction), # Sauvegarder comme booléen
+            # ---  ---
             # Preview
             'preview_stretch_method': str(self.preview_stretch_method),
             'preview_black_point': float(self.preview_black_point),
@@ -381,7 +403,9 @@ class SettingsManager:
 
     def load_settings(self):
         """ Charge les paramètres depuis le fichier JSON. """
+        print(f"DEBUG (Settings load_settings): Tentative chargement depuis {self.settings_file}...") 
         if not os.path.exists(self.settings_file):
+            print(f"DEBUG (Settings load_settings): Fichier non trouvé. Utilisation défauts.") 
             print(f"Settings file not found: {self.settings_file}. Using defaults and creating file.")
             self.reset_to_defaults()
             self.save_settings() # Créer le fichier avec les défauts
@@ -435,11 +459,21 @@ class SettingsManager:
             # UI
             self.language = settings_data.get('language', defaults['language'])
             self.window_geometry = settings_data.get('window_geometry', defaults['window_geometry'])
+            
+            # ---CORRECTION CHROMA ---
+            # Utiliser la valeur par défaut de 'defaults' si la clé n'est pas dans le fichier
+            self.apply_chroma_correction = settings_data.get('apply_chroma_correction', defaults['apply_chroma_correction'])
+            # S'assurer que c'est un booléen après chargement
+            self.apply_chroma_correction = bool(self.apply_chroma_correction)
+            print(f"DEBUG (Settings load_settings): apply_chroma_correction chargé: {self.apply_chroma_correction}") # <-- DEBUG
+            # --- ---
+            print(f"DEBUG (Settings load_settings): Paramètres chargés. Validation...") # DEBUG
 
             print(f"Settings loaded from {self.settings_file}")
             # Validate settings after loading
             validation_messages = self.validate_settings()
             if validation_messages:
+                 print("DEBUG (Settings load_settings): Paramètres chargés ajustés après validation:") # <--  DEBUG
                  print("Loaded settings adjusted after validation:")
                  for msg in validation_messages: print(f"  - {msg}")
                  self.save_settings() # Save the corrected settings
