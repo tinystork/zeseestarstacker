@@ -3,9 +3,12 @@
 # ---------------------------------------------------------------------------
 # Core CPU Libraries for the main Seestar Stacker GUI application
 # (Tested with Python 3.8+, NumPy 1.x/2.x)
+# ---------------------------------------------------------------------------      
 # ---------------------------------------------------------------------------
+# DEPENDENCIES & OPTIONAL GPU ACCELERATION NOTES (CUDA)
+# ---------------------------------------------------------------------------
+# Core libraries needed for basic CPU operation:
 numpy
-opencv-python
 astropy
 astroalign
 tqdm
@@ -78,13 +81,13 @@ psutil                  # Highly recommended for automatic batch size estimation
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for sat_trail.py (Satellite Trail Analyzer Tool)
 # ---------------------------------------------------------------------------
-# acstools                # For satellite trail detection (satdet.detsat using Hough)
-# scipy                   # Dependency for acstools/skimage/other scientific tasks
+acstools                # For satellite trail detection (satdet.detsat using Hough)
+scipy                   # Dependency for acstools/skimage/other scientific tasks
 
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
-# PyQt5                   # GUI framework for the standalone visu.py viewer
+PyQt5                   # GUI framework for the standalone visu.py viewer
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)
@@ -140,4 +143,76 @@ psutil                  # Highly recommended for automatic batch size estimation
 #      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
 #
 # cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
+# ---------------------------------------------------------------------------
+# --- OpenCV (Potential CUDA Use for Denoise/Blur/CLAHE) ---
+# Using opencv-contrib-python *enables the possibility* of using CUDA via OpenCV
+# IF the user has a compatible NVIDIA GPU, CUDA Toolkit, and drivers installed
+# *BEFORE* installing this package.
+# If CUDA is not available or OpenCV wasn't built with CUDA support, it will
+# automatically and safely fall back to using the CPU.
+# You might see "DEBUG: CUDA device not found" or similar messages - this is NORMAL
+# if you don't have the required NVIDIA setup. The program will still work.
+opencv-contrib-python
+
+# --- CuPy (Potential CUDA Use for Stacking) ---
+# CuPy provides significant speedups for stacking *if* you have the correct setup.
+# This is OPTIONAL. The program works perfectly fine using the CPU without CuPy.
+#
+# Requirements for CuPy GPU Acceleration:
+#   1. An NVIDIA GPU with CUDA support.
+#   2. NVIDIA CUDA Toolkit installed (matching the CuPy version below).
+#   3. NVIDIA drivers installed.
+#
+# Installation (MANUAL STEP REQUIRED FOR GPU USERS):
+#   - First, check your installed CUDA Toolkit version by running: nvcc --version
+#   - Then, install the CuPy package matching your CUDA version. Examples:
+#     For CUDA 12.x: pip install cupy-cuda12x
+#     For CUDA 11.x: pip install cupy-cuda11x
+#     (Check CuPy docs for exact package name: https://docs.cupy.dev/en/stable/install.html)
+#
+# WARNING MESSAGES:
+# If you run the program *without* installing CuPy or without a proper CUDA setup,
+# you WILL see messages like "DEBUG: CuPy library not found" or errors related to
+# CUDA libraries (e.g., "nvrtc64_XXX.dll not found", "CUDA runtime error").
+# **These messages are NORMAL and HARMLESS if you are not intending to use GPU acceleration.**
+# The program is designed to detect this and automatically fall back to the CPU for stacking.
+#
+# cupy-cudaXXX # <-- Leave this commented out or remove. User installs manually.
+
+# ---------------------------------------------------------------------------
+# FIN DES NOTES SUR L'ACCELERATION GPU (CUDA)
+# ---------------------------------------------------------------------------
+# --- OpenCV (Utilisation CUDA potentielle pour Denoise/Blur/CLAHE) ---
+# L'utilisation d'opencv-contrib-python *permet potentiellement* l'utilisation de CUDA via OpenCV
+# SI l'utilisateur a une carte graphique NVIDIA compatible, le CUDA Toolkit et les pilotes
+# installés *AVANT* d'installer ce paquet Python.
+# Si CUDA n'est pas disponible ou si OpenCV n'a pas été compilé avec le support CUDA,
+# le programme utilisera automatiquement et sans danger le CPU.
+# Vous pourriez voir des messages comme "DEBUG: CUDA device not found" - c'est NORMAL
+# si vous n'avez pas la configuration NVIDIA requise. Le programme fonctionnera quand même.
+
+# --- CuPy (Utilisation CUDA potentielle pour l'Empilement) ---
+# CuPy accélère significativement l'empilement *si* vous avez la bonne configuration.
+# Ceci est OPTIONNEL. Le programme fonctionne parfaitement sur CPU sans CuPy.
+#
+# Prérequis pour l'accélération GPU avec CuPy :
+#   1. Une carte graphique NVIDIA supportant CUDA.
+#   2. Le NVIDIA CUDA Toolkit installé (correspondant à la version de CuPy ci-dessous).
+#   3. Les pilotes NVIDIA installés.
+#
+# Installation (ÉTAPE MANUELLE REQUISE pour utilisateurs GPU) :
+#   - D'abord, vérifiez la version du CUDA Toolkit installée avec : nvcc --version
+#   - Ensuite, installez le paquet CuPy correspondant à votre version CUDA. Exemples :
+#     Pour CUDA 12.x : pip install cupy-cuda12x
+#     Pour CUDA 11.x : pip install cupy-cuda11x
+#     (Vérifiez la documentation CuPy pour le nom exact : https://docs.cupy.dev/en/stable/install.html)
+#
+# MESSAGES D'AVERTISSEMENT :
+# Si vous lancez le programme *sans* installer CuPy ou sans configuration CUDA correcte,
+# vous VERREZ des messages comme "DEBUG: CuPy library not found" ou des erreurs liées
+# aux librairies CUDA (ex: "nvrtc64_XXX.dll not found", "CUDA runtime error").
+# **Ces messages sont NORMAUX et SANS DANGER si vous ne comptez pas utiliser l'accélération GPU.**
+# Le programme est conçu pour détecter cela et utiliser automatiquement le CPU pour l'empilement.
+#
+# cupy-cudaXXX # <-- Laissez commenté ou supprimez. Installation manuelle par l'utilisateur.
 # ---------------------------------------------------------------------------

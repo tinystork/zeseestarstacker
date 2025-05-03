@@ -1,4 +1,3 @@
-.
 ├── seestar/                     # Package principal de l'application
 │   ├── core/                    # Noyau : Fonctions de base du traitement d'image
 │   │   ├── __init__.py          # Exporte les éléments du 'core'
