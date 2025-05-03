@@ -21,7 +21,7 @@ from PIL import Image, ImageTk
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys # Pour sys.executable
 # ----------------------------------------------------
- 
+import tempfile # <-- AJOUTÉ
 # Seestar imports
 from ..core.image_processing import load_and_validate_fits, debayer_image
 from ..core.image_processing import load_and_validate_fits, debayer_image
@@ -65,105 +65,161 @@ from .histogram_widget import HistogramWidget
 
 class SeestarStackerGUI:
     """ GUI principale pour Seestar. """
-    def __init__(self):
+    # --- MODIFIÉ: Signature du constructeur ---
+    def __init__(self, initial_input_dir=None, stack_immediately_from=None): # <-- AJOUTÉ stack_immediately_from
         """Initialise l'interface graphique."""
+        print("DEBUG (GUI __init__): Initialisation SeestarStackerGUI...") # <-- AJOUTÉ DEBUG
+        print(f"DEBUG (GUI __init__): Reçu initial_input_dir='{initial_input_dir}', stack_immediately_from='{stack_immediately_from}'") # <-- AJOUTÉ DEBUG
         self.root = tk.Tk()
-      
+
+        # ... (Logique de l'icône inchangée) ...
         try:
-            # Replace this path with the ACTUAL path to icon file!
-            # Example: icon_path = "icons/my_app_icon.png"
-            # Make sure the path is correct relative to where you run the script,
-            # or use an absolute path.
             icon_path = 'icon/icon.png'
-
             if os.path.exists(icon_path):
-                # Load the image using Pillow
-                icon_image = Image.open(icon_path)
-                # Convert it for Tkinter
-                self.tk_icon = ImageTk.PhotoImage(icon_image)
-                # Set the icon for the window (and taskbar/dock)
-                self.root.iconphoto(True, self.tk_icon)
-                print(f"DEBUG: Successfully loaded and set icon from: {icon_path}") # Optional debug message
-            else:
-                print(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
-        except FileNotFoundError:
-             print(f"Error: Icon file not found at specified path: {icon_path}. Using default icon.")
-        except Exception as e:
-            print(f"Error loading or setting window icon: {e}")
-            # Optional: Show traceback for debugging complex errors
-            # import traceback
-            # traceback.print_exc()
-        # --- End Icon Setting ---
+                icon_image = Image.open(icon_path); self.tk_icon = ImageTk.PhotoImage(icon_image); self.root.iconphoto(True, self.tk_icon)
+                print(f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}") # <-- AJOUTÉ DEBUG (plus détaillé)
+            else: print(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
+        except Exception as e: print(f"Error loading or setting window icon: {e}")
 
-        self.localization = Localization("en") # The rest of the __init__ method continues here
+        # --- Initialisation des variables et objets internes ---
+        # (Identique à avant, mais ajout d'un flag pour le stack immédiat)
         self.localization = Localization("en")
         self.settings = SettingsManager()
-        self.queued_stacker = SeestarQueuedStacker() # Use the queued stacker
-        self.processing = False # Flag to track if processing is active from UI perspective
-        self.thread = None # Holds the progress tracker thread
-        # Preview data is now primarily managed by the PreviewManager
-        self.current_preview_data = None # Holds raw data for re-applying preview settings
-        self.current_stack_header = None # Header associated with current_preview_data
+        self.queued_stacker = SeestarQueuedStacker()
+        self.processing = False
+        self.thread = None
+        self.current_preview_data = None
+        self.current_stack_header = None
         self.debounce_timer_id = None
-        self.time_per_image = 0 # Average time per processed file (updated by tracker)
-        self.global_start_time = None # Start time of the whole processing session
-
-        # *** NOUVEAU : Liste pour les dossiers ajoutés AVANT de démarrer ***
+        self.time_per_image = 0
+        self.global_start_time = None
         self.additional_folders_to_process = []
-        # --- Fin Nouveau ---
 
-        # --- Quality Weighting Variables ---
+        # --- NOUVEAU FLAG ---
+        self._trigger_immediate_stack = False # Sera True si stack_immediately_from est valide
+        self._folder_for_immediate_stack = None # Stockera le chemin
+        # --- FIN NOUVEAU ---
+
+        # --- Variables Pondération (Inchangé) ---
         self.use_weighting_var = tk.BooleanVar(value=False)
-        self.weight_snr_var = tk.BooleanVar(value=True)
-        self.weight_stars_var = tk.BooleanVar(value=True)
-        self.snr_exponent_var = tk.DoubleVar(value=1.0)
-        self.stars_exponent_var = tk.DoubleVar(value=0.5)
+        self.weight_snr_var = tk.BooleanVar(value=True); self.weight_stars_var = tk.BooleanVar(value=True)
+        self.snr_exponent_var = tk.DoubleVar(value=1.0); self.stars_exponent_var = tk.DoubleVar(value=0.5)
         self.min_weight_var = tk.DoubleVar(value=0.1)
-        # Initialize Tkinter variables first
-        self.init_variables()
 
-        # Load settings and set initial language
+        # --- Initialisation Variables Tkinter ---
+        self.init_variables() # Doit être avant le chargement/application des settings
+
+        # --- Chargement Settings & Langue ---
         self.settings.load_settings()
-        self.language_var.set(self.settings.language) # Ensure var matches loaded setting
+        self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
+        print(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.") # <-- AJOUTÉ DEBUG
 
-        # Create Managers that depend on self.root and settings
-        self.file_handler = FileHandlingManager(self) # Needs self for callbacks/settings
+        # --- Gestion des arguments d'entrée (MODIFIÉ) ---
+        # Priorité 1: Stacking immédiat demandé par l'analyseur
+        if stack_immediately_from and isinstance(stack_immediately_from, str) and os.path.isdir(stack_immediately_from):
+             print(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}") # <-- AJOUTÉ INFO
+             # Surcharger le dossier d'entrée avec celui de l'analyseur
+             self.input_path.set(stack_immediately_from)
+             # --- NOUVEAU: Marquer pour déclencher le stack ---
+             self._folder_for_immediate_stack = stack_immediately_from
+             self._trigger_immediate_stack = True
+             print(f"DEBUG (GUI __init__): Flag _trigger_immediate_stack mis à True.") # <-- AJOUTÉ DEBUG
+             # Optionnel: Mettre aussi à jour le setting (écrase valeur chargée)
+             # self.settings.input_folder = stack_immediately_from
+        # Priorité 2: Pré-remplissage simple demandé via --input-dir
+        elif initial_input_dir and isinstance(initial_input_dir, str) and os.path.isdir(initial_input_dir):
+             print(f"INFO (GUI __init__): Pré-remplissage dossier entrée depuis argument: {initial_input_dir}") # <-- AJOUTÉ INFO
+             self.input_path.set(initial_input_dir)
+             # self.settings.input_folder = initial_input_dir # Optionnel
 
-        # Build the UI layout
-        self.create_layout() # Creates widgets, must be before manager init
+        # --- Création Layout et Initialisation Managers (Inchangé) ---
+        self.file_handler = FileHandlingManager(self) # Doit être avant create_layout si utilisé dedans
+        self.create_layout()
+        self.init_managers()
+        print("DEBUG (GUI __init__): Layout créé, managers initialisés.") # <-- AJOUTÉ DEBUG
 
-        # Initialize managers that need widget references
-        self.init_managers() # Initializes progress_manager, preview_manager etc.
-
-        # Apply loaded settings to the UI widgets
+        # --- Application Settings & UI Updates (Inchangé) ---
         self.settings.apply_to_ui(self)
+        if hasattr(self, '_update_spinbox_from_float'): self._update_spinbox_from_float()
         self._update_weighting_options_state()
+        self._update_drizzle_options_state() # S'assurer que les options drizzle sont à jour
         self._update_show_folders_button_state()
-        self.update_ui_language() # Translate UI based on loaded language
+        self.update_ui_language()
 
-        # Connect backend callbacks
+        # --- Connexion Callbacks Backend (Inchangé) ---
         self.queued_stacker.set_progress_callback(self.update_progress_gui)
         self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)
+        print("DEBUG (GUI __init__): Callbacks backend connectés.") # <-- AJOUTÉ DEBUG
 
-        # Final window setup
+        # --- Configuration Fenêtre Finale (Inchangé) ---
         self.root.title(self.tr("title"))
-        try:
-            self.root.geometry(self.settings.window_geometry) # Apply saved geometry
-        except tk.TclError:
-            self.root.geometry("1200x750") # Default fallback
+        try: self.root.geometry(self.settings.window_geometry)
+        except tk.TclError: self.root.geometry("1200x750")
         self.root.minsize(1100, 650)
-        self.root.bind("<Configure>", self._debounce_resize) # Handle resize for preview refresh
-        self.root.protocol("WM_DELETE_WINDOW", self._on_closing) # Handle closing
+        self.root.bind("<Configure>", self._debounce_resize)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
-        # --- ADD Variables to store preview state info ---
-        self.preview_img_count = 0
-        self.preview_total_imgs = 0
-        self.preview_current_batch = 0
-        self.preview_total_batches = 0
+        # --- Variables état aperçu (Inchangé) ---
+        self.preview_img_count = 0; self.preview_total_imgs = 0
+        self.preview_current_batch = 0; self.preview_total_batches = 0
+
+        # --- Aperçu Initial & Dossiers Additionnels (Inchangé) ---
+        self._try_show_first_input_image()
+        self.update_additional_folders_display()
+
+        # --- NOUVEAU: Déclenchement du stacking immédiat si demandé ---
+        if self._trigger_immediate_stack:
+             print("DEBUG (GUI __init__): Planification du lancement immédiat via after(500, ...).") # <-- AJOUTÉ DEBUG
+             # Utiliser 'after' pour lancer le stacking après que l'UI soit complètement chargée
+             # Un délai court (ex: 500ms) peut aider à assurer que tout est prêt
+             self.root.after(500, self._start_immediate_stack)
+        else:
+             print("DEBUG (GUI __init__): Pas de stacking immédiat demandé.") # <-- AJOUTÉ DEBUG
+
+        print("DEBUG (GUI __init__): Initialisation terminée.") # <-- AJOUTÉ DEBUG
+
+
+# --- DANS LA CLASSE SeestarStackerGUI ---
+# (Ajoutez cette méthode, par exemple après __init__ ou près de start_processing)
+
+    def _start_immediate_stack(self):
+        """
+        Méthode appelée via 'after' pour démarrer le stacking automatiquement
+        si demandé par l'analyseur.
+        """
+        print("DEBUG (GUI): Exécution de _start_immediate_stack().") # <-- AJOUTÉ DEBUG
+        # Double vérification que le flag est bien positionné et qu'un dossier est défini
+        if self._trigger_immediate_stack and self._folder_for_immediate_stack:
+            print(f"DEBUG (GUI): Conditions remplies. Tentative de lancement de start_processing pour: {self._folder_for_immediate_stack}") # <-- AJOUTÉ DEBUG
+            # Assurer que le dossier d'entrée dans l'UI correspond bien
+            # (Normalement déjà fait dans __init__, mais sécurité supplémentaire)
+            current_ui_input = self.input_path.get()
+            if os.path.normpath(current_ui_input) != os.path.normpath(self._folder_for_immediate_stack):
+                print(f"AVERTISSEMENT (GUI): Dossier UI ({current_ui_input}) ne correspond pas au dossier demandé ({self._folder_for_immediate_stack}). Mise à jour UI.")
+                self.input_path.set(self._folder_for_immediate_stack)
+                # On pourrait aussi mettre à jour self.settings.input_folder ici
+
+            # Vérifier si le dossier de sortie est défini, sinon, suggérer un défaut
+            if not self.output_path.get():
+                default_output = os.path.join(self._folder_for_immediate_stack, "stack_output")
+                print(f"INFO (GUI): Dossier de sortie non défini, utilisation défaut: {default_output}")
+                self.output_path.set(default_output)
+                # Il faudra peut-être créer ce dossier dans start_processing
+
+            # Appeler la méthode start_processing normale
+            self.start_processing()
+        else:
+            print("DEBUG (GUI): _start_immediate_stack() appelé mais conditions non remplies (flag ou dossier manquant).") # <-- AJOUTÉ DEBUG
+
+        # Réinitialiser le flag pour éviter déclenchement multiple
+        self._trigger_immediate_stack = False
+        self._folder_for_immediate_stack = None
+
 
     def init_variables(self):
         """Initialise les variables Tkinter."""
+        # ... (autres variables input_path, output_path, etc. inchangées) ...
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.reference_image_path = tk.StringVar()
@@ -175,20 +231,17 @@ class SeestarStackerGUI:
         self.neighborhood_size = tk.IntVar(value=5)
         self.cleanup_temp_var = tk.BooleanVar(value=True) # Renamed from remove_aligned
 
-        # ... (Variables existantes : input_path, output_path, etc.) ...
-        self.cleanup_temp_var = tk.BooleanVar(value=True) # Renamed from remove_aligned
+        # --- Drizzle Variables --- # <-- MODIFIÉ SECTION
+        self.use_drizzle_var = tk.BooleanVar(value=False)
+        self.drizzle_scale_var = tk.StringVar(value="2")
+        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7) # La variable 0.0-1.0 (INCHANGÉE)
+        self.drizzle_wht_display_var = tk.StringVar(value="70") # <-- AJOUTÉ: Variable pour l'affichage % (String pour .set())
+        self.drizzle_mode_var = tk.StringVar(value="Final")
+        self.drizzle_kernel_var = tk.StringVar(value="square")
+        self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
+        # --- FIN MODIFICATION ---
 
-        # --- AJOUTER ICI les variables Drizzle ---
-        self.use_drizzle_var = tk.BooleanVar(value=False) # Drizzle désactivé par défaut
-        self.drizzle_scale_var = tk.StringVar(value="2") # Échelle Drizzle (sous forme de string pour Combobox/Radio)
-        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7)
-        # --- FIN AJOUT ---
-
-        # Preview settings variables
-        self.preview_stretch_method = tk.StringVar(value="Asinh")
-        # ... (Reste des variables existantes) ...
-
-        # Preview settings variables
+        # ... (variables Preview inchangées) ...
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
         self.preview_white_point = tk.DoubleVar(value=0.99)
@@ -196,24 +249,25 @@ class SeestarStackerGUI:
         self.preview_r_gain = tk.DoubleVar(value=1.0)
         self.preview_g_gain = tk.DoubleVar(value=1.0)
         self.preview_b_gain = tk.DoubleVar(value=1.0)
-        # Additional preview adjustments (Brightness/Contrast/Saturation)
         self.preview_brightness = tk.DoubleVar(value=1.0)
         self.preview_contrast = tk.DoubleVar(value=1.0)
         self.preview_saturation = tk.DoubleVar(value=1.0)
 
-        # UI State variables
-        self.language_var = tk.StringVar(value='en') # Default language
+        # ... (variables UI State inchangées) ...
+        self.language_var = tk.StringVar(value='en')
         self.remaining_files_var = tk.StringVar(value=self.tr("no_files_waiting", default="No files waiting"))
         self.additional_folders_var = tk.StringVar(value=self.tr("no_additional_folders", default="None"))
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var = tk.StringVar(value=default_aligned_fmt.format(count="--"))
         self.remaining_time_var = tk.StringVar(value="--:--:--") # ETA
         self.elapsed_time_var = tk.StringVar(value="00:00:00")
-        self._after_id_resize = None # For debouncing resize events
-        # --- NOUVELLE LIGNE CI-DESSOUS ---
-        self.drizzle_mode_var = tk.StringVar(value="Final") # Nouveau: Choix mode Drizzle ('Final' ou 'Incremental')
-        self.drizzle_kernel_var = tk.StringVar(value="square") # Nouveau: Noyau Drizzle
-        self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)    # Nouveau: Fraction Pixel Drizzle
+        self._after_id_resize = None
+        # La ligne suivante n'est plus nécessaire car le trace a été enlevé, on peut la supprimer si elle existe
+        # self._trace_id_wht = None # <-- SUPPRIMER SI PRÉSENT
+
+
+
+
 #######################################################################################################################
 
 
@@ -352,37 +406,51 @@ class SeestarStackerGUI:
         """ Raccourci pour la localisation. """
         return self.localization.get(key, default=default)
 
+
+
     def _convert_spinbox_percent_to_float(self, *args):
-        """Lit le Spinbox (%) et met à jour la variable (0-1)."""
+        """Lit la variable d'affichage (%) et met à jour la variable de stockage (0-1)."""
         try:
-            percent_value = float(self.drizzle_wht_spinbox.get())
+            # --- MODIFIÉ: Lire depuis la variable d'affichage ---
+            display_value_str = self.drizzle_wht_display_var.get()
+            percent_value = float(display_value_str)
+            # --- FIN MODIFICATION ---
+
+            # La conversion et le clip restent les mêmes
             float_value = np.clip(percent_value / 100.0, 0.01, 1.0) # Assurer 0.01-1.0
-            # Mettre à jour directement la variable
+
+            # Mettre à jour directement la variable de stockage (0.0-1.0)
             self.drizzle_wht_threshold_var.set(float_value)
-        except (ValueError, tk.TclError):
-            pass # Ignorer erreurs de conversion
+            # print(f"DEBUG (Spinbox Cmd): Display='{display_value_str}', FloatSet={float_value:.3f}") # <-- DEBUG Optionnel
 
-    def _update_spinbox_from_float(self, *args):
-        """Lit la variable (0-1) et met à jour le Spinbox (%). Appelé manuellement."""
-        try:
-            # Vérifier si le widget existe avant d'y accéder
-            if hasattr(self, 'drizzle_wht_spinbox') and self.drizzle_wht_spinbox.winfo_exists():
-                float_value = self.drizzle_wht_threshold_var.get()
-                percent_value = round(float_value * 100.0)
-                # Mettre à jour le Spinbox sans déclencher sa propre commande
-                self.drizzle_wht_spinbox.config(textvariable=tk.StringVar(value=f"{percent_value:.0f}"))
-                # Remettre la liaison à la variable correcte pour la lecture future
-                self.drizzle_wht_spinbox.config(textvariable=self.drizzle_wht_threshold_var) # Reconnecter pour la saisie? Non, on utilise command.
-                # Juste mettre la valeur est plus simple:
-                # self.drizzle_wht_spinbox.delete(0, tk.END)
-                # self.drizzle_wht_spinbox.insert(0, f"{percent_value:.0f}") # Ceci est plus sûr
-                # Encore plus simple: utiliser set() si Spinbox le supporte bien
-                self.drizzle_wht_spinbox.set(f"{percent_value:.0f}")
-
-
-        except (tk.TclError, AttributeError):
-            # Peut arriver si appelé avant que spinbox soit prêt ou après destruction
+        except (ValueError, tk.TclError, AttributeError) as e:
+            # Ignorer erreurs de conversion ou si les variables n'existent pas encore
+            print(f"DEBUG (Spinbox Cmd): Ignored error during conversion: {e}") # <-- AJOUTÉ DEBUG
             pass
+
+
+
+#    def _update_spinbox_from_float(self, *args):
+#        """Lit la variable (0-1) et met à jour le Spinbox (%). Appelé manuellement."""
+#        try:
+#            # Vérifier si le widget existe avant d'y accéder
+#            if hasattr(self, 'drizzle_wht_spinbox') and self.drizzle_wht_spinbox.winfo_exists():
+#                float_value = self.drizzle_wht_threshold_var.get()
+#                percent_value = round(float_value * 100.0)
+#                # Mettre à jour le Spinbox sans déclencher sa propre commande
+#                self.drizzle_wht_spinbox.config(textvariable=tk.StringVar(value=f"{percent_value:.0f}"))
+#                # Remettre la liaison à la variable correcte pour la lecture future
+#                self.drizzle_wht_spinbox.config(textvariable=self.drizzle_wht_threshold_var) # Reconnecter pour la saisie? Non, on utilise command.
+#                # Juste mettre la valeur est plus simple:
+#                # self.drizzle_wht_spinbox.delete(0, tk.END)
+#                # self.drizzle_wht_spinbox.insert(0, f"{percent_value:.0f}") # Ceci est plus sûr
+#                # Encore plus simple: utiliser set() si Spinbox le supporte bien
+#                self.drizzle_wht_spinbox.set(f"{percent_value:.0f}")
+
+
+#       except (tk.TclError, AttributeError):
+            # Peut arriver si appelé avant que spinbox soit prêt ou après destruction
+#            pass
     
 
     # Nécéssite d'ajouter self._trace_id_wht = None dans __init__
@@ -431,8 +499,32 @@ class SeestarStackerGUI:
         self.drizzle_check = ttk.Checkbutton(self.drizzle_options_frame, text=self.tr("drizzle_activate_check"), variable=self.use_drizzle_var, command=self._update_drizzle_options_state); self.drizzle_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
         self.drizzle_mode_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_mode_frame.pack(fill=tk.X, padx=(20, 5), pady=(2, 5)); self.drizzle_mode_label = ttk.Label(self.drizzle_mode_frame, text=self.tr("drizzle_mode_label")); self.drizzle_mode_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_final = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_final"), variable=self.drizzle_mode_var, value="Final", command=self._update_drizzle_options_state); self.drizzle_radio_incremental = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_incremental"), variable=self.drizzle_mode_var, value="Incremental", command=self._update_drizzle_options_state); self.drizzle_radio_final.pack(side=tk.LEFT, padx=3); self.drizzle_radio_incremental.pack(side=tk.LEFT, padx=3)
         self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text=self.tr("drizzle_scale_label")); self.drizzle_scale_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_2x = ttk.Radiobutton(self.drizzle_scale_frame, text="x2", variable=self.drizzle_scale_var, value="2"); self.drizzle_radio_3x = ttk.Radiobutton(self.drizzle_scale_frame, text="x3", variable=self.drizzle_scale_var, value="3"); self.drizzle_radio_4x = ttk.Radiobutton(self.drizzle_scale_frame, text="x4", variable=self.drizzle_scale_var, value="4"); self.drizzle_radio_2x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_3x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_4x.pack(side=tk.LEFT, padx=3)
-        wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5)); self.drizzle_wht_label = ttk.Label(wht_frame, text=self.tr("drizzle_wht_threshold_label")); self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_wht_spinbox = ttk.Spinbox(wht_frame, from_=10.0, to=100.0, increment=5.0, textvariable=self.drizzle_wht_threshold_var, width=6, command=self._convert_spinbox_percent_to_float, format="%.0f"); self.drizzle_wht_threshold_var.trace_add("write", self._update_spinbox_from_float); self._update_spinbox_from_float(); self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
-        kernel_frame = ttk.Frame(self.drizzle_options_frame); kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_kernel_label = ttk.Label(kernel_frame, text=self.tr("drizzle_kernel_label")); self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
+
+
+
+        # --- MODIFIÉ: Cadre et Spinbox WHT ---
+        wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5))
+        self.drizzle_wht_label = ttk.Label(wht_frame, text=self.tr("drizzle_wht_threshold_label"))
+        self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5))
+        self.drizzle_wht_spinbox = ttk.Spinbox(
+            wht_frame,
+            from_=10.0, # <-- Garder la plage d'affichage 10-100
+            to=100.0,
+            increment=5.0,
+            textvariable=self.drizzle_wht_display_var, # <-- MODIFIÉ: Lier à la variable d'affichage (String)
+            width=6,
+            command=self._convert_spinbox_percent_to_float, # Garder la commande pour mettre à jour la variable 0-1
+            format="%.0f" # Garder le format pour afficher des entiers
+        )
+        # SUPPRIMÉ: self.drizzle_wht_threshold_var.trace_add("write", self._update_spinbox_from_float);
+        # SUPPRIMÉ: self._update_spinbox_from_float();
+        self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
+        # --- FIN MODIFICATION ---
+
+        kernel_frame = ttk.Frame(self.drizzle_options_frame)
+        kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
+        self.drizzle_kernel_label = ttk.Label(kernel_frame, text=self.tr("drizzle_kernel_label"))
+        self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text=self.tr("drizzle_pixfrac_label")); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         self.hp_frame = ttk.LabelFrame(tab_stacking, text=self.tr("hot_pixels_correction")); self.hp_frame.pack(fill=tk.X, pady=5, padx=5); hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text=self.tr("perform_hot_pixels_correction"), variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text=self.tr("hot_pixel_threshold")); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text=self.tr("neighborhood_size")); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
         self.weighting_frame = ttk.LabelFrame(tab_stacking, text=self.tr("quality_weighting_frame")); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5); self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text=self.tr("enable_weighting_check"), variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text=self.tr("weighting_metrics_label")); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_snr_check"), variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_stars_check"), variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text=self.tr("snr_exponent_label")); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text=self.tr("stars_exponent_label")); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text=self.tr("min_weight_label")); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5)); self._update_weighting_options_state()
@@ -538,92 +630,231 @@ class SeestarStackerGUI:
 ##############################################################################################################################
 
 
-
-
     def _launch_folder_analyzer(self):
-        """Launches the external folder analyzer script."""
+        """
+        Détermine le chemin du fichier de commande, lance le script analyse_gui.py
+        en lui passant ce chemin, et démarre la surveillance du fichier.
+        """
+        print("DEBUG (GUI): Entrée dans _launch_folder_analyzer.") # <-- AJOUTÉ DEBUG
         input_folder = self.input_path.get()
 
-        # 1. Validation du dossier d'entrée
+        # 1. Validation du dossier d'entrée (inchangé)
         if not input_folder:
-            messagebox.showerror(self.tr("error"), self.tr("select_folders")) # Réutilise message existant
+            messagebox.showerror(self.tr("error"), self.tr("select_folders"))
             return
         if not os.path.isdir(input_folder):
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             return
 
-        # 2. Déterminer le chemin vers le script analyse_gui.py
+        # --- MODIFIÉ : Détermination du chemin du fichier de commande ---
+        # 2. Déterminer un chemin sûr pour le fichier de commande
         try:
-            # Chemin vers ce fichier (main_window.py)
+            # Utiliser tempfile pour obtenir le répertoire temporaire système
+            temp_dir = tempfile.gettempdir()
+            # Créer un sous-dossier spécifique à l'application pour éviter les conflits
+            app_temp_dir = os.path.join(temp_dir, "seestar_stacker_comm")
+            os.makedirs(app_temp_dir, exist_ok=True)
+            # Nom du fichier de commande (relativement unique)
+            # On pourrait ajouter un PID ou timestamp pour plus de robustesse si plusieurs instances tournent
+            command_filename = f"analyzer_stack_command_{os.getpid()}.txt"
+            self.analyzer_command_file_path = os.path.join(app_temp_dir, command_filename) # <-- Stocker le chemin dans l'instance
+            print(f"DEBUG (GUI): Chemin fichier commande défini: {self.analyzer_command_file_path}") # <-- AJOUTÉ DEBUG
+
+            # --- Nettoyer ancien fichier de commande s'il existe (sécurité) ---
+            if os.path.exists(self.analyzer_command_file_path):
+                print(f"DEBUG (GUI): Suppression ancien fichier commande existant: {self.analyzer_command_file_path}") # <-- AJOUTÉ DEBUG
+                try:
+                    os.remove(self.analyzer_command_file_path)
+                except OSError as e_rem:
+                    print(f"AVERTISSEMENT (GUI): Impossible de supprimer ancien fichier commande: {e_rem}")
+            # --- Fin Nettoyage ---
+
+        except Exception as e_path:
+            messagebox.showerror(
+                self.tr("error"), # Utiliser une clé générique ou créer une clé spécifique
+                f"Impossible de déterminer le chemin du fichier de communication temporaire:\n{e_path}"
+            )
+            print(f"ERREUR (GUI): Échec détermination chemin fichier commande: {e_path}") # <-- AJOUTÉ DEBUG
+            traceback.print_exc(limit=2)
+            return
+        # --- FIN MODIFICATION ---
+
+        # 3. Déterminer le chemin vers le script analyse_gui.py (inchangé)
+        try:
             gui_file_path = os.path.abspath(__file__)
-            # Chemin vers le dossier gui/
             gui_dir = os.path.dirname(gui_file_path)
-            # Chemin vers le dossier seestar/
             seestar_dir = os.path.dirname(gui_dir)
-            # Chemin vers le dossier parent de seestar/
             project_root_parent = os.path.dirname(seestar_dir)
-            # Construire le chemin vers le script cible
             analyzer_script_path = os.path.join(project_root_parent, 'seestar', 'beforehand', 'analyse_gui.py')
-            analyzer_script_path = os.path.normpath(analyzer_script_path) # Normaliser pour OS
-
-            print(f"DEBUG: Tentative de lancement de: {analyzer_script_path}") # Debug
-
+            analyzer_script_path = os.path.normpath(analyzer_script_path)
+            print(f"DEBUG (GUI): Chemin script analyseur trouvé: {analyzer_script_path}") # <-- AJOUTÉ DEBUG
         except Exception as e:
-            messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                f"Erreur interne lors de la détermination du chemin de l'analyseur:\n{e}"
-            )
+            messagebox.showerror(self.tr("analyzer_launch_error_title"), f"Erreur interne chemin analyseur:\n{e}")
             return
 
-        # 3. Vérifier si le script existe
+        # 4. Vérifier si le script analyseur existe (inchangé)
         if not os.path.exists(analyzer_script_path):
-            messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_script_not_found").format(path=analyzer_script_path)
-            )
+            messagebox.showerror(self.tr("analyzer_launch_error_title"), self.tr("analyzer_script_not_found").format(path=analyzer_script_path))
             return
 
-        # 4. Construire et lancer la commande
+        # 5. Construire et lancer la commande (MODIFIÉ pour ajouter l'argument command_file_path)
         try:
-            # Utiliser sys.executable pour s'assurer qu'on utilise le même interpréteur Python
             command = [
                 sys.executable,
                 analyzer_script_path,
-                "--input-dir",
-                input_folder # Passer le dossier d'entrée actuel
+                "--input-dir", input_folder,
+                "--command-file", self.analyzer_command_file_path # <-- AJOUTÉ: Passer le chemin fichier commande
             ]
-
-            print(f"DEBUG: Lancement commande: {' '.join(command)}") # Debug
+            print(f"DEBUG (GUI): Commande lancement analyseur: {' '.join(command)}") # <-- AJOUTÉ DEBUG
 
             # Lancer comme processus séparé non bloquant
-            # Utiliser Popen pour ne pas attendre la fin du script
             process = subprocess.Popen(command)
-
-            # Optionnel: Afficher un message dans la barre de statut
             self.update_progress_gui(self.tr("analyzer_launched"), None)
 
+            # --- NOUVEAU : Démarrer la surveillance du fichier de commande ---
+            print("DEBUG (GUI): Démarrage de la surveillance du fichier commande...") # <-- AJOUTÉ DEBUG
+            # Assurer qu'une seule boucle de vérification tourne à la fois
+            if hasattr(self, '_analyzer_check_after_id') and self._analyzer_check_after_id:
+                print("DEBUG (GUI): Annulation surveillance précédente...") # <-- AJOUTÉ DEBUG
+                try:
+                    self.root.after_cancel(self._analyzer_check_after_id)
+                except tk.TclError: pass # Ignore error if already cancelled/invalid
+                self._analyzer_check_after_id = None
+
+            # Démarrer la nouvelle boucle de vérification (ex: toutes les 1 seconde)
+            self._check_analyzer_command_file()
+            # --- FIN NOUVEAU ---
+
+        # 6. Gestion des erreurs de lancement (inchangé)
         except FileNotFoundError:
-             messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_launch_failed").format(error=f"Python executable '{sys.executable}' or script not found.")
-            )
+             messagebox.showerror(self.tr("analyzer_launch_error_title"), self.tr("analyzer_launch_failed").format(error=f"Python '{sys.executable}' or script not found."))
         except OSError as e:
-             messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_launch_failed").format(error=f"OS error: {e}")
-            )
+             messagebox.showerror(self.tr("analyzer_launch_error_title"), self.tr("analyzer_launch_failed").format(error=f"OS error: {e}"))
         except Exception as e:
-            messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_launch_failed").format(error=str(e))
-            )
-            traceback.print_exc(limit=2) # Afficher traceback pour erreurs inattendues
-
-
+            messagebox.showerror(self.tr("analyzer_launch_error_title"), self.tr("analyzer_launch_failed").format(error=str(e)))
+            traceback.print_exc(limit=2)
+        print("DEBUG (GUI): Sortie de _launch_folder_analyzer.") # <-- AJOUTÉ DEBUG
 
 
 #############################################################################################################################
 
+
+
+    def _check_analyzer_command_file(self):
+        """
+        Vérifie périodiquement l'existence du fichier de commande de l'analyseur.
+        Si trouvé, lit le chemin, le supprime, et lance le stacking.
+        """
+        # print("DEBUG (GUI): _check_analyzer_command_file() exécuté.") # <-- DEBUG (peut être trop verbeux)
+
+        # --- Vérifications préliminaires ---
+        # 1. Le chemin du fichier de commande est-il défini ?
+        if not hasattr(self, 'analyzer_command_file_path') or not self.analyzer_command_file_path:
+            print("DEBUG (GUI): Vérification fichier commande annulée (chemin non défini).")
+            self._analyzer_check_after_id = None # Assurer l'arrêt
+            return
+
+        # 2. Un traitement est-il déjà en cours dans le stacker principal ?
+        if self.processing:
+            # print("DEBUG (GUI): Traitement principal en cours, arrêt temporaire surveillance fichier commande.")
+             # Pas besoin de vérifier le fichier si on est déjà en train de stacker/traiter.
+             # On pourrait replanifier plus tard, mais pour l'instant, on arrête la surveillance
+             # une fois le traitement principal démarré.
+             self._analyzer_check_after_id = None # Arrêter la boucle si traitement lancé par autre chose
+             return
+
+        # 3. Le fichier de commande existe-t-il ?
+        try:
+            if os.path.exists(self.analyzer_command_file_path):
+                print(f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}") # <-- AJOUTÉ DEBUG
+
+                # --- Traitement du fichier ---
+                file_content = None
+                try:
+                    # Lire le contenu (chemin du dossier)
+                    with open(self.analyzer_command_file_path, 'r', encoding='utf-8') as f_cmd:
+                        file_content = f_cmd.read().strip()
+                    print(f"DEBUG (GUI): Contenu fichier commande lu: '{file_content}'") # <-- AJOUTÉ DEBUG
+
+                    # Supprimer le fichier IMMÉDIATEMENT après lecture réussie
+                    try:
+                        os.remove(self.analyzer_command_file_path)
+                        print(f"DEBUG (GUI): Fichier commande supprimé.") # <-- AJOUTÉ DEBUG
+                    except OSError as e_rem:
+                        print(f"AVERTISSEMENT (GUI): Échec suppression fichier commande {self.analyzer_command_file_path}: {e_rem}")
+                        # Continuer quand même si la lecture a réussi
+
+                except IOError as e_read:
+                    print(f"ERREUR (GUI): Impossible de lire le fichier commande {self.analyzer_command_file_path}: {e_read}")
+                    # Essayer de supprimer le fichier même si lecture échoue (peut être corrompu)
+                    try: os.remove(self.analyzer_command_file_path)
+                    except OSError: pass
+                    # Replanifier la vérification car on n'a pas pu traiter
+                    if hasattr(self.root, 'after'): # Vérifier si root existe toujours
+                         self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file) # Replanifier dans 1s
+                    return # Sortir pour cette itération
+
+                # --- Agir sur le contenu lu ---
+                if file_content and os.path.isdir(file_content):
+                    analyzed_folder_path = os.path.abspath(file_content)
+                    print(f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}") # <-- AJOUTÉ INFO
+
+                    # Mettre à jour le champ d'entrée
+                    current_input = self.input_path.get()
+                    if os.path.normpath(current_input) != os.path.normpath(analyzed_folder_path):
+                        print(f"DEBUG (GUI): Mise à jour du champ dossier d'entrée vers: {analyzed_folder_path}") # <-- AJOUTÉ DEBUG
+                        self.input_path.set(analyzed_folder_path)
+                        # Mettre à jour aussi le setting pour cohérence ?
+                        self.settings.input_folder = analyzed_folder_path
+                        # Redessiner l'aperçu initial si le dossier a changé
+                        self._try_show_first_input_image()
+
+                    # Vérifier si le dossier de sortie est défini
+                    if not self.output_path.get():
+                        default_output = os.path.join(analyzed_folder_path, "stack_output_analyzer") # Nom différent?
+                        print(f"INFO (GUI): Dossier sortie non défini, utilisation défaut: {default_output}") # <-- AJOUTÉ INFO
+                        self.output_path.set(default_output)
+                        self.settings.output_folder = default_output
+
+                    # Démarrer le stacking
+                    print("DEBUG (GUI): Appel de self.start_processing() suite à commande analyseur...") # <-- AJOUTÉ DEBUG
+                    self.start_processing()
+                    # Pas besoin de replanifier la vérification, le but est atteint.
+                    self._analyzer_check_after_id = None
+                    return # Sortir de la méthode
+
+                else:
+                    print(f"AVERTISSEMENT (GUI): Contenu fichier commande invalide ('{file_content}') ou n'est pas un dossier. Fichier supprimé.")
+                    # Replanifier la vérification car le contenu était invalide
+                    if hasattr(self.root, 'after'): # Vérifier si root existe toujours
+                        self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file) # Replanifier dans 1s
+                    return # Sortir pour cette itération
+
+            else:
+                # --- Replanifier si le fichier n'existe pas ---
+                # print("DEBUG (GUI): Fichier commande non trouvé, replanification...") # <-- DEBUG (trop verbeux)
+                # Vérifier si la fenêtre racine existe toujours avant de replanifier
+                if hasattr(self.root, 'after'):
+                    self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file) # Vérifier à nouveau dans 1000 ms (1 seconde)
+                else:
+                    print("DEBUG (GUI): Fenêtre racine détruite, arrêt surveillance fichier commande.")
+                    self._analyzer_check_after_id = None # Arrêter si la fenêtre est fermée
+
+        except Exception as e_check:
+             print(f"ERREUR (GUI): Erreur inattendue dans _check_analyzer_command_file: {e_check}")
+             traceback.print_exc(limit=2)
+             # Essayer de replanifier même en cas d'erreur pour ne pas bloquer
+             if hasattr(self.root, 'after'):
+                 try:
+                     self._analyzer_check_after_id = self.root.after(2000, self._check_analyzer_command_file) # Attendre un peu plus longtemps après une erreur
+                 except tk.TclError:
+                     self._analyzer_check_after_id = None # Arrêter si la fenêtre est fermée
+             else:
+                 self._analyzer_check_after_id = None
+
+    
+
+#############################################################################################################################
 
     def _update_show_folders_button_state(self, event=None):
         """Enables/disables the 'View Inputs' and 'Analyze Input' buttons."""
@@ -2094,36 +2325,162 @@ class SeestarStackerGUI:
         ### !!! FIN BLOC CORRIGÉ !!! ###
 
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    try:
-        _dummy_root = tk.Tk()
-        _dummy_root.withdraw()
-        style = ttk.Style()
-        available_themes = style.theme_names()
-        theme_to_use = 'default'
-        preferred_themes = ['clam', 'alt', 'vista', 'xpnative']
-        for t in preferred_themes:
-            if t in available_themes:
-                theme_to_use = t
-                break
-        print(f"Using theme: {theme_to_use}")
-        style.theme_use(theme_to_use)
-        try:
-            style.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'), foreground='white', background='#0078D7')
-        except tk.TclError:
-            print("Warning: Could not configure Accent.TButton style.")
-        try:
-            style.configure('Toolbutton.TButton', padding=1, font=('Segoe UI', 8))
-        except tk.TclError:
-            print("Warning: Could not configure Toolbutton.TButton style.")
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
-            _dummy_root.destroy()
-    except tk.TclError as theme_err:
-        print(f"Error initializing Tk themes: {theme_err}. Using Tk default.")
-        if '_dummy_root' in locals() and _dummy_root.winfo_exists():
-            _dummy_root.destroy()
 
-    gui = SeestarStackerGUI()
-    gui.root.mainloop()
-    # --- END OF FILE seestar/gui/main_window.py (Part 3/3) ---
+
+# --- Bloc d'Exécution Principal  ---
+if __name__ == "__main__":
+    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---
+    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
+    parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        help="Optional: Pre-fill the input directory path."
+    )
+    # --- NOUVEL ARGUMENT AJOUTÉ ICI ---
+    parser.add_argument(
+        "--command-file", # <-- AJOUTÉ : Définition de l'argument
+        type=str,
+        metavar="CMD_FILE_PATH",
+        help="Internal: Path to the command file for communicating with the main stacker GUI."
+    )
+    # --- FIN NOUVEL ARGUMENT ---
+    args = parser.parse_args()
+    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
+    # --- FIN MODIFICATION ---
+
+    root = None # Initialiser la variable racine
+    try:
+        # Vérifier si les modules essentiels sont importables
+        # (Logique inchangée)
+        if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
+        if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
+
+        # Créer la fenêtre racine Tkinter mais la cacher initialement
+        root = tk.Tk(); root.withdraw()
+
+        # Vérifier les dépendances externes
+        check_dependencies()
+
+        # Afficher la fenêtre principale
+        root.deiconify()
+
+        # --- MODIFIÉ: Passer command_file_path au constructeur ---
+        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
+        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
+        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
+        # --- FIN MODIFICATION ---
+
+        # --- Pré-remplissage dossier d'entrée (Logique inchangée) ---
+        if args.input_dir:
+            input_path_from_arg = os.path.abspath(args.input_dir)
+            if os.path.isdir(input_path_from_arg):
+                print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
+                app.input_dir.set(input_path_from_arg)
+                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
+                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
+                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
+            else:
+                print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
+
+        # Lancer la boucle principale de Tkinter
+        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
+        root.mainloop()
+        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
+
+    # --- Gestion des Erreurs au Démarrage (Inchangée) ---
+    except ImportError as e:
+        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc()
+        try:
+            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+    except SystemExit as e: # <-- AJOUTÉ: Gérer SystemExit de argparse
+        print(f"DEBUG (analyse_gui main): Argparse a quitté (probablement '-h' ou erreur argument). Code: {e.code}")
+        # Ne rien faire de plus, le message d'erreur d'argparse est déjà affiché.
+        pass
+    except tk.TclError as e:
+        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
+    except Exception as e_main:
+        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc()
+        try:
+            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---
+    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
+    parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        help="Optional: Pre-fill the input directory path."
+    )
+      
+# --- NOUVEL ARGUMENT AJOUTÉ ICI ---
+    parser.add_argument(
+        "--command-file", # <-- Vérifiez l'orthographe EXACTE et les DEUX tirets
+        type=str,
+        metavar="CMD_FILE_PATH",
+        help="Internal: Path to the command file for communicating with the main stacker GUI."
+    )
+    # --- FIN NOUVEL ARGUMENT ---
+    args = parser.parse_args() # <--- Cette ligne doit venir APRES l'ajout de l'argument
+
+    
+    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
+    # --- FIN MODIFICATION ---
+
+    root = None # Initialiser la variable racine
+    try:
+        # Vérifier si les modules essentiels sont importables
+        # (Logique inchangée)
+        if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
+        if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
+
+        # Créer la fenêtre racine Tkinter mais la cacher initialement
+        root = tk.Tk(); root.withdraw()
+
+        # Vérifier les dépendances externes
+        check_dependencies()
+
+        # Afficher la fenêtre principale
+        root.deiconify()
+
+        # --- MODIFIÉ: Passer command_file_path au constructeur ---
+        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
+        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
+        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
+        # --- FIN MODIFICATION ---
+
+        # --- Pré-remplissage dossier d'entrée (Logique inchangée) ---
+        if args.input_dir:
+            input_path_from_arg = os.path.abspath(args.input_dir)
+            if os.path.isdir(input_path_from_arg):
+                print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
+                app.input_dir.set(input_path_from_arg)
+                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
+                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
+                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
+            else:
+                print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
+
+        # Lancer la boucle principale de Tkinter
+        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
+        root.mainloop()
+        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
+
+    # --- Gestion des Erreurs au Démarrage (Inchangée) ---
+    except ImportError as e:
+        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc()
+        try: 
+            if root is None: root = tk.Tk(); root.withdraw()
+            messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+    except tk.TclError as e:
+        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
+    except Exception as e_main:
+        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc()
+        try: 
+            if root is None: root = tk.Tk(); root.withdraw()
+            messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+
+        # ----Fin du Fichier main_window.py

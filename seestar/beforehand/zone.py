@@ -4,6 +4,7 @@
 
 translations = {
     'fr': {
+            
         # --- Fenêtre principale ---
         'window_title': "Analyseur d'Images Astronomiques",
         'status_ready': "Prêt",
@@ -53,6 +54,7 @@ translations = {
         # --- Boutons ---
         'browse_button': "Parcourir",
         'analyse_button': "Analyser les images",
+        'analyse_stack_button': "Analyser et Empiler", # Clé pour le nouveau bouton
         'visualize_button': "Visualiser les résultats",
         'open_log_button': "Ouvrir le fichier log",
         'manage_markers_button': "Gérer Marqueurs", # <-- NOUVEAU
@@ -147,7 +149,9 @@ translations = {
         'sort_snr_check_label': "Sort results by descending SNR",
 
         # --- Buttons ---
-        'browse_button': "Browse", 'analyse_button': "Analyze Images", 'visualize_button': "Visualize Results", 'open_log_button': "Open Log File",
+        'browse_button': "Browse", 'analyse_button':
+        "Analyze Images", 'visualize_button': "Visualize Results", 'open_log_button': "Open Log File",
+        'analyse_stack_button': "Analyze and Stack", # Key for the new button
         'manage_markers_button': "Manage Markers", # <-- NEW
         'quit_button': "Quit", 'return_button_text': "Return", 'export_button': "Export Recommended List (.txt)",
         'Fermer': "Close", 'Exporter Toutes Conservées': "Export All Kept",

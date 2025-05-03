@@ -18,6 +18,8 @@ import traceback
 import time
 import gc
 import argparse # Pour gérer les arguments de ligne de commande
+from PIL import Image, ImageTk
+
 
 # === Imports Locaux (Logique Métier et Traductions) ===
 try:
@@ -160,16 +162,65 @@ class ToolTip:
 class AstroImageAnalyzerGUI:
     """Interface graphique pour l'analyseur d'images astronomiques."""
 
-    def __init__(self, root, main_app_callback=None):
+# === Classe Principale de l'Interface Graphique ===
+class AstroImageAnalyzerGUI:
+    """Interface graphique pour l'analyseur d'images astronomiques."""
+
+    # --- MODIFIÉ: Signature du constructeur ---
+    def __init__(self, root, command_file_path=None, main_app_callback=None): # <-- AJOUTÉ command_file_path
         """
         Initialise l'interface graphique.
 
         Args:
             root (tk.Tk or tk.Toplevel): La fenêtre racine ou Toplevel pour cette interface.
+            command_file_path (str, optional): Chemin vers le fichier à utiliser pour
+                                               la communication avec le GUI principal.
             main_app_callback (callable, optional): Fonction à appeler lors de la fermeture (Retour).
         """
         self.root = root
         self.main_app_callback = main_app_callback # Callback pour retourner au script appelant
+
+        # --- AJOUTÉ: Stockage du chemin du fichier de commande ---
+        self.command_file_path = command_file_path
+        try:
+            # 1. Trouver le chemin absolu de l'icône depuis ce script
+            analyzer_script_path = os.path.abspath(__file__)
+            beforehand_dir = os.path.dirname(analyzer_script_path)
+            # Remonter d'UN niveau pour être à la racine du projet (où se trouve le dossier icon/)
+            project_root = os.path.dirname(beforehand_dir) # <-- Ajustement ici si nécessaire
+            icon_rel_path = os.path.join('icon', 'icon.png') # Chemin relatif depuis la racine
+            icon_path = os.path.join(project_root, icon_rel_path)
+            icon_path = os.path.normpath(icon_path)
+            print(f"DEBUG (analyse_gui __init__): Chemin icône calculé: {icon_path}") # <-- AJOUTÉ DEBUG
+
+            # 2. Vérifier si le fichier existe
+            if os.path.exists(icon_path):
+                # 3. Charger et définir l'icône
+                icon_image = Image.open(icon_path)
+                # Stocker la référence à l'image Tkinter pour éviter la garbage collection
+                self.tk_icon = ImageTk.PhotoImage(icon_image)
+                # Appliquer à la fenêtre racine de CETTE interface (self.root)
+                self.root.iconphoto(True, self.tk_icon)
+                print(f"DEBUG (analyse_gui __init__): Icône de fenêtre définie avec succès depuis: {icon_path}") # <-- AJOUTÉ DEBUG
+            else:
+                print(f"AVERTISSEMENT (analyse_gui __init__): Fichier icône introuvable: {icon_path}. Icône par défaut utilisée.") # <-- AJOUTÉ DEBUG
+        except ImportError:
+             # Si Pillow n'est pas installé (bien qu'il soit dans requirements)
+             print("AVERTISSEMENT (analyse_gui __init__): Pillow (PIL/ImageTk) non trouvé. Impossible de définir l'icône.") # <-- AJOUTÉ DEBUG
+             self.tk_icon = None # Assurer que l'attribut existe même si l'import échoue
+        except Exception as e_icon:
+            print(f"ERREUR (analyse_gui __init__): Impossible de charger/définir l'icône: {e_icon}") # <-- AJOUTÉ DEBUG
+            traceback.print_exc(limit=1) # Afficher une trace limitée pour le debug
+            self.tk_icon = None # Assurer que l'attribut existe
+        # --- FIN AJOUT ---
+
+
+        if self.command_file_path:
+            print(f"DEBUG (analyse_gui __init__): Fichier de commande reçu: {self.command_file_path}")
+        else:
+            # Avertissement si aucun chemin n'est fourni (le bouton "Analyser et Empiler" ne pourra pas communiquer)
+            print("AVERTISSEMENT (analyse_gui __init__): Aucun chemin de fichier de commande fourni. La fonction 'Analyser et Empiler' ne communiquera pas avec le stacker.")
+        # --- FIN AJOUT ---
 
         # Variables Tkinter pour lier les widgets aux données
         self.current_lang = tk.StringVar(value='fr') # Langue actuelle (défaut: français)
@@ -219,11 +270,15 @@ class AstroImageAnalyzerGUI:
         self.snr_reject_dir_entry = self.detect_trails_check = self.acstools_status_label = None
         self.params_sat_frame = self.trail_reject_dir_frame = self.trail_reject_dir_entry = None
         self.analyze_button = self.visualize_button = self.open_log_button = None
+        # --- MODIFIÉ : Ajouter référence analyze_stack_button ---
+        self.analyze_stack_button = None # Sera défini dans create_widgets
+        # --- FIN MODIFIÉ ---
         self.return_button = self.progress_bar = self.status_label = self.results_text = None
         self.lang_combobox = None
         self.trail_param_labels = {}
         self.trail_param_entries = {}
         self.manage_markers_button = None
+        self.stack_after_analysis = False # Indicateur pour empiler après analyse
 
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -240,7 +295,757 @@ class AstroImageAnalyzerGUI:
         self.root.geometry("950x850")
         self.root.minsize(950, 850)
 
-    # --- Méthodes Utilitaires Internes ---
+
+###################################################################################################################""
+    
+    def start_analysis(self):
+        """Appelle la logique de lancement SANS l'option d'empiler après."""
+        self._launch_analysis(stack_after=False)
+
+
+    def start_analysis_and_stack(self):
+        """Valide les options et lance l'analyse dans un thread avec INTENTION D'EMPILER APRÈS."""
+        # Empêcher lancements multiples (identique à start_analysis)
+        if self.analysis_running:
+            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_running"), parent=self.root)
+            return
+
+        # --- Définir le flag pour empiler ---
+        self.stack_after_analysis = True
+        # --- Fin modification flag ---
+
+        # Le reste de la validation est IDENTIQUE à start_analysis
+        # On duplique cette partie pour l'instant. À l'étape suivante, nous factoriserons.
+        options = {}
+        callbacks = {'status': self.update_status, 'progress': self.update_progress, 'log': self.update_results_text}
+        input_dir = self.input_dir.get()
+        output_log = self.output_log.get()
+        options['analyze_snr'] = self.analyze_snr.get()
+        options['detect_trails'] = self.detect_trails.get()
+        options['include_subfolders'] = self.include_subfolders.get()
+
+        # Vérifier chemins entrée/log (identique)
+        if not input_dir or not os.path.isdir(input_dir):
+            messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
+            self.stack_after_analysis = False # Réinitialiser en cas d'erreur
+            return
+        if not output_log:
+            messagebox.showerror(self._("msg_error"), self._("msg_log_file_missing"), parent=self.root)
+            self.stack_after_analysis = False # Réinitialiser
+            return
+
+        # Configurer action rejet (identique)
+        reject_action = self.reject_action.get()
+        options['move_rejected'] = (reject_action == 'move')
+        options['delete_rejected'] = (reject_action == 'delete')
+        options['trail_reject_dir'] = self.trail_reject_dir.get() if options['move_rejected'] else None
+        options['snr_reject_dir'] = self.snr_reject_dir.get() if options['move_rejected'] else None
+
+        # Vérifier chemins rejet si action 'move' (identique)
+        if options['move_rejected']:
+            if options['detect_trails'] and SATDET_AVAILABLE and not options['trail_reject_dir']:
+                messagebox.showerror(self._("msg_error"), self._("trail_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
+                self.stack_after_analysis = False # Réinitialiser
+                return
+            if options['analyze_snr'] and self.snr_selection_mode.get() != 'none' and not options['snr_reject_dir']:
+                messagebox.showerror(self._("msg_error"), self._("snr_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
+                self.stack_after_analysis = False # Réinitialiser
+                return
+        # Confirmer suppression si action 'delete' (identique)
+        elif options['delete_rejected']:
+            if not messagebox.askyesno(self._("msg_warning"), self._("confirm_delete"), parent=self.root):
+                self.stack_after_analysis = False # Annulé par l'utilisateur
+                return
+
+        # Valider paramètres SNR si analyse activée (identique)
+        if options['analyze_snr']:
+            options['snr_selection_mode'] = self.snr_selection_mode.get()
+            options['snr_selection_value'] = self.snr_selection_value.get()
+            if options['snr_selection_mode'] in ['percent', 'threshold']:
+                if not options['snr_selection_value']:
+                    messagebox.showerror(self._("msg_error"), self._("snr_value_missing"), parent=self.root)
+                    self.stack_after_analysis = False; return
+                try: float(options['snr_selection_value'])
+                except ValueError: messagebox.showerror(self._("msg_error"), self._("snr_value_invalid"), parent=self.root); self.stack_after_analysis = False; return
+            else: options['snr_selection_value'] = None
+
+        # Valider paramètres détection traînées si activée (identique)
+        if options['detect_trails']:
+            if not (SATDET_AVAILABLE and SATDET_USES_SEARCHPATTERN):
+                messagebox.showerror(self._("msg_error"), self._("msg_satdet_incompatible"), parent=self.root)
+                self.stack_after_analysis = False; return
+            try:
+                options['trail_params'] = { k: self.trail_params[k].get() for k in self.trail_params } # Prendre valeurs des StringVar
+                options['trail_params'] = { # Convertir en nombres
+                    'sigma': float(options['trail_params']['sigma']), 'low_thresh': float(options['trail_params']['low_thresh']),
+                    'h_thresh': float(options['trail_params']['h_thresh']), 'line_len': int(options['trail_params']['line_len']),
+                    'small_edge': int(options['trail_params']['small_edge']), 'line_gap': int(options['trail_params']['line_gap'])
+                }
+                if options['trail_params']['h_thresh'] < options['trail_params']['low_thresh']:
+                    messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e="High Thresh doit être >= Low Thresh"), parent=self.root)
+                    self.stack_after_analysis = False; return
+            except ValueError as e: messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e=f"Paramètres Traînées: {e}"), parent=self.root); self.stack_after_analysis = False; return
+        else: options['trail_params'] = {}
+
+        # --- Préparer UI pour l'analyse --- (identique)
+        self.reset_ui_for_new_analysis()
+        self.analysis_running = True
+        self._set_widget_state(self.analyze_button, tk.DISABLED)
+        self._set_widget_state(self.analyze_stack_button, tk.DISABLED) # <-- Désactiver le nouveau bouton aussi
+        self._set_widget_state(self.visualize_button, tk.DISABLED)
+        self._set_widget_state(self.open_log_button, tk.DISABLED)
+        self._set_widget_state(self.return_button, tk.DISABLED)
+        self._set_widget_state(self.manage_markers_button, tk.DISABLED)
+        self.update_status("status_analysis_start")
+        self.update_results_text("--- Début de l'analyse (pour empiler ensuite) ---", clear=True) # Message légèrement différent
+        self.update_progress(0.0)
+
+        # --- Lancer le thread d'analyse --- (identique)
+        analysis_thread = threading.Thread(
+            target=self.run_analysis_thread,
+            args=(input_dir, output_log, options, callbacks),
+            daemon=True
+        )
+        analysis_thread.start()
+ 
+    def _launch_analysis(self, stack_after: bool):
+        """Méthode interne pour valider et lancer le thread d'analyse."""
+        # Empêcher lancements multiples
+        if self.analysis_running:
+            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_running"), parent=self.root)
+            return False # Retourner False pour indiquer l'échec du lancement
+
+        # Définir l'intention d'empiler après
+        self.stack_after_analysis = stack_after
+
+        # --- Validation des Options et Chemins ---
+        # (Ce bloc est le code factorisé qui était dans start_analysis/start_analysis_and_stack)
+        options = {}
+        callbacks = {'status': self.update_status, 'progress': self.update_progress, 'log': self.update_results_text}
+        input_dir = self.input_dir.get()
+        output_log = self.output_log.get()
+        options['analyze_snr'] = self.analyze_snr.get()
+        options['detect_trails'] = self.detect_trails.get()
+        options['include_subfolders'] = self.include_subfolders.get()
+
+        # Vérifier chemins entrée/log
+        if not input_dir or not os.path.isdir(input_dir):
+            messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
+            self.stack_after_analysis = False # Annuler l'intention si erreur
+            return False
+        if not output_log:
+            messagebox.showerror(self._("msg_error"), self._("msg_log_file_missing"), parent=self.root)
+            self.stack_after_analysis = False
+            return False
+
+        # Configurer action rejet
+        reject_action = self.reject_action.get()
+        options['move_rejected'] = (reject_action == 'move')
+        options['delete_rejected'] = (reject_action == 'delete')
+        options['trail_reject_dir'] = self.trail_reject_dir.get() if options['move_rejected'] else None
+        options['snr_reject_dir'] = self.snr_reject_dir.get() if options['move_rejected'] else None
+
+        # Vérifier chemins rejet si action 'move'
+        if options['move_rejected']:
+            if options['detect_trails'] and SATDET_AVAILABLE and not options['trail_reject_dir']:
+                messagebox.showerror(self._("msg_error"), self._("trail_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
+                self.stack_after_analysis = False; return False
+            if options['analyze_snr'] and self.snr_selection_mode.get() != 'none' and not options['snr_reject_dir']:
+                messagebox.showerror(self._("msg_error"), self._("snr_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
+                self.stack_after_analysis = False; return False
+        # Confirmer suppression si action 'delete'
+        elif options['delete_rejected']:
+            if not messagebox.askyesno(self._("msg_warning"), self._("confirm_delete"), parent=self.root):
+                self.stack_after_analysis = False; return False
+
+        # Valider paramètres SNR si analyse activée
+        if options['analyze_snr']:
+            options['snr_selection_mode'] = self.snr_selection_mode.get()
+            options['snr_selection_value'] = self.snr_selection_value.get()
+            if options['snr_selection_mode'] in ['percent', 'threshold']:
+                if not options['snr_selection_value']:
+                    messagebox.showerror(self._("msg_error"), self._("snr_value_missing"), parent=self.root)
+                    self.stack_after_analysis = False; return False
+                try: float(options['snr_selection_value'])
+                except ValueError: messagebox.showerror(self._("msg_error"), self._("snr_value_invalid"), parent=self.root); self.stack_after_analysis = False; return False
+            else: options['snr_selection_value'] = None
+
+        # Valider paramètres détection traînées si activée
+        if options['detect_trails']:
+            if not (SATDET_AVAILABLE and SATDET_USES_SEARCHPATTERN):
+                messagebox.showerror(self._("msg_error"), self._("msg_satdet_incompatible"), parent=self.root)
+                self.stack_after_analysis = False; return False
+            try:
+                options['trail_params'] = { k: self.trail_params[k].get() for k in self.trail_params }
+                options['trail_params'] = { # Convertir en nombres
+                    'sigma': float(options['trail_params']['sigma']), 'low_thresh': float(options['trail_params']['low_thresh']),
+                    'h_thresh': float(options['trail_params']['h_thresh']), 'line_len': int(options['trail_params']['line_len']),
+                    'small_edge': int(options['trail_params']['small_edge']), 'line_gap': int(options['trail_params']['line_gap'])
+                }
+                if options['trail_params']['h_thresh'] < options['trail_params']['low_thresh']:
+                    messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e="High Thresh doit être >= Low Thresh"), parent=self.root)
+                    self.stack_after_analysis = False; return False
+            except ValueError as e: messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e=f"Paramètres Traînées: {e}"), parent=self.root); self.stack_after_analysis = False; return False
+        else: options['trail_params'] = {}
+
+        # --- Préparer UI pour l'analyse ---
+        self.reset_ui_for_new_analysis()
+        self.analysis_running = True
+        self._set_widget_state(self.analyze_button, tk.DISABLED)
+        self._set_widget_state(self.analyze_stack_button, tk.DISABLED) # Nouveau bouton aussi
+        self._set_widget_state(self.visualize_button, tk.DISABLED)
+        self._set_widget_state(self.open_log_button, tk.DISABLED)
+        self._set_widget_state(self.return_button, tk.DISABLED)
+        self._set_widget_state(self.manage_markers_button, tk.DISABLED)
+        self.update_status("status_analysis_start")
+        # Adapter le message de démarrage basé sur l'intention
+        log_start_msg = "--- Début de l'analyse (pour empiler ensuite) ---" if stack_after else "--- Début de l'analyse ---"
+        self.update_results_text(log_start_msg, clear=True)
+        self.update_progress(0.0)
+
+        # --- Lancer le thread d'analyse ---
+        analysis_thread = threading.Thread(
+            target=self.run_analysis_thread,
+            args=(input_dir, output_log, options, callbacks),
+            daemon=True
+        )
+        analysis_thread.start()
+        return True # Indiquer que le lancement a réussi
+
+
+        # --- Méthodes Utilitaires Internes ---
+
+# --- DANS LE FICHIER analyse_gui.py ---
+# À l'intérieur de la classe AstroImageAnalyzerGUI
+# (Remplacez la version incomplète précédente par celle-ci)
+
+    def visualize_results(self):
+        """Affiche les graphiques de visualisation dans une nouvelle fenêtre."""
+        # Vérifier s'il y a des résultats à afficher
+        if not self.analysis_results and not self.analysis_running:
+            messagebox.showinfo(self._("msg_info"), self._("msg_no_results_visualize"), parent=self.root)
+            return
+        # Empêcher visualisation si analyse en cours
+        if self.analysis_running:
+            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_wait_visualize"), parent=self.root)
+            return
+        # Avertir si analyse terminée avec erreurs
+        if not self.analysis_completed_successfully:
+            messagebox.showwarning(self._("msg_warning"), self._("msg_results_incomplete") + "\n" + self._("Affichage des données disponibles.", default="Displaying available data."), parent=self.root)
+
+        # --- Bloc try principal pour la création de la fenêtre ---
+        vis_window = None # Initialiser à None
+        canvas_list = []
+        figures_list = []
+        try:
+            # Créer la fenêtre Toplevel pour la visualisation
+            vis_window = tk.Toplevel(self.root)
+            vis_window.title(self._("visu_window_title"))
+            vis_window.geometry("850x650")
+            vis_window.transient(self.root) # Lier à la fenêtre principale
+            vis_window.grab_set() # Rendre modale
+
+            # Notebook pour les différents onglets de graphiques/données
+            notebook = ttk.Notebook(vis_window)
+            notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            # --- Onglet Distribution SNR ---
+            snr_tab = ttk.Frame(notebook)
+            notebook.add(snr_tab, text=self._("visu_tab_snr_dist"))
+            fig1 = None # Initialiser figure à None
+            try:
+                fig1, ax1 = plt.subplots(figsize=(7, 5))
+                figures_list.append(fig1)
+                valid_snrs = [r['snr'] for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr'])]
+                if valid_snrs:
+                    ax1.hist(valid_snrs, bins=20, color='skyblue', edgecolor='black')
+                    ax1.set_title(self._("visu_snr_dist_title"))
+                    ax1.set_xlabel(self._("visu_snr_dist_xlabel"))
+                    ax1.set_ylabel(self._("visu_snr_dist_ylabel"))
+                    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+                else:
+                    ax1.text(0.5, 0.5, self._("visu_snr_dist_no_data"), ha='center', va='center', fontsize=12, color='red')
+                canvas1 = FigureCanvasTkAgg(fig1, master=snr_tab)
+                canvas1.draw()
+                canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                canvas_list.append(canvas1)
+            except Exception as e:
+                print(f"Erreur Histogramme SNR: {e}"); ttk.Label(snr_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig1: plt.close(fig1) # Fermer figure si erreur canvas
+
+            # --- Onglet Comparaison SNR (Top/Bottom N) ---
+            comp_tab = ttk.Frame(notebook)
+            notebook.add(comp_tab, text=self._("visu_tab_snr_comp"))
+            fig2 = None
+            try:
+                valid_res = [r for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr']) and 'file' in r]
+                if len(valid_res) >= 2:
+                    sorted_res = sorted(valid_res, key=lambda x: x['snr'], reverse=True)
+                    num_total = len(sorted_res); num_show = min(10, num_total // 2 if num_total >= 2 else 1)
+                    best = sorted_res[:num_show]; worst = sorted_res[-num_show:]
+                    fig_height = max(4, num_show * 0.5)
+                    fig2, (ax2, ax3) = plt.subplots(1, 2, figsize=(10, fig_height))
+                    figures_list.append(fig2)
+                    best_labels = [os.path.basename(r['file']) for r in best]; ax2.barh(best_labels, [r['snr'] for r in best], color='mediumseagreen', edgecolor='black'); ax2.set_title(self._("visu_snr_comp_best_title", n=num_show)); ax2.invert_yaxis(); ax2.set_xlabel(self._("visu_snr_comp_xlabel")); ax2.tick_params(axis='y', labelsize=8)
+                    worst_labels = [os.path.basename(r['file']) for r in worst]; ax3.barh(worst_labels, [r['snr'] for r in worst], color='salmon', edgecolor='black'); ax3.set_title(self._("visu_snr_comp_worst_title", n=num_show)); ax3.invert_yaxis(); ax3.set_xlabel(self._("visu_snr_comp_xlabel")); ax3.tick_params(axis='y', labelsize=8)
+                    fig2.tight_layout(pad=1.5); canvas2 = FigureCanvasTkAgg(fig2, master=comp_tab); canvas2.draw(); canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True); canvas_list.append(canvas2)
+                else: ttk.Label(comp_tab, text=self._("visu_snr_comp_no_data")).pack(padx=10, pady=10)
+            except Exception as e:
+                print(f"Erreur Comparaison SNR: {e}"); ttk.Label(comp_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig2: plt.close(fig2)
+
+            # --- Onglet Traînées Satellites (Camembert) ---
+            detect_trails_was_active = any('has_trails' in r for r in self.analysis_results)
+            if detect_trails_was_active:
+                sat_tab = ttk.Frame(notebook); notebook.add(sat_tab, text=self._("visu_tab_sat_trails")); fig3 = None
+                try:
+                    sat_count = sum(1 for r in self.analysis_results if r.get('has_trails', False)); no_sat_count = sum(1 for r in self.analysis_results if 'has_trails' in r and not r.get('has_trails')); total_analyzed_for_trails = sat_count + no_sat_count
+                    if total_analyzed_for_trails > 0:
+                        fig3, ax4 = plt.subplots(figsize=(6, 6)); figures_list.append(fig3); labels = [self._("visu_sat_pie_without"), self._("visu_sat_pie_with")]; sizes = [no_sat_count, sat_count]; colors = ['#66b3ff', '#ff9999']; explode = (0, 0.1 if sat_count > 0 and no_sat_count > 0 else 0)
+                        wedges, texts, autotexts = ax4.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%', shadow=True, startangle=90); ax4.axis('equal'); ax4.set_title(self._("visu_sat_pie_title")); plt.setp(autotexts, size=10, weight="bold", color="white"); plt.setp(texts, size=10)
+                        canvas3 = FigureCanvasTkAgg(fig3, master=sat_tab); canvas3.draw(); canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True); canvas_list.append(canvas3)
+                    else: ttk.Label(sat_tab, text=self._("visu_sat_pie_no_data")).pack(padx=10, pady=10)
+                except Exception as e:
+                    print(f"Erreur Camembert Satellites: {e}"); ttk.Label(sat_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                    if fig3: plt.close(fig3)
+
+            # --- Onglet Données Détaillées (Tableau Treeview) ---
+            data_tab = ttk.Frame(notebook); notebook.add(data_tab, text=self._("visu_tab_raw_data"))
+            try:
+                cols = ('file', 'status', 'snr', 'bg', 'noise', 'pixsig'); col_names_map = {'file': self._("visu_data_col_file"), 'status': self._("Statut", default="Status"), 'snr': self._("visu_data_col_snr"), 'bg': self._("visu_data_col_bg"), 'noise': self._("visu_data_col_noise"), 'pixsig': self._("visu_data_col_pixsig"), 'trails': self._("visu_data_col_trails"), 'nbseg': self._("visu_data_col_nbseg"), 'action': self._("Action", default="Action"), 'reason': self._("Raison Rejet", default="Reject Reason"), 'comment': self._("Commentaire", default="Comment")}; col_widths = {'file': 250, 'status': 60, 'snr': 60, 'bg': 60, 'noise': 60, 'pixsig': 60, 'trails': 60, 'nbseg': 60, 'action': 80, 'reason': 80, 'comment': 150}; col_anchors = {'file': tk.W, 'status': tk.CENTER, 'snr': tk.CENTER, 'bg': tk.CENTER, 'noise': tk.CENTER, 'pixsig': tk.CENTER, 'trails': tk.CENTER, 'nbseg': tk.CENTER, 'action': tk.W, 'reason': tk.W, 'comment': tk.W}
+                if detect_trails_was_active: cols = cols + ('trails', 'nbseg'); cols = cols + ('action', 'reason', 'comment'); col_names = [col_names_map.get(c, c.capitalize()) for c in cols]
+                tree = ttk.Treeview(data_tab, columns=cols, show='headings')
+                for col_id, col_name in zip(cols, col_names): tree.heading(col_id, text=col_name, command=lambda _col=col_id: self.sort_treeview(tree, _col, False)); tree.column(col_id, width=col_widths.get(col_id, 80), anchor=col_anchors.get(col_id, tk.CENTER), stretch=tk.NO)
+                display_res = sorted(self.analysis_results, key=lambda x: x.get('snr', -np.inf) if np.isfinite(x.get('snr', -np.inf)) else -np.inf, reverse=True) if self.sort_by_snr.get() else self.analysis_results
+                for r in display_res:
+                    status = r.get('status','?'); vals = []
+                    for col_id in cols:
+                        if col_id == 'file': vals.append(r.get('rel_path', os.path.basename(r.get('file','?'))));
+                        elif col_id == 'status': vals.append(status)
+                        elif col_id == 'snr': vals.append(f"{r.get('snr',0.0):.2f}" if np.isfinite(r.get('snr', np.nan)) else "N/A")
+                        elif col_id == 'bg': vals.append(f"{r.get('sky_bg',0.0):.2f}" if np.isfinite(r.get('sky_bg', np.nan)) else "N/A")
+                        elif col_id == 'noise': vals.append(f"{r.get('sky_noise',0.0):.2f}" if np.isfinite(r.get('sky_noise', np.nan)) else "N/A")
+                        elif col_id == 'pixsig': vals.append(f"{r.get('signal_pixels',0)}")
+                        elif col_id == 'trails': vals.append(self._("logic_trail_yes") if r.get('has_trails',False) else self._("logic_trail_no"))
+                        elif col_id == 'nbseg': vals.append(f"{r.get('num_trails',0)}" if 'num_trails' in r else "N/A")
+                        elif col_id == 'action': vals.append(r.get('action','?'))
+                        elif col_id == 'reason': vals.append(r.get('rejected_reason','') or '')
+                        elif col_id == 'comment': vals.append(r.get('error_message', '') + r.get('action_comment', ''))
+                        else: vals.append(r.get(col_id, '?'))
+                    tag = ('error',) if status == 'error' else ('rejected',) if r.get('rejected_reason') else ()
+                    tree.insert('', tk.END, values=tuple(vals), tags=tag)
+                tree.tag_configure('error', background='mistyrose'); tree.tag_configure('rejected', background='lightyellow'); vsb = ttk.Scrollbar(data_tab, orient=tk.VERTICAL, command=tree.yview); hsb = ttk.Scrollbar(data_tab, orient=tk.HORIZONTAL, command=tree.xview); tree.configure(yscroll=vsb.set, xscroll=hsb.set); vsb.pack(side=tk.RIGHT, fill=tk.Y); hsb.pack(side=tk.BOTTOM, fill=tk.X); tree.pack(fill=tk.BOTH, expand=True)
+            except Exception as e: print(f"Erreur Tableau Données: {e}"); ttk.Label(data_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+
+            # --- Onglet Recommandations Stacking ---
+            stack_tab = ttk.Frame(notebook); notebook.add(stack_tab, text=self._("visu_tab_recom")); fig4=None # Placeholder fig
+            try:
+                recom_frame = ttk.LabelFrame(stack_tab, text=self._("visu_recom_frame_title"), padding=10); recom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                valid_kept_results = [r for r in self.analysis_results if r.get('status')=='ok' and r.get('action')=='kept' and r.get('rejected_reason') is None and 'snr' in r and np.isfinite(r['snr'])]; valid_kept_snrs = [r['snr'] for r in valid_kept_results]
+                if len(valid_kept_snrs) >= 5:
+                    p25_threshold = np.percentile(valid_kept_snrs, 25); good_img = [r for r in valid_kept_results if r['snr'] >= p25_threshold]
+                    if good_img:
+                        good_img_sorted = sorted(good_img, key=lambda x: x['snr'], reverse=True); ttk.Label(recom_frame, text=self._("visu_recom_text", count=len(good_img_sorted), p75=p25_threshold)).pack(anchor=tk.W, pady=(0,5)); rec_cols = ("file", "snr"); rec_tree = ttk.Treeview(recom_frame, columns=rec_cols, show='headings', height=10); rec_tree.heading("file", text=self._("visu_recom_col_file")); rec_tree.column("file", width=450, anchor='w'); rec_tree.heading("snr", text=self._("visu_recom_col_snr")); rec_tree.column("snr", width=100, anchor='center')
+                        for img in good_img_sorted: rec_tree.insert('', tk.END, values=(img.get('rel_path', os.path.basename(img.get('file', '?'))), f"{img.get('snr', 0.0):.2f}"));
+                        rec_scr = ttk.Scrollbar(recom_frame, orient=tk.VERTICAL, command=rec_tree.yview); rec_tree.configure(yscroll=rec_scr.set); rec_scr.pack(side=tk.RIGHT, fill=tk.Y); rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0,10)); export_cmd = lambda gi=good_img_sorted, p=p25_threshold: self.export_recommended_list(gi, p); export_button = ttk.Button(recom_frame, text=self._("export_button"), command=export_cmd); export_button.pack(pady=5)
+                    else: ttk.Label(recom_frame, text=self._("visu_recom_no_selection")).pack(padx=10, pady=10)
+                elif len(valid_kept_snrs) > 0:
+                    ttk.Label(recom_frame, text=self._("visu_recom_not_enough")).pack(padx=10, pady=10); export_all_kept_cmd = lambda gi=valid_kept_results: self.export_recommended_list(gi, -1); export_all_button = ttk.Button(recom_frame, text=self._("Exporter Toutes Conservées", default="Export All Kept"), command=export_all_kept_cmd); export_all_button.pack(pady=5)
+                else: ttk.Label(recom_frame, text=self._("visu_recom_no_data")).pack(padx=10, pady=10)
+            except Exception as e:
+                 print(f"Erreur Recommandations: {e}"); traceback.print_exc(); ttk.Label(stack_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                 # Pas de fig4 à fermer ici pour l'instant
+
+            # --- Fonction de Nettoyage et Bouton Fermer ---
+            # <--- DÉBUT DU CODE MANQUANT --->
+            def cleanup_vis_window():
+                """Nettoie les ressources Matplotlib et détruit la fenêtre."""
+                nonlocal canvas_list, figures_list, vis_window # Utiliser les variables locales
+                print("Nettoyage de la fenêtre de visualisation...")
+                # Détruire les canvas Tkinter
+                for canvas in canvas_list:
+                    if canvas and canvas.get_tk_widget().winfo_exists():
+                        try:
+                            # Tenter d'appeler close_event() - peut ne pas exister sur toutes les versions/backends
+                            if hasattr(canvas, 'close_event') and callable(canvas.close_event):
+                                canvas.close_event()
+                                print(f"  Canvas close_event() appelé pour {canvas}")
+                            # Détacher et détruire le widget Tkinter
+                            canvas.get_tk_widget().pack_forget()
+                            canvas.get_tk_widget().destroy()
+                            print(f"  Widget Canvas détruit pour {canvas}")
+                        except tk.TclError as e_tk:
+                            print(f"  TclError détruisant le widget canvas: {e_tk}")
+                        except Exception as e_other:
+                            print(f"  Erreur détruisant le widget canvas: {e_other}")
+                canvas_list = [] # Vider la liste
+
+                # Fermer les figures Matplotlib
+                print(f"  Fermeture de {len(figures_list)} figures Matplotlib...")
+                for fig in figures_list:
+                    try:
+                        plt.close(fig) # Fermer la figure
+                    except Exception as e_plt:
+                        print(f"  Erreur lors de la fermeture de la figure {fig}: {e_plt}")
+                figures_list = [] # Vider la liste
+
+                # Forcer Garbage Collection
+                print("  Forçage du Garbage Collector...")
+                collected_count = gc.collect()
+                print(f"    Garbage Collector a collecté {collected_count} objets.")
+
+                # Détruire la fenêtre Toplevel
+                if vis_window and vis_window.winfo_exists():
+                    try:
+                        print("  Destruction de la fenêtre Toplevel de visualisation...")
+                        vis_window.grab_release() # Libérer grab modal
+                        vis_window.destroy()
+                        print("  Fenêtre de visualisation détruite.")
+                    except tk.TclError as e_tk_win:
+                        print(f"  TclError détruisant vis_window: {e_tk_win}")
+                    except Exception as e_other_win:
+                        print(f"  Erreur détruisant vis_window: {e_other_win}")
+
+            # Bouton Fermer et liaison fermeture fenêtre
+            close_button = ttk.Button(vis_window, text=self._("Fermer", default="Close"), command=cleanup_vis_window)
+            close_button.pack(pady=10)
+            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window) # Lier bouton X
+
+            # Attendre que la fenêtre de visualisation soit fermée
+            self.root.wait_window(vis_window)
+            print("Fenêtre de visualisation fermée (wait_window finished).")
+            # <--- FIN DU CODE MANQUANT --->
+
+        # --- Fin du bloc try principal ---
+        except Exception as e_vis:
+            # Gérer erreur globale création fenêtre visualisation
+            print(f"Erreur Globale Visualisation: {e_vis}")
+            traceback.print_exc()
+            messagebox.showerror(self._("msg_error"), self._("msg_unexpected_error", e=e_vis), parent=self.root)
+            # Essayer de nettoyer même en cas d'erreur
+            if vis_window and vis_window.winfo_exists():
+                try:
+                    vis_window.destroy()
+                except Exception: pass
+
+    def sort_treeview(self, tree, col, reverse):
+        """Trie les données d'un Treeview lorsqu'un en-tête de colonne est cliqué."""
+        try:
+            # Obtenir les données de la colonne et l'identifiant de chaque ligne
+            data = [(tree.set(item, col), item) for item in tree.get_children('')]
+
+            # Fonction pour convertir en float (gère erreurs et non-numériques)
+            def safe_float(value):
+                try: return float(value)
+                except (ValueError, TypeError): return -float('inf') # Pour trier non-numériques en bas
+
+            # Essayer de trier numériquement d'abord
+            try:
+                data.sort(key=lambda t: safe_float(t[0]), reverse=reverse)
+            except Exception:
+                # Si tri numérique échoue, trier alphabétiquement
+                data.sort(reverse=reverse)
+
+            # Réinsérer les éléments dans l'ordre trié
+            for index, (val, item) in enumerate(data):
+                tree.move(item, '', index)
+
+            # Inverser la direction du tri pour le prochain clic sur cette colonne
+            tree.heading(col, command=lambda _col=col: self.sort_treeview(tree, _col, not reverse))
+        except Exception as e:
+            print(f"Erreur tri Treeview: {e}")
+
+
+
+    def manage_markers(self):
+        """Ouvre une fenêtre pour visualiser et supprimer les fichiers marqueurs."""
+        input_dir = self.input_dir.get()
+        # Vérifier si dossier entrée valide
+        if not input_dir or not os.path.isdir(input_dir):
+            messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
+            return
+
+        marker_filename = ".astro_analyzer_run_complete" # Nom du fichier marqueur
+        marked_dirs_rel = [] # Liste chemins relatifs marqués
+        marked_dirs_abs = [] # Liste chemins absolus marqués
+        abs_input_dir = os.path.abspath(input_dir)
+
+        # Déterminer les dossiers de rejet à exclure du scan
+        reject_dirs_to_exclude_abs = []
+        if self.reject_action.get() == 'move':
+            snr_dir = self.snr_reject_dir.get()
+            trail_dir = self.trail_reject_dir.get()
+            if snr_dir: reject_dirs_to_exclude_abs.append(os.path.abspath(snr_dir))
+            if trail_dir: reject_dirs_to_exclude_abs.append(os.path.abspath(trail_dir))
+
+        # Scanner les dossiers pour trouver les marqueurs
+        try:
+            print(f"Scan pour marqueur '{marker_filename}' dans {abs_input_dir}...")
+            for dirpath, dirnames, filenames in os.walk(abs_input_dir, topdown=True):
+                current_dir_abs = os.path.abspath(dirpath)
+
+                # Exclure les dossiers de rejet du parcours récursif
+                dirs_to_remove = [d for d in dirnames if os.path.abspath(os.path.join(current_dir_abs, d)) in reject_dirs_to_exclude_abs]
+                if dirs_to_remove:
+                    for dname in dirs_to_remove: dirnames.remove(dname)
+
+                # Vérifier présence marqueur
+                marker_path = os.path.join(current_dir_abs, marker_filename)
+                if os.path.exists(marker_path):
+                    # Obtenir chemin relatif par rapport au dossier d'entrée
+                    rel_path = os.path.relpath(current_dir_abs, abs_input_dir)
+                    # Utiliser '.' pour le dossier racine lui-même
+                    marked_dirs_rel.append('.' if rel_path == '.' else rel_path)
+                    marked_dirs_abs.append(current_dir_abs) # Stocker chemin absolu
+
+
+
+        except OSError as e:
+            messagebox.showerror(self._("msg_error"), f"Erreur parcours dossiers:\n{e}", parent=self.root)
+            return
+
+        def delete_selected_markers():
+            """Supprime les marqueurs des dossiers sélectionnés dans la listbox."""
+            selected_indices = listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning(self._("msg_warning"), self._("marker_select_none", default="Veuillez sélectionner un ou plusieurs dossiers."), parent=marker_window)
+                return
+
+            # Confirmer suppression
+            confirm_msg = self._("marker_confirm_delete_selected", default="Supprimer les marqueurs pour les {count} dossiers sélectionnés ?\nCela forcera leur ré-analyse au prochain lancement.").format(count=len(selected_indices))
+            if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
+                deleted_count = 0; errors = []
+                paths_to_delete_rel = [listbox.get(i) for i in selected_indices]
+
+                # Supprimer les fichiers marqueurs
+                for rel_path in paths_to_delete_rel:
+                    abs_path_to_clear = rel_to_abs_map.get(rel_path)
+                    if not abs_path_to_clear: errors.append(f"{rel_path}: Chemin absolu non trouvé"); continue
+                    marker_to_delete = os.path.join(abs_path_to_clear, marker_filename)
+                    try:
+                        if os.path.exists(marker_to_delete): os.remove(marker_to_delete); deleted_count += 1
+                        else: deleted_count += 1 # Compter comme succès si déjà absent
+                    except Exception as e: errors.append(f"{rel_path}: {e}")
+
+                # Rafraîchir la liste après suppression (re-scanner est plus sûr)
+                listbox.config(state=tk.NORMAL); listbox.delete(0, tk.END)
+                marked_dirs_rel.clear(); marked_dirs_abs.clear(); rel_to_abs_map.clear()
+                try: # Re-scan
+                    for dp, dn, fn in os.walk(abs_input_dir, topdown=True):
+                        ca = os.path.abspath(dp)
+                        dtr = [d for d in dn if os.path.abspath(os.path.join(ca, d)) in reject_dirs_to_exclude_abs]
+                        for dname in dtr: dn.remove(dname)
+                        mp = os.path.join(ca, marker_filename)
+                        if os.path.exists(mp):
+                            rp = os.path.relpath(ca, abs_input_dir); rp = '.' if rp == '.' else rp
+                            marked_dirs_rel.append(rp); marked_dirs_abs.append(ca); rel_to_abs_map[rp] = ca
+                except Exception as e_scan: listbox.insert(tk.END, "Erreur re-scan"); listbox.config(state=tk.DISABLED)
+
+                # Re-remplir listbox
+                sorted_rel_paths_new = sorted(marked_dirs_rel)
+                if sorted_rel_paths_new:
+                    for rel_path in sorted_rel_paths_new: listbox.insert(tk.END, rel_path)
+                else: listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé.")); listbox.config(state=tk.DISABLED)
+
+                # Mettre à jour état boutons
+                any_markers_left = bool(sorted_rel_paths_new)
+                delete_sel_button.config(state=tk.NORMAL if any_markers_left else tk.DISABLED)
+                delete_all_button.config(state=tk.NORMAL if any_markers_left else tk.DISABLED)
+
+                # Message final
+                if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
+                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_selected_success", default="{count} marqueur(s) supprimé(s).").format(count=deleted_count), parent=marker_window)
+####################################################################################################################
+
+
+        def delete_all_markers():
+            """Supprime tous les marqueurs trouvés."""
+            abs_paths_to_clear = list(rel_to_abs_map.values())
+            if not abs_paths_to_clear:
+                messagebox.showinfo(self._("msg_info"), self._("marker_none_found", default="Aucun dossier marqué trouvé."), parent=marker_window)
+                return
+
+            # Confirmer suppression totale
+            confirm_msg = self._("marker_confirm_delete_all", default="Supprimer TOUS les marqueurs ({count}) dans le dossier '{folder}' et ses sous-dossiers analysables ?\nCela forcera une ré-analyse complète.").format(count=len(abs_paths_to_clear), folder=os.path.basename(abs_input_dir))
+            if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
+                deleted_count = 0; errors = []
+                # Supprimer tous les marqueurs
+                for abs_path in abs_paths_to_clear:
+                    marker_to_delete = os.path.join(abs_path, marker_filename)
+                    try:
+                        if os.path.exists(marker_to_delete): os.remove(marker_to_delete); deleted_count += 1
+                    except Exception as e: errors.append(f"{os.path.relpath(abs_path, abs_input_dir)}: {e}")
+
+                # Mettre à jour listbox (vider)
+                listbox.config(state=tk.NORMAL); listbox.delete(0, tk.END)
+                listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé."))
+                listbox.config(state=tk.DISABLED)
+                marked_dirs_rel[:] = []; marked_dirs_abs[:] = []; rel_to_abs_map.clear()
+
+                # Mettre à jour état boutons
+                delete_sel_button.config(state=tk.DISABLED)
+                delete_all_button.config(state=tk.DISABLED)
+
+                # Message final
+                if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
+                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_all_success", default="Tous les {count} marqueur(s) trouvés ont été supprimés.").format(count=deleted_count), parent=marker_window)
+
+
+
+        # --- Créer la fenêtre de gestion des marqueurs ---
+        marker_window = tk.Toplevel(self.root)
+        marker_window.title(self._("marker_window_title", default="Gérer les Marqueurs d'Analyse"))
+        marker_window.geometry("600x400")
+        marker_window.transient(self.root)
+        marker_window.grab_set() # Rendre modale
+
+        # Cadre principal fenêtre
+        mw_frame = ttk.Frame(marker_window, padding=10)
+        mw_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Label info
+        info_label = ttk.Label(mw_frame, text=self._("marker_info_label", default="Dossiers marqués comme analysés (contiennent le fichier marqueur):"), wraplength=550)
+        info_label.pack(pady=(0, 10))
+
+        # Cadre pour Listbox et Scrollbar
+        list_frame = ttk.Frame(mw_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, yscrollcommand=scrollbar.set, width=80)
+        scrollbar.config(command=listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Remplir Listbox et mapper relatif -> absolu
+        rel_to_abs_map = {rel: abs_p for rel, abs_p in zip(marked_dirs_rel, marked_dirs_abs)}
+        sorted_rel_paths = sorted(marked_dirs_rel)
+        if sorted_rel_paths:
+            for rel_path in sorted_rel_paths: listbox.insert(tk.END, rel_path)
+        else:
+            listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé."))
+            listbox.config(state=tk.DISABLED) # Désactiver si vide
+
+        # Cadre pour les boutons
+        button_mw_frame = ttk.Frame(mw_frame)
+        button_mw_frame.pack(fill=tk.X, pady=(10, 0))
+
+        # Créer les boutons de la fenêtre marqueur
+        delete_sel_button = ttk.Button(button_mw_frame, text=self._("marker_delete_selected_button", default="Supprimer Sélection"), command=delete_selected_markers)
+        delete_sel_button.pack(side=tk.LEFT, padx=10)
+        delete_all_button = ttk.Button(button_mw_frame, text=self._("marker_delete_all_button", default="Supprimer Tout"), command=delete_all_markers)
+        delete_all_button.pack(side=tk.LEFT, padx=10)
+        close_mw_button = ttk.Button(button_mw_frame, text=self._("Fermer", default="Close"), command=marker_window.destroy)
+        close_mw_button.pack(side=tk.RIGHT, padx=10)
+
+        # Désactiver boutons si liste vide au départ
+        if not sorted_rel_paths:
+            delete_sel_button.config(state=tk.DISABLED)
+            delete_all_button.config(state=tk.DISABLED)
+
+        # Attendre fermeture fenêtre
+        marker_window.wait_window()
+
+
+
+
+
+
+
+
+
+    def return_or_quit(self):
+        """Gère la fermeture de la fenêtre ou le retour à l'application principale."""
+        # --- Ajout Debug ---
+        print("DEBUG AG: Début return_or_quit.") # Log début
+        # --------------------
+
+        # Confirmer si analyse en cours (inchangé)
+        if self.analysis_running:
+            title = self._("msg_warning")
+            message = self._("Analyse en cours, quitter quand même?")
+            if not messagebox.askyesno(title, message, parent=self.root):
+                # --- Ajout Debug ---
+                print("DEBUG AG: return_or_quit annulé par l'utilisateur (analyse en cours).")
+                # --------------------
+                return # Ne pas quitter si l'utilisateur annule
+
+        # --- Ajout Debug ---
+        print("DEBUG AG: Fermeture du GUI de l'analyseur...")
+        # --------------------
+        print("  Nettoyage explicite des ressources Tkinter...")
+        # Cacher et annuler les infobulles actives (inchangé)
+        for tt_key in list(self.tooltips.keys()):
+            tooltip = self.tooltips.pop(tt_key, None)
+            if tooltip:
+                tooltip.hidetip()
+                tooltip.unschedule()
+
+        # Essayer de supprimer les références aux variables Tkinter (inchangé)
+        widget_keys_to_delete = list(self.__dict__.keys())
+        deleted_vars = 0
+        for attr_name in widget_keys_to_delete:
+            try:
+                attr_value = getattr(self, attr_name, None)
+                if isinstance(attr_value, tk.Variable):
+                    delattr(self, attr_name)
+                    deleted_vars += 1
+            except Exception: pass
+        print(f"    {deleted_vars} variables Tkinter supprimées de l'instance.")
+
+        # Vider les dictionnaires de références (inchangé)
+        if hasattr(self, 'widgets_refs'): self.widgets_refs.clear()
+        if hasattr(self, 'trail_param_labels'): self.trail_param_labels.clear()
+        if hasattr(self, 'trail_param_entries'): self.trail_param_entries.clear()
+        if hasattr(self, 'analysis_results'): self.analysis_results = []
+        print("    Dictionnaires de références vidés.")
+
+        # Forcer mise à jour UI avant destruction (inchangé)
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.update_idletasks()
+                print("    update_idletasks exécuté.")
+        except tk.TclError:
+            print("    Impossible d'exécuter update_idletasks (fenêtre détruite?).")
+
+        # Forcer Garbage Collection (inchangé)
+        print("  Forçage du Garbage Collector...")
+        collected_count = gc.collect()
+        print(f"    Garbage Collector a collecté {collected_count} objets.")
+
+        # Détruire la fenêtre Toplevel
+        try:
+            if self.root and self.root.winfo_exists():
+                # --- Ajout Debug ---
+                print("DEBUG AG: Tentative de destruction de la fenêtre Toplevel (self.root)...")
+                # --------------------
+                self.root.destroy() # <--- Destruction fenêtre
+                # --- Ajout Debug ---
+                print("DEBUG AG: Fenêtre Toplevel a priori détruite.")
+                # --------------------
+        except Exception as e: print(f"  Erreur pendant destroy: {e}")
+
+        # Appeler le callback si fourni
+        if callable(self.main_app_callback):
+            # --- Ajout Debug ---
+            print("DEBUG AG: Appel du callback du script principal (_on_analyzer_closed)...")
+            # --------------------
+            try:
+                self.main_app_callback() # <--- Appel callback
+                # --- Ajout Debug ---
+                print("DEBUG AG: Callback principal exécuté.")
+                # --------------------
+            except Exception as cb_e: print(f"  Erreur dans le callback principal: {cb_e}")
+        else:
+            # --- Ajout Debug ---
+            print("DEBUG AG: Aucun callback principal à appeler.")
+            # --------------------
+
+        # --- Ajout Debug ---
+        print("DEBUG AG: Fin return_or_quit.") # Log fin
+        # --------------------
+
+
+
 
     def _(self, key, **kwargs):
         """Raccourci pour obtenir une traduction."""
@@ -324,6 +1129,9 @@ class AstroImageAnalyzerGUI:
                 self._stop_timer()
 
     # --- Création des Widgets ---
+
+# --- DANS LE FICHIER analyse_gui.py ---
+# À l'intérieur de la classe AstroImageAnalyzerGUI
 
     def create_widgets(self):
         """Crée tous les widgets de l'interface graphique."""
@@ -494,17 +1302,40 @@ class AstroImageAnalyzerGUI:
         # --- Cadre Boutons Principaux ---
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=10)
+
         self.analyze_button = ttk.Button(button_frame, text="", command=self.start_analysis, width=18)
-        self.analyze_button.pack(side=tk.LEFT, padx=5)
+        self.analyze_button.pack(side=tk.LEFT, padx=(5, 2)) # Pack avec Analyze normal
+        self.widgets_refs['analyse_button'] = self.analyze_button # Référencer le bouton Analyser seul
+
+        # <--- NOUVEAU ---> Ajout du bouton Analyser et Empiler
+        # Il appellera self.start_analysis_and_stack (à créer à l'étape 2)
+        self.analyze_stack_button = ttk.Button(
+            button_frame,
+            text='analyse_stack_button', # Sera défini par la traduction 'analyse_stack_button'
+            command=self.start_analysis_and_stack, # Fonction callback (Étape 2)
+            width=18,
+            state=tk.NORMAL # Activé par défaut (ou tk.DISABLED si pas de dossier initial)
+        )
+        self.analyze_stack_button.pack(side=tk.LEFT, padx=(2, 5)) # Pack à droite du bouton Analyser
+        self.widgets_refs['analyse_stack_button'] = self.analyze_stack_button # Référencer pour traduction
+        # <--- FIN NOUVEAU --->
+
         self.visualize_button = ttk.Button(button_frame, text="", command=self.visualize_results, width=18)
         self.visualize_button.pack(side=tk.LEFT, padx=5); self.visualize_button.config(state=tk.DISABLED) # Désactivé au début
+        self.widgets_refs['visualize_button'] = self.visualize_button # Référencer
+
         self.open_log_button = ttk.Button(button_frame, text="", command=self.open_log_file, width=18)
         self.open_log_button.pack(side=tk.LEFT, padx=5); self.open_log_button.config(state=tk.DISABLED) # Désactivé au début
+        self.widgets_refs['open_log_button'] = self.open_log_button # Référencer
+
         self.manage_markers_button = ttk.Button(button_frame, text="", command=self.manage_markers, width=18)
         self.manage_markers_button.pack(side=tk.LEFT, padx=5)
         self.widgets_refs['manage_markers_button'] = self.manage_markers_button
+
         self.return_button = ttk.Button(button_frame, text="", command=self.return_or_quit, width=12)
         self.return_button.pack(side=tk.RIGHT, padx=5)
+        # La référence pour le bouton Retour/Quitter sera ajoutée dans change_language
+        # en utilisant self.return_button directement.
 
         # --- Cadre Progression et Statut ---
         progress_frame = ttk.Frame(main_frame)
@@ -523,9 +1354,12 @@ class AstroImageAnalyzerGUI:
         self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, width=80, height=15)
         self.results_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.results_text.config(state=tk.DISABLED) # Lecture seule
-
     # --- Gestion Langue et État Widgets ---
 
+# --- DANS LE FICHIER analyse_gui.py ---
+# À l'intérieur de la classe AstroImageAnalyzerGUI
+# Placez cette méthode APRES __init__ et create_widgets, près de start_analysis
+       
     def change_language(self, *args):
         """Met à jour tous les textes de l'interface selon la langue sélectionnée."""
         lang = self.current_lang.get()
@@ -589,6 +1423,7 @@ class AstroImageAnalyzerGUI:
         # Mettre à jour les textes des boutons d'action principaux
         try:
             if self.analyze_button: self.analyze_button.config(text=self._("analyse_button"))
+            if self.analyze_stack_button: self.analyze_stack_button.config(text=self._("analyse_stack_button"))
             if self.visualize_button: self.visualize_button.config(text=self._("visualize_button"))
             if self.open_log_button: self.open_log_button.config(text=self._("open_log_button"))
             # Texte du bouton Quitter/Retour dépend si un callback est fourni
@@ -867,116 +1702,6 @@ class AstroImageAnalyzerGUI:
         except Exception as e:
             print(f"Erreur dans _insert_results_text: {e}")
 
-    # --- Logique d'Analyse ---
-
-    def start_analysis(self):
-        """Valide les options et lance l'analyse dans un thread séparé."""
-        # Empêcher lancements multiples
-        if self.analysis_running:
-            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_running"), parent=self.root)
-            return
-
-        # Récupérer et valider les options de l'interface
-        options = {}
-        callbacks = {'status': self.update_status, 'progress': self.update_progress, 'log': self.update_results_text}
-        input_dir = self.input_dir.get()
-        output_log = self.output_log.get()
-        options['analyze_snr'] = self.analyze_snr.get()
-        options['detect_trails'] = self.detect_trails.get()
-        options['include_subfolders'] = self.include_subfolders.get()
-
-        # Vérifier chemins entrée/log
-        if not input_dir or not os.path.isdir(input_dir):
-            messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
-            return
-        if not output_log:
-            messagebox.showerror(self._("msg_error"), self._("msg_log_file_missing"), parent=self.root)
-            return
-
-        # Configurer action rejet
-        reject_action = self.reject_action.get()
-        options['move_rejected'] = (reject_action == 'move')
-        options['delete_rejected'] = (reject_action == 'delete')
-        options['trail_reject_dir'] = self.trail_reject_dir.get() if options['move_rejected'] else None
-        options['snr_reject_dir'] = self.snr_reject_dir.get() if options['move_rejected'] else None
-
-        # Vérifier chemins rejet si action 'move'
-        if options['move_rejected']:
-             if options['detect_trails'] and SATDET_AVAILABLE and not options['trail_reject_dir']:
-                 messagebox.showerror(self._("msg_error"), self._("trail_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
-                 return
-             if options['analyze_snr'] and self.snr_selection_mode.get() != 'none' and not options['snr_reject_dir']:
-                 messagebox.showerror(self._("msg_error"), self._("snr_reject_dir_label") + " " + self._("non spécifié"), parent=self.root)
-                 return
-        # Confirmer suppression si action 'delete'
-        elif options['delete_rejected']:
-             if not messagebox.askyesno(self._("msg_warning"), self._("confirm_delete"), parent=self.root):
-                 return # Annuler si utilisateur refuse
-
-        # Valider paramètres SNR si analyse activée
-        if options['analyze_snr']:
-            options['snr_selection_mode'] = self.snr_selection_mode.get()
-            options['snr_selection_value'] = self.snr_selection_value.get()
-            # Vérifier valeur si mode % ou seuil
-            if options['snr_selection_mode'] in ['percent', 'threshold']:
-                if not options['snr_selection_value']:
-                    messagebox.showerror(self._("msg_error"), self._("snr_value_missing"), parent=self.root)
-                    return
-                try:
-                    float(options['snr_selection_value']) # Juste vérifier si convertible en nombre
-                except ValueError:
-                    messagebox.showerror(self._("msg_error"), self._("snr_value_invalid"), parent=self.root)
-                    return
-            else: # Mode 'none'
-                options['snr_selection_value'] = None
-
-        # Valider paramètres détection traînées si activée
-        if options['detect_trails']:
-             # Vérifier si acstools est compatible
-             if not (SATDET_AVAILABLE and SATDET_USES_SEARCHPATTERN):
-                 messagebox.showerror(self._("msg_error"), self._("msg_satdet_incompatible"), parent=self.root)
-                 return
-             # Vérifier validité numérique des paramètres
-             try:
-                 options['trail_params'] = {
-                     'sigma': float(self.trail_params['sigma'].get()),
-                     'low_thresh': float(self.trail_params['low_thresh'].get()),
-                     'h_thresh': float(self.trail_params['h_thresh'].get()),
-                     'line_len': int(self.trail_params['line_len'].get()),
-                     'small_edge': int(self.trail_params['small_edge'].get()),
-                     'line_gap': int(self.trail_params['line_gap'].get())
-                 }
-                 # Vérifier cohérence seuils
-                 if options['trail_params']['h_thresh'] < options['trail_params']['low_thresh']:
-                     messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e="High Thresh doit être >= Low Thresh"), parent=self.root)
-                     return
-             except ValueError as e:
-                 messagebox.showerror(self._("msg_error"), self._("msg_params_invalid", e=f"Paramètres Traînées: {e}"), parent=self.root)
-                 return
-        else:
-            options['trail_params'] = {} # Dictionnaire vide si détection désactivée
-
-        # --- Préparer UI pour l'analyse ---
-        self.reset_ui_for_new_analysis() # Nettoyer affichages précédents
-        self.analysis_running = True
-        # Désactiver boutons pendant analyse
-        self._set_widget_state(self.analyze_button, tk.DISABLED)
-        self._set_widget_state(self.visualize_button, tk.DISABLED)
-        self._set_widget_state(self.open_log_button, tk.DISABLED)
-        self._set_widget_state(self.return_button, tk.DISABLED)
-        self._set_widget_state(self.manage_markers_button, tk.DISABLED)
-        # Mettre à jour statut et log initial
-        self.update_status("status_analysis_start")
-        self.update_results_text("--- Début de l'analyse ---", clear=True)
-        self.update_progress(0.0)
-
-        # --- Lancer le thread d'analyse ---
-        analysis_thread = threading.Thread(
-            target=self.run_analysis_thread,
-            args=(input_dir, output_log, options, callbacks),
-            daemon=True # Permet à l'application de quitter même si ce thread tourne
-        )
-        analysis_thread.start()
 
     def run_analysis_thread(self, input_dir, output_log, options, callbacks):
         """Fonction exécutée dans le thread séparé pour appeler la logique d'analyse."""
@@ -1002,722 +1727,173 @@ class AstroImageAnalyzerGUI:
         finally:
             # Planifier la finalisation dans le thread UI (toujours exécuté)
             self.root.after(0, self.finalize_analysis, results, success)
+##########################################################################################################################
+
+
+
 
     def finalize_analysis(self, results, success):
         """Met à jour l'interface après la fin du thread d'analyse."""
-        self._stop_timer() # Arrêter le chronomètre s'il tournait
-        self.analysis_running = False # Marquer analyse comme terminée
+        # --- Imports Standard (os, gc déjà présents globalement) ---
+        # Pas besoin de subprocess ou sys ici pour cette version
+        print("DEBUG (analyse_gui): Entrée dans finalize_analysis.") # <-- CONSERVÉ DEBUG
+        print(f"DEBUG (analyse_gui): Paramètres reçus - success: {success}, stack_after_analysis (avant logique): {self.stack_after_analysis}") # <-- CONSERVÉ DEBUG
 
-        # Réactiver les boutons principaux
-        self._set_widget_state(self.analyze_button, tk.NORMAL)
-        self._set_widget_state(self.return_button, tk.NORMAL)
-        self._set_widget_state(self.manage_markers_button, tk.NORMAL)
+        self._stop_timer()
+        self.analysis_running = False
 
-        # Mettre à jour la barre de progression finale
+        folder_to_stack = None
+        should_write_command = False # <-- MODIFIÉ: Renommé pour clarté
+
+        # --- Logique pour déterminer si on doit écrire la commande ---
+        if self.stack_after_analysis and success:
+            print("DEBUG (analyse_gui): Analyse réussie et intention d'empiler détectée.") # <-- CONSERVÉ DEBUG
+            self.update_results_text("logic_info_prefix", text="Analyse terminée avec succès, préparation pour empilage.")
+            folder_to_stack = self.input_dir.get()
+
+            if not folder_to_stack or not os.path.isdir(folder_to_stack):
+                print(f"DEBUG (analyse_gui): Dossier pour empilage invalide: '{folder_to_stack}'") # <-- CONSERVÉ DEBUG
+                self.update_results_text("logic_error_prefix", text=f"Dossier invalide ou non défini pour empiler après analyse: '{folder_to_stack}'. Empilage annulé.")
+                messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid") + "\n" + self._("Empilage annulé.", default="Stacking cancelled."), parent=self.root)
+                folder_to_stack = None
+                success = False # Marquer comme échec pour ne pas écrire la commande
+                should_write_command = False # <-- MODIFIÉ: Ne pas écrire la commande
+            else:
+                print(f"DEBUG (analyse_gui): Dossier pour empilage validé: {folder_to_stack}") # <-- CONSERVÉ DEBUG
+                should_write_command = True # <-- MODIFIÉ: On écrira la commande
+
+            self.stack_after_analysis = False # Réinitialiser l'intention
+        else:
+            if not success: print("DEBUG (analyse_gui): Analyse échouée, commande non écrite.") # <-- CONSERVÉ DEBUG
+            if not self.stack_after_analysis: print("DEBUG (analyse_gui): Pas d'intention d'empiler après analyse, commande non écrite.") # <-- CONSERVÉ DEBUG
+            self.stack_after_analysis = False # Réinitialiser au cas où
+
+        print(f"DEBUG (analyse_gui): État après logique décision: should_write_command={should_write_command}, folder_to_stack={folder_to_stack}") # <-- MODIFIÉ DEBUG
+
+        # --- Mise à jour UI (Statut et Barre Progression) ---
+        # (Logique inchangée)
         self.update_progress(100.0 if success else 0.0)
-
-        # Stocker les résultats et déterminer si l'analyse a réussi globalement
         self.analysis_results = results if results else []
+        self.analysis_completed_successfully = success
+        final_status_key = ""
+        processed_count = 0 ; action_count = 0 ; errors_count = 0
+
         if success:
             processed_count = len(self.analysis_results)
             if processed_count > 0:
-                 # Compter erreurs et actions pour le message final
                  errors_count = sum(1 for r in self.analysis_results if r.get('status') == 'error')
                  action_count = sum(1 for r in self.analysis_results if r.get('action','').startswith(('moved', 'deleted')))
-                 # Afficher message de succès avec détails
-                 self.update_status("status_analysis_done_some", processed=processed_count, moved=action_count, errors=errors_count)
+                 final_status_key = "status_analysis_done_some"
                  self.update_results_text("--- Analyse terminée ---")
-                 # Activer bouton Visualiser
-                 self._set_widget_state(self.visualize_button, tk.NORMAL)
-                 # Marquer comme succès si pas d'erreur individuelle
-                 self.analysis_completed_successfully = (errors_count == 0)
+                 # Activer Visualiser seulement si on n'écrit PAS la commande (car on ne fermera pas)
+                 if not should_write_command: self._set_widget_state(self.visualize_button, tk.NORMAL)
+                 else: self._set_widget_state(self.visualize_button, tk.DISABLED)
             else:
-                 # Cas où l'analyse s'est bien déroulée mais aucun fichier traitable trouvé
-                 self.update_status("status_analysis_done_no_valid")
+                 final_status_key = "status_analysis_done_no_valid"
                  self.update_results_text("--- Analyse terminée (aucun fichier traitable trouvé ou tous ignorés) ---")
-                 self.analysis_completed_successfully = True # Pas d'erreur critique
-                 self._set_widget_state(self.visualize_button, tk.DISABLED) # Pas de résultats à voir
+                 self._set_widget_state(self.visualize_button, tk.DISABLED)
         else:
-            # Cas où une erreur critique a eu lieu dans le thread
-            self.update_results_text("--- Analyse terminée avec erreurs critiques ---")
-            self.analysis_completed_successfully = False
-            self._set_widget_state(self.visualize_button, tk.DISABLED)
+             final_status_key = "status_analysis_done_errors"
+             self.update_results_text("--- Analyse terminée avec erreurs ---")
+             self._set_widget_state(self.visualize_button, tk.DISABLED)
 
-        # Activer bouton Ouvrir Log si le fichier existe
-        if self.output_log.get() and os.path.exists(self.output_log.get()):
-            self._set_widget_state(self.open_log_button, tk.NORMAL)
-        else:
-            self._set_widget_state(self.open_log_button, tk.DISABLED)
+        # Afficher le statut final
+        if final_status_key:
+            print(f"DEBUG (analyse_gui): Affichage statut final (clé: {final_status_key})") # <-- CONSERVÉ DEBUG
+            status_kwargs = {}
+            if success and processed_count > 0: status_kwargs = {'processed': processed_count, 'moved': action_count, 'errors': errors_count}
+            self.update_status(final_status_key, **status_kwargs)
 
-    # --- Quitter / Retour ---
+        # --- Réactivation des boutons (SEULEMENT si on n'écrit PAS la commande) ---
+        if not should_write_command:
+            print("DEBUG (analyse_gui): Réactivation des boutons (pas de commande écrite).") # <-- CONSERVÉ DEBUG
+            self._set_widget_state(self.analyze_button, tk.NORMAL)
+            self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
+            self._set_widget_state(self.return_button, tk.NORMAL)
+            self._set_widget_state(self.manage_markers_button, tk.NORMAL)
+            if self.output_log.get() and os.path.exists(self.output_log.get()):
+                 self._set_widget_state(self.open_log_button, tk.NORMAL)
+            else:
+                 self._set_widget_state(self.open_log_button, tk.DISABLED)
 
-    def return_or_quit(self):
-        """Gère la fermeture de la fenêtre ou le retour à l'application principale."""
-        # Confirmer si analyse en cours
-        if self.analysis_running:
-            title = self._("msg_warning")
-            message = self._("Analyse en cours, quitter quand même?")
-            if not messagebox.askyesno(title, message, parent=self.root):
-                return # Ne pas quitter si l'utilisateur annule
-
-        print("Fermeture du GUI de l'analyseur...")
-        print("  Nettoyage explicite des ressources Tkinter...")
-        # Cacher et annuler les infobulles actives
-        for tt_key in list(self.tooltips.keys()):
-            tooltip = self.tooltips.pop(tt_key, None)
-            if tooltip:
-                tooltip.hidetip()
-                tooltip.unschedule() # Assurer l'annulation
-
-        # Essayer de supprimer les références aux variables Tkinter pour aider GC
-        widget_keys_to_delete = list(self.__dict__.keys())
-        deleted_vars = 0
-        for attr_name in widget_keys_to_delete:
-            try:
-                attr_value = getattr(self, attr_name, None)
-                if isinstance(attr_value, tk.Variable):
-                    # Supprimer l'attribut de l'instance
-                    delattr(self, attr_name)
-                    deleted_vars += 1
-            except Exception: pass # Ignorer erreurs si attribut déjà supprimé
-        print(f"    {deleted_vars} variables Tkinter supprimées de l'instance.")
-
-        # Vider les dictionnaires de références
-        if hasattr(self, 'widgets_refs'): self.widgets_refs.clear()
-        if hasattr(self, 'trail_param_labels'): self.trail_param_labels.clear()
-        if hasattr(self, 'trail_param_entries'): self.trail_param_entries.clear()
-        if hasattr(self, 'analysis_results'): self.analysis_results = []
-        print("    Dictionnaires de références vidés.")
-
-        # Forcer mise à jour UI avant destruction (peut aider libération)
-        try:
-            if self.root and self.root.winfo_exists():
-                self.root.update_idletasks()
-                print("    update_idletasks exécuté.")
-        except tk.TclError:
-            print("    Impossible d'exécuter update_idletasks (fenêtre détruite?).")
-
-        # Forcer Garbage Collection
-        print("  Forçage du Garbage Collector...")
-        collected_count = gc.collect()
-        print(f"    Garbage Collector a collecté {collected_count} objets.")
-
-        # Détruire la fenêtre Toplevel
-        try:
-            if self.root and self.root.winfo_exists():
-                print("  Destruction de la fenêtre Toplevel...")
-                self.root.destroy()
-                print("  Fenêtre Toplevel détruite.")
-        except tk.TclError as e:
-            print(f"  TclError pendant destroy: {e}")
-        except Exception as e:
-            print(f"  Erreur pendant destroy: {e}")
-
-        # Appeler le callback si fourni (pour retourner à l'app principale)
-        if callable(self.main_app_callback):
-            print("  Appel du callback du script principal.")
-            try:
-                self.main_app_callback()
-            except Exception as cb_e:
-                print(f"  Erreur dans le callback principal: {cb_e}")
-
-    # --- Visualisation et Export ---
-
-    def visualize_results(self):
-        """Affiche les graphiques de visualisation dans une nouvelle fenêtre."""
-        # Vérifier s'il y a des résultats à afficher
-        if not self.analysis_results and not self.analysis_running:
-            messagebox.showinfo(self._("msg_info"), self._("msg_no_results_visualize"), parent=self.root)
-            return
-        # Empêcher visualisation si analyse en cours
-        if self.analysis_running:
-            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_wait_visualize"), parent=self.root)
-            return
-        # Avertir si analyse terminée avec erreurs
-        if not self.analysis_completed_successfully:
-            messagebox.showwarning(self._("msg_warning"), self._("msg_results_incomplete") + "\n" + self._("Affichage des données disponibles.", default="Displaying available data."), parent=self.root)
-
-        try:
-            # Créer la fenêtre Toplevel pour la visualisation
-            vis_window = tk.Toplevel(self.root)
-            vis_window.title(self._("visu_window_title"))
-            vis_window.geometry("850x650")
-            vis_window.transient(self.root) # Lier à la fenêtre principale
-            vis_window.grab_set() # Rendre modale
-
-            # Notebook pour les différents onglets de graphiques/données
-            notebook = ttk.Notebook(vis_window)
-            notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-            # Listes pour garder trace des canvas et figures Matplotlib pour nettoyage
-            canvas_list = []
-            figures_list = []
-
-            # --- Onglet Distribution SNR ---
-            snr_tab = ttk.Frame(notebook)
-            notebook.add(snr_tab, text=self._("visu_tab_snr_dist"))
-            fig1 = None # Initialiser figure à None
-            try:
-                # Créer figure et axes Matplotlib
-                fig1, ax1 = plt.subplots(figsize=(7, 5))
-                figures_list.append(fig1) # Ajouter à la liste pour nettoyage
-                # Filtrer les résultats valides pour l'histogramme SNR
-                valid_snrs = [r['snr'] for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr'])]
-                if valid_snrs:
-                    # Afficher l'histogramme
-                    ax1.hist(valid_snrs, bins=20, color='skyblue', edgecolor='black')
-                    ax1.set_title(self._("visu_snr_dist_title"))
-                    ax1.set_xlabel(self._("visu_snr_dist_xlabel"))
-                    ax1.set_ylabel(self._("visu_snr_dist_ylabel"))
-                    ax1.grid(axis='y', linestyle='--', alpha=0.7)
-                else:
-                    # Afficher message si pas de données valides
-                    ax1.text(0.5, 0.5, self._("visu_snr_dist_no_data"), ha='center', va='center', fontsize=12, color='red')
-                # Intégrer le graphique Matplotlib dans Tkinter
-                canvas1 = FigureCanvasTkAgg(fig1, master=snr_tab)
-                canvas1.draw()
-                canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                canvas_list.append(canvas1) # Ajouter à la liste pour nettoyage
-            except Exception as e:
-                # Afficher erreur si création graphique échoue
-                print(f"Erreur Histogramme SNR: {e}")
-                ttk.Label(snr_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
-
-            # --- Onglet Comparaison SNR (Top/Bottom N) ---
-            comp_tab = ttk.Frame(notebook)
-            notebook.add(comp_tab, text=self._("visu_tab_snr_comp"))
-            fig2 = None
-            try:
-                # Filtrer résultats valides avec SNR et nom de fichier
-                valid_res = [r for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr']) and 'file' in r]
-                if len(valid_res) >= 2: # Besoin d'au moins 2 images pour comparer
-                    # Trier par SNR décroissant
-                    sorted_res = sorted(valid_res, key=lambda x: x['snr'], reverse=True)
-                    num_total = len(sorted_res)
-                    # Afficher jusqu'à 10 images (ou la moitié si moins de 20)
-                    num_show = min(10, num_total // 2 if num_total >= 2 else 1)
-                    best = sorted_res[:num_show]
-                    worst = sorted_res[-num_show:]
-                    # Ajuster hauteur figure dynamiquement
-                    fig_height = max(4, num_show * 0.5)
-                    fig2, (ax2, ax3) = plt.subplots(1, 2, figsize=(10, fig_height)) # 1 ligne, 2 colonnes
-                    figures_list.append(fig2)
-
-                    # Graphique barres horizontales pour Top N
-                    best_labels = [os.path.basename(r['file']) for r in best]
-                    ax2.barh(best_labels, [r['snr'] for r in best], color='mediumseagreen', edgecolor='black')
-                    ax2.set_title(self._("visu_snr_comp_best_title", n=num_show))
-                    ax2.invert_yaxis() # Meilleur en haut
-                    ax2.set_xlabel(self._("visu_snr_comp_xlabel"))
-                    ax2.tick_params(axis='y', labelsize=8) # Réduire taille labels axe Y
-
-                    # Graphique barres horizontales pour Bottom N
-                    worst_labels = [os.path.basename(r['file']) for r in worst]
-                    ax3.barh(worst_labels, [r['snr'] for r in worst], color='salmon', edgecolor='black')
-                    ax3.set_title(self._("visu_snr_comp_worst_title", n=num_show))
-                    ax3.invert_yaxis() # Pire en haut (plus logique pour comparaison)
-                    ax3.set_xlabel(self._("visu_snr_comp_xlabel"))
-                    ax3.tick_params(axis='y', labelsize=8)
-
-                    fig2.tight_layout(pad=1.5) # Ajuster espacement
-                    canvas2 = FigureCanvasTkAgg(fig2, master=comp_tab)
-                    canvas2.draw()
-                    canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                    canvas_list.append(canvas2)
-                else:
-                    # Message si pas assez d'images pour comparer
-                    ttk.Label(comp_tab, text=self._("visu_snr_comp_no_data")).pack(padx=10, pady=10)
-            except Exception as e:
-                print(f"Erreur Comparaison SNR: {e}")
-                ttk.Label(comp_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
-
-            # --- Onglet Traînées Satellites (Camembert) ---
-            # Vérifier si la détection de traînées était active pendant l'analyse
-            detect_trails_was_active = any('has_trails' in r for r in self.analysis_results)
-            if detect_trails_was_active:
-                sat_tab = ttk.Frame(notebook)
-                notebook.add(sat_tab, text=self._("visu_tab_sat_trails"))
-                fig3 = None
+        # --- ACTION FINALE : ÉCRIRE LE FICHIER DE COMMANDE OU NON ---
+        if should_write_command and folder_to_stack:
+            print(f"DEBUG (analyse_gui): Condition remplie pour écrire la commande pour: {folder_to_stack}") # <-- AJOUTÉ DEBUG
+            # --- MODIFIÉ : Écrire dans le fichier de commande ---
+            if self.command_file_path:
                 try:
-                    # Compter images avec/sans traînées
-                    sat_count = sum(1 for r in self.analysis_results if r.get('has_trails', False))
-                    no_sat_count = sum(1 for r in self.analysis_results if 'has_trails' in r and not r.get('has_trails'))
-                    total_analyzed_for_trails = sat_count + no_sat_count
-                    if total_analyzed_for_trails > 0:
-                        fig3, ax4 = plt.subplots(figsize=(6, 6))
-                        figures_list.append(fig3)
-                        labels = [self._("visu_sat_pie_without"), self._("visu_sat_pie_with")]
-                        sizes = [no_sat_count, sat_count]
-                        colors = ['#66b3ff', '#ff9999'] # Bleu clair, Rouge clair
-                        # Mettre en évidence la part "Avec Traînées" si elle existe
-                        explode = (0, 0.1 if sat_count > 0 and no_sat_count > 0 else 0)
-                        # Afficher camembert
-                        wedges, texts, autotexts = ax4.pie(sizes, explode=explode, labels=labels, colors=colors,
-                                                           autopct='%1.1f%%', shadow=True, startangle=90)
-                        ax4.axis('equal') # Assurer un cercle parfait
-                        ax4.set_title(self._("visu_sat_pie_title"))
-                        # Style texte pourcentages
-                        plt.setp(autotexts, size=10, weight="bold", color="white")
-                        plt.setp(texts, size=10) # Style labels (Avec/Sans)
-                        canvas3 = FigureCanvasTkAgg(fig3, master=sat_tab)
-                        canvas3.draw()
-                        canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                        canvas_list.append(canvas3)
-                    else:
-                        # Message si aucune image analysée pour les traînées
-                        ttk.Label(sat_tab, text=self._("visu_sat_pie_no_data")).pack(padx=10, pady=10)
-                except Exception as e:
-                    print(f"Erreur Camembert Satellites: {e}")
-                    ttk.Label(sat_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                    # S'assurer que le dossier parent existe (au cas où il serait dans /tmp/app_comm)
+                    command_dir = os.path.dirname(self.command_file_path)
+                    os.makedirs(command_dir, exist_ok=True)
+                    print(f"DEBUG (analyse_gui): Tentative d'écriture dans {self.command_file_path}") # <-- AJOUTÉ DEBUG
 
-            # --- Onglet Données Détaillées (Tableau Treeview) ---
-            data_tab = ttk.Frame(notebook)
-            notebook.add(data_tab, text=self._("visu_tab_raw_data"))
-            try:
-                # Définir colonnes de base
-                cols = ('file', 'status', 'snr', 'bg', 'noise', 'pixsig')
-                # Mapper clés internes aux noms de colonnes traduits
-                col_names_map = {
-                    'file': self._("visu_data_col_file"), 'status': self._("Statut", default="Status"),
-                    'snr': self._("visu_data_col_snr"), 'bg': self._("visu_data_col_bg"),
-                    'noise': self._("visu_data_col_noise"), 'pixsig': self._("visu_data_col_pixsig"),
-                    'trails': self._("visu_data_col_trails"), 'nbseg': self._("visu_data_col_nbseg"),
-                    'action': self._("Action", default="Action"), 'reason': self._("Raison Rejet", default="Reject Reason"),
-                    'comment': self._("Commentaire", default="Comment")
-                }
-                # Définir largeurs et alignements par défaut
-                col_widths = {'file': 250, 'status': 60, 'snr': 60, 'bg': 60, 'noise': 60, 'pixsig': 60,
-                              'trails': 60, 'nbseg': 60, 'action': 80, 'reason': 80, 'comment': 150}
-                col_anchors = {'file': tk.W, 'status': tk.CENTER, 'snr': tk.CENTER, 'bg': tk.CENTER,
-                               'noise': tk.CENTER, 'pixsig': tk.CENTER, 'trails': tk.CENTER, 'nbseg': tk.CENTER,
-                               'action': tk.W, 'reason': tk.W, 'comment': tk.W}
+                    # Écrire le chemin du dossier dans le fichier
+                    with open(self.command_file_path, "w", encoding='utf-8') as f_cmd:
+                        f_cmd.write(folder_to_stack)
 
-                # Ajouter colonnes traînées si détection active
-                if detect_trails_was_active:
-                    cols = cols + ('trails', 'nbseg')
-                # Ajouter colonnes action/raison/commentaire
-                cols = cols + ('action', 'reason', 'comment')
-                # Obtenir noms traduits pour l'affichage
-                col_names = [col_names_map.get(c, c.capitalize()) for c in cols]
+                    print(f"DEBUG (analyse_gui): Fichier de commande écrit avec succès.") # <-- AJOUTÉ DEBUG
+                    self.update_results_text("logic_info_prefix", text=f"Commande d'empilement envoyée pour: {folder_to_stack}")
 
-                # Créer le Treeview
-                tree = ttk.Treeview(data_tab, columns=cols, show='headings')
-                # Configurer chaque colonne (titre, largeur, alignement, tri)
-                for col_id, col_name in zip(cols, col_names):
-                    tree.heading(col_id, text=col_name, command=lambda _col=col_id: self.sort_treeview(tree, _col, False))
-                    tree.column(col_id, width=col_widths.get(col_id, 80), anchor=col_anchors.get(col_id, tk.CENTER), stretch=tk.NO)
+                    # Fermer l'analyseur après avoir écrit le fichier
+                    self.update_status("Status: Commande d'empilement envoyée...") # Message final
+                    print("DEBUG (analyse_gui): Planification fermeture via after(100, self.return_or_quit)...") # <-- AJOUTÉ DEBUG
+                    self.root.after(100, self.return_or_quit) # Très court délai juste pour rafraîchir status
 
-                # Trier résultats si option cochée
-                display_res = sorted(self.analysis_results, key=lambda x: x.get('snr', -np.inf) if np.isfinite(x.get('snr', -np.inf)) else -np.inf, reverse=True) if self.sort_by_snr.get() else self.analysis_results
+                except IOError as e_io:
+                    err_msg = f"Impossible d'écrire le fichier de commande '{self.command_file_path}'. Empilage automatique annulé. Erreur: {e_io}"
+                    print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                    self.update_results_text("logic_error_prefix", text=err_msg)
+                    messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
+                    # Réactiver les boutons car l'écriture a échoué
+                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande.") # <-- AJOUTÉ DEBUG
+                    self._set_widget_state(self.analyze_button, tk.NORMAL)
+                    self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
+                    self._set_widget_state(self.return_button, tk.NORMAL)
+                    self._set_widget_state(self.manage_markers_button, tk.NORMAL)
+                    if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
 
-                # Remplir le Treeview
-                for r in display_res:
-                    status = r.get('status','?')
-                    vals = []
-                    # Formater chaque valeur pour l'affichage
-                    for col_id in cols:
-                        if col_id == 'file': vals.append(r.get('rel_path', os.path.basename(r.get('file','?')))) # Chemin relatif si dispo
-                        elif col_id == 'status': vals.append(status)
-                        elif col_id == 'snr': vals.append(f"{r.get('snr',0.0):.2f}" if np.isfinite(r.get('snr', np.nan)) else "N/A")
-                        elif col_id == 'bg': vals.append(f"{r.get('sky_bg',0.0):.2f}" if np.isfinite(r.get('sky_bg', np.nan)) else "N/A")
-                        elif col_id == 'noise': vals.append(f"{r.get('sky_noise',0.0):.2f}" if np.isfinite(r.get('sky_noise', np.nan)) else "N/A")
-                        elif col_id == 'pixsig': vals.append(f"{r.get('signal_pixels',0)}")
-                        elif col_id == 'trails': vals.append(self._("logic_trail_yes") if r.get('has_trails',False) else self._("logic_trail_no"))
-                        elif col_id == 'nbseg': vals.append(f"{r.get('num_trails',0)}" if 'num_trails' in r else "N/A")
-                        elif col_id == 'action': vals.append(r.get('action','?'))
-                        elif col_id == 'reason': vals.append(r.get('rejected_reason','') or '')
-                        elif col_id == 'comment': vals.append(r.get('error_message', '') + r.get('action_comment', ''))
-                        else: vals.append(r.get(col_id, '?')) # Valeur brute si colonne inconnue
+                except Exception as e_write: # Capturer autres erreurs potentielles
+                    err_msg = f"Erreur inattendue lors de l'écriture du fichier de commande. Empilage automatique annulé. Erreur: {e_write}"
+                    print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                    traceback.print_exc()
+                    self.update_results_text("logic_error_prefix", text=err_msg)
+                    messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
+                    # Réactiver les boutons
+                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande (Exception).") # <-- AJOUTÉ DEBUG
+                    self._set_widget_state(self.analyze_button, tk.NORMAL)
+                    self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
+                    self._set_widget_state(self.return_button, tk.NORMAL)
+                    self._set_widget_state(self.manage_markers_button, tk.NORMAL)
+                    if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
 
-                    # Appliquer tags pour coloration conditionnelle
-                    tag = ()
-                    if status == 'error': tag = ('error',)
-                    elif r.get('rejected_reason'): tag = ('rejected',)
-                    tree.insert('', tk.END, values=tuple(vals), tags=tag)
+            else:
+                # Cas où le chemin du fichier de commande n'a pas été fourni à __init__
+                err_msg = "Erreur interne: Chemin du fichier de commande non défini. Empilage automatique impossible."
+                print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                self.update_results_text("logic_error_prefix", text=err_msg)
+                messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
+                # Réactiver les boutons
+                print("DEBUG (analyse_gui): Réactivation boutons car command_file_path est None.") # <-- AJOUTÉ DEBUG
+                self._set_widget_state(self.analyze_button, tk.NORMAL)
+                self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
+                self._set_widget_state(self.return_button, tk.NORMAL)
+                self._set_widget_state(self.manage_markers_button, tk.NORMAL)
+                if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
+            # --- FIN MODIFIÉ ---
+        # --- FIN ACTION FINALE ---
 
-                # Configurer couleurs des tags
-                tree.tag_configure('error', background='mistyrose')
-                tree.tag_configure('rejected', background='lightyellow')
+        print("DEBUG (analyse_gui): Appel final à gc.collect()") # <-- CONSERVÉ DEBUG
+        gc.collect()
+        print("DEBUG (analyse_gui): Sortie de finalize_analysis.") # <-- CONSERVÉ DEBUG
 
-                # Ajouter barres de défilement
-                vsb = ttk.Scrollbar(data_tab, orient=tk.VERTICAL, command=tree.yview)
-                hsb = ttk.Scrollbar(data_tab, orient=tk.HORIZONTAL, command=tree.xview)
-                tree.configure(yscroll=vsb.set, xscroll=hsb.set)
-                vsb.pack(side=tk.RIGHT, fill=tk.Y)
-                hsb.pack(side=tk.BOTTOM, fill=tk.X)
-                tree.pack(fill=tk.BOTH, expand=True)
-            except Exception as e:
-                print(f"Erreur Tableau Données: {e}")
-                ttk.Label(data_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
-
-            # --- Onglet Recommandations Stacking ---
-            stack_tab = ttk.Frame(notebook)
-            notebook.add(stack_tab, text=self._("visu_tab_recom"))
-            try:
-                recom_frame = ttk.LabelFrame(stack_tab, text=self._("visu_recom_frame_title"), padding=10)
-                recom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-                # Filtrer images OK, conservées, sans raison de rejet, avec SNR valide
-                valid_kept_results = [r for r in self.analysis_results if r.get('status')=='ok' and r.get('action')=='kept' and r.get('rejected_reason') is None and 'snr' in r and np.isfinite(r['snr'])]
-                valid_kept_snrs = [r['snr'] for r in valid_kept_results]
-
-                if len(valid_kept_snrs) >= 5: # Assez d'images pour recommandation basée sur P25
-                    p25_threshold = np.percentile(valid_kept_snrs, 25) # Seuil = 25ème percentile
-                    good_img = [r for r in valid_kept_results if r['snr'] >= p25_threshold]
-                    if good_img:
-                         # Trier par SNR décroissant pour affichage
-                         good_img_sorted = sorted(good_img, key=lambda x: x['snr'], reverse=True)
-                         # Afficher texte recommandation
-                         ttk.Label(recom_frame, text=self._("visu_recom_text", count=len(good_img_sorted), p75=p25_threshold)).pack(anchor=tk.W, pady=(0,5))
-                         # Afficher liste dans Treeview
-                         rec_cols = ("file", "snr")
-                         rec_tree = ttk.Treeview(recom_frame, columns=rec_cols, show='headings', height=10)
-                         rec_tree.heading("file", text=self._("visu_recom_col_file"))
-                         rec_tree.column("file", width=450, anchor='w')
-                         rec_tree.heading("snr", text=self._("visu_recom_col_snr"))
-                         rec_tree.column("snr", width=100, anchor='center')
-                         for img in good_img_sorted:
-                             rec_tree.insert('', tk.END, values=(img.get('rel_path', os.path.basename(img.get('file', '?'))), f"{img.get('snr', 0.0):.2f}"))
-                         # Ajouter scrollbar
-                         rec_scr = ttk.Scrollbar(recom_frame, orient=tk.VERTICAL, command=rec_tree.yview)
-                         rec_tree.configure(yscroll=rec_scr.set)
-                         rec_scr.pack(side=tk.RIGHT, fill=tk.Y)
-                         rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0,10))
-                         # Bouton Exporter Liste Recommandée
-                         export_cmd = lambda gi=good_img_sorted, p=p25_threshold: self.export_recommended_list(gi, p)
-                         export_button = ttk.Button(recom_frame, text=self._("export_button"), command=export_cmd)
-                         export_button.pack(pady=5)
-                    else:
-                         # Cas où P25 est très élevé et aucune image ne le dépasse
-                         ttk.Label(recom_frame, text=self._("visu_recom_no_selection")).pack(padx=10, pady=10)
-                elif len(valid_kept_snrs) > 0: # Moins de 5 images valides conservées
-                    ttk.Label(recom_frame, text=self._("visu_recom_not_enough")).pack(padx=10, pady=10)
-                    # Bouton Exporter Toutes les Conservées
-                    export_all_kept_cmd = lambda gi=valid_kept_results: self.export_recommended_list(gi, -1) # -1 indique "toutes"
-                    export_all_button = ttk.Button(recom_frame, text=self._("Exporter Toutes Conservées", default="Export All Kept"), command=export_all_kept_cmd)
-                    export_all_button.pack(pady=5)
-                else: # Aucune image valide conservée
-                    ttk.Label(recom_frame, text=self._("visu_recom_no_data")).pack(padx=10, pady=10)
-            except Exception as e:
-                print(f"Erreur Recommandations: {e}")
-                traceback.print_exc()
-                ttk.Label(stack_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
-
-            # --- Fonction de Nettoyage et Bouton Fermer ---
-            def cleanup_vis_window():
-                """Nettoie les ressources Matplotlib et détruit la fenêtre."""
-                nonlocal canvas_list, figures_list # Utiliser les listes externes
-                print("Nettoyage de la fenêtre de visualisation...")
-                # Détruire les canvas Tkinter
-                for canvas in canvas_list:
-                    if canvas and canvas.get_tk_widget().winfo_exists():
-                        try:
-                            canvas.close_event() # Appeler méthode Matplotlib si existe
-                            print(f"  Canvas close_event() appelé pour {canvas}")
-                            canvas.get_tk_widget().pack_forget() # Détacher du layout
-                            canvas.get_tk_widget().destroy() # Détruire widget Tkinter
-                            print(f"  Widget Canvas détruit pour {canvas}")
-                        except tk.TclError as e_tk:
-                            print(f"  TclError détruisant le widget canvas: {e_tk}")
-                        except Exception as e_other:
-                            print(f"  Erreur détruisant le widget canvas: {e_other}")
-                canvas_list = [] # Vider la liste
-                # Fermer les figures Matplotlib
-                print(f"  Fermeture de {len(figures_list)} figures Matplotlib...")
-                for fig in figures_list:
-                    try:
-                        plt.close(fig) # Fermer la figure
-                    except Exception as e_plt:
-                        print(f"  Erreur lors de la fermeture de la figure {fig}: {e_plt}")
-                figures_list = [] # Vider la liste
-                # Forcer Garbage Collection
-                print("  Forçage du Garbage Collector...")
-                collected_count = gc.collect()
-                print(f"    Garbage Collector a collecté {collected_count} objets.")
-                # Détruire la fenêtre Toplevel
-                if vis_window and vis_window.winfo_exists():
-                    try:
-                        print("  Destruction de la fenêtre Toplevel de visualisation...")
-                        vis_window.grab_release() # Libérer grab modal
-                        vis_window.destroy()
-                        print("  Fenêtre de visualisation détruite.")
-                    except tk.TclError as e_tk_win:
-                        print(f"  TclError détruisant vis_window: {e_tk_win}")
-                    except Exception as e_other_win:
-                        print(f"  Erreur détruisant vis_window: {e_other_win}")
-
-            # Bouton Fermer et liaison fermeture fenêtre
-            close_button = ttk.Button(vis_window, text=self._("Fermer", default="Close"), command=cleanup_vis_window)
-            close_button.pack(pady=10)
-            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window) # Lier bouton X
-
-            # Attendre que la fenêtre de visualisation soit fermée
-            self.root.wait_window(vis_window)
-            print("Fenêtre de visualisation fermée (wait_window finished).")
-        except Exception as e_vis:
-            # Gérer erreur globale création fenêtre visualisation
-            print(f"Erreur Globale Visualisation: {e_vis}")
-            traceback.print_exc()
-            messagebox.showerror(self._("msg_error"), self._("msg_unexpected_error", e=e_vis), parent=self.root)
-
-    def sort_treeview(self, tree, col, reverse):
-        """Trie les données d'un Treeview lorsqu'un en-tête de colonne est cliqué."""
-        try:
-            # Obtenir les données de la colonne et l'identifiant de chaque ligne
-            data = [(tree.set(item, col), item) for item in tree.get_children('')]
-
-            # Fonction pour convertir en float (gère erreurs et non-numériques)
-            def safe_float(value):
-                try: return float(value)
-                except (ValueError, TypeError): return -float('inf') # Pour trier non-numériques en bas
-
-            # Essayer de trier numériquement d'abord
-            try:
-                data.sort(key=lambda t: safe_float(t[0]), reverse=reverse)
-            except Exception:
-                # Si tri numérique échoue, trier alphabétiquement
-                data.sort(reverse=reverse)
-
-            # Réinsérer les éléments dans l'ordre trié
-            for index, (val, item) in enumerate(data):
-                tree.move(item, '', index)
-
-            # Inverser la direction du tri pour le prochain clic sur cette colonne
-            tree.heading(col, command=lambda _col=col: self.sort_treeview(tree, _col, not reverse))
-        except Exception as e:
-            print(f"Erreur tri Treeview: {e}")
-
-    def export_recommended_list(self, images_list, threshold_val):
-        """Exporte la liste des fichiers recommandés dans un fichier texte."""
-        if not images_list:
-            messagebox.showwarning(self._("msg_warning"), self._("msg_export_no_images"), parent=self.root)
-            return
-
-        # Déterminer nom fichier et critère basé sur seuil
-        if threshold_val == -1: # Cas "Exporter Toutes Conservées"
-            default_filename = f"kept_images_{datetime.datetime.now().strftime('%Y%m%d')}.txt"
-            criterion_text = self._("Toutes les images conservées valides", default="All valid kept images")
-        else: # Cas recommandation P25
-            default_filename = f"recommended_images_snr_gt_{threshold_val:.2f}.txt"
-            criterion_text = self._("Critère", default="Criterion") + f": SNR >= {threshold_val:.2f}"
-
-        # Ouvrir dialogue enregistrer sous
-        save_path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title=self._("export_button"),
-            initialfile=default_filename,
-            defaultextension=".txt",
-            filetypes=[(self._("Fichiers Texte", default="Text Files"), "*.txt"), (self._("Tous les fichiers", default="All Files"), "*.*")]
-        )
-
-        if save_path:
-             try:
-                 # Écrire en-tête et liste des fichiers
-                 with open(save_path, 'w', encoding='utf-8') as f:
-                     f.write(f"# {self._('Liste dimages recommandées', default='Recommended image list')}\n")
-                     f.write(f"# {criterion_text}\n")
-                     f.write(f"# {self._('Généré le', default='Generated on')}: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                     f.write(f"# {self._('Nombre dimages', default='Number of images')}: {len(images_list)}\n\n")
-                     # Écrire chemin relatif si disponible, sinon nom de base
-                     for img in images_list:
-                         f.write(f"{img.get('rel_path', os.path.basename(img.get('file', 'N/A')))}\n")
-                 # Message succès
-                 messagebox.showinfo(self._("msg_info"), self._("msg_export_success", count=len(images_list), path=save_path), parent=self.root)
-             except IOError as ex_err:
-                 # Message erreur écriture
-                 messagebox.showerror(self._("msg_error"), self._("msg_export_error", e=ex_err), parent=self.root)
-        # Ramener focus après dialogue
-        self.root.after(50, self.root.focus_force)
-        self.root.after(100, self.root.lift)
-
-    # --- Gestion des Marqueurs d'Analyse ---
-
-    def manage_markers(self):
-        """Ouvre une fenêtre pour visualiser et supprimer les fichiers marqueurs."""
-        input_dir = self.input_dir.get()
-        # Vérifier si dossier entrée valide
-        if not input_dir or not os.path.isdir(input_dir):
-            messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
-            return
-
-        marker_filename = ".astro_analyzer_run_complete" # Nom du fichier marqueur
-        marked_dirs_rel = [] # Liste chemins relatifs marqués
-        marked_dirs_abs = [] # Liste chemins absolus marqués
-        abs_input_dir = os.path.abspath(input_dir)
-
-        # Déterminer les dossiers de rejet à exclure du scan
-        reject_dirs_to_exclude_abs = []
-        if self.reject_action.get() == 'move':
-            snr_dir = self.snr_reject_dir.get()
-            trail_dir = self.trail_reject_dir.get()
-            if snr_dir: reject_dirs_to_exclude_abs.append(os.path.abspath(snr_dir))
-            if trail_dir: reject_dirs_to_exclude_abs.append(os.path.abspath(trail_dir))
-
-        # Scanner les dossiers pour trouver les marqueurs
-        try:
-            print(f"Scan pour marqueur '{marker_filename}' dans {abs_input_dir}...")
-            for dirpath, dirnames, filenames in os.walk(abs_input_dir, topdown=True):
-                current_dir_abs = os.path.abspath(dirpath)
-
-                # Exclure les dossiers de rejet du parcours récursif
-                dirs_to_remove = [d for d in dirnames if os.path.abspath(os.path.join(current_dir_abs, d)) in reject_dirs_to_exclude_abs]
-                if dirs_to_remove:
-                    for dname in dirs_to_remove: dirnames.remove(dname)
-
-                # Vérifier présence marqueur
-                marker_path = os.path.join(current_dir_abs, marker_filename)
-                if os.path.exists(marker_path):
-                    # Obtenir chemin relatif par rapport au dossier d'entrée
-                    rel_path = os.path.relpath(current_dir_abs, abs_input_dir)
-                    # Utiliser '.' pour le dossier racine lui-même
-                    marked_dirs_rel.append('.' if rel_path == '.' else rel_path)
-                    marked_dirs_abs.append(current_dir_abs) # Stocker chemin absolu
-
-        except OSError as e:
-            messagebox.showerror(self._("msg_error"), f"Erreur parcours dossiers:\n{e}", parent=self.root)
-            return
-
-        # --- Créer la fenêtre de gestion des marqueurs ---
-        marker_window = tk.Toplevel(self.root)
-        marker_window.title(self._("marker_window_title", default="Gérer les Marqueurs d'Analyse"))
-        marker_window.geometry("600x400")
-        marker_window.transient(self.root)
-        marker_window.grab_set() # Rendre modale
-
-        # Cadre principal fenêtre
-        mw_frame = ttk.Frame(marker_window, padding=10)
-        mw_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Label info
-        info_label = ttk.Label(mw_frame, text=self._("marker_info_label", default="Dossiers marqués comme analysés (contiennent le fichier marqueur):"), wraplength=550)
-        info_label.pack(pady=(0, 10))
-
-        # Cadre pour Listbox et Scrollbar
-        list_frame = ttk.Frame(mw_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
-        listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, yscrollcommand=scrollbar.set, width=80)
-        scrollbar.config(command=listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Remplir Listbox et mapper relatif -> absolu
-        rel_to_abs_map = {rel: abs_p for rel, abs_p in zip(marked_dirs_rel, marked_dirs_abs)}
-        sorted_rel_paths = sorted(marked_dirs_rel)
-        if sorted_rel_paths:
-            for rel_path in sorted_rel_paths: listbox.insert(tk.END, rel_path)
-        else:
-            listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé."))
-            listbox.config(state=tk.DISABLED) # Désactiver si vide
-
-        # Cadre pour les boutons
-        button_mw_frame = ttk.Frame(mw_frame)
-        button_mw_frame.pack(fill=tk.X, pady=(10, 0))
-
-        # --- Fonctions pour les boutons de suppression ---
-        def delete_selected_markers():
-            """Supprime les marqueurs des dossiers sélectionnés dans la listbox."""
-            selected_indices = listbox.curselection()
-            if not selected_indices:
-                messagebox.showwarning(self._("msg_warning"), self._("marker_select_none", default="Veuillez sélectionner un ou plusieurs dossiers."), parent=marker_window)
-                return
-
-            # Confirmer suppression
-            confirm_msg = self._("marker_confirm_delete_selected", default="Supprimer les marqueurs pour les {count} dossiers sélectionnés ?\nCela forcera leur ré-analyse au prochain lancement.").format(count=len(selected_indices))
-            if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
-                deleted_count = 0; errors = []
-                paths_to_delete_rel = [listbox.get(i) for i in selected_indices]
-
-                # Supprimer les fichiers marqueurs
-                for rel_path in paths_to_delete_rel:
-                    abs_path_to_clear = rel_to_abs_map.get(rel_path)
-                    if not abs_path_to_clear: errors.append(f"{rel_path}: Chemin absolu non trouvé"); continue
-                    marker_to_delete = os.path.join(abs_path_to_clear, marker_filename)
-                    try:
-                        if os.path.exists(marker_to_delete): os.remove(marker_to_delete); deleted_count += 1
-                        else: deleted_count += 1 # Compter comme succès si déjà absent
-                    except Exception as e: errors.append(f"{rel_path}: {e}")
-
-                # Rafraîchir la liste après suppression (re-scanner est plus sûr)
-                listbox.config(state=tk.NORMAL); listbox.delete(0, tk.END)
-                marked_dirs_rel.clear(); marked_dirs_abs.clear(); rel_to_abs_map.clear()
-                try: # Re-scan
-                    for dp, dn, fn in os.walk(abs_input_dir, topdown=True):
-                        ca = os.path.abspath(dp)
-                        dtr = [d for d in dn if os.path.abspath(os.path.join(ca, d)) in reject_dirs_to_exclude_abs]
-                        for dname in dtr: dn.remove(dname)
-                        mp = os.path.join(ca, marker_filename)
-                        if os.path.exists(mp):
-                            rp = os.path.relpath(ca, abs_input_dir); rp = '.' if rp == '.' else rp
-                            marked_dirs_rel.append(rp); marked_dirs_abs.append(ca); rel_to_abs_map[rp] = ca
-                except Exception as e_scan: listbox.insert(tk.END, "Erreur re-scan"); listbox.config(state=tk.DISABLED)
-
-                # Re-remplir listbox
-                sorted_rel_paths_new = sorted(marked_dirs_rel)
-                if sorted_rel_paths_new:
-                    for rel_path in sorted_rel_paths_new: listbox.insert(tk.END, rel_path)
-                else: listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé.")); listbox.config(state=tk.DISABLED)
-
-                # Mettre à jour état boutons
-                any_markers_left = bool(sorted_rel_paths_new)
-                delete_sel_button.config(state=tk.NORMAL if any_markers_left else tk.DISABLED)
-                delete_all_button.config(state=tk.NORMAL if any_markers_left else tk.DISABLED)
-
-                # Message final
-                if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
-                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_selected_success", default="{count} marqueur(s) supprimé(s).").format(count=deleted_count), parent=marker_window)
-
-        def delete_all_markers():
-            """Supprime tous les marqueurs trouvés."""
-            abs_paths_to_clear = list(rel_to_abs_map.values())
-            if not abs_paths_to_clear:
-                messagebox.showinfo(self._("msg_info"), self._("marker_none_found", default="Aucun dossier marqué trouvé."), parent=marker_window)
-                return
-
-            # Confirmer suppression totale
-            confirm_msg = self._("marker_confirm_delete_all", default="Supprimer TOUS les marqueurs ({count}) dans le dossier '{folder}' et ses sous-dossiers analysables ?\nCela forcera une ré-analyse complète.").format(count=len(abs_paths_to_clear), folder=os.path.basename(abs_input_dir))
-            if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
-                deleted_count = 0; errors = []
-                # Supprimer tous les marqueurs
-                for abs_path in abs_paths_to_clear:
-                    marker_to_delete = os.path.join(abs_path, marker_filename)
-                    try:
-                        if os.path.exists(marker_to_delete): os.remove(marker_to_delete); deleted_count += 1
-                    except Exception as e: errors.append(f"{os.path.relpath(abs_path, abs_input_dir)}: {e}")
-
-                # Mettre à jour listbox (vider)
-                listbox.config(state=tk.NORMAL); listbox.delete(0, tk.END)
-                listbox.insert(tk.END, self._("marker_none_found", default="Aucun dossier marqué trouvé."))
-                listbox.config(state=tk.DISABLED)
-                marked_dirs_rel[:] = []; marked_dirs_abs[:] = []; rel_to_abs_map.clear()
-
-                # Mettre à jour état boutons
-                delete_sel_button.config(state=tk.DISABLED)
-                delete_all_button.config(state=tk.DISABLED)
-
-                # Message final
-                if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
-                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_all_success", default="Tous les {count} marqueur(s) trouvés ont été supprimés.").format(count=deleted_count), parent=marker_window)
-
-        # Créer les boutons de la fenêtre marqueur
-        delete_sel_button = ttk.Button(button_mw_frame, text=self._("marker_delete_selected_button", default="Supprimer Sélection"), command=delete_selected_markers)
-        delete_sel_button.pack(side=tk.LEFT, padx=10)
-        delete_all_button = ttk.Button(button_mw_frame, text=self._("marker_delete_all_button", default="Supprimer Tout"), command=delete_all_markers)
-        delete_all_button.pack(side=tk.LEFT, padx=10)
-        close_mw_button = ttk.Button(button_mw_frame, text=self._("Fermer", default="Close"), command=marker_window.destroy)
-        close_mw_button.pack(side=tk.RIGHT, padx=10)
-
-        # Désactiver boutons si liste vide au départ
-        if not sorted_rel_paths:
-            delete_sel_button.config(state=tk.DISABLED)
-            delete_all_button.config(state=tk.DISABLED)
-
-        # Attendre fermeture fenêtre
-        marker_window.wait_window()
+    # --- Le reste de la classe (méthodes inchangées) ---
+    # ... (create_widgets, toggle_sections_state, browse_..., etc.) ...
 
 
-#####################################################################################################################
 
 
+
+ #####################################################################################################################
 
 # --- DANS LA CLASSE AstroImageAnalyzerGUI ou en dehors si fonction globale ---
 # (Assurez-vous que cette fonction est au bon endroit dans votre fichier)
@@ -1850,9 +2026,7 @@ def check_dependencies():
 ########################################################################################################################
 
 
-
-
-
+###alors gemini as tu vu la modification ?
 
 
 
@@ -1860,91 +2034,77 @@ def check_dependencies():
 
 # --- Bloc d'Exécution Principal  ---
 if __name__ == "__main__":
-    # --- NOUVEAU: Parsing des arguments de ligne de commande ---
+    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---  # <--- Note: J'ai changé le commentaire pour refléter la correction
+    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
     parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
     parser.add_argument(
-        "--input-dir", # Nom de l'argument
-        type=str,      # Type attendu (chaîne de caractères)
-        help="Optional: Pre-fill the input directory path." # Aide affichée
+        "--input-dir",
+        type=str,
+        help="Optional: Pre-fill the input directory path."
     )
-    # Analyser les arguments fournis lors du lancement du script
-    args = parser.parse_args()
-    # args.input_dir contiendra le chemin s'il a été fourni, sinon None
-    # --- FIN NOUVEAU ---
+    # --- NOUVEL ARGUMENT AJOUTÉ ICI ---  # <--- **** CETTE PARTIE EST MANQUANTE DANS VOTRE FICHIER ****
+    parser.add_argument(                       # <--- ****
+        "--command-file",                      # <--- ****
+        type=str,                              # <--- ****
+        metavar="CMD_FILE_PATH",               # <--- ****
+        help="Internal: Path to the command file for communicating with the main stacker GUI." # <--- ****
+    )                                          # <--- ****
+    # --- FIN NOUVEL ARGUMENT ---              # <--- ****
+    args = parser.parse_args() # <--- DOIT VENIR APRES L'AJOUT
+    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
+    # --- FIN MODIFICATION ---
 
     root = None # Initialiser la variable racine
     try:
         # Vérifier si les modules essentiels sont importables
-        if 'analyse_logic' not in sys.modules:
-            raise ImportError("analyse_logic.py could not be imported.")
-        if 'translations' not in globals() or not translations:
-            raise ImportError("zone.py is empty or could not be imported.")
+        if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
+        if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
 
         # Créer la fenêtre racine Tkinter mais la cacher initialement
-        root = tk.Tk()
-        root.withdraw()
+        root = tk.Tk(); root.withdraw()
 
-        # Vérifier les dépendances externes (numpy, astropy, etc.)
-        check_dependencies() # Cette fonction peut quitter si dépendances manquantes
+        # Vérifier les dépendances externes
+        check_dependencies()
 
-        # Si on arrive ici, les dépendances sont OK (ou l'utilisateur a choisi de continuer)
         # Afficher la fenêtre principale
         root.deiconify()
 
-        # Créer l'instance de l'application GUI
-        app = AstroImageAnalyzerGUI(root, main_app_callback=None) # Pas de callback ici
+        # --- MODIFIÉ: Passer command_file_path au constructeur ---
+        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
+        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
+        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
+        # --- FIN MODIFICATION ---
 
-        # --- NOUVEAU: Pré-remplir le dossier d'entrée si fourni via argument ---
-        if args.input_dir: # Vérifier si l'argument a été passé
-            input_path_from_arg = os.path.abspath(args.input_dir) # Obtenir chemin absolu
-            # Vérifier si le chemin est un dossier valide
+        # --- Pré-remplissage dossier d'entrée ---
+        if args.input_dir:
+            input_path_from_arg = os.path.abspath(args.input_dir)
             if os.path.isdir(input_path_from_arg):
-                print(f"INFO: Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
-                # Mettre à jour la variable Tkinter liée au champ d'entrée
+                print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
                 app.input_dir.set(input_path_from_arg)
-                # Pré-remplir aussi les chemins par défaut basés sur l'entrée,
-                # seulement s'ils sont vides actuellement.
-                if not app.output_log.get():
-                    app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
-                if not app.snr_reject_dir.get():
-                    app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
-                if not app.trail_reject_dir.get():
-                    app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
+                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
+                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
+                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
             else:
-                # Avertissement si le chemin fourni n'est pas un dossier valide
-                print(f"AVERTISSEMENT: Dossier d'entrée fourni via argument invalide: {args.input_dir}")
-        # --- FIN NOUVEAU ---
+                print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
 
         # Lancer la boucle principale de Tkinter
+        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
         root.mainloop()
+        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
 
     # --- Gestion des Erreurs au Démarrage ---
     except ImportError as e:
-        # Erreur si un module essentiel (logic, zone) manque
-        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr)
-        try:
-            # Tenter d'afficher une boîte d'erreur
-            if root is None: root = tk.Tk(); root.withdraw()
-            messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides.")
-            if root and root.winfo_exists(): root.destroy()
-        except tk.TclError: pass
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc();
+        try: 
+            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+    except SystemExit as e: # <-- AJOUTÉ: Gérer SystemExit de argparse
+        print(f"DEBUG (analyse_gui main): Argparse a quitté (probablement '-h' ou erreur argument). Code: {e.code}")
+        pass
     except tk.TclError as e:
-        # Erreur si l'environnement graphique n'est pas disponible
-        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr)
-        print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr)
-        sys.exit(1)
+        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
     except Exception as e_main:
-        # Autres erreurs inattendues au démarrage
-        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr)
-        traceback.print_exc()
+        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc();
         try:
-            # Tenter d'afficher une boîte d'erreur
-            if root is None: root = tk.Tk(); root.withdraw()
-            messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}")
-            if root and root.winfo_exists(): root.destroy()
-        except tk.TclError: pass
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr)
-        sys.exit(1)
-
+            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
+        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)

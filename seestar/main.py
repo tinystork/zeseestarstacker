@@ -10,6 +10,7 @@ import tkinter as tk
 import traceback # Keep for detailed error reporting
 import warnings
 from astropy.io.fits.verify import VerifyWarning
+import argparse
 
 # --- Robust PYTHONPATH Modification ---
 # Goal: Ensure the directory *containing* the 'seestar' package is in sys.path
@@ -53,6 +54,7 @@ try:
     # Now import using the package structure (e.g., from seestar.gui...)
     from seestar.gui import SeestarStackerGUI
     from seestar import __version__ as SEESTAR_VERSION
+
 except ImportError as e:
     print(f"\n--- Import Error ---")
     print(f"Error: {e}")
@@ -168,9 +170,11 @@ def check_dependencies():
     return True
 
 
+
 def main():
     """Point d'entrée principal de l'application."""
     print(f"\n--- Démarrage de Seestar Stacker v{SEESTAR_VERSION} ---")
+    print(f"DEBUG (main.py): Lancement du script principal.") # <-- AJOUTÉ DEBUG
 
     # Vérifier les dépendances
     if not check_dependencies():
@@ -179,17 +183,70 @@ def main():
         except EOFError: pass
         sys.exit(1)
 
+    # --- MODIFIÉ : Parser les arguments de ligne de commande ---
+    print("DEBUG (main.py): Configuration du parser d'arguments...") # <-- AJOUTÉ DEBUG
+    parser = argparse.ArgumentParser(description="Seestar Stacker GUI")
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        help="Optional: Pre-fill the input directory."
+    )
+    # --- NOUVEL ARGUMENT AJOUTÉ ICI ---
+    parser.add_argument(
+        "--stack-from-analyzer", # <-- NOUVEAU
+        type=str,
+        metavar="ANALYZED_DIR", # Nom affiché dans l'aide
+        help="Internal: Launch stacking directly from analyzer for the specified directory."
+    )
+    # Ajouter d'autres arguments ici si nécessaire
+    print("DEBUG (main.py): Parsing des arguments fournis...") # <-- AJOUTÉ DEBUG
+    args = parser.parse_args()
+    print(f"DEBUG (main.py): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
+
+    input_dir_from_args = None
+    stack_immediately_path = None # <-- NOUVEAU: Variable pour stocker chemin si lancé par analyseur
+
+    # --- NOUVEAU: Logique pour --stack-from-analyzer ---
+    if args.stack_from_analyzer:
+        abs_path_analyzer = os.path.abspath(args.stack_from_analyzer)
+        if os.path.isdir(abs_path_analyzer):
+            stack_immediately_path = abs_path_analyzer
+            input_dir_from_args = abs_path_analyzer # Pré-remplir aussi le champ input
+            print(f"INFO (main.py): Lancement automatique stacking demandé par analyseur pour: {stack_immediately_path}") # <-- AJOUTÉ INFO
+        else:
+            print(f"AVERTISSEMENT (main.py): Le chemin --stack-from-analyzer '{args.stack_from_analyzer}' n'est pas un dossier valide. Empilage automatique ignoré.")
+            # Optionnel: Mettre input_dir_from_args à None pour ne pas pré-remplir si invalide ?
+            # input_dir_from_args = None
+    # --- FIN NOUVEAU ---
+    # --- Gérer --input-dir (SEULEMENT si --stack-from-analyzer n'a pas été utilisé) ---
+    elif args.input_dir: # <-- AJOUTÉ 'elif' pour prioriser --stack-from-analyzer
+        abs_path_arg = os.path.abspath(args.input_dir)
+        if os.path.isdir(abs_path_arg):
+            input_dir_from_args = abs_path_arg
+            print(f"INFO (main.py): Dossier d'entrée pré-rempli depuis argument --input-dir: {input_dir_from_args}")
+        else:
+            print(f"AVERTISSEMENT (main.py): Le chemin --input-dir '{args.input_dir}' n'est pas un dossier valide. Ignoré.")
+    # --- FIN MODIFICATION ---
+
     print("\nLancement de l'interface graphique...")
     # Lancer l'interface graphique
-    root = None # Keep track of root window for error handling
+    root = None
     try:
-        # Instantiate and run the main application window
-        app = SeestarStackerGUI()
-        root = app.root # Get reference to the Tk root window
+        # --- MODIFIÉ: Passer le chemin pour le stacking immédiat à SeestarStackerGUI ---
+        print(f"DEBUG (main.py): Instanciation SeestarStackerGUI avec initial_input_dir='{input_dir_from_args}', stack_immediately_from='{stack_immediately_path}'") # <-- AJOUTÉ DEBUG
+        app = SeestarStackerGUI(
+            initial_input_dir=input_dir_from_args,
+            stack_immediately_from=stack_immediately_path # <-- NOUVEAU PARAMETRE
+        )
+        # --- FIN MODIFICATION ---
+
+        root = app.root
+        print("DEBUG (main.py): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
         root.mainloop()
+        print("DEBUG (main.py): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
 
     except tk.TclError as e:
-        # Handle common Tkinter errors more gracefully
+        # ... (Gestion erreurs Tkinter/Tcl identique) ...
         err_str = str(e).lower()
         print("\n--- ERREUR Tkinter/Tcl ---")
         if "display" in err_str or "no display name" in err_str or "couldn't connect to display" in err_str:
@@ -203,7 +260,6 @@ def main():
              print("une incompatibilité de version, ou une erreur interne.")
         else:
             print("Erreur Tkinter/Tcl inattendue.")
-
         print(f"\nErreur détaillée: {e}")
         traceback.print_exc()
         print("-" * 25)
@@ -212,7 +268,7 @@ def main():
         sys.exit(1)
 
     except Exception as e:
-        # Catch any other unexpected error during GUI setup or run
+        # ... (Gestion erreurs générales identique) ...
         print(f"\n--- ERREUR INATTENDUE ---")
         print(f"Une erreur s'est produite lors du lancement ou de l'exécution de l'application:")
         print(f"Type: {type(e).__name__}")
