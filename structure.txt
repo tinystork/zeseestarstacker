@@ -1,48 +1,48 @@
-zeseestarstacker/
+├── seestar/                     # Package principal de l'application
+│   ├── core/                    # Noyau : Fonctions de base du traitement d'image
+│   │   ├── __init__.py          # Exporte les éléments du 'core'
+│   │   ├── image_processing.py  # Chargement/Sauvegarde FITS, Debayer, Normalisation, Aperçu PNG
+│   │   ├── alignment.py         # Classe SeestarAligner pour l'alignement (astroalign)
+│   │   ├── hot_pixels.py        # Détection/Correction pixels chauds (OpenCV +/- CUDA)
+│   │   └── utils.py             # Utilitaires : Estimation taille lot, Débruitage, Checks CUDA/CuPy
+│   │
+│   ├── gui/                     # Interface Graphique Utilisateur (Tkinter)
+│   │   ├── __init__.py          # Exporte les éléments du 'gui'
+│   │   ├── main_window.py       # Fenêtre principale, orchestration UI, lien avec backend
+│   │   ├── preview.py           # Gestionnaire Canvas Aperçu (Zoom/Pan, Ajustements visuels)
+│   │   ├── histogram_widget.py  # Widget Histogramme interactif (Matplotlib intégré)
+│   │   ├── file_handling.py     # Gestionnaire dialogues sélection fichiers/dossiers
+│   │   ├── progress.py          # Gestionnaire affichage progression (barre, texte, timers)
+│   │   └── settings.py          # Gestionnaire chargement/sauvegarde paramètres (JSON)
+│   │
+│   ├── queuep/                  # Backend : Traitement asynchrone en file d'attente
+│   │   ├── __init__.py          # Exporte le QueueManager
+│   │   └── queue_manager.py     # SeestarQueuedStacker : Moteur principal (thread, file, align, stack, drizzle, poids)
+│   │
+│   ├── tools/                   # Outils : Fonctions avancées pour traitement/aperçu
+│   │   ├── __init__.py          # Exporte les éléments 'tools'
+│   │   └── stretch.py           # Presets Stretch, Correction Couleur, Auto-ajustements, Sauvegarde PNG
+│   │
+│   ├── enhancement/             # Améliorations : Drizzle et post-traitement
+│   │   ├── __init__.py          # Exporte les éléments 'enhancement'
+│   │   ├── drizzle_integration.py # Fonctions/Classes utilitaires pour Drizzle (WCS, chargement temp)
+│   │   └── stack_enhancement.py   # StackEnhancer (potentiellement pour post-traitement : crop, CLAHE)
+│   │
+│   ├── localization/            # Support multi-langues
+│   │   ├── __init__.py          # Exporte la classe Localization
+│   │   ├── fr.py                # Traductions françaises
+│   │   ├── en.py                # Traductions anglaises
+│   │   └── localization.py      # Classe Localization pour gérer les traductions
+│   │
+│   └── __init__.py              # Init package seestar, exporte éléments clés
 │
-├── seestar/                     # Main application package
-│   ├── __init__.py              # Package initializer, exposes main components
-│   │
-│   ├── core/                    # Core processing logic
-│   │   ├── __init__.py          # Initializes core module
-│   │   ├── alignment.py         # SeestarAligner class (reference finding, alignment)
-│   │   ├── hot_pixels.py        # Hot pixel detection and correction
-│   │   ├── image_processing.py  # Basic FITS load/save, debayer, preview save
-│   │   ├── utils.py             # Utility functions (batch size estimation, denoise)
-│   │   └── (stacking.py)        # Likely OBSOLETE/UNUSED - stacking now in queuep
-│   │
-│   ├── gui/                     # Graphical User Interface components
-│   │   ├── __init__.py          # Initializes gui module
-│   │   ├── file_handling.py     # File/Folder dialogs, Add Folder logic
-│   │   ├── histogram_widget.py  # Interactive Matplotlib histogram widget
-│   │   ├── main_window.py       # Main SeestarStackerGUI class, layout, callbacks
-│   │   ├── preview.py           # Preview canvas manager (zoom/pan, display adjustments, text overlay)
-│   │   ├── progress.py          # Progress bar, status text, time updates
-│   │   ├── settings.py          # Settings loading/saving/validation (JSON)
-│   │   └── (main_window_back.py)# Likely OBSOLETE/UNUSED backup/old version
-│   │   └── (processing.py)      # Likely OBSOLETE/UNUSED - processing now in queuep
-│   │   └── (ui_components.py)   # Likely OBSOLETE/UNUSED - UI created in main_window
-│   │
-│   ├── localization/            # Language and translation files
-│   │   ├── __init__.py          # Initializes localization module
-│   │   ├── en.py                # English translations dictionary
-│   │   ├── fr.py                # French translations dictionary
-│   │   └── localization.py      # Localization class to manage translations
-│   │
-│   ├── queuep/                  # Asynchronous queue processing
-│   │   ├── __init__.py          # Initializes queuep module
-│   │   ├── queue_manager.py     # SeestarQueuedStacker class (worker thread, batching, stacking)
-│   │   └── (image_db.py)        # Likely OBSOLETE/UNUSED
-│   │   └── (image_info.py)      # Likely OBSOLETE/UNUSED
-│   │
-│   └── tools/                   # Auxiliary image tools
-│       ├── __init__.py          # Initializes tools module
-│       ├── stretch.py           # Stretch presets, color correction, auto WB/Stretch
-│       └── (visu.py)            # Likely OBSOLETE/UNUSED (separate viewer?)
-│       └── (testimg.py)         # Likely OBSOLETE/UNUSED (test script?)
+├── icon/                        # Dossier pour les icônes et images de fond
+│   ├── icon.png                 # Icône de l'application
+│   └── back.png                 # Image de fond pour l'aperçu
 │
-├── main.py                      # Alternative entry point if run from within seestar/
-│
-├── README.md                    # This documentation file
-├── requirements.txt             # Python package dependencies
-└── seestar_settings.json        # User settings file (created on first run/save)
+├── main.py                      # Script principal pour lancer l'application GUI
+├── README.md                    # Documentation principale
+├── requirements.txt             # Dépendances Python
+├── seestar_settings.json        # Fichier de configuration utilisateur (exemple/généré)
+├── LICENSE                      # Fichier de licence (ex: GPL-3.0)
+└── quality weighting explained.txt # Documentation spécifique sur la pondération
