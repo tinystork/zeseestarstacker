@@ -76,8 +76,6 @@ warnings.filterwarnings('ignore', category=FITSFixedWarning)
 ################################################################################################################################################
 
 
-# --- DANS LE FICHIER: seestar/enhancement/drizzle_integration.py ---
-
 def _load_drizzle_temp_file(filepath):
     """
     Charge spécifiquement un fichier FITS temporaire Drizzle.
@@ -145,7 +143,7 @@ def _load_drizzle_temp_file(filepath):
         traceback.print_exc(limit=1)
         return None, None, None
 
-# --- FIN FONCTION _load_drizzle_temp_file CORRIGÉE ---
+
 
 
 
@@ -153,7 +151,141 @@ def _load_drizzle_temp_file(filepath):
 
 
 
-# === Fonctions Helper (Intégrées ou adaptées) ===
+    def apply_drizzle_mosaic(self, temp_filepath_list, output_wcs, output_shape_2d_hw):
+        """
+        Assemble une mosaïque en utilisant la classe Drizzle à partir de fichiers temporaires.
+        MAJ: Passe explicitement output_wcs à Drizzle.
+
+        Args:
+            temp_filepath_list (list): Liste des chemins vers les fichiers FITS temporaires
+                                      (HxWx3 float32 attendu, avec WCS valide).
+            output_wcs (astropy.wcs.WCS): WCS final pour l'image combinée.
+            output_shape_2d_hw (tuple): Shape (H, W) finale pour l'image combinée.
+
+        Returns:
+            tuple: (final_sci_image_hxwxc, final_wht_map_hxwxc) ou (None, None) si échec.
+                   Les tableaux retournés sont en float32.
+        """
+        start_time = time.time()
+        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None:
+            print("ERREUR (apply_drizzle_mosaic): Classe Drizzle non disponible.")
+            return None, None
+        if not temp_filepath_list:
+            print("WARNING (apply_drizzle_mosaic): Liste de fichiers vide fournie.")
+            return None, None
+        if output_wcs is None or output_shape_2d_hw is None:
+            print("ERREUR (apply_drizzle_mosaic): WCS ou Shape de sortie manquant.")
+            return None, None
+
+        num_files = len(temp_filepath_list)
+        print(f"DrizzleProcessor (Mosaic): Démarrage assemblage sur {num_files} fichiers...")
+        # --- Ajout Debug pour vérifier la shape de sortie ATTENDUE ---
+        print(f"   -> Grille Sortie CIBLE: Shape={output_shape_2d_hw} (H,W), WCS fourni: {'Oui' if output_wcs else 'Non'}")
+        if output_wcs:
+            print(f"      - WCS Cible CRPIX: {output_wcs.wcs.crpix}, PixelShape: {output_wcs.pixel_shape}")
+        # --- Fin Ajout Debug ---
+
+        # --- Initialiser les objets Drizzle finaux et tableaux de sortie ---
+        num_output_channels = 3
+        final_drizzlers = []
+        final_output_sci_list = []
+        final_output_wht_list = []
+        initialized = False
+
+        try:
+            print(f"   -> Initialisation Drizzle pour {num_output_channels} canaux...")
+            for _ in range(num_output_channels):
+                out_img_ch = np.zeros(output_shape_2d_hw, dtype=np.float32)
+                out_wht_ch = np.zeros(output_shape_2d_hw, dtype=np.float32)
+                final_output_sci_list.append(out_img_ch)
+                final_output_wht_list.append(out_wht_ch)
+
+                # --- MODIFICATION ICI : Ajouter out_wcs ---
+                driz_ch = Drizzle(
+                    out_img=out_img_ch,
+                    out_wht=out_wht_ch,
+                    out_shape=output_shape_2d_hw, # Garder shape pour clarté
+                    out_wcs=output_wcs,           ### AJOUT out_wcs ###
+                    kernel=self.kernel,
+                    fillval="0.0"
+                )
+                # --- FIN MODIFICATION ---
+
+                final_drizzlers.append(driz_ch)
+            initialized = True
+            print("   -> Initialisation Drizzle terminée (avec WCS de sortie).")
+        except Exception as init_err:
+            print(f"   -> ERREUR initialisation Drizzle pour Mosaïque: {init_err}")
+            traceback.print_exc(limit=1)
+            return None, None
+
+        if not initialized: return None, None # Sécurité
+
+        # --- Boucle Drizzle sur les fichiers temporaires (INCHANGÉ) ---
+        print(f"   -> Démarrage boucle Drizzle sur {len(temp_filepath_list)} fichiers...")
+        processed_count = 0
+        for i, filepath in enumerate(temp_filepath_list):
+            if (i + 1) % 10 == 0 or i == 0 or i == len(temp_filepath_list) - 1: print(f"      Adding Mosaïque Input {i+1}/{len(temp_filepath_list)}") # Renommé pour clarté
+            img_data_hxwxc, wcs_in, header_in = _load_drizzle_temp_file(filepath)
+            if img_data_hxwxc is None or wcs_in is None: print(f"      - Skip Mosaïque Input {i+1} (échec chargement/WCS)"); del img_data_hxwxc, wcs_in, header_in; gc.collect(); continue
+            current_input_shape_2d = img_data_hxwxc.shape[:2]
+            # On ne compare plus à ref_shape_2d car les images peuvent avoir des tailles légèrement différentes
+
+            pixmap = None
+            try:
+                y_in, x_in = np.indices(current_input_shape_2d)
+                world_coords = wcs_in.all_pix2world(x_in.flatten(), y_in.flatten(), 0)
+                x_out, y_out = output_wcs.all_world2pix(world_coords[0], world_coords[1], 0)
+                pixmap = np.dstack((x_out.reshape(current_input_shape_2d), y_out.reshape(current_input_shape_2d))).astype(np.float32)
+            except Exception as map_err: print(f"      - ERREUR calcul pixmap mosaïque pour input {i+1}: {map_err}"); del img_data_hxwxc, wcs_in, header_in; gc.collect(); continue
+
+            if pixmap is not None:
+                try:
+                    exptime = 1.0
+                    if header_in and 'EXPTIME' in header_in:
+                        try: exptime = max(1e-6, float(header_in['EXPTIME']))
+                        except (ValueError, TypeError): pass
+                    for c in range(num_output_channels):
+                        channel_data_2d = img_data_hxwxc[:, :, c].astype(np.float32) # Assurer float32 ici
+                        finite_mask = np.isfinite(channel_data_2d)
+                        if not np.all(finite_mask): channel_data_2d[~finite_mask] = 0.0
+                        final_drizzlers[c].add_image(data=channel_data_2d, pixmap=pixmap, exptime=exptime, in_units='counts', pixfrac=self.pixfrac)
+                    processed_count += 1
+                except Exception as e_add: print(f"      - ERREUR add_image mosaïque input {i+1}: {e_add}"); traceback.print_exc(limit=1)
+                finally: del img_data_hxwxc, wcs_in, header_in, pixmap; gc.collect()
+            else: del img_data_hxwxc, wcs_in, header_in; gc.collect()
+        # --- Fin Boucle Drizzle ---
+
+        print(f"   -> Boucle assemblage Mosaïque terminée. {processed_count}/{num_files} fichiers ajoutés.")
+        if processed_count == 0:
+            print("ERREUR (apply_drizzle_mosaic): Aucun fichier traité avec succès.")
+            del final_drizzlers, final_output_sci_list, final_output_wht_list; gc.collect()
+            return None, None
+
+        # --- Assemblage et Retour (INCHANGÉ) ---
+        try:
+            print("   -> Assemblage final des canaux (Mosaïque)...")
+            final_sci_hxwxc = np.stack(final_output_sci_list, axis=-1)
+            final_wht_hxwxc = np.stack(final_output_wht_list, axis=-1)
+            final_sci_hxwxc[~np.isfinite(final_sci_hxwxc)] = 0.0
+            final_wht_hxwxc[~np.isfinite(final_wht_hxwxc)] = 0.0
+            final_wht_hxwxc[final_wht_hxwxc < 0] = 0.0
+            print(f"   -> Combinaison terminée. Shape finale SCI: {final_sci_hxwxc.shape}, WHT: {final_wht_hxwxc.shape}")
+        except Exception as e_final:
+            print(f"   -> ERREUR assemblage final Mosaïque: {e_final}")
+            del final_drizzlers, final_output_sci_list, final_output_wht_list; gc.collect()
+            return None, None
+
+        end_time = time.time()
+        print(f"✅ DrizzleProcessor (Mosaic): Assemblage terminé en {end_time - start_time:.2f}s.")
+        del final_drizzlers, final_output_sci_list, final_output_wht_list; gc.collect()
+        # Retourner HxWx3 float32
+        return final_sci_hxwxc.astype(np.float32), final_wht_hxwxc.astype(np.float32)
+
+
+
+
+###################################################################################################################################
 
 
 

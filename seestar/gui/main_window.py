@@ -29,6 +29,8 @@ from ..localization import Localization
 from ..queuep.queue_manager import SeestarQueuedStacker
 from ..core.utils import estimate_batch_size
 from ..enhancement.color_correction import ChromaticBalancer 
+# (Ajouter ceci avec les autres imports de gui)
+from .mosaic_gui import MosaicSettingsWindow # Importer la future classe
 try:
     # Import tools for preview adjustments and auto calculations
     from ..tools.stretch import StretchPresets, ColorCorrection
@@ -95,6 +97,12 @@ class SeestarStackerGUI:
         self.time_per_image = 0
         self.global_start_time = None
         self.additional_folders_to_process = []
+
+        # --- Variables état mosaïque ---
+        self.mosaic_mode_active = False
+        # self.mosaic_panel_folders = [] # Sera utilisé plus tard
+        # self.mosaic_settings = {}    # Sera utilisé plus tard
+        print("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
 
         # --- NOUVEAU FLAG ---
         self._trigger_immediate_stack = False # Sera True si stack_immediately_from est valide
@@ -468,6 +476,9 @@ class SeestarStackerGUI:
 
 
 
+# --- DANS LE FICHIER: seestar/gui/main_window.py ---
+# --- DANS LA CLASSE: SeestarStackerGUI ---
+
     def create_layout(self):
         """Crée la disposition des widgets avec les boutons de contrôle SOUS l'aperçu."""
         print("DEBUG (GUI create_layout): Début création layout...") # <-- AJOUTÉ DEBUG
@@ -497,16 +508,13 @@ class SeestarStackerGUI:
         tab_stacking = ttk.Frame(control_notebook)
         # ... (Début de l'onglet Stacking : Folders, Options, Drizzle, HP, Weighting - INCHANGÉ) ...
         self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders")); self.folders_frame.pack(fill=tk.X, pady=5, padx=5)
-        # ... (contenu de folders_frame) ...
         in_subframe = ttk.Frame(self.folders_frame); in_subframe.pack(fill=tk.X, padx=5, pady=(5, 2)); self.input_label = ttk.Label(in_subframe, text=self.tr("input_folder"), width=8, anchor="w"); self.input_label.pack(side=tk.LEFT); self.browse_input_button = ttk.Button(in_subframe, text=self.tr("browse_input_button"), command=self.file_handler.browse_input, width=10); self.browse_input_button.pack(side=tk.RIGHT); self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path); self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)); self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state); self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state)
         out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5)); self.output_label = ttk.Label(out_subframe, text=self.tr("output_folder"), width=8, anchor="w"); self.output_label.pack(side=tk.LEFT); self.browse_output_button = ttk.Button(out_subframe, text=self.tr("browse_output_button"), command=self.file_handler.browse_output, width=10); self.browse_output_button.pack(side=tk.RIGHT); self.output_entry = ttk.Entry(out_subframe, textvariable=self.output_path); self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         ref_frame = ttk.Frame(self.folders_frame); ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5)); self.reference_label = ttk.Label(ref_frame, text=self.tr("reference_image"), width=8, anchor="w"); self.reference_label.pack(side=tk.LEFT); self.browse_ref_button = ttk.Button(ref_frame, text=self.tr("browse_ref_button"), command=self.file_handler.browse_reference, width=10); self.browse_ref_button.pack(side=tk.RIGHT); self.ref_entry = ttk.Entry(ref_frame, textvariable=self.reference_image_path); self.ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.options_frame = ttk.LabelFrame(tab_stacking, text=self.tr("options")); self.options_frame.pack(fill=tk.X, pady=5, padx=5)
-        # ... (contenu de options_frame : method, kappa, batch) ...
         method_frame = ttk.Frame(self.options_frame); method_frame.pack(fill=tk.X, padx=5, pady=5); self.stacking_method_label = ttk.Label(method_frame, text=self.tr("stacking_method")); self.stacking_method_label.pack(side=tk.LEFT, padx=(0, 5)); self.stacking_combo = ttk.Combobox(method_frame, textvariable=self.stacking_mode, values=("mean", "median", "kappa-sigma", "winsorized-sigma"), width=15, state="readonly"); self.stacking_combo.pack(side=tk.LEFT); self.kappa_label = ttk.Label(method_frame, text=self.tr("kappa_value")); self.kappa_label.pack(side=tk.LEFT, padx=(10, 2)); self.kappa_spinbox = ttk.Spinbox(method_frame, from_=1.0, to=5.0, increment=0.1, textvariable=self.kappa, width=5); self.kappa_spinbox.pack(side=tk.LEFT)
         batch_frame = ttk.Frame(self.options_frame); batch_frame.pack(fill=tk.X, padx=5, pady=5); self.batch_size_label = ttk.Label(batch_frame, text=self.tr("batch_size")); self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5)); self.batch_spinbox = ttk.Spinbox(batch_frame, from_=3, to=500, increment=1, textvariable=self.batch_size, width=5); self.batch_spinbox.pack(side=tk.LEFT)
         self.drizzle_options_frame = ttk.LabelFrame(tab_stacking, text=self.tr("drizzle_options_frame_label")); self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
-        # ... (contenu de drizzle_options_frame : check, mode, scale, wht, kernel, pixfrac) ...
         self.drizzle_check = ttk.Checkbutton(self.drizzle_options_frame, text=self.tr("drizzle_activate_check"), variable=self.use_drizzle_var, command=self._update_drizzle_options_state); self.drizzle_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
         self.drizzle_mode_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_mode_frame.pack(fill=tk.X, padx=(20, 5), pady=(2, 5)); self.drizzle_mode_label = ttk.Label(self.drizzle_mode_frame, text=self.tr("drizzle_mode_label")); self.drizzle_mode_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_final = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_final"), variable=self.drizzle_mode_var, value="Final", command=self._update_drizzle_options_state); self.drizzle_radio_incremental = ttk.Radiobutton(self.drizzle_mode_frame, text=self.tr("drizzle_radio_incremental"), variable=self.drizzle_mode_var, value="Incremental", command=self._update_drizzle_options_state); self.drizzle_radio_final.pack(side=tk.LEFT, padx=3); self.drizzle_radio_incremental.pack(side=tk.LEFT, padx=3)
         self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text=self.tr("drizzle_scale_label")); self.drizzle_scale_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_2x = ttk.Radiobutton(self.drizzle_scale_frame, text="x2", variable=self.drizzle_scale_var, value="2"); self.drizzle_radio_3x = ttk.Radiobutton(self.drizzle_scale_frame, text="x3", variable=self.drizzle_scale_var, value="3"); self.drizzle_radio_4x = ttk.Radiobutton(self.drizzle_scale_frame, text="x4", variable=self.drizzle_scale_var, value="4"); self.drizzle_radio_2x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_3x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_4x.pack(side=tk.LEFT, padx=3)
@@ -514,45 +522,16 @@ class SeestarStackerGUI:
         kernel_frame = ttk.Frame(self.drizzle_options_frame); kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_kernel_label = ttk.Label(kernel_frame, text=self.tr("drizzle_kernel_label")); self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text=self.tr("drizzle_pixfrac_label")); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         self.hp_frame = ttk.LabelFrame(tab_stacking, text=self.tr("hot_pixels_correction")); self.hp_frame.pack(fill=tk.X, pady=5, padx=5)
-        # ... (contenu de hp_frame) ...
         hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text=self.tr("perform_hot_pixels_correction"), variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text=self.tr("hot_pixel_threshold")); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text=self.tr("neighborhood_size")); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
         self.weighting_frame = ttk.LabelFrame(tab_stacking, text=self.tr("quality_weighting_frame")); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5)
-        # ... (contenu de weighting_frame) ...
         self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text=self.tr("enable_weighting_check"), variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text=self.tr("weighting_metrics_label")); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_snr_check"), variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text=self.tr("weight_stars_check"), variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text=self.tr("snr_exponent_label")); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text=self.tr("stars_exponent_label")); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text=self.tr("min_weight_label")); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
-
-
-        # --- Cadre Post-Traitement (MODIFIÉ) ---
-        # Création du cadre (reste identique)
-        self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text=self.tr('post_proc_opts_frame_label'))
-        self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5)
-
-        # Création de la checkbox "Cleanup" (reste identique)
-        self.cleanup_temp_check = ttk.Checkbutton(
-            self.post_proc_opts_frame,
-            text=self.tr("cleanup_temp_check_label"), # Le texte sera mis à jour par localisation
-            variable=self.cleanup_temp_var
-        )
-        # Packer la checkbox "Cleanup" à gauche
-        self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5)
-
-        # --- AJOUT DE LA NOUVELLE CHECKBOX "Edge Enhance" ---
-        self.chroma_correction_check = ttk.Checkbutton(
-            self.post_proc_opts_frame,
-            text="Edge Enhance", # Label temporaire
-            variable=self.apply_chroma_correction_var # Lier à la variable Tkinter
-            # Pas besoin de 'command' pour l'instant, on lit la valeur au démarrage
-        )
-        # Packer la nouvelle checkbox à côté de l'autre (à droite de "Cleanup")
-        self.chroma_correction_check.pack(anchor=tk.W, padx=5, pady=(2,5)) # pady=(haut, bas)
-        print("DEBUG (GUI create_layout): Checkbox 'Edge Enhance' créée et packée (vertical).") # <-- AJOUTÉ DEBUG
-        # --- FIN AJOUT ---
-        # --- FIN MODIFICATION Cadre Post-Traitement ---
-
+        self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text=self.tr('post_proc_opts_frame_label')); self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5)
+        self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text=self.tr("cleanup_temp_check_label"), variable=self.cleanup_temp_var); self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5)
+        self.chroma_correction_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Edge Enhance", variable=self.apply_chroma_correction_var); self.chroma_correction_check.pack(anchor=tk.W, padx=5, pady=(2,5))
         control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking")} ')
 
         # --- Onglet Aperçu (inchangé) ---
         tab_preview = ttk.Frame(control_notebook)
-        # ... (contenu de l'onglet Preview : WB, Stretch, Adjustments) ...
         self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance")); self.wb_frame.pack(fill=tk.X, pady=5, padx=5); self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain); self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain); self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain); wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5); self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_wb_button.pack(side=tk.LEFT, padx=5); self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
         self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text=self.tr("stretch_options")); self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5); stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2); self.stretch_method_label = ttk.Label(stretch_method_frame, text=self.tr("stretch_method")); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5)); self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly"); self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview); self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders); self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders); self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma); stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5); self.auto_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("auto_stretch"), command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_stretch_button.pack(side=tk.LEFT, padx=5); self.reset_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("reset_stretch"), command=self.reset_stretch); self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
         self.bcs_frame = ttk.LabelFrame(tab_preview, text=self.tr("image_adjustments")); self.bcs_frame.pack(fill=tk.X, pady=5, padx=5); self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness); self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast); self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation); bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5); self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation); self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
@@ -561,27 +540,37 @@ class SeestarStackerGUI:
         # ==============================================================
         # --- Panneau Droit (Aperçu, Boutons, Histogramme) ---
         # ==============================================================
-        # (Inchangé)
         # 1. Définition du Cadre des Boutons
         control_frame = ttk.Frame(right_frame)
-        # ... (contenu de control_frame : boutons Start, Stop, Analyze, Open Output, Add Folder, Show Folders) ...
+        # --- ICI NOUS ALLONS AJOUTER LE BOUTON MOSAÏQUE ---
         try: style = ttk.Style(); accent_style = 'Accent.TButton' if 'Accent.TButton' in style.element_names() else 'TButton'
         except tk.TclError: accent_style = 'TButton'
         self.start_button = ttk.Button(control_frame, text=self.tr("start"), command=self.start_processing, style=accent_style); self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text=self.tr("stop"), command=self.stop_processing, state=tk.DISABLED); self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(control_frame, text=self.tr("analyze_folder_button"), command=self._launch_folder_analyzer, state=tk.DISABLED); self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+
+        ### AJOUT BOUTON MOSAÏQUE ###
+        # Création du bouton
+        self.mosaic_options_button = ttk.Button(
+            control_frame,
+            text=self.tr("Mosaic...", default="Mosaic..."), # Clé de traduction à ajouter
+            command=self._open_mosaic_settings_window # Méthode à créer à l'étape suivante
+        )
+        # Placement du bouton (par exemple, après "Analyze Input Folder")
+        self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        ### FIN AJOUT ###
+
+        # --- Reste des boutons (droite) ---
         self.open_output_button = ttk.Button(control_frame, text=self.tr("open_output_button_text"), command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text=self.tr("add_folder_button"), command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.show_folders_button = ttk.Button(control_frame, text=self.tr("show_folders_button_text"), command=self._show_input_folder_list, state=tk.DISABLED); self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
 
         # 2. Définition du Cadre de l'Histogramme (inchangé)
         self.histogram_frame = ttk.LabelFrame(right_frame, text=self.tr("histogram"))
-        # ... (contenu de histogram_frame) ...
         hist_fig_height_inches = 2.2; hist_fig_dpi = 80; hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1); self.histogram_frame.config(height=hist_height_pixels); self.histogram_frame.pack_propagate(False); self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram); self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2)); self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2); self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
 
         # 3. Définition du Cadre de l'Aperçu (inchangé)
         self.preview_frame = ttk.LabelFrame(right_frame, text=self.tr("preview"))
-        # ... (contenu de preview_frame) ...
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0); self.preview_canvas.pack(fill=tk.BOTH, expand=True)
 
         # 4. Packing FINAL dans le right_frame (inchangé)
@@ -591,20 +580,12 @@ class SeestarStackerGUI:
 
         # 5. Zone Progression (inchangée)
         self.progress_frame = ttk.LabelFrame(left_frame, text=self.tr("progress"))
-        # ... (contenu de progress_frame) ...
         self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode='determinate'); self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2)); time_frame = ttk.Frame(self.progress_frame); time_frame.pack(fill=tk.X, padx=5, pady=2); time_frame.columnconfigure(0, weight=0); time_frame.columnconfigure(1, weight=1); time_frame.columnconfigure(2, weight=0); time_frame.columnconfigure(3, weight=0); self.remaining_time_label = ttk.Label(time_frame, text=self.tr("estimated_time")); self.remaining_time_label.grid(row=0, column=0, sticky='w'); self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), anchor='w'); self.remaining_time_value.grid(row=0, column=1, sticky='w', padx=(2, 10)); self.elapsed_time_label = ttk.Label(time_frame, text=self.tr("elapsed_time")); self.elapsed_time_label.grid(row=0, column=2, sticky='e', padx=(5,0)); self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='e'); self.elapsed_time_value.grid(row=0, column=3, sticky='e', padx=(2,0)); files_info_frame = ttk.Frame(self.progress_frame); files_info_frame.pack(fill=tk.X, padx=5, pady=2); self.remaining_static_label = ttk.Label(files_info_frame, text=self.tr("Remaining:")); self.remaining_static_label.pack(side=tk.LEFT); self.remaining_value_label = ttk.Label(files_info_frame, textvariable=self.remaining_files_var, width=12, anchor='w'); self.remaining_value_label.pack(side=tk.LEFT, padx=(2,10)); self.aligned_files_label = ttk.Label(files_info_frame, textvariable=self.aligned_files_var, width=12, anchor='w'); self.aligned_files_label.pack(side=tk.LEFT, padx=(10,0)); self.additional_value_label = ttk.Label(files_info_frame, textvariable=self.additional_folders_var, anchor='e'); self.additional_value_label.pack(side=tk.RIGHT); self.additional_static_label = ttk.Label(files_info_frame, text=self.tr("Additional:")); self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2)); status_text_frame = ttk.Frame(self.progress_frame); status_text_font = tkFont.Font(family="Arial", size=8); status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5)); self.copy_log_button = ttk.Button(status_text_frame, text="Copy", command=self._copy_log_to_clipboard, width=5); self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor='ne'); self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical"); self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0); self.status_text = tk.Text(status_text_frame, height=6, wrap=tk.WORD, bd=0, font=status_text_font, relief=tk.FLAT, state=tk.DISABLED, yscrollcommand=self.status_scrollbar.set); self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=0); self.status_scrollbar.config(command=self.status_text.yview)
         self.progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(5, 5))
 
-        # 6. Stockage des références (MODIFIÉ : ajouter la nouvelle checkbox)
-        # Note : La méthode _store_widget_references sera modifiée à l'étape 5
-        #        pour inclure la référence self.chroma_correction_check.
-        #        Ici, on s'assure juste qu'elle est appelée après création.
-        self._store_widget_references()
+        # 6. Stockage des références (MODIFIÉ : ajouter la nouvelle référence)
+        self._store_widget_references() # Appelera la méthode (qui devra être modifiée ensuite)
         print("DEBUG (GUI create_layout): Fin création layout.") # <-- AJOUTÉ DEBUG
-
-# --- END OF METHOD SeestarStackerGUI.create_layout ---
-
-
 
 
 
@@ -1113,8 +1094,10 @@ class SeestarStackerGUI:
             # La clé ici n'est pas utilisée pour la traduction, mais pour référencer le widget.
             # On utilisera le texte "Edge Enhance" directement pour l'instant.
             "chroma_correction_check": getattr(self, 'chroma_correction_check', None),
-            # --- FIN AJOUT ---
 
+            # --- Bouton Mosaique ---
+            "Mosaic...": getattr(self, 'mosaic_options_button', None),
+            # ---  ---
 
         }
         print(f"DEBUG (GUI _store_widget_references): Références stockées. Nb={len(self.widgets_to_translate)}") # <-- DEBUG 
@@ -1837,6 +1820,47 @@ class SeestarStackerGUI:
             else: return
         else: self._save_settings_and_destroy()
 
+
+
+
+    def _open_mosaic_settings_window(self):
+        """
+        Ouvre la fenêtre modale pour configurer les options de mosaïque.
+        """
+        print("DEBUG (GUI): Clic sur bouton 'Mosaïque...' - Appel de _open_mosaic_settings_window.")
+
+        # Vérifier si une instance existe déjà (sécurité, normalement inutile car modal)
+        # (Optionnel, mais peut être utile pour le développement)
+        if hasattr(self, '_mosaic_settings_window_instance') and self._mosaic_settings_window_instance and self._mosaic_settings_window_instance.winfo_exists():
+            print("DEBUG (GUI): Fenêtre de paramètres mosaïque déjà ouverte. Mise au premier plan.")
+            self._mosaic_settings_window_instance.lift()
+            self._mosaic_settings_window_instance.focus_force()
+            return
+
+        # Créer et afficher la nouvelle fenêtre modale
+        try:
+            print("DEBUG (GUI): Création de l'instance MosaicSettingsWindow...")
+            # Passer 'self' (l'instance SeestarStackerGUI) à la fenêtre enfant
+            # pour qu'elle puisse mettre à jour le flag mosaic_mode_active etc.
+            mosaic_window = MosaicSettingsWindow(parent_gui=self)
+            self._mosaic_settings_window_instance = mosaic_window # Stocker référence (optionnel)
+            print("DEBUG (GUI): Instance MosaicSettingsWindow créée.")
+            # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.
+
+        except Exception as e:
+            error_msg = f"Erreur création fenêtre paramètres mosaïque: {e}"
+            print(f"ERREUR (GUI): {error_msg}")
+            traceback.print_exc(limit=2)
+            messagebox.showerror(
+                self.tr("error", default="Error"),
+                self.tr("mosaic_window_create_error", default="Could not open Mosaic settings window.") + f"\n{e}",
+                parent=self.root
+            )
+            # Assurer la réinitialisation de la référence si erreur
+            self._mosaic_settings_window_instance = None
+
+
+
     def _save_settings_and_destroy(self):
         try:
             if self.root.winfo_exists(): self.settings.window_geometry = self.root.geometry()
@@ -2163,12 +2187,10 @@ class SeestarStackerGUI:
 
 
 #########################################################################################################################################
-# --- START OF METHOD SeestarStackerGUI.start_processing (dans main_window.py) ---
-# (Assurez-vous d'être dans la classe SeestarStackerGUI)
 
     def start_processing(self):
         """Démarre le traitement, affiche l'avertissement Drizzle, gère la config et lance le thread backend."""
-        print("DEBUG (GUI start_processing): Début tentative démarrage...") # <-- AJOUTÉ DEBUG
+        print("DEBUG (GUI start_processing): Début tentative démarrage...")
 
         # --- Désactivation immédiate bouton Start (inchangé) ---
         if hasattr(self, 'start_button'):
@@ -2184,7 +2206,6 @@ class SeestarStackerGUI:
                 try: self.start_button.config(state=tk.NORMAL)
                 except tk.TclError: pass # Réactiver
             return # Arrêter
-        # ... (autres validations de chemins) ...
         if not os.path.isdir(input_folder):
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             if hasattr(self, 'start_button'):
@@ -2195,7 +2216,7 @@ class SeestarStackerGUI:
             try: os.makedirs(output_folder, exist_ok=True); self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
             except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}");
             if hasattr(self, 'start_button'):
-                try: self.start_button.config(state=tk.NORMAL) 
+                try: self.start_button.config(state=tk.NORMAL)
                 except tk.TclError: pass
             return
         try:
@@ -2206,10 +2227,11 @@ class SeestarStackerGUI:
                         except tk.TclError: pass
                     return
         except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-        if hasattr(self, 'start_button'): 
-            try: self.start_button.config(state=tk.NORMAL)
-            except tk.TclError:
-                pass
+        # Correction: Pas de réactivation du bouton ici si l'erreur est avant askyesno
+        # if hasattr(self, 'start_button'):
+        #     try: self.start_button.config(state=tk.NORMAL)
+        #     except tk.TclError: pass
+        # return # Si erreur, il faut s'arrêter
 
         # === AVERTISSEMENT DRIZZLE (inchangé) ===
         drizzle_enabled = False
@@ -2227,7 +2249,7 @@ class SeestarStackerGUI:
                 return
 
         # --- Logique principale de démarrage (inchangée jusqu'à la configuration backend) ---
-        print("DEBUG (GUI start_processing): Démarrage logique principale...") # <-- AJOUTÉ DEBUG
+        print("DEBUG (GUI start_processing): Démarrage logique principale...")
         self.processing = True; self.time_per_image = 0; self.global_start_time = time.monotonic()
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var.set(default_aligned_fmt.format(count=0))
@@ -2255,8 +2277,7 @@ class SeestarStackerGUI:
             for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None);
             self.settings.apply_to_ui(self)
 
-        # Configurer QueuedStacker (partie batch size inchangée)
-        # ... (récupération mode, kappa, batch_size, hot pixels, bayer, cleanup, ref) ...
+        # Configurer QueuedStacker (inchangé jusqu'à l'appel start_processing)
         self.queued_stacker.stacking_mode = self.settings.stacking_mode
         self.queued_stacker.kappa = self.settings.kappa
         requested_batch_size = self.settings.batch_size; final_batch_size_for_backend = 0
@@ -2277,35 +2298,34 @@ class SeestarStackerGUI:
         self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
         self.update_progress_gui(f"ⓘ Taille de lot pour traitement : {self.queued_stacker.batch_size}", None)
 
+        apply_chroma = False
+        try: apply_chroma = self.apply_chroma_correction_var.get()
+        except tk.TclError: print("Warning (GUI start_processing): Impossible de lire apply_chroma_correction_var.")
 
-        # --- RÉCUPÉRATION DE LA VALEUR DE LA NOUVELLE CHECKBOX ---
-        apply_chroma = False # Valeur par défaut si erreur
-        try:
-            apply_chroma = self.apply_chroma_correction_var.get()
-            print(f"DEBUG (GUI start_processing): Valeur lue pour apply_chroma_correction: {apply_chroma}") # <-- AJOUTÉ DEBUG
-        except tk.TclError:
-            print("Warning (GUI start_processing): Impossible de lire la variable apply_chroma_correction_var.")
-        # --- FIN RÉCUPÉRATION ---
-
-        # --- MODIFICATION DE L'APPEL à queued_stacker.start_processing ---
-        # Ajout du nouvel argument 'apply_chroma_correction'
+        ### MODIFICATION DE L'APPEL : Ajout de is_mosaic_run ###
+        # Récupérer l'état du mode mosaïque
+        is_mosaic_mode = getattr(self, 'mosaic_mode_active', False)
+        print(f"DEBUG (GUI start_processing): Mode mosaïque détecté = {is_mosaic_mode}")
+        print(f"!!!! DEBUG GUI Start: Lancement avec is_mosaic_run = {is_mosaic_mode} !!!!") # Message très visible
         processing_started = self.queued_stacker.start_processing(
             input_folder, output_folder, self.settings.reference_image_path,
             initial_additional_folders=folders_to_pass_to_backend,
-            # Pondération (inchangé)
+            # Pondération
             use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr,
             weight_stars=self.settings.weight_by_stars, snr_exp=self.settings.snr_exponent,
             stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight,
-            # Drizzle (inchangé)
+            # Drizzle
             use_drizzle=self.use_drizzle_var.get(), drizzle_scale=float(self.drizzle_scale_var.get()),
             drizzle_wht_threshold=self.drizzle_wht_threshold_var.get(),
             drizzle_mode=self.drizzle_mode_var.get(), drizzle_kernel=self.drizzle_kernel_var.get(),
             drizzle_pixfrac=self.drizzle_pixfrac_var.get(),
-            # --- NOUVEL ARGUMENT ---
-            apply_chroma_correction=apply_chroma  # Passer la valeur lue
+            # Correction Chroma
+            apply_chroma_correction=apply_chroma,
+            # --- NOUVEL ARGUMENT POUR LE MODE ---
+            is_mosaic_run=is_mosaic_mode # Passer le flag au backend
         )
-        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait avec apply_chroma_correction={apply_chroma}") # <-- AJOUTÉ DEBUG
-        # --- FIN MODIFICATION APPEL ---
+        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait avec is_mosaic_run={is_mosaic_mode}")
+        ### FIN MODIFICATION APPEL ###
 
         # Gérer résultat démarrage backend (inchangé)
         if processing_started:
@@ -2315,16 +2335,14 @@ class SeestarStackerGUI:
             self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
             self.thread.start()
         else:
-            self.update_progress_gui("ⓘ Demande démarrage ignorée (traitement déjà en cours?).", None)
-            if hasattr(self, 'stop_button'):
-                try: self.stop_button.config(state=tk.NORMAL)
+            # S'assurer que le bouton start est réactivé si le backend refuse de démarrer
+            if hasattr(self, 'start_button'):
+                try: self.start_button.config(state=tk.NORMAL)
                 except tk.TclError: pass
-            self.processing = True # Assurer que le flag est bien True
-        print("DEBUG (GUI start_processing): Fin.") # <-- AJOUTÉ DEBUG
+            self.processing = False # Assurer que le flag est False si échec démarrage
+            self.update_progress_gui("ⓘ Échec démarrage traitement (backend a refusé).", None)
 
-# --- END OF METHOD SeestarStackerGUI.start_processing ---
-
-
+        print("DEBUG (GUI start_processing): Fin.")
 # --- Bloc d'Exécution Principal  ---
 if __name__ == "__main__":
     # --- MODIFIÉ: Parsing des arguments de ligne de commande ---

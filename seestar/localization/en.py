@@ -180,5 +180,17 @@ EN_TRANSLATIONS = {
     'analyzer_launch_failed': "Failed to launch the analyzer script:\n{error}",
     'analyzer_launched': "Folder analyzer launched.",
 
+    # --- Mosaic Settings ---
+    'Mosaic...': "Mosaic...",
+    'mosaic_settings_title': "Mosaic Options",
+    'mosaic_activation_frame': "Activation",
+    'mosaic_activate_label': "Enable Mosaic Processing Mode",
+    'cancel': "Cancel",
+    'ok': "OK",
+    'mosaic_window_create_error': "Could not open Mosaic settings window.",
+    'mosaic_mode_enabled_log': "Mosaic mode ENABLED.",
+    'mosaic_mode_disabled_log': "Mosaic mode DISABLED.",
+
+
 }
 # --- END OF FILE seestar/localization/en.py ---
