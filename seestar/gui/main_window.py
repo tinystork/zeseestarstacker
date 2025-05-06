@@ -22,11 +22,31 @@ from PIL import Image, ImageTk
 import sys # Pour sys.executable
 # ----------------------------------------------------
 import tempfile # <-- AJOUTÉ
+print("-" * 20)
+print("DEBUG MW: Tentative d'importation de SeestarQueuedStacker...")
+try:
+    # L'import que vous avez déjà
+    from ..queuep.queue_manager import SeestarQueuedStacker
+    print(f"DEBUG MW: Import de 'SeestarQueuedStacker' réussi.")
+    print(f"DEBUG MW: Type de l'objet importé: {type(SeestarQueuedStacker)}")
+    # Vérifier si l'attribut existe sur la CLASSE importée
+    print(f"DEBUG MW: La CLASSE importée a 'set_progress_callback'? {hasattr(SeestarQueuedStacker, 'set_progress_callback')}")
+    print(f"DEBUG MW: Attributs de la CLASSE importée: {dir(SeestarQueuedStacker)}")
+except ImportError as imp_err:
+    print(f"ERREUR MW: ÉCHEC de l'import de SeestarQueuedStacker: {imp_err}")
+    traceback.print_exc()
+    # Si l'import échoue, l'application ne peut pas continuer
+    sys.exit("Échec de l'importation critique.")
+except Exception as gen_err:
+    print(f"ERREUR MW: Erreur INATTENDUE pendant l'import de SeestarQueuedStacker: {gen_err}")
+    traceback.print_exc()
+    sys.exit("Échec de l'importation critique.")
+print("-" * 20)
+# --- FIN DU BLOC DE DEBUG ---
 # Seestar imports
 from ..core.image_processing import load_and_validate_fits, debayer_image
-from ..core.image_processing import load_and_validate_fits, debayer_image
 from ..localization import Localization
-from ..queuep.queue_manager import SeestarQueuedStacker
+
 from ..core.utils import estimate_batch_size
 from ..enhancement.color_correction import ChromaticBalancer 
 # (Ajouter ceci avec les autres imports de gui)
@@ -83,7 +103,8 @@ class SeestarStackerGUI:
                 print(f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}") # <-- AJOUTÉ DEBUG (plus détaillé)
             else: print(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
         except Exception as e: print(f"Error loading or setting window icon: {e}")
-
+        
+        self.astrometry_api_key_var = tk.StringVar()
         # --- Initialisation des variables et objets internes ---
         # (Identique à avant, mais ajout d'un flag pour le stack immédiat)
         self.localization = Localization("en")
@@ -103,6 +124,8 @@ class SeestarStackerGUI:
         # self.mosaic_panel_folders = [] # Sera utilisé plus tard
         # self.mosaic_settings = {}    # Sera utilisé plus tard
         print("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
+        self.mosaic_settings = {}    # <<<--- AJOUTER CETTE LIGNE pour initialiser le dictionnaire
+        print("DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés.")
 
         # --- NOUVEAU FLAG ---
         self._trigger_immediate_stack = False # Sera True si stack_immediately_from est valide
@@ -1679,23 +1702,68 @@ class SeestarStackerGUI:
              try: self.remaining_files_var.set(self.tr("no_files_waiting"))
              except tk.TclError: pass
 
-    # --- MODIFIÉ: update_additional_folders_display ---
+
+
+
+
+    # --- MODIFIER CETTE MÉTHODE ---
+
+
+
     def update_additional_folders_display(self):
         """Met à jour l'affichage du nombre de dossiers supplémentaires."""
         count = 0
-        if self.processing and hasattr(self, 'queued_stacker'):
-            # Pendant le traitement, lire la liste du backend
-            with self.queued_stacker.folders_lock: count = len(self.queued_stacker.additional_folders)
-        else:
-            # Avant le traitement, lire la liste du GUI
-            count = len(self.additional_folders_to_process)
+        # --- AJOUT DEBUG ---
+        print("-" * 20)
+        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
+        if hasattr(self, 'queued_stacker'):
+            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
+            # VÉRIFICATION CRUCIALE :
+            has_lock = hasattr(self.queued_stacker, 'folders_lock')
+            print(f"  -> self.queued_stacker a l'attribut 'folders_lock'? {has_lock}")
+            if not has_lock:
+                 print("  -> !!! ATTRIBUT 'folders_lock' MANQUANT SUR L'INSTANCE !!!")
+                 print(f"  -> Attributs présents: {dir(self.queued_stacker)}") # Lister ce qui est présent
+            # --- FIN AJOUT DEBUG ---
 
+            # Condition originale pour lire depuis le backend
+            if self.processing and self.queued_stacker.is_running(): # Ajout check is_running pour sécurité
+                try:
+                    # L'accès problématique
+                    with self.queued_stacker.folders_lock: # <<< C'est ici que ça plante
+                         count = len(self.queued_stacker.additional_folders)
+                    print(f"  -> Lecture backend (processing): count={count}") # Si ça passe le 'with'
+                except AttributeError as ae:
+                     print(f"  -> ERREUR ATTRIBUT DANS LE 'WITH': {ae}") # Log spécifique si ça plante DANS le with
+                     traceback.print_exc(limit=1) # Afficher où ça plante
+                     # Fallback pour ne pas planter l'UI
+                     count = -99 # Valeur pour indiquer une erreur
+                except Exception as e:
+                     print(f"  -> ERREUR PENDANT lecture backend: {e}")
+                     traceback.print_exc(limit=1)
+                     count = -98
+            else:
+                # Lire depuis la liste GUI (traitement non actif)
+                count = len(self.additional_folders_to_process)
+                print(f"  -> Lecture GUI (non processing): count={count}")
+        else:
+             print("  -> self.queued_stacker n'existe PAS.")
+             count = len(self.additional_folders_to_process) # Fallback liste GUI
+        print("-" * 20)
+
+        # Mise à jour de la variable Tkinter (inchangé)
         try:
             if count == 0: self.additional_folders_var.set(self.tr('no_additional_folders'))
             elif count == 1: self.additional_folders_var.set(self.tr('1 additional folder'))
+            # Gérer les comptes d'erreur négatifs pour le debug
+            elif count < 0 : self.additional_folders_var.set(f"ERR ({count})")
             else: self.additional_folders_var.set(self.tr('{count} additional folders', default="{count} add. folders").format(count=count))
         except tk.TclError: pass
         except AttributeError: pass
+    # --- FIN MÉTHODE MODIFIÉE ---
+
+
+
 
     def stop_processing(self):
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
@@ -2188,24 +2256,29 @@ class SeestarStackerGUI:
 
 #########################################################################################################################################
 
+
     def start_processing(self):
-        """Démarre le traitement, affiche l'avertissement Drizzle, gère la config et lance le thread backend."""
+        """
+        Démarre le traitement, affiche l'avertissement Drizzle, gère la config
+        et lance le thread backend avec les bons paramètres (y compris mosaïque).
+        """
         print("DEBUG (GUI start_processing): Début tentative démarrage...")
 
-        # --- Désactivation immédiate bouton Start (inchangé) ---
+        # Désactiver bouton Start immédiatement
         if hasattr(self, 'start_button'):
             try: self.start_button.config(state=tk.DISABLED)
             except tk.TclError: pass
 
-        # --- Validation des chemins (inchangé) ---
+        # --- Validation des chemins ---
         input_folder = self.input_path.get()
         output_folder = self.output_path.get()
         if not input_folder or not output_folder:
             messagebox.showerror(self.tr("error"), self.tr("select_folders"))
             if hasattr(self, 'start_button'):
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass # Réactiver
-            return # Arrêter
+                try:
+                    self.start_button.config(state=tk.NORMAL)
+                except tk.TclError: pass
+            return
         if not os.path.isdir(input_folder):
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             if hasattr(self, 'start_button'):
@@ -2220,130 +2293,133 @@ class SeestarStackerGUI:
                 except tk.TclError: pass
             return
         try:
-            if not any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)):
+            # Vérifier s'il y a des fichiers FITS (sauf si dossier vide ET dossiers additionnels prévus)
+            has_initial_fits = any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder))
+            has_additional = bool(self.additional_folders_to_process)
+            if not has_initial_fits and not has_additional:
                 if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
                     if hasattr(self, 'start_button'):
                         try: self.start_button.config(state=tk.NORMAL)
                         except tk.TclError: pass
                     return
         except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-        # Correction: Pas de réactivation du bouton ici si l'erreur est avant askyesno
-        # if hasattr(self, 'start_button'):
-        #     try: self.start_button.config(state=tk.NORMAL)
-        #     except tk.TclError: pass
-        # return # Si erreur, il faut s'arrêter
-
-        # === AVERTISSEMENT DRIZZLE (inchangé) ===
-        drizzle_enabled = False
-        if hasattr(self, 'use_drizzle_var'):
-            try: drizzle_enabled = self.use_drizzle_var.get()
+        # Il manquait un return ici si erreur lecture dossier
+        if hasattr(self, 'start_button'):
+            try: self.start_button.config(state=tk.NORMAL)
             except tk.TclError: pass
-        if drizzle_enabled:
-            warning_title = self.tr('drizzle_warning_title'); warning_text = self.tr('drizzle_warning_text')
-            continue_with_drizzle = messagebox.askyesno(warning_title, warning_text, parent=self.root)
-            if not continue_with_drizzle:
-                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur (Drizzle).", None)
+        # === AVERTISSEMENT DRIZZLE ===
+        drizzle_enabled = self.use_drizzle_var.get()
+        # --- Vérification supplémentaire : Si mode mosaïque, Drizzle est implicitement requis par le backend ---
+        is_mosaic_mode_for_warning = getattr(self, 'mosaic_mode_active', False)
+        if (drizzle_enabled or is_mosaic_mode_for_warning): # Afficher si Drizzle coché OU mode Mosaïque actif
+            warning_title = self.tr('drizzle_warning_title')
+            warning_text = self.tr('drizzle_warning_text')
+            if is_mosaic_mode_for_warning and not drizzle_enabled: # Ajouter une note si mosaïque force Drizzle
+                 warning_text += "\n\n" + self.tr("mosaic_requires_drizzle_note", default="(Note: Mosaic mode requires Drizzle for final combination.)")
+            continue_processing = messagebox.askyesno(warning_title, warning_text, parent=self.root)
+            if not continue_processing:
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur.", None)
                 if hasattr(self, 'start_button'):
                     try: self.start_button.config(state=tk.NORMAL)
                     except tk.TclError: pass
                 return
 
-        # --- Logique principale de démarrage (inchangée jusqu'à la configuration backend) ---
+
+        # --- Logique principale de démarrage ---
         print("DEBUG (GUI start_processing): Démarrage logique principale...")
         self.processing = True; self.time_per_image = 0; self.global_start_time = time.monotonic()
-        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}"); self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+        # Passer une COPIE de la liste des dossiers additionnels au backend
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
-        self.additional_folders_to_process = []; self.update_additional_folders_display()
-        self._set_parameter_widgets_state(tk.DISABLED)
-        if hasattr(self, "stop_button"):
-            try: self.stop_button.config(state=tk.NORMAL)
-            except tk.TclError: pass
-        if hasattr(self, "open_output_button"):
-            try: self.open_output_button.config(state=tk.DISABLED)
-            except tk.TclError: pass
+        self.additional_folders_to_process = [] # Vider la liste du GUI
+        self.update_additional_folders_display() # Mettre à jour affichage GUI
+        self._set_parameter_widgets_state(tk.DISABLED) # Désactiver les contrôles UI
+        if hasattr(self, "stop_button"): self.stop_button.config(state=tk.NORMAL)
+        if hasattr(self, "open_output_button"): self.open_output_button.config(state=tk.DISABLED)
         if hasattr(self, "progress_manager"): self.progress_manager.reset(); self.progress_manager.start_timer()
-        if hasattr(self, "status_text"):
-            try:
-                self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END)
-                self.status_text.insert(tk.END, f"--- {self.tr('stacking_start', default='--- Starting Processing ---')} ---\n")
-                self.status_text.config(state=tk.DISABLED)
-            except tk.TclError: pass
+        if hasattr(self, "status_text"): # Initialiser le log
+            self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END); self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n"); self.status_text.config(state=tk.DISABLED)
 
-        # MAJ et Validation Settings (inchangé)
+        # Mettre à jour et valider les settings AVANT de les passer
         self.settings.update_from_ui(self); validation_messages = self.settings.validate_settings()
         if validation_messages:
-            self.update_progress_gui("⚠️ Paramètres ajustés:", None);
-            for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None);
-            self.settings.apply_to_ui(self)
+            self.update_progress_gui("⚠️ Paramètres ajustés:", None); [self.update_progress_gui(f"  - {msg}", None) for msg in validation_messages];
+            self.settings.apply_to_ui(self) # Réappliquer les settings validés à l'UI (visuel)
 
-        # Configurer QueuedStacker (inchangé jusqu'à l'appel start_processing)
-        self.queued_stacker.stacking_mode = self.settings.stacking_mode
-        self.queued_stacker.kappa = self.settings.kappa
-        requested_batch_size = self.settings.batch_size; final_batch_size_for_backend = 0
-        if requested_batch_size <= 0:
-            self.update_progress_gui("🧠 Estimation taille lot auto...", None); sample_img_path = None
-            if self.settings.input_folder and os.path.isdir(self.settings.input_folder):
-                fits_files = [f for f in os.listdir(self.settings.input_folder) if f.lower().endswith(('.fit', '.fits'))]
-                if fits_files: sample_img_path = os.path.join(self.settings.input_folder, fits_files[0])
-            try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); final_batch_size_for_backend = estimated_size; self.update_progress_gui(f"✅ Taille lot auto estimée: {estimated_size}", None)
-            except Exception as est_err: self.update_progress_gui(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); final_batch_size_for_backend = 10
-        else: final_batch_size_for_backend = requested_batch_size
-        self.queued_stacker.batch_size = final_batch_size_for_backend
-        self.queued_stacker.correct_hot_pixels = self.settings.correct_hot_pixels
-        self.queued_stacker.hot_pixel_threshold = self.settings.hot_pixel_threshold
-        self.queued_stacker.neighborhood_size = self.settings.neighborhood_size
-        self.queued_stacker.bayer_pattern = self.settings.bayer_pattern
-        self.queued_stacker.perform_cleanup = self.cleanup_temp_var.get()
-        self.queued_stacker.aligner.reference_image_path = self.settings.reference_image_path or None
-        self.update_progress_gui(f"ⓘ Taille de lot pour traitement : {self.queued_stacker.batch_size}", None)
-
-        apply_chroma = False
-        try: apply_chroma = self.apply_chroma_correction_var.get()
-        except tk.TclError: print("Warning (GUI start_processing): Impossible de lire apply_chroma_correction_var.")
-
-        ### MODIFICATION DE L'APPEL : Ajout de is_mosaic_run ###
-        # Récupérer l'état du mode mosaïque
+        # --- Préparation des arguments pour le backend ---
+        # Récupérer l'état mosaïque et les settings spécifiques
         is_mosaic_mode = getattr(self, 'mosaic_mode_active', False)
-        print(f"DEBUG (GUI start_processing): Mode mosaïque détecté = {is_mosaic_mode}")
-        print(f"!!!! DEBUG GUI Start: Lancement avec is_mosaic_run = {is_mosaic_mode} !!!!") # Message très visible
-        processing_started = self.queued_stacker.start_processing(
-            input_folder, output_folder, self.settings.reference_image_path,
-            initial_additional_folders=folders_to_pass_to_backend,
-            # Pondération
-            use_weighting=self.settings.use_quality_weighting, weight_snr=self.settings.weight_by_snr,
-            weight_stars=self.settings.weight_by_stars, snr_exp=self.settings.snr_exponent,
-            stars_exp=self.settings.stars_exponent, min_w=self.settings.min_weight,
-            # Drizzle
-            use_drizzle=self.use_drizzle_var.get(), drizzle_scale=float(self.drizzle_scale_var.get()),
-            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get(),
-            drizzle_mode=self.drizzle_mode_var.get(), drizzle_kernel=self.drizzle_kernel_var.get(),
-            drizzle_pixfrac=self.drizzle_pixfrac_var.get(),
-            # Correction Chroma
-            apply_chroma_correction=apply_chroma,
-            # --- NOUVEL ARGUMENT POUR LE MODE ---
-            is_mosaic_run=is_mosaic_mode # Passer le flag au backend
-        )
-        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait avec is_mosaic_run={is_mosaic_mode}")
-        ### FIN MODIFICATION APPEL ###
+        current_mosaic_settings = getattr(self, 'mosaic_settings', {})
+        if not isinstance(current_mosaic_settings, dict): current_mosaic_settings = {}
+        # Récupérer la clé API depuis la variable Tkinter
+        current_api_key = getattr(self, 'astrometry_api_key_var', tk.StringVar()).get()
+        # Récupérer la valeur de correction chroma
+        apply_chroma = self.apply_chroma_correction_var.get()
 
-        # Gérer résultat démarrage backend (inchangé)
+        print(f"!!!! DEBUG GUI Start: Lancement avec is_mosaic_run = {is_mosaic_mode} !!!!")
+        print(f"!!!! DEBUG GUI Start: Settings Mosaïque passés = {current_mosaic_settings} !!!!")
+        print(f"!!!! DEBUG GUI Start: Clé API passée = {'Oui' if current_api_key else 'Non'} !!!!")
+
+        # --- Appel à queued_stacker.start_processing ---
+        processing_started = self.queued_stacker.start_processing(
+            # Chemins et dossiers
+            input_dir=input_folder,                            # Doit être string
+            output_dir=output_folder,                          # Doit être string
+            reference_path_ui=self.settings.reference_image_path, # String ou None
+            initial_additional_folders=folders_to_pass_to_backend, # Liste de strings
+            # Paramètres Stacking Classique
+            stacking_mode=self.settings.stacking_mode,         # String
+            kappa=self.settings.kappa,                         # Float
+            # Paramètres Communs
+            batch_size=self.settings.batch_size,               # Int (QueueManager le gérera si 0)
+            correct_hot_pixels=self.settings.correct_hot_pixels, # Bool
+            hot_pixel_threshold=self.settings.hot_pixel_threshold, # Float
+            neighborhood_size=self.settings.neighborhood_size,     # Int
+            bayer_pattern=self.settings.bayer_pattern,             # String
+            perform_cleanup=self.cleanup_temp_var.get(),           # Bool
+            # Pondération
+            use_weighting=self.settings.use_quality_weighting, # Bool
+            weight_snr=self.settings.weight_by_snr,            # Bool
+            weight_stars=self.settings.weight_by_stars,        # Bool
+            snr_exp=self.settings.snr_exponent,                # Float
+            stars_exp=self.settings.stars_exponent,            # Float
+            min_w=self.settings.min_weight,                    # Float
+            # Drizzle (valeurs globales, seront ignorées/écrasées si Mosaïque pour kernel/pixfrac)
+            use_drizzle=self.use_drizzle_var.get(),            # Bool
+            drizzle_scale=float(self.drizzle_scale_var.get()), # Float
+            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get(), # Float (0-1)
+            drizzle_mode=self.drizzle_mode_var.get(),          # String ("Final" ou "Incremental")
+            drizzle_kernel=self.drizzle_kernel_var.get(),      # String
+            drizzle_pixfrac=self.drizzle_pixfrac_var.get(),    # Float (0.01-1.0)
+            # Correction Chroma
+            apply_chroma_correction=apply_chroma,              # Bool
+            # --- Arguments Mosaïque ---
+            is_mosaic_run=is_mosaic_mode,                      # Bool
+            api_key=current_api_key,                           # String (clé API)
+            mosaic_settings=current_mosaic_settings            # Dict ({'kernel': ..., 'pixfrac': ...})
+        )
+        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait.")
+
+        # --- Gérer résultat démarrage backend ---
         if processing_started:
-            if hasattr(self, 'stop_button'):
-                try: self.stop_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
+            # ... (démarrage thread _track_processing_progress comme avant) ...
+            if hasattr(self, 'stop_button'): self.stop_button.config(state=tk.NORMAL)
             self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
             self.thread.start()
         else:
-            # S'assurer que le bouton start est réactivé si le backend refuse de démarrer
-            if hasattr(self, 'start_button'):
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            self.processing = False # Assurer que le flag est False si échec démarrage
+            # ... (réactiver bouton start, reset flag processing comme avant) ...
+            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+            self.processing = False
             self.update_progress_gui("ⓘ Échec démarrage traitement (backend a refusé).", None)
 
         print("DEBUG (GUI start_processing): Fin.")
-# --- Bloc d'Exécution Principal  ---
+
+# --- FIN DE LA MÉTHODE start_processing (CORRIGÉE) ---
+
+
+
+
+
 if __name__ == "__main__":
     # --- MODIFIÉ: Parsing des arguments de ligne de commande ---
     print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG

@@ -9,6 +9,7 @@ import os
 import tkinter as tk
 import numpy as np
 import traceback
+from .mosaic_gui import VALID_DRIZZLE_KERNELS 
 
 class SettingsManager:
     """
@@ -58,6 +59,13 @@ class SettingsManager:
         # --- Correction Chroma ---
         self.apply_chroma_correction = True # Activé par défaut
         print("DEBUG (Settings reset_to_defaults): apply_chroma_correction mis à True (défaut).") # <-- AJOUTÉ DEBUG
+                # --- AJOUTER ICI ---
+        self.mosaic_mode_active = False # Flag pour savoir si le mode est actif
+        self.mosaic_settings = {        # Dictionnaire pour les paramètres spécifiques
+        "kernel": "square",         # Utiliser les défauts globaux comme défauts mosaïque
+        "pixfrac": 1.0
+        # Ajouter d'autres clés spécifiques mosaïque ici plus tard
+        }
         
         # Preview Settings
         self.preview_stretch_method = "Asinh" # Bon défaut pour l'astro
@@ -127,6 +135,11 @@ class SettingsManager:
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
             self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=self.drizzle_pixfrac)).get()
+            # --- juste lire les attributs du GUI) ---
+            self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', False) # Lire le flag
+            self.mosaic_settings = getattr(gui_instance, 'mosaic_settings', {}).copy() # Lire le dict (faire une copie)
+            # ---  ---
+
 
             # --- Preview Settings ---
             # ... (inchangé) ...
@@ -208,6 +221,15 @@ class SettingsManager:
             getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
             getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
             getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
+            # --- juste définir les attributs du GUI) ---
+            setattr(gui_instance, 'mosaic_mode_active', bool(self.mosaic_mode_active)) # Assurer booléen
+            setattr(gui_instance, 'mosaic_settings', self.mosaic_settings.copy() if isinstance(self.mosaic_settings, dict) else {}) # Assurer dict, passer copie
+            # Pas besoin de mettre à jour l'UI de la fenêtre modale ici, elle lira à son ouverture
+            # On pourrait mettre à jour l'indicateur visuel sur le GUI principal ici
+            if hasattr(gui_instance, '_update_mosaic_status_indicator'): gui_instance._update_mosaic_status_indicator()
+            # --- ---
+
+
 
             # --- Preview Settings ---
             # ... (inchangé) ...
@@ -351,7 +373,7 @@ class SettingsManager:
         """ Sauvegarde les paramètres actuels dans le fichier JSON. """
         # S'assurer que les types sont corrects pour JSON
         settings_data = {
-            'version': "1.3.0", # Incrémenter la version si la structure change significativement
+            'version': "1.4.0", # Incrémenter la version si la structure change significativement
             # Processing
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
@@ -378,6 +400,11 @@ class SettingsManager:
             'drizzle_mode': str(self.drizzle_mode),
             'drizzle_kernel': str(self.drizzle_kernel),
             'drizzle_pixfrac': float(self.drizzle_pixfrac),
+             # ---  ---
+            'mosaic_mode_active': bool(self.mosaic_mode_active),
+            'mosaic_settings': self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {}, # Sauvegarder le dict
+            # --- FIN AJOUT ---
+
             # --- CORRECTION CHROMA ---
             'apply_chroma_correction': bool(self.apply_chroma_correction), # Sauvegarder comme booléen
             # ---  ---
@@ -446,6 +473,23 @@ class SettingsManager:
             self.drizzle_mode = settings_data.get('drizzle_mode', defaults['drizzle_mode'])
             self.drizzle_kernel = settings_data.get('drizzle_kernel', defaults['drizzle_kernel'])
             self.drizzle_pixfrac = settings_data.get('drizzle_pixfrac', defaults['drizzle_pixfrac'])
+                         # --- AJOUTER ICI ---
+            self.mosaic_mode_active = settings_data.get('mosaic_mode_active', defaults['mosaic_mode_active'])
+            loaded_mosaic_settings = settings_data.get('mosaic_settings', defaults['mosaic_settings'])
+            # Valider/Nettoyer les settings mosaïque chargés
+            self.mosaic_settings = {
+                'kernel': loaded_mosaic_settings.get('kernel', defaults['mosaic_settings']['kernel']),
+                'pixfrac': loaded_mosaic_settings.get('pixfrac', defaults['mosaic_settings']['pixfrac'])
+                # Ajouter d'autres clés futures ici avec leurs défauts
+            }
+            if self.mosaic_settings['kernel'] not in VALID_DRIZZLE_KERNELS: # Utiliser la constante définie dans mosaic_gui
+                self.mosaic_settings['kernel'] = defaults['mosaic_settings']['kernel']
+            try:
+                 pf = float(self.mosaic_settings['pixfrac'])
+                 self.mosaic_settings['pixfrac'] = np.clip(pf, 0.01, 1.0)
+            except (ValueError, TypeError):
+                 self.mosaic_settings['pixfrac'] = defaults['mosaic_settings']['pixfrac']
+            # --- FIN AJOUT ---
             
             # Preview
             self.preview_stretch_method = settings_data.get('preview_stretch_method', defaults['preview_stretch_method'])

@@ -452,147 +452,148 @@ class DrizzleProcessor:
         print(f"   - Output WCS créé: Shape={out_shape_2d} (H,W), CRPIX={out_wcs.wcs.crpix}")
         return out_wcs, out_shape_2d # Retourne WCS et shape (H, W)
 ##################################################################################################################################################
+# --- DANS LE FICHIER: seestar/enhancement/drizzle_integration.py ---
 
-# --- DANS LA CLASSE DrizzleProcessor DANS seestar/enhancement/drizzle_integration.py ---
-
-    def apply_drizzle(self, temp_filepath_list):
+    # Ajouter output_wcs et output_shape_2d_hw comme arguments optionnels
+    def apply_drizzle(self, temp_filepath_list, output_wcs=None, output_shape_2d_hw=None):
         """
         Applique Drizzle en utilisant la classe drizzle.resample.Drizzle.
-        Prend une liste de fichiers FITS temporaires (HxWx3, float32, avec WCS).
-        Initialise Drizzle avec des tableaux de sortie pré-alloués.
+        MAJ: Accepte output_wcs et output_shape_2d_hw optionnels pour Mosaïque/Pré-calcul.
 
         Args:
             temp_filepath_list (list): Liste des chemins vers les fichiers FITS temporaires.
+            output_wcs (astropy.wcs.WCS, optional): WCS pré-calculé pour la sortie.
+                                                    Si None, calculé depuis la première image.
+            output_shape_2d_hw (tuple, optional): Shape (H, W) pré-calculée pour la sortie.
+                                                  Si None, calculé depuis la première image.
 
         Returns:
             tuple: (final_image_normalized, final_wht) ou (None, None) en cas d'erreur.
-                   final_image_normalized est HxWx3 float32 [0,1].
-                   final_wht est HxWx3 float32.
         """
         start_time = time.time()
-        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None:
-            print("ERREUR: Classe Drizzle (drizzle.resample.Drizzle) non disponible.")
-            return None, None
-        if not temp_filepath_list:
-            print("WARNING DrizzleProcessor: Liste de fichiers vide fournie.")
-            return None, None
+        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None: print("ERREUR: Classe Drizzle non disponible."); return None, None
+        if not temp_filepath_list: print("WARNING DrizzleProcessor: Liste fichiers vide."); return None, None
 
         print(f"DrizzleProcessor (resample): Application sur {len(temp_filepath_list)} fichiers...")
 
-        output_wcs = None; output_shape_2d = None; ref_shape_2d = None
-        processed_count = 0; drizzler_objects = []
-        # --- NOUVEAU : Listes pour les tableaux de sortie ---
-        output_images_list = [] # Contiendra les 3 tableaux out_img (R,G,B)
-        output_weights_list = [] # Contiendra les 3 tableaux out_wht (R,G,B)
-        # --- FIN NOUVEAU ---
-        initialized = False
+        # --- Déterminer la Grille de Sortie ---
+        # Utiliser la grille fournie si disponible, sinon la calculer depuis la première image
+        final_output_wcs = output_wcs
+        final_output_shape_hw = output_shape_2d_hw
+        ref_shape_2d = None # Pour la boucle
 
-        # --- Étape 1 : Définir la Grille et Initialiser Drizzle AVEC tableaux ---
-        print("   -> Définition grille sortie et initialisation objets Drizzle...")
-        for i, filepath in enumerate(temp_filepath_list):
-            img_data, wcs_in, header_in = _load_drizzle_temp_file(filepath)
-            if img_data is not None and wcs_in is not None:
-                ref_shape_2d = img_data.shape[:2]
-                try:
-                    output_wcs, output_shape_2d = self._create_output_wcs(wcs_in, ref_shape_2d, self.scale_factor)
-                    out_h, out_w = output_shape_2d
+        if final_output_wcs is None or final_output_shape_hw is None:
+            print("   -> Grille sortie non fournie, calcul depuis première image valide...")
+            for i, filepath in enumerate(temp_filepath_list):
+                img_data, wcs_in, _ = _load_drizzle_temp_file(filepath)
+                if img_data is not None and wcs_in is not None:
+                    ref_shape_2d = img_data.shape[:2]
+                    try:
+                        final_output_wcs, final_output_shape_hw = self._create_output_wcs(wcs_in, ref_shape_2d, self.scale_factor)
+                        print(f"   -> Grille sortie calculée: Shape={final_output_shape_hw} (H,W)")
+                        del img_data, wcs_in # Nettoyer mémoire
+                        break # Sortir après avoir trouvé la première valide
+                    except Exception as e_init:
+                        print(f"      - ERREUR calcul grille depuis image {i+1}: {e_init}. Skip Drizzle.")
+                        return None, None
+                else: del img_data, wcs_in # Nettoyer mémoire
+            if final_output_wcs is None: print("ERREUR: Impossible de déterminer la grille de sortie."); return None, None
+        else:
+             print(f"   -> Utilisation grille sortie fournie: Shape={final_output_shape_hw} (H,W)")
+             # Essayer de déterminer ref_shape_2d pour la boucle
+             try: _, wcs_tmp, _ = _load_drizzle_temp_file(temp_filepath_list[0]); ref_shape_2d = wcs_tmp.pixel_shape[::-1] if wcs_tmp and wcs_tmp.pixel_shape else None; del _,wcs_tmp,_
+             except: pass
+             if ref_shape_2d is None: print("WARN: Impossible de déterminer shape réf pour boucle add_image"); # Continuer quand même ?
 
-                    # --- NOUVEAU : Créer les tableaux de sortie AVANT ---
-                    for _ in range(3): # Créer 3 tableaux pour R, G, B
-                        out_img_ch = np.zeros(output_shape_2d, dtype=np.float32)
-                        out_wht_ch = np.zeros(output_shape_2d, dtype=np.float32)
-                        output_images_list.append(out_img_ch)
-                        output_weights_list.append(out_wht_ch)
-                    # --- FIN NOUVEAU ---
 
-                    # Initialiser les 3 objets Drizzle en passant les tableaux
-                    for ch_idx in range(3):
-                        # --- INITIALISATION AVEC TABLEAUX ---
-                        driz_ch = Drizzle(
-                            out_img=output_images_list[ch_idx],  # Passer tableau science
-                            out_wht=output_weights_list[ch_idx], # Passer tableau poids
-                            out_shape=output_shape_2d, # Toujours utile ? Oui selon docstring.
-                            kernel=self.kernel,
-                            fillval="0.0"              # Ou 0 ? Essayons "0.0"
-                            # wt_scl='exptime'         # Normalement géré par add_image via in_units
-                        )
-                        # --- FIN INITIALISATION ---
-                        drizzler_objects.append(driz_ch)
+        # --- Initialiser Drizzle et Tableaux de Sortie ---
+        # (Utilise final_output_wcs et final_output_shape_hw déterminés ci-dessus)
+        num_output_channels = 3; final_drizzlers = []; output_images_list = []; output_weights_list = []; initialized = False
+        try:
+            print(f"   -> Initialisation Drizzle pour {num_output_channels} canaux...")
+            for _ in range(num_output_channels):
+                out_img_ch = np.zeros(final_output_shape_hw, dtype=np.float32); out_wht_ch = np.zeros(final_output_shape_hw, dtype=np.float32)
+                output_images_list.append(out_img_ch); output_weights_list.append(out_wht_ch)
+                driz_ch = Drizzle(out_img=out_img_ch, out_wht=out_wht_ch, out_shape=final_output_shape_hw,
+                                  #out_wcs=final_output_wcs, # Utilise le WCS final
+                                  kernel=self.kernel, fillval="0.0")
+                final_drizzlers.append(driz_ch)
+            initialized = True; print("   -> Initialisation Drizzle terminée.")
+        except Exception as init_err: print(f"   -> ERREUR init Drizzle: {init_err}"); traceback.print_exc(limit=1); return None, None
+        if not initialized: return None, None
 
-                    print(f"   -> Grille sortie définie: Shape={output_shape_2d} (H,W). Objets Drizzle et Tableaux Sortie créés.")
-                    initialized = True; del img_data, wcs_in, header_in; gc.collect(); break
-                except Exception as e_init:
-                    print(f"      - ERREUR initialisation Drizzle/Tableaux: {e_init}. Skip Drizzle.")
-                    traceback.print_exc(limit=1)
-                    del img_data, wcs_in, header_in; gc.collect(); return None, None
-            else: print(f"      - Skip fichier {i+1} pour init grille."); del img_data, wcs_in, header_in; gc.collect()
-        if not initialized: print("ERREUR: Impossible d'initialiser."); return None, None
-
-        # --- Étape 2 : Boucle Drizzle (add_image) ---
-        # (La logique interne de la boucle reste la même que la dernière version :
-        #  charger fichier, calculer pixmap, appeler add_image pour chaque canal)
+        # --- Boucle Drizzle (add_image) ---
         print(f"   -> Démarrage boucle Drizzle sur {len(temp_filepath_list)} fichiers...")
+        processed_count = 0
         for i, filepath in enumerate(temp_filepath_list):
+            # ... (Logique identique pour charger, calculer pixmap, appeler add_image) ...
+            # ... (Utilise final_output_wcs pour calculer pixmap) ...
             if (i + 1) % 10 == 0 or i == 0 or i == len(temp_filepath_list) - 1: print(f"      Adding Drizzle Input {i+1}/{len(temp_filepath_list)}")
-            img_data, wcs_in, header_in = _load_drizzle_temp_file(filepath)
-            if img_data is None or wcs_in is None: print(f"      - Skip (load/WCS {i+1})"); del img_data, wcs_in, header_in; gc.collect(); continue
-            current_input_shape_2d = img_data.shape[:2]
-            if current_input_shape_2d != ref_shape_2d: print(f"      - WARNING: Shape {current_input_shape_2d} != ref {ref_shape_2d}.")
+            img_data_hxwxc, wcs_in, header_in = _load_drizzle_temp_file(filepath) # Renommé img_data_hxwxc
+            if img_data_hxwxc is None or wcs_in is None: print(f"      - Skip Input {i+1} (load/WCS)"); del img_data_hxwxc, wcs_in, header_in; gc.collect(); continue
+
+            # Utiliser ref_shape_2d déterminé plus haut ou celui de l'image courante
+            current_input_shape_hw = img_data_hxwxc.shape[:2] # H, W
+            if ref_shape_2d is None: ref_shape_2d = current_input_shape_hw # Initialiser si besoin
 
             pixmap = None
             try:
-                y_in, x_in = np.indices(current_input_shape_2d)
+                y_in, x_in = np.indices(current_input_shape_hw)
                 world_coords = wcs_in.all_pix2world(x_in.flatten(), y_in.flatten(), 0)
-                x_out, y_out = output_wcs.all_world2pix(world_coords[0], world_coords[1], 0)
-                pixmap = np.dstack((x_out.reshape(current_input_shape_2d), y_out.reshape(current_input_shape_2d))).astype(np.float32)
-            except Exception as map_err: print(f"      - ERREUR pixmap: {map_err}"); del img_data, wcs_in, header_in; gc.collect(); continue
+                x_out, y_out = final_output_wcs.all_world2pix(world_coords[0], world_coords[1], 0) # Utilise WCS final
+                pixmap = np.dstack((x_out.reshape(current_input_shape_hw), y_out.reshape(current_input_shape_hw))).astype(np.float32)
+            except Exception as map_err: print(f"      - ERREUR pixmap: {map_err}"); del img_data_hxwxc, wcs_in, header_in; gc.collect(); continue
 
-            try:
-                exptime = 1.0
+            try: # Appel add_image
+                exptime = 1.0; # ... (calcul exptime) ...
                 if header_in and 'EXPTIME' in header_in:
-                    try: exptime = float(header_in['EXPTIME']); exptime = max(1e-6, exptime)
+                    try: exptime = max(1e-6, float(header_in['EXPTIME']))
                     except (ValueError, TypeError): pass
                 for c in range(3):
-                    channel_data_2d = img_data[:, :, c]
-                    drizzler_objects[c].add_image( # Appel add_image correct
-                        data=channel_data_2d,
-                        pixmap=pixmap,
-                        exptime=exptime,
-                        in_units='counts',
-                        pixfrac=self.pixfrac
-                    )
+                    channel_data_2d = img_data_hxwxc[:, :, c]; finite_mask = np.isfinite(channel_data_2d); channel_data_2d[~finite_mask] = 0.0
+                    final_drizzlers[c].add_image(data=channel_data_2d, pixmap=pixmap, exptime=exptime, in_units='counts', pixfrac=self.pixfrac)
                 processed_count += 1
-            except Exception as e_add: print(f"   - ERREUR add_image {i+1}: {e_add}"); traceback.print_exc(limit=1) # Limiter traceback ici
-            finally: del img_data, wcs_in, header_in, pixmap; gc.collect()
+            except Exception as e_add: print(f"   - ERREUR add_image {i+1}: {e_add}"); traceback.print_exc(limit=1)
+            finally: del img_data_hxwxc, wcs_in, header_in, pixmap; gc.collect()
         # --- Fin Boucle Drizzle ---
 
-        # --- Étape 3 : Finalisation (Plus simple : les résultats sont dans les listes) ---
         print(f"   -> Boucle Drizzle terminée. {processed_count}/{len(temp_filepath_list)} fichiers traités.")
         if processed_count == 0: print("ERREUR: Aucun fichier traité."); return None, None
 
+        # --- Assemblage et Retour ---
         try:
-            # Les résultats sont déjà dans output_images_list et output_weights_list
-            # Il suffit de les combiner en tableaux HxWxC
-            print("   -> Combinaison des canaux finaux...")
-            final_sci = np.stack(output_images_list, axis=-1)
-            final_wht = np.stack(output_weights_list, axis=-1)
+            print("   -> Combinaison canaux finaux..."); final_sci = np.stack(output_images_list, axis=-1); final_wht = np.stack(output_weights_list, axis=-1)
             print(f"   -> Combinaison terminée. Shape finale: {final_sci.shape}")
+        except Exception as e_final: print(f"   -> ERREUR assemblage final: {e_final}"); return None, None
 
-        except Exception as e_final:
-            print(f"   -> ERREUR pendant combinaison finale des canaux: {e_final}")
-            traceback.print_exc(limit=2)
-            return None, None # Échec
-
-        # --- Étape 4 : Normalisation Finale (inchangée) ---
-        final_image_normalized = None
+        # --- Normalisation Finale ---
+        # ... (logique normalisation inchangée) ...
+        final_image_normalized = None # Initialiser
         try:
             print("   -> Normalisation finale 0-1...")
             min_val = np.nanmin(final_sci); max_val = np.nanmax(final_sci)
-            if max_val > min_val: final_image_normalized = (final_sci - min_val) / (max_val - min_val); final_image_normalized = np.clip(final_image_normalized, 0.0, 1.0); final_image_normalized = np.nan_to_num(final_image_normalized, nan=0.0)
-            else: print("   - WARNING: Image finale constante/vide."); final_image_normalized = np.zeros_like(final_sci)
-        except Exception as norm_err: print(f"   - ERREUR normalisation: {norm_err}"); return None, None
+            print(f"      - Avant Norm -> Min: {min_val:.4f}, Max: {max_val:.4f}") # Log valeurs
+            if max_val > min_val:
+                final_image_normalized = (final_sci - min_val) / (max_val - min_val)
+                final_image_normalized = np.clip(final_image_normalized, 0.0, 1.0)
+                final_image_normalized = np.nan_to_num(final_image_normalized, nan=0.0) # Nettoyer NaN après division
+            else:
+                print("   - WARNING: Image finale constante/vide après Drizzle.")
+                final_image_normalized = np.zeros_like(final_sci) # Mettre à zéro explicitement
+            # Assurer float32 en sortie
+            final_image_normalized = final_image_normalized.astype(np.float32)
+            print(f"      - Après Norm -> Shape: {final_image_normalized.shape}, Type: {final_image_normalized.dtype}, Min: {np.min(final_image_normalized):.2f}, Max: {np.max(final_image_normalized):.2f}") # Log après
 
-        end_time = time.time(); print(f"✅ DrizzleProcessor (resample avec tableaux pré-alloués): Terminé en {end_time - start_time:.2f}s.")
-        return final_image_normalized.astype(np.float32), final_wht.astype(np.float32)
+        except Exception as norm_err:
+            print(f"   - ERREUR normalisation finale: {norm_err}")
+            final_image_normalized = None # Mettre à None si erreur
+            # Ne pas retourner final_wht si l'image sci a échoué
+            final_wht = None # Assurer que wht est aussi None
 
-# --- FIN DE LA MÉTHODE apply_drizzle (AVEC TABLEAUX PRÉ-ALLOUÉS) ---
+        end_time = time.time(); print(f"✅ DrizzleProcessor terminé en {end_time - start_time:.2f}s.")
+        # Ajouter un log juste avant le return pour voir ce qui est retourné
+        print(f"DEBUG [apply_drizzle return]: Returning SCI is None? {final_image_normalized is None}, WHT is None? {final_wht is None}")
+        return final_image_normalized, final_wht
+
+
+# --- FIN DE LA MÉTHODE apply_drizzle (MODIFIÉE) ---

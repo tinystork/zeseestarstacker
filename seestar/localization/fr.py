@@ -177,6 +177,17 @@ FR_TRANSLATIONS = {
     'mosaic_window_create_error': "Impossible d'ouvrir la fenêtre d'options Mosaïque.",
     'mosaic_mode_enabled_log': "Mode mosaïque ACTIVÉ.",
     'mosaic_mode_disabled_log': "Mode mosaïque DÉSACTIVÉ.",    
+    'mosaic_drizzle_options_frame': "Options Drizzle Mosaïque",
+    'mosaic_drizzle_kernel_label': "Noyau :",
+    'mosaic_drizzle_pixfrac_label': "Pixfrac :",
+    'mosaic_invalid_kernel': "Noyau Drizzle sélectionné invalide.",
+    'mosaic_invalid_pixfrac': "Valeur Pixfrac invalide. Doit être entre 0.01 et 1.0.",
+    'mosaic_mode_enabled_log': "Mode mosaïque ACTIVÉ.",
+    'mosaic_mode_disabled_log': "Mode mosaïque DÉSACTIVÉ.",
+    'mosaic_api_key_frame': "Clé API Astrometry.net (Requise pour Mosaïque)",
+    'mosaic_api_key_label': "Clé API :",
+    'mosaic_api_key_help': "Obtenez votre clé sur nova.astrometry.net (compte gratuit)",
+    'mosaic_api_key_required': "La clé API Astrometry.net est requise lorsque le Mode Mosaïque est activé.",
 
     # ---  Textes pour Avertissement Drizzle ---
     'drizzle_warning_title': "Avertissement Drizzle",

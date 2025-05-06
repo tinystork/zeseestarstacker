@@ -189,7 +189,18 @@ EN_TRANSLATIONS = {
     'ok': "OK",
     'mosaic_window_create_error': "Could not open Mosaic settings window.",
     'mosaic_mode_enabled_log': "Mosaic mode ENABLED.",
-    'mosaic_mode_disabled_log': "Mosaic mode DISABLED.",
+    'mosaic_mode_disabled_log': "Mosaic mode DISABLED.",   
+    'mosaic_drizzle_options_frame': "Mosaic Drizzle Options",
+    'mosaic_drizzle_kernel_label': "Kernel:",
+    'mosaic_drizzle_pixfrac_label': "Pixfrac:",
+    'mosaic_invalid_kernel': "Invalid Drizzle kernel selected.",
+    'mosaic_invalid_pixfrac': "Invalid Pixfrac value. Must be between 0.01 and 1.0.",
+
+    'mosaic_api_key_frame': "Astrometry.net API Key (Required for Mosaic)",
+    'mosaic_api_key_label': "API Key:",
+    'mosaic_api_key_help': "Get your key from nova.astrometry.net (free account)",
+    'mosaic_api_key_required': "Astrometry.net API Key is required when Mosaic Mode is enabled.",
+   
 
 
 }
