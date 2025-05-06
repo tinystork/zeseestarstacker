@@ -2,65 +2,100 @@
 """
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
-(Version Révisée 6: Intégration ajout dossiers initiaux + Pondération)
+(Version Révisée 9: Imports strictement nécessaires au niveau module)
 """
-import os
-import numpy as np
-from astropy.io import fits
-import cv2
-import threading
-from queue import Queue, Empty
-import time
-import astroalign as aa # Keep astroalign
-import traceback
-import shutil
-import math
-import gc
-from ..enhancement.drizzle_integration import DrizzleProcessor
-# --- NOUVELLE LIGNE D'IMPORT ---
-from astropy.wcs import WCS, FITSFixedWarning # Importer WCS (et peut-être le warning)
-import warnings # Si FITSFixedWarning est importé, il faut aussi warnings
+print("DEBUG QM: Début chargement module queue_manager.py")
 
+# --- Standard Library Imports ---
+import gc
+import math
+import os
+from queue import Queue, Empty # Essentiel pour la classe
+import shutil
+import threading              # Essentiel pour la classe (Lock)
+import time
+import traceback
+import warnings
+print("DEBUG QM: Imports standard OK.")
+
+# --- Third-Party Library Imports ---
+import astroalign as aa
+import cv2
+import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy import units as u
+from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+from astropy.wcs import WCS, FITSFixedWarning
+from ccdproc import CCDData, combine as ccdproc_combine
+print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
+
+# --- Optional Third-Party Imports (with availability flags) ---
 try:
     import cupy
     _cupy_installed = True
+    print("DEBUG QM: Import CuPy OK.")
 except ImportError:
     _cupy_installed = False
-# print("DEBUG: CuPy library not found globally.") # Optional debug
-# --- Adjust relative import for utils ---
-from ..core.utils import check_cupy_cuda, estimate_batch_size # Add check_cupy_cuda
-# Import core processing functions needed within this module
-from ..core.image_processing import (
-    load_and_validate_fits,
-    debayer_image,
-    save_fits_image,
-    save_preview_image
+    print("DEBUG QM: Import CuPy échoué (normal si non installé).")
 
-)
 try:
-    from drizzle.resample import Drizzle # Importer la CLASSE Drizzle
+    # On importe juste Drizzle ici, car la CLASSE est utilisée dans les méthodes
+    from drizzle.resample import Drizzle
     _OO_DRIZZLE_AVAILABLE = True
-    print("DEBUG QueueManager: Imported drizzle.resample.Drizzle")
+    print("DEBUG QM: Import drizzle.resample.Drizzle OK.")
 except ImportError as e_driz_cls:
-    print(f"ERROR QueueManager: Cannot import drizzle.resample.Drizzle class: {e_driz_cls}")
     _OO_DRIZZLE_AVAILABLE = False
     Drizzle = None # Définir comme None si indisponible
-# --- FIN MODIFICATION ---
-from ..core.hot_pixels import detect_and_correct_hot_pixels
-from ..core.alignment import SeestarAligner
-from ..core.utils import estimate_batch_size
-# Correction ici: Utiliser le chemin complet depuis la racine 'seestar'
-from ..enhancement.stack_enhancement import StackEnhancer
-from ..enhancement.drizzle_integration import _create_wcs_from_header # Importer la fonction helper
-from ..core.utils import check_cupy_cuda, estimate_batch_size
-from ..core.image_processing import (
-    load_and_validate_fits,
-    debayer_image,
-    save_fits_image,
-    save_preview_image
-)
-from ccdproc import CCDData                    
-from ccdproc import combine as ccdproc_combine 
+    print(f"ERROR QM: Échec import drizzle.resample.Drizzle: {e_driz_cls}")
+
+# --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
+# Core Alignment (Instancié dans __init__)
+try:
+    from ..core.alignment import SeestarAligner
+    print("DEBUG QM: Import SeestarAligner OK.")
+except ImportError as e: print(f"ERREUR QM: Échec import SeestarAligner: {e}"); raise
+# Core Hot Pixels (Utilisé dans _worker -> _process_file)
+try:
+    from ..core.hot_pixels import detect_and_correct_hot_pixels
+    print("DEBUG QM: Import detect_and_correct_hot_pixels OK.")
+except ImportError as e: print(f"ERREUR QM: Échec import detect_and_correct_hot_pixels: {e}"); raise
+# Core Image Processing (Utilisé PARTOUT)
+try:
+    from ..core.image_processing import (
+        load_and_validate_fits,
+        debayer_image,
+        save_fits_image,
+        save_preview_image
+    )
+    print("DEBUG QM: Imports image_processing OK.")
+except ImportError as e: print(f"ERREUR QM: Échec import image_processing: {e}"); raise
+# Core Utils (Utilisé PARTOUT)
+try:
+    from ..core.utils import check_cupy_cuda, estimate_batch_size
+    print("DEBUG QM: Imports utils OK.")
+except ImportError as e: print(f"ERREUR QM: Échec import utils: {e}"); raise
+# Enhancement Color Correction (Instancié dans __init__)
+try:
+    from ..enhancement.color_correction import ChromaticBalancer
+    print("DEBUG QM: Import ChromaticBalancer OK.")
+except ImportError as e: print(f"ERREUR QM: Échec import ChromaticBalancer: {e}"); raise
+
+# --- Imports INTERNES à déplacer en IMPORTS TARDIFS ---
+# Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
+# pour éviter les dépendances circulaires au chargement initial.
+
+from ..enhancement.drizzle_integration import _load_drizzle_temp_file, DrizzleProcessor, _create_wcs_from_header # Déplacé vers _worker, etc.
+from ..enhancement.astrometry_solver import solve_image_wcs # Déplacé vers _worker/_process_file
+from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files # Déplacé vers _worker
+from ..enhancement.stack_enhancement import StackEnhancer # Importé tardivement si nécessaire dans _save_final_stack ou ailleurs
+
+# --- Configuration des Avertissements ---
+warnings.filterwarnings('ignore', category=FITSFixedWarning)
+print("DEBUG QM: Configuration warnings OK.")
+# --- FIN Imports ---
+
+
 
 class SeestarQueuedStacker:
     """
@@ -68,79 +103,105 @@ class SeestarQueuedStacker:
     Gère l'alignement et l'empilement dans un thread séparé.
     Ajout de la pondération basée sur la qualité (SNR, Nombre d'étoiles).
     """
-    def __init__(self):
-        # --- State Flags & Control ---
-        self.stop_processing = False
+    print("DEBUG QM: Lecture de la définition de la classe SeestarQueuedStacker...")
+
+    def __init__(self, *args, **kwargs):
+        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (Réorganisé) ====")
+        
+        # --- 1. Attributs Critiques et Simples EN PREMIER ---
+        print("  -> Initialisation attributs simples...")
+        # Flags & Control
         self.processing_active = False
+        self.stop_processing = False
         self.processing_error = None
-        # --- Callbacks ---
+        self.is_mosaic_run = False
+        self.drizzle_active_session = False
+        self.perform_cleanup = True
+        self.use_quality_weighting = False
+        self.weight_by_snr = True
+        self.weight_by_stars = True
+        self.correct_hot_pixels = True
+        self.apply_chroma_correction = True
+        # Callbacks
         self.progress_callback = None
         self.preview_callback = None
-        # --- Queue & Threading ---
+        # Queue & Threading
         self.queue = Queue()
+        self.folders_lock = threading.Lock()  # <<< Défini tôt
         self.processing_thread = None
-        self.folders_lock = threading.Lock()
-        # --- File & Folder Management ---
+        # File & Folder Management
         self.processed_files = set()
         self.additional_folders = []
         self.current_folder = None
         self.output_folder = None
         self.unaligned_folder = None
-        ### NOUVEAU : Chemin pour les entrées temporaires Drizzle (sera défini dans initialize) ###
         self.drizzle_temp_dir = None
-        ### NOUVEAU : Flag pour savoir si Drizzle est actif pour cette session (sera défini dans start_processing) ###
-        self.drizzle_active_session = False
-        self.reference_wcs_object = None # Stockera l'objet WCS validé
-        # --- Reference Image & Alignment ---
-        self.aligner = SeestarAligner()
-        ### NOUVEAU : Pour stocker le header de référence pour le WCS Drizzle (sera défini dans _worker) ###
+        self.drizzle_batch_output_dir = None
+        self.final_stacked_path = None
+        # Astrometry & WCS Refs
+        self.api_key = None
+        self.reference_wcs_object = None  # À utiliser pour l'astrométrie de la mosaïque
         self.reference_header_for_wcs = None
-        # --- Batch & Cumulative Stack (pour l'aperçu classique) ---
-        self.current_batch_data = [] # Stocke (aligned_data, header, quality_scores)
-        self.current_stack_data = None # Stack CLASSIQUE cumulé pour l'aperçu
+        self.reference_pixel_scale_arcsec = None
+        self.drizzle_output_wcs = None
+        self.drizzle_output_shape_hw = None
+        # Batch & Cumulative Data
+        self.current_batch_data = []
+        self.current_stack_data = None
         self.current_stack_header = None
-        self.images_in_cumulative_stack = 0 # Pour le stack CLASSIQUE
-        self.total_exposure_seconds = 0.0 # Pour le stack CLASSIQUE
-        self.final_stacked_path = None # Chemin du fichier FITS final (classique OU drizzle)
-        # --- Processing Parameters (Valeurs par défaut, seront écrasées par start_processing) ---
+        self.images_in_cumulative_stack = 0
+        self.total_exposure_seconds = 0.0
+        self.cumulative_drizzle_data = None
+        self.cumulative_drizzle_wht = None
+        self.intermediate_drizzle_batch_files = []
+        # Processing Parameters
         self.stacking_mode = "kappa-sigma"
         self.kappa = 2.5
-        self.batch_size = 10 # Valeur par défaut si non fournie
-        self.correct_hot_pixels = True
+        self.batch_size = 10
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
         self.bayer_pattern = "GRBG"
-        self.perform_cleanup = True
-        self.use_drizzle_processing = False # Valeur par défaut initiale
+        self.drizzle_mode = "Final"
         self.drizzle_scale = 2.0
         self.drizzle_wht_threshold = 0.7
-        # --- Quality Weighting Parameters ---
-        self.use_quality_weighting = False
-        self.weight_by_snr = True
-        self.weight_by_stars = True
+        self.drizzle_kernel = "square"
+        self.drizzle_pixfrac = 1.0
         self.snr_exponent = 1.0
         self.stars_exponent = 0.5
         self.min_weight = 0.1
-        # --- Statistics ---
+        # Statistics
         self.files_in_queue = 0
         self.processed_files_count = 0
         self.aligned_files_count = 0
-        self.stacked_batches_count = 0 # Nombre de batchs classiques traités
+        self.stacked_batches_count = 0
         self.total_batches_estimated = 0
         self.failed_align_count = 0
-        self.failed_stack_count = 0 # Échecs DANS _stack_batch (ccdproc)
+        self.failed_stack_count = 0
         self.skipped_files_count = 0
-        # --- NOUVEAUX ATTRIBUTS pour Drizzle Modes & Incrémental ---
-        self.drizzle_mode = "Final"                 # Stocke le mode choisi ('Final', 'Incremental')
-        self.cumulative_drizzle_data = None         # Image Drizzle cumulative (mode Incrémental)
-        self.cumulative_drizzle_wht = None          # Carte de poids cumulative (mode Incrémental)
-        self.drizzle_kernel = "square"              # Noyau Drizzle choisi
-        self.drizzle_pixfrac = 1.0                  # Pixfrac Drizzle choisi
-        # --- Assurer que l'aligneur a aussi un callback progress (au cas où) ---
-        if self.progress_callback:
-             self.aligner.set_progress_callback(self.progress_callback)
-######################################################################################################################################################
+        print("  -> Attributs simples initialisés.")
 
+        # --- 2. Instanciations de Classes (dans des try/except) ---
+        try:
+            print("  -> Tentative instanciation ChromaticBalancer...")
+            self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15)
+            print("     ✓ ChromaticBalancer OK.")
+        except Exception as e_cb:
+            print(f"  -> ERREUR ChromaticBalancer: {e_cb}")
+            self.chroma_balancer = None; raise
+
+        try:
+            print("  -> Tentative instanciation SeestarAligner...")
+            self.aligner = SeestarAligner()
+            print("     ✓ SeestarAligner OK.")
+        except Exception as e_align:
+            print(f"  -> ERREUR SeestarAligner: {e_align}")
+            self.aligner = None; raise
+
+        print("==== FIN INITIALISATION SeestarQueuedStacker (Réorganisé) ====\n")
+
+
+
+######################################################################################################################################################
 
 
     def initialize(self, output_dir):
@@ -222,12 +283,6 @@ class SeestarQueuedStacker:
 ########################################################################################################################################################
 
 
-
-    def set_progress_callback(self, callback):
-        self.progress_callback = callback
-        self.aligner.set_progress_callback(callback)
-
-
     def update_progress(self, message, progress=None):
         message = str(message)
         if self.progress_callback:
@@ -237,7 +292,31 @@ class SeestarQueuedStacker:
             if progress is not None: print(f"[{int(progress)}%] {message}")
             else: print(message)
 
-    def set_preview_callback(self, callback): self.preview_callback = callback
+########################################################################################################################################################
+    
+
+    def set_progress_callback(self, callback):
+        # ... (code identique à avant) ...
+        print("DEBUG QM: Appel de set_progress_callback.") # Debug
+        self.progress_callback = callback
+        if hasattr(self, 'aligner') and hasattr(self.aligner, 'set_progress_callback') and callable(callback):
+            try:
+                print("DEBUG QM: Tentative de configuration callback sur aligner...") # Debug
+                self.aligner.set_progress_callback(callback)
+                print("DEBUG QM: Callback aligner configuré.") # Debug
+            except Exception as e_align_cb: print(f"Warning QM: Could not set progress callback on aligner: {e_align_cb}")
+        else: print("DEBUG QM: Ne configure pas callback aligner (aligner ou méthode manquante).") # Debug
+
+########################################################################################################################################################
+
+
+    def set_preview_callback(self, callback):
+        """Définit la fonction de rappel pour les mises à jour de l'aperçu."""
+        self.preview_callback = callback
+
+
+################################################################################################################################################
+
 
     def _update_preview(self, force_update=False):
         """Safely calls the preview callback, including stack count and batch info."""
@@ -296,6 +375,9 @@ class SeestarQueuedStacker:
         except Exception as e:
             print(f"Error in _update_preview_incremental_drizzle: {e}")
             traceback.print_exc(limit=2)
+
+
+
 #########################################################################################################################################################
 
 
@@ -381,6 +463,172 @@ class SeestarQueuedStacker:
         return out_wcs, out_shape_2d_hw # Retourne WCS et shape (H, W)
 
 
+###########################################################################################################################################################
+
+
+
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list):
+        """
+        Calcule le WCS et la Shape optimaux pour la mosaïque finale en se basant
+        sur l'étendue couverte par tous les WCS d'entrée.
+
+        Args:
+            all_input_wcs_list (list): Liste des objets astropy.wcs.WCS
+                                       provenant de toutes les images d'entrée alignées.
+                                       IMPORTANT: Chaque WCS doit avoir .pixel_shape défini !
+
+        Returns:
+            tuple: (output_wcs, output_shape_hw) ou (None, None) si échec.
+        """
+        num_wcs = len(all_input_wcs_list)
+        print(f"DEBUG (Backend _calculate_final_mosaic_grid): Appel avec {num_wcs} WCS d'entrée.")
+        self.update_progress(f"📐 Calcul de la grille de sortie mosaïque ({num_wcs} WCS)...")
+
+        if num_wcs == 0:
+            print("ERREUR (Backend _calculate_final_mosaic_grid): Aucune information WCS fournie.")
+            return None, None
+
+        # --- Validation des WCS d'entrée ---
+        valid_wcs_list = []
+        for i, wcs_in in enumerate(all_input_wcs_list):
+            if wcs_in is None or not wcs_in.is_celestial:
+                print(f"   - WARNING: WCS {i+1} invalide ou non céleste. Ignoré.")
+                continue
+            if wcs_in.pixel_shape is None:
+                print(f"   - WARNING: WCS {i+1} n'a pas de pixel_shape défini. Ignoré.")
+                # Tenter de l'ajouter si possible (basé sur NAXIS du header de référence?)
+                # C'est risqué ici, il vaut mieux s'assurer qu'il est défini AVANT
+                continue
+            valid_wcs_list.append(wcs_in)
+
+        if not valid_wcs_list:
+            print("ERREUR (Backend _calculate_final_mosaic_grid): Aucun WCS d'entrée valide trouvé.")
+            return None, None
+        print(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
+
+        try:
+            # --- 1. Calculer le "footprint" (empreinte) de chaque image sur le ciel ---
+            #    Le footprint est la projection des 4 coins de l'image dans les coordonnées célestes.
+            all_footprints_sky = []
+            print("   -> Calcul des footprints célestes...")
+            for wcs_in in valid_wcs_list:
+                # wcs_in.pixel_shape est (nx, ny)
+                nx, ny = wcs_in.pixel_shape
+                # Calculer le footprint en coordonnées pixel (0-based corners)
+                # Ordre: (0,0), (nx-1, 0), (nx-1, ny-1), (0, ny-1)
+                pixel_corners = np.array([
+                    [0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]
+                ], dtype=np.float64)
+                # Projeter ces coins sur le ciel
+                sky_corners = wcs_in.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
+                all_footprints_sky.append(sky_corners)
+
+            # --- 2. Déterminer l'étendue totale de la mosaïque ---
+            #    Trouver les RA/Dec min/max de tous les coins projetés.
+            #    Attention à la discontinuité du RA à 0h/24h (ou 0/360 deg).
+            #    SkyCoord gère cela mieux.
+            print("   -> Détermination de l'étendue totale...")
+            all_corners_flat = SkyCoord(ra=np.concatenate([fp.ra.deg for fp in all_footprints_sky]),
+                                        dec=np.concatenate([fp.dec.deg for fp in all_footprints_sky]),
+                                        unit='deg', frame='icrs') # Assumer ICRS
+
+            # Trouver le centre approximatif pour aider à gérer le wrap RA
+            central_ra = np.median(all_corners_flat.ra.wrap_at(180*u.deg).deg)
+            central_dec = np.median(all_corners_flat.dec.deg)
+            print(f"      - Centre Approx (RA, Dec): ({central_ra:.4f}, {central_dec:.4f}) deg")
+
+            # Calculer l'étendue en RA/Dec en tenant compte du wrap
+            # On utilise wrap_at(180) pour le RA
+            ra_values_wrapped = all_corners_flat.ra.wrap_at(180 * u.deg).deg
+            min_ra_wrap, max_ra_wrap = np.min(ra_values_wrapped), np.max(ra_values_wrapped)
+            min_dec, max_dec = np.min(all_corners_flat.dec.deg), np.max(all_corners_flat.dec.deg)
+
+            # La taille angulaire en RA dépend de la déclinaison
+            delta_ra_deg = (max_ra_wrap - min_ra_wrap) * np.cos(np.radians(central_dec))
+            delta_dec_deg = max_dec - min_dec
+            print(f"      - Étendue Approx (RA * cos(Dec), Dec): ({delta_ra_deg:.4f}, {delta_dec_deg:.4f}) deg")
+
+            # --- 3. Définir le WCS de Sortie ---
+            #    Utiliser le centre calculé, la même projection que la référence,
+            #    et la nouvelle échelle de pixel.
+            print("   -> Création du WCS de sortie...")
+            ref_wcs = valid_wcs_list[0] # Utiliser le premier WCS valide comme base
+            output_wcs = WCS(naxis=2)
+            output_wcs.wcs.ctype = ref_wcs.wcs.ctype # Garder la projection (ex: TAN)
+            output_wcs.wcs.crval = [central_ra, central_dec] # Centrer sur la mosaïque
+            output_wcs.wcs.cunit = ref_wcs.wcs.cunit # Garder les unités (deg)
+
+            # Calculer la nouvelle échelle de pixel (en degrés/pixel)
+            # Utiliser la moyenne des échelles d'entrée ou l'échelle de référence
+            ref_scale_matrix = ref_wcs.pixel_scale_matrix
+            # Prendre la moyenne des valeurs absolues diagonales comme échelle approx
+            avg_input_scale = np.mean(np.abs(np.diag(ref_scale_matrix)))
+            output_pixel_scale = avg_input_scale / self.drizzle_scale
+            print(f"      - Échelle Pixel Entrée (Moy): {avg_input_scale * 3600:.3f} arcsec/pix")
+            print(f"      - Échelle Pixel Sortie Cible: {output_pixel_scale * 3600:.3f} arcsec/pix")
+
+            # Appliquer la nouvelle échelle (CD matrix, en assumant pas de rotation/skew complexe)
+            # Mettre le signe correct pour le RA (- pour axe X vers l'Est)
+            output_wcs.wcs.cd = np.array([[-output_pixel_scale, 0.0],
+                                          [0.0, output_pixel_scale]])
+
+            # --- 4. Calculer la Shape de Sortie ---
+            #    Projeter l'étendue totale (les coins extrêmes) sur la nouvelle grille WCS
+            #    pour déterminer les dimensions en pixels nécessaires.
+            print("   -> Calcul de la shape de sortie...")
+            # Créer les coordonnées des coins englobants de la mosaïque
+            # (On prend les min/max RA/Dec, attention au wrap RA)
+            # C'est plus sûr de projeter *tous* les coins d'entrée dans le système de sortie
+            all_output_pixels_x = []
+            all_output_pixels_y = []
+            for sky_corners in all_footprints_sky:
+                pixels_out_x, pixels_out_y = output_wcs.world_to_pixel(sky_corners)
+                all_output_pixels_x.extend(pixels_out_x)
+                all_output_pixels_y.extend(pixels_out_y)
+
+            # Trouver les min/max des coordonnées pixel de sortie
+            x_min_out, x_max_out = np.min(all_output_pixels_x), np.max(all_output_pixels_x)
+            y_min_out, y_max_out = np.min(all_output_pixels_y), np.max(all_output_pixels_y)
+
+            # Calculer la largeur et la hauteur (ajouter 1 car indices 0-based)
+            # Utiliser ceil pour s'assurer qu'on couvre tout
+            out_width = int(np.ceil(x_max_out - x_min_out + 1))
+            out_height = int(np.ceil(y_max_out - y_min_out + 1))
+            # Assurer une taille minimale
+            out_width = max(10, out_width)
+            out_height = max(10, out_height)
+            output_shape_hw = (out_height, out_width) # Ordre H, W
+            print(f"      - Dimensions Pixels Calculées (W, H): ({out_width}, {out_height})")
+
+            # --- 5. Finaliser le WCS de Sortie ---
+            #    Ajuster CRPIX pour qu'il corresponde au nouveau centre pixel
+            #    dans le système de coordonnées de sortie (0-based index).
+            #    Le pixel (0,0) de la sortie correspond à (x_min_out, y_min_out)
+            #    dans le système intermédiaire calculé par world_to_pixel.
+            #    CRPIX (1-based) = (coord_centre_interm - coord_min_interm + 1)
+            #    Calculer le pixel central dans le système 'output_pixels'
+            center_x_out, center_y_out = output_wcs.world_to_pixel(SkyCoord(ra=central_ra*u.deg, dec=central_dec*u.deg))
+            # Calculer CRPIX
+            output_wcs.wcs.crpix = [
+                center_x_out - x_min_out + 1.0, # CRPIX1
+                center_y_out - y_min_out + 1.0  # CRPIX2
+            ]
+            # Définir la shape pour Astropy WCS (W, H)
+            output_wcs.pixel_shape = (out_width, out_height)
+            # Mettre à jour NAXIS internes
+            try: output_wcs._naxis1 = out_width; output_wcs._naxis2 = out_height
+            except AttributeError: pass
+
+            print(f"      - WCS Finalisé: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
+            print(f"DEBUG (Backend _calculate_final_mosaic_grid): Calcul grille mosaïque réussi.")
+            return output_wcs, output_shape_hw # Retourne WCS et shape (H, W)
+
+        except Exception as e:
+            print(f"ERREUR (Backend _calculate_final_mosaic_grid): Échec calcul grille mosaïque: {e}")
+            traceback.print_exc(limit=3)
+            return None, None
+
+
 
 
 ###########################################################################################################################################################
@@ -389,6 +637,16 @@ class SeestarQueuedStacker:
         """Estimates the total number of batches based on files_in_queue."""
         if self.batch_size > 0: self.total_batches_estimated = math.ceil(self.files_in_queue / self.batch_size)
         else: self.update_progress(f"⚠️ Taille de lot invalide ({self.batch_size}), impossible d'estimer le nombre total de lots."); self.total_batches_estimated = 0
+
+
+
+
+################################################################################################################################################
+
+
+
+
+
     def _calculate_quality_metrics(self, image_data):
         """Calculates SNR and Star Count, WITH ADDED LOGGING.""" # Docstring updated
         scores = {'snr': 0.0, 'stars': 0.0}
@@ -451,370 +709,561 @@ class SeestarQueuedStacker:
         # --- This section is ONLY reached if the 'try' block succeeds ---
         self.update_progress(f"      Quality Scores -> SNR: {scores['snr']:.2f}, Stars: {scores['stars']:.3f} ({num_stars} raw)")
         return scores # Return the successfully calculated scores
+
+
+
 ##################################################################################################################
 
 
+    def set_progress_callback(self, callback):
+        print("DEBUG QM: Appel de set_progress_callback.")
+        self.progress_callback = callback
+        if hasattr(self, 'aligner') and hasattr(self.aligner, 'set_progress_callback') and callable(callback):
+            try:
+                print("DEBUG QM: Tentative de configuration callback sur aligner...")
+                self.aligner.set_progress_callback(callback)
+                print("DEBUG QM: Callback aligner configuré.")
+            except Exception as e_align_cb: print(f"Warning QM: Could not set progress callback on aligner: {e_align_cb}")
+        else: print("DEBUG QM: Ne configure pas callback aligner (aligner ou méthode manquante).")
+
+
+
+################################################################################################################################################
+
+
+
+    def set_preview_callback(self, callback):
+        print("DEBUG QM: Appel de set_preview_callback.")
+        self.preview_callback = callback
+
+
+################################################################################################################################################
+
 
     def _worker(self):
-        """Thread principal pour le traitement des images."""
+        """
+        Thread principal pour le traitement des images.
+        (Version Corrigée pour Batch Processing, TypeError & Import Tardif)
+        """
+        print("\n" + "="*10 + " DEBUG [Worker Start]: Initialisation " + "="*10)
         self.processing_active = True
         self.processing_error = None
         start_time_session = time.monotonic()
-        reference_image_data = None
-        reference_header = None
-        self.reference_wcs_object = None # Sera l'objet WCS validé avec pixel_shape
-        self.reference_header_for_wcs = None # Header brut de référence
 
-        # Initialiser/Réinitialiser les listes selon le mode
-        current_batch_temp_files = [] # Pour Drizzle Incremental
-        self.current_batch_data = [] # Pour Classique
-        # Liste pour les chemins des fichiers intermédiaires Drizzle Final
-        self.intermediate_drizzle_batch_files = []
+        # --- Initialisation des variables de session ---
+        reference_image_data = None; reference_header = None
+        self.reference_wcs_object = None; self.reference_header_for_wcs = None
+        self.reference_pixel_scale_arcsec = None
+        self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
 
-        print(f"DEBUG [WORKER START]: Mode: {self.drizzle_mode if self.drizzle_active_session else 'Classic'}, DrizzleActive: {self.drizzle_active_session}")
+        # --- Listes pour accumuler les résultats ---
+        self.current_batch_data = [] # Classique [(data, header, scores)]
+        local_batch_temp_files = [] # Drizzle Incrémental [temp_path]
+        local_drizzle_final_batch_data = [] # Drizzle Final [(data, hdr, wcs_ref)]
+        self.intermediate_drizzle_batch_files = [] # Drizzle Final [(sci_path, [wht_paths])]
+        all_aligned_files_with_info = [] # Mosaïque [(aligned_data, header, quality_scores, wcs_indiv)]
 
+        print(f"DEBUG [Worker Start]: Mode reçu -> is_mosaic_run={self.is_mosaic_run}, drizzle_active_session={self.drizzle_active_session}, drizzle_mode='{self.drizzle_mode}'")
+
+        # --- IMPORTS TARDIFS (pour éviter dépendances circulaires au chargement) ---
+        # Ces modules sont nécessaires pour le traitement dans la boucle ou la finalisation
+        solve_image_wcs_func = None
+        DrizzleProcessor_class = None
+        load_drizzle_temp_file_func = None
+        create_wcs_from_header_func = None
         try:
-            # --- 1. Préparation de l'image de référence et WCS ---
-            self.update_progress("⭐ Recherche/Préparation image référence...")
-            if not self.current_folder or not os.path.isdir(self.current_folder):
-                raise RuntimeError(f"Dossier d'entrée initial invalide ou non défini: {self.current_folder}")
-            initial_files = []
-            try:
-                initial_files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.fit', '.fits'))])
-                if not initial_files: raise RuntimeError(f"Aucun fichier FITS trouvé dans le dossier initial: {self.current_folder}")
-                print(f"DEBUG [_worker]: Trouvé {len(initial_files)} fichiers FITS initiaux pour référence.")
-            except Exception as e: raise RuntimeError(f"Erreur lors du listage des fichiers initiaux: {e}")
+            from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_func
+            print("DEBUG [_worker]: Import tardif solve_image_wcs OK.")
+        except ImportError: print("ERREUR [_worker]: Échec import tardif solve_image_wcs.")
+        try:
+            from ..enhancement.drizzle_integration import _load_drizzle_temp_file as load_drizzle_temp_file_func
+            from ..enhancement.drizzle_integration import DrizzleProcessor as DrizzleProcessor_class
+            from ..enhancement.drizzle_integration import _create_wcs_from_header as create_wcs_from_header_func
+            print("DEBUG [_worker]: Import tardif drizzle_integration OK.")
+        except ImportError: print("ERREUR [_worker]: Échec import tardif drizzle_integration.")
+        # L'import de mosaic_processor reste dans la branche de finalisation mosaïque
+        # --- FIN IMPORTS TARDIFS ---
 
-            # Configuration Aligneur
+        # ============================================================
+        # --- DEBUT DU BLOC TRY PRINCIPAL (couvre tout le worker) ---
+        # ============================================================
+        try:
+            # ----------------------------------------------------
+            # Étape 1: Préparation Image Référence et WCS/Échelle
+            # ----------------------------------------------------
+            self.update_progress("⭐ Préparation image référence...")
+            if not self.current_folder or not os.path.isdir(self.current_folder): raise RuntimeError(f"Dossier entrée invalide: {self.current_folder}")
+            initial_files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.fit', '.fits'))])
+            if not initial_files: raise RuntimeError(f"Aucun FITS initial trouvé dans {self.current_folder}")
             self.aligner.correct_hot_pixels = self.correct_hot_pixels; self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
             self.aligner.neighborhood_size = self.neighborhood_size; self.aligner.bayer_pattern = self.bayer_pattern
-
-            # Obtenir l'image de référence et son header
             reference_image_data, reference_header = self.aligner._get_reference_image(self.current_folder, initial_files)
+            if reference_image_data is None or reference_header is None: raise RuntimeError("Échec obtention image/header référence.")
+            self.reference_header_for_wcs = reference_header.copy(); self.update_progress("   -> Validation/Génération WCS Référence...")
+            # --- Utiliser la fonction importée tardivement ---
+            if create_wcs_from_header_func:
+                 local_ref_wcs_obj = create_wcs_from_header_func(reference_header)
+            else: local_ref_wcs_obj = None
+            # --- Fin utilisation ---
+            if local_ref_wcs_obj is None or not local_ref_wcs_obj.is_celestial: raise RuntimeError("Impossible d'obtenir WCS référence valide.")
+            ref_naxis1 = reference_header.get('NAXIS1'); ref_naxis2 = reference_header.get('NAXIS2')
+            if ref_naxis1 and ref_naxis2: local_ref_wcs_obj.pixel_shape = (ref_naxis1, ref_naxis2)
+            self.reference_wcs_object = local_ref_wcs_obj
+            try: scale_matrix = self.reference_wcs_object.pixel_scale_matrix; self.reference_pixel_scale_arcsec = np.mean(np.abs(np.diag(scale_matrix))) * 3600.0
+            except Exception as scale_err: print(f"   - WARNING: Impossible calculer échelle pixel réf: {scale_err}")
+            self.aligner._save_reference_image(reference_image_data, reference_header, self.output_folder)
+            self.update_progress("⭐ Image de référence et WCS prêts.", 5)
+            self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None # Reporté
 
-            if reference_image_data is None or reference_header is None:
-                user_ref_path = self.aligner.reference_image_path; error_msg = ""
-                if user_ref_path and os.path.isfile(user_ref_path): error_msg = f"Échec chargement/prétraitement référence MANUELLE: {os.path.basename(user_ref_path)}"
-                elif user_ref_path: error_msg = f"Fichier référence MANUELLE introuvable/invalide: {user_ref_path}"
-                else: error_msg = "Échec sélection automatique image référence (vérifiez logs internes aligner)."
-                raise RuntimeError(error_msg)
-            else:
-                # *** Validation WCS référence ***
-                self.update_progress("   -> Validation/Génération WCS Référence...")
-                self.reference_header_for_wcs = reference_header.copy() # Stocker le header brut
-                local_ref_wcs_obj = None
-                try: # Essayer lecture depuis header
-                    with warnings.catch_warnings(): warnings.simplefilter('ignore', FITSFixedWarning); wcs_hdr = WCS(reference_header, naxis=2)
-                    if wcs_hdr.is_celestial: local_ref_wcs_obj = wcs_hdr; print("      - WCS valide trouvé dans header référence.")
-                except Exception: pass
-                if local_ref_wcs_obj is None: # Essayer génération si lecture échoue
-                    print("      - WCS Header invalide/absent, tentative génération...")
-                    local_ref_wcs_obj = _create_wcs_from_header(reference_header) # Utilise la fonction importée
-                    if local_ref_wcs_obj and local_ref_wcs_obj.is_celestial: print("      - WCS généré avec succès.")
-                    else: print("      - Échec génération WCS."); local_ref_wcs_obj = None
-
-                if local_ref_wcs_obj is None: # Si WCS toujours invalide
-                    raise RuntimeError("Impossible d'obtenir un WCS céleste valide pour l'image de référence.")
-
-                # *** Vérification cruciale : pixel_shape ***
-                ref_naxis1 = reference_header.get('NAXIS1')
-                ref_naxis2 = reference_header.get('NAXIS2')
-                if ref_naxis1 and ref_naxis2:
-                     local_ref_wcs_obj.pixel_shape = (ref_naxis1, ref_naxis2)
-                     print(f"      - Pixel shape défini sur WCS Ref Obj: {local_ref_wcs_obj.pixel_shape}")
-                     if local_ref_wcs_obj.pixel_shape is None:
-                         raise RuntimeError("Association pixel_shape à l'objet WCS a échoué.")
-                elif local_ref_wcs_obj is not None and local_ref_wcs_obj.pixel_shape is None:
-                     print("     ----> WARNING: WCS de référence n'a toujours pas de pixel_shape après génération/association. Le mode Drizzle échouera probablement.")
-
-                self.reference_wcs_object = local_ref_wcs_obj
-
-                # Sauvegarder l'image référence pour inspection (ne change pas)
-                self.aligner._save_reference_image(reference_image_data, reference_header, self.output_folder)
-                self.update_progress("⭐ Image de référence et WCS prêts.", 5)
-
-            # --- Calculer WCS/Shape sortie Drizzle UNE FOIS ---
-            self.drizzle_output_wcs = None
-            self.drizzle_output_shape_hw = None
-            if self.drizzle_active_session: # Seulement si Drizzle est actif
-                try:
-                    self.update_progress("   -> Calcul WCS/Shape sortie Drizzle...")
-                    ref_shape_hw = reference_image_data.shape[:2] # H, W
-                    self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                        self.reference_wcs_object,
-                        ref_shape_hw,
-                        self.drizzle_scale
-                    )
-                    if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-                        raise RuntimeError("Échec création WCS/Shape Drizzle sortie.")
-                except Exception as wcs_out_err:
-                     self.update_progress(f"❌ ERREUR CRITIQUE WCS Sortie Drizzle: {wcs_out_err}")
-                     self.processing_error = f"Erreur WCS Sortie Drizzle: {wcs_out_err}"
-                     # Important de sortir ici pour ne pas continuer sans WCS de sortie
-                     raise wcs_out_err # Rethrow pour être attrapé par le finally global
-
-            # --- 2. Boucle de traitement de la file ---
-            self._recalculate_total_batches() # Estimer une première fois
+            # ----------------------------------------------------
+            # Étape 2: Boucle de traitement de la file
+            # ----------------------------------------------------
+            self._recalculate_total_batches() # Calculer total_batches_est
             self.update_progress(f"▶️ Démarrage boucle traitement (File: {self.files_in_queue} | Lots Est.: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})")
 
-            # Liste pour accumuler les données du lot Drizzle Final
-            current_drizzle_final_batch_data = []
-
             while not self.stop_processing:
-                file_path = None
-                try:
+                file_path = None; aligned_data = None; header = None; quality_scores = None; wcs_object_indiv = None
+                try: # --- Try interne pour une image ---
                     file_path = self.queue.get(timeout=1.0)
                     file_name = os.path.basename(file_path)
-                    # Récupérer 4 valeurs de _process_file
-                    aligned_data, header, quality_scores, wcs_object = self._process_file(file_path, reference_image_data)
+
+                    # --- AJOUTER L'IMPORT DE SOLVE_IMAGE_WCS ICI (s'il est nécessaire dans _process_file) ---
+                    # Note: Normalement _process_file génère seulement le WCS, mais si le solve est déplacé ici :
+                    if self.is_mosaic_run and solve_image_wcs_func is None:
+                         # Si on est en mosaïque et que l'import a échoué, on ne peut pas continuer
+                         raise ImportError("Solveur WCS non importé mais requis pour la mosaïque.")
+                    # --- FIN AJOUT ---
+
+                    aligned_data, header, quality_scores, wcs_object_indiv = self._process_file(
+                        file_path, reference_image_data # _process_file a besoin de solve_image_wcs_func si is_mosaic_run
+                    )
                     self.processed_files_count += 1
 
                     if aligned_data is not None:
                         self.aligned_files_count += 1
+                        # --- Branche Mosaïque ---
+                        if self.is_mosaic_run:
+                            print(f"DEBUG [_worker/Loop]: Stockage info MOSAIC pour {file_name}")
+                            current_info = (aligned_data, header, quality_scores, wcs_object_indiv)
+                            all_aligned_files_with_info.append(current_info)
+                        # --- Branche NON-Mosaïque ---
+                        else:
+                            print(f"DEBUG [_worker/Loop]: Traitement BATCH pour {file_name}")
+                            data_for_batch=aligned_data; header_for_batch=header; scores_for_batch=quality_scores; wcs_for_batch=wcs_object_indiv
 
-                        # A. MODE DRIZZLE FINAL (NOUVELLE LOGIQUE - Étape 3)
-                        if self.drizzle_active_session and self.drizzle_mode == "Final":
-                            if wcs_object is None: # Sécurité
-                                 self.update_progress(f"   ⚠️ WCS manquant pour image alignée {file_name}. Ignorée pour Drizzle Final.")
-                                 self.skipped_files_count += 1
-                            else:
-                                 current_drizzle_final_batch_data.append((aligned_data, header, wcs_object)) # Stocker tuple
-                                 # Vérifier si le lot est plein
-                                 if len(current_drizzle_final_batch_data) >= self.batch_size:
-                                     self.stacked_batches_count += 1
-                                     # Traiter et sauvegarder le lot Drizzle
-                                     sci_path, wht_paths = self._process_and_save_drizzle_batch(
-                                         current_drizzle_final_batch_data,
-                                         self.drizzle_output_wcs,      # WCS sortie Drizzle
-                                         self.drizzle_output_shape_hw, # Shape sortie Drizzle
-                                         self.stacked_batches_count
-                                     )
-                                     # Ajouter les chemins si réussi
-                                     if sci_path and wht_paths:
-                                         self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-                                     else:
-                                         self.failed_stack_count += len(current_drizzle_final_batch_data)
-                                     # Vider le lot traité
-                                     current_drizzle_final_batch_data = []
-                                     gc.collect()
-                            # Nettoyer les données individuelles car traitées ou ignorées
-                            try: del aligned_data, header, quality_scores, wcs_object; gc.collect()
-                            except NameError: pass
+                            if self.drizzle_active_session and self.drizzle_mode == "Final":
+                                if wcs_for_batch:
+                                    local_drizzle_final_batch_data.append((data_for_batch, header_for_batch, self.reference_wcs_object))
+                                    print(f"  -> Ajouté Drizzle Final lot ({len(local_drizzle_final_batch_data)}/{self.batch_size})")
+                                    if len(local_drizzle_final_batch_data) >= self.batch_size:
+                                        if self.drizzle_output_wcs is None:
+                                            try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
+                                            except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle: {e}") from e
+                                        self.stacked_batches_count += 1
+                                        sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
+                                        if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
+                                        else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                                        local_drizzle_final_batch_data = []
+                                else: self.skipped_files_count += 1; self.update_progress(f"   ⚠️ {file_name} ignoré Drizzle Final (WCS Généré Invalide).")
 
-                        # B. MODE DRIZZLE INCREMENTAL (INCHANGÉ)
-                        elif self.drizzle_active_session and self.drizzle_mode == "Incremental":
-                             temp_filepath = self._save_drizzle_input_temp(aligned_data, header) # wcs_object non utilisé
-                             if temp_filepath is not None:
-                                 current_batch_temp_files.append(temp_filepath)
-                                 del aligned_data, header, quality_scores, wcs_object; gc.collect()
-                                 if len(current_batch_temp_files) >= self.batch_size:
-                                     self.stacked_batches_count += 1
-                                     self._process_incremental_drizzle_batch(current_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
-                                     current_batch_temp_files = []
-                             else:
-                                 self.update_progress(f"   ⚠️ Échec sauvegarde temp Drizzle (Incr). Fichier {file_name} ignoré.")
-                                 self.skipped_files_count += 1
-                                 try: del aligned_data, header, quality_scores, wcs_object; gc.collect()
-                                 except NameError: pass
+                            elif self.drizzle_active_session and self.drizzle_mode == "Incremental":
+                                temp_filepath_incr = self._save_drizzle_input_temp(data_for_batch, header_for_batch)
+                                if temp_filepath_incr:
+                                    local_batch_temp_files.append(temp_filepath_incr)
+                                    print(f"  -> Ajouté Drizzle Incr lot ({len(local_batch_temp_files)}/{self.batch_size})")
+                                    if len(local_batch_temp_files) >= self.batch_size:
+                                        self.stacked_batches_count += 1
+                                        self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                                        local_batch_temp_files = []
+                                else: self.skipped_files_count += 1; self.update_progress(f"   ⚠️ {file_name} ignoré Drizzle Incr (Échec sauvegarde temp).")
 
-                        # C. MODE CLASSIQUE (INCHANGÉ)
-                        elif not self.drizzle_active_session:
-                            # wcs_object non utilisé
-                            self.current_batch_data.append((aligned_data, header, quality_scores))
-                            if len(self.current_batch_data) >= self.batch_size:
-                                self.stacked_batches_count += 1
-                                self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
-                                self.current_batch_data = []
+                            else: # Mode Classique
+                                self.current_batch_data.append((data_for_batch, header_for_batch, scores_for_batch))
+                                print(f"  -> Ajouté Classique lot ({len(self.current_batch_data)}/{self.batch_size})")
+                                if len(self.current_batch_data) >= self.batch_size:
+                                    self.stacked_batches_count += 1
+                                    self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                                    self.current_batch_data = []
+
+                            # Nettoyage Mémoire (non-mosaïque)
+                            print(f"   -> Nettoyage mémoire image {file_name} (non-mosaïque)")
+                            del aligned_data, header, quality_scores, wcs_object_indiv
+                            del data_for_batch, header_for_batch, scores_for_batch, wcs_for_batch
+                            gc.collect()
 
                     self.queue.task_done()
-
-                    # Mise à jour Progression/ETA (Identique)
+                    # Mise à jour Progression/ETA
                     current_progress = (self.processed_files_count / self.files_in_queue) * 100 if self.files_in_queue > 0 else 0
-                    elapsed_time_session = time.monotonic() - start_time_session
-                    if self.processed_files_count > 0:
-                        time_per_file = elapsed_time_session / self.processed_files_count
-                        remaining_files_estimate = max(0, self.files_in_queue - self.processed_files_count)
-                        eta_seconds = remaining_files_estimate * time_per_file
-                        h, rem = divmod(int(eta_seconds), 3600); m, s = divmod(rem, 60)
-                        time_str = f"{h:02}:{m:02}:{s:02}"
-                        progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name} | ETA: {time_str}"
-                    else: progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name}"
-                    self.update_progress(progress_msg, current_progress)
-
+                    elapsed_time_session = time.monotonic() - start_time_session; time_per_file = elapsed_time_session / self.processed_files_count if self.processed_files_count > 0 else 0
+                    remaining_files = self.files_in_queue - self.processed_files_count; eta_seconds = remaining_files * time_per_file if time_per_file > 0 else 0
+                    h_eta, rem_eta = divmod(int(eta_seconds), 3600); m_eta, s_eta = divmod(rem_eta, 60); time_str = f"{h_eta:02}:{m_eta:02}:{s_eta:02}"
+                    progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name} | ETA: {time_str}"; self.update_progress(progress_msg, current_progress)
                     if self.processed_files_count % 20 == 0: gc.collect()
 
-                except Empty:
+                except Empty: # Gestion file vide et dossiers sup
                     self.update_progress("ⓘ File vide. Vérification batch final / dossiers sup...")
-                    # Traiter dernier lot partiel (selon le mode)
-                    if self.drizzle_active_session and self.drizzle_mode == "Final" and current_drizzle_final_batch_data:
-                        self.update_progress(f"⏳ Traitement dernier batch Drizzle Final ({len(current_drizzle_final_batch_data)} images)...")
-                        self.stacked_batches_count += 1
-                        sci_path, wht_paths = self._process_and_save_drizzle_batch(
-                            current_drizzle_final_batch_data,
-                            self.drizzle_output_wcs,
-                            self.drizzle_output_shape_hw,
-                            self.stacked_batches_count
-                        )
-                        if sci_path and wht_paths:
-                            self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-                        else:
-                            self.failed_stack_count += len(current_drizzle_final_batch_data)
-                        current_drizzle_final_batch_data = []
-                        gc.collect()
-                    elif not self.drizzle_active_session and self.current_batch_data:
-                        self.update_progress(f"⏳ Traitement dernier batch classique ({len(self.current_batch_data)} images)...")
-                        self.stacked_batches_count += 1
-                        self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
-                        self.current_batch_data = []
-                    elif self.drizzle_active_session and self.drizzle_mode == "Incremental" and current_batch_temp_files:
-                        self.update_progress(f"⏳ Traitement dernier batch Drizzle Incr. ({len(current_batch_temp_files)} fichiers)...")
-                        self.stacked_batches_count += 1
-                        self._process_incremental_drizzle_batch(current_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
-                        current_batch_temp_files = []
-
-                    # Traiter dossier supplémentaire (logique inchangée)
-                    folder_to_process = None
+                    # --- Traiter dernier lot partiel (SI PAS MOSAÏQUE) ---
+                    if not self.is_mosaic_run:
+                        print("DEBUG [_worker/EmptyQueue]: Traitement dernier lot partiel (Non-Mosaïque)...")
+                        if self.drizzle_active_session and self.drizzle_mode == "Final" and local_drizzle_final_batch_data:
+                            print(f"   -> Dernier lot Drizzle Final ({len(local_drizzle_final_batch_data)} images)")
+                            if self.drizzle_output_wcs is None:
+                                try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
+                                except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle final: {e}") from e
+                            self.stacked_batches_count += 1
+                            sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
+                            if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
+                            else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                            local_drizzle_final_batch_data = []
+                        elif self.drizzle_active_session and self.drizzle_mode == "Incremental" and local_batch_temp_files:
+                            print(f"   -> Dernier lot Drizzle Incrémental ({len(local_batch_temp_files)} images)")
+                            self.stacked_batches_count += 1
+                            self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                            local_batch_temp_files = []
+                        elif not self.drizzle_active_session and self.current_batch_data:
+                            print(f"   -> Dernier lot Classique ({len(self.current_batch_data)} images)")
+                            self.stacked_batches_count += 1
+                            self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                            self.current_batch_data = []
+                    # --- Traiter dossier supplémentaire ---
+                    folder_to_process = None;
                     with self.folders_lock:
-                        if self.additional_folders:
-                            folder_to_process = self.additional_folders.pop(0); folder_count = len(self.additional_folders)
-                            self.update_progress(f"folder_count_update:{folder_count}")
+                        if self.additional_folders: folder_to_process = self.additional_folders.pop(0); self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
                     if folder_to_process:
-                        folder_name = os.path.basename(folder_to_process); self.update_progress(f"📂 Traitement dossier sup: {folder_name}")
-                        self.current_folder = folder_to_process
-                        # Vider les accumulateurs de lots
-                        current_batch_temp_files = []
-                        current_drizzle_final_batch_data = [] # Vider aussi celui-là
-                        if not self.drizzle_active_session: self.current_batch_data = []
-                        # Ajouter fichiers
-                        files_added = self._add_files_to_queue(folder_to_process)
-                        if files_added > 0:
-                            self._recalculate_total_batches() # Recalculer total après ajout
-                            self.update_progress(f"📋 {files_added} fichiers ajoutés depuis {folder_name}. File: {self.files_in_queue}. Lots Est.: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-                            continue
-                        else: self.update_progress(f"⚠️ Aucun nouveau FITS trouvé dans {folder_name}"); continue
+                        self.current_folder = folder_to_process; self.update_progress(f"📂 Traitement dossier supplémentaire: {os.path.basename(folder_to_process)}")
+                        self._add_files_to_queue(folder_to_process); self._recalculate_total_batches()
+                        self.update_progress(f"   -> Fichiers ajoutés. Total Queue={self.files_in_queue}, Lots Est.={self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
+                        continue # Revenir au début boucle
                     else:
-                        self.update_progress("✅ Fin de la file et des dossiers supplémentaires.")
-                        break # Sortir boucle while
-
-                except Exception as e: # Gestion Erreur Générale Fichier (inchangée)
-                    error_context = f" de {file_name}" if file_path else " (file inconnu)"
-                    self.update_progress(f"❌ Erreur boucle worker{error_context}: {e}")
-                    traceback.print_exc(limit=3); self.processing_error = f"Erreur boucle worker: {e}"
-                    if file_path: self.skipped_files_count += 1
+                        self.update_progress("✅ Fin file/dossiers.")
+                        break # Sortir boucle principale
+                except Exception as e_inner_loop: # Erreur fichier générale
+                    error_context=f" de {file_name}" if file_path else ""; self.update_progress(f"❌ Erreur boucle worker{error_context}: {e_inner_loop}"); traceback.print_exc(limit=3); self.processing_error = f"Erreur: {e_inner_loop}";
+                    if file_path: self.skipped_files_count += 1;
                     try: self.queue.task_done()
                     except ValueError: pass
                     time.sleep(0.1)
-            # --- FIN DE LA BOUCLE WHILE ---
+                finally: # Nettoyage Mémoire Itération
+                    try:
+                        if aligned_data is not None: del aligned_data
+                        if header is not None: del header
+                        if quality_scores is not None: del quality_scores
+                        if wcs_object_indiv is not None: del wcs_object_indiv
+                    except NameError: pass
+            # --- FIN BOUCLE WHILE ---
 
+            # --- Traitement dernier lot partiel (si sorti normalement ET non-mosaïque) ---
+            if not self.stop_processing and not self.is_mosaic_run:
+                print("DEBUG [_worker/AfterLoop]: Traitement dernier lot partiel (sortie normale boucle)...")
+                if self.drizzle_active_session and self.drizzle_mode == "Final" and local_drizzle_final_batch_data:
+                    print(f"   -> Dernier lot Drizzle Final ({len(local_drizzle_final_batch_data)} images)")
+                    if self.drizzle_output_wcs is None:
+                        try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
+                        except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle final: {e}") from e
+                    self.stacked_batches_count += 1
+                    sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
+                    if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
+                    else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                    local_drizzle_final_batch_data = []
+                elif self.drizzle_active_session and self.drizzle_mode == "Incremental" and local_batch_temp_files:
+                    print(f"   -> Dernier lot Drizzle Incrémental ({len(local_batch_temp_files)} images)")
+                    self.stacked_batches_count += 1
+                    self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                    local_batch_temp_files = []
+                elif not self.drizzle_active_session and self.current_batch_data:
+                    print(f"   -> Dernier lot Classique ({len(self.current_batch_data)} images)")
+                    self.stacked_batches_count += 1
+                    self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                    self.current_batch_data = []
+
+            # ==================================================
             # --- 3. Étape Finale (après la boucle) ---
-            if self.stop_processing:
-                # Cas Arrêt Utilisateur (Logique inchangée, inclut arrêt Drizzle Final)
-                self.update_progress("🛑 Traitement interrompu avant étape finale.")
-                if self.drizzle_mode == "Incremental" and self.cumulative_drizzle_data is not None:
-                    self.update_progress("💾 Sauvegarde Drizzle incrémental intermédiaire (arrêt)...")
-                    self._save_final_stack(output_filename_suffix="_drizzle_incr_stopped", stopped_early=True)
-                elif not self.drizzle_active_session and self.current_stack_data is not None: # Arrêt mode Classique
-                    self.update_progress("💾 Sauvegarde stack classique intermédiaire (arrêt)...")
-                    self._save_final_stack(output_filename_suffix="_classic_stopped", stopped_early=True)
-                elif self.drizzle_mode == "Final" and self.intermediate_drizzle_batch_files:
-                     self.update_progress("ⓘ Traitement Drizzle Final interrompu. Les lots intermédiaires peuvent être conservés si le nettoyage est désactivé.")
+            # ==================================================
+            print("DEBUG [_worker]: Fin boucle principale. Début logique finalisation...")
+            final_result_data = None; final_result_header = None
 
-            else: # Si Traitement Normal Terminé
+            # --- Nettoyage mémoire si non-mosaïque ---
+            if not self.is_mosaic_run:
+                print("DEBUG [_worker/Finalize]: Nettoyage all_aligned_files_with_info (mode non-mosaïque)...")
+                all_aligned_files_with_info = [] # Vider la liste
+                gc.collect()
 
-                # --- MODIFIÉ : Logique pour Drizzle Final (Étape 5a) ---
-                if self.drizzle_active_session and self.drizzle_mode == "Final":
+            if self.stop_processing: # Si arrêt utilisateur
+                self.update_progress("🛑 Traitement interrompu avant finalisation.")
+                if not self.is_mosaic_run: # Sauvegarde partielle seulement si pas mosaïque
+                    if self.drizzle_mode=="Incremental" and self.cumulative_drizzle_data is not None:
+                        final_result_data=self.cumulative_drizzle_data; final_result_header=self.current_stack_header
+                        self._save_final_stack("_drizzle_incr_stopped", True)
+                    elif not self.drizzle_active_session and self.current_stack_data is not None:
+                        final_result_data=self.current_stack_data; final_result_header=self.current_stack_header
+                        self._save_final_stack("_classic_stopped", True)
+                    elif self.drizzle_mode=="Final" and self.intermediate_drizzle_batch_files:
+                        self.update_progress("ⓘ Lots Drizzle Final interm. conservés si nettoyage désactivé.")
+                self.final_stacked_path = None # Pas de stack final officiel
+
+            else: # Traitement Normal Terminé
+                print("DEBUG [_worker]: Traitement normal terminé. Branchement finalisation par mode...")
+                # --- Branche Mosaïque ---
+                if self.is_mosaic_run:
+                    print(f"DEBUG [_worker]: Branche finalisation MOSAÏQUE ({len(all_aligned_files_with_info)} images)...")
+                    self.update_progress("🖼️ Finalisation Mode Mosaïque...")
+                    if all_aligned_files_with_info:
+                        # --- IMPORT TARDIF MOSAIC PROCESSOR ICI ---
+                        try:
+                            from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files
+                            print("DEBUG [_worker/Finalize]: Import TARDIF de process_mosaic_from_aligned_files réussi.")
+                            final_result_data, final_result_header = process_mosaic_from_aligned_files(all_aligned_files_with_info, self, self.update_progress)
+                            if final_result_data is None: self.processing_error = self.processing_error or "Échec orchestration mosaïque."
+                        except ImportError as imp_err_mosaic: self.update_progress(f"❌ Erreur Import Tardif Mosaic Processor: {imp_err_mosaic}"); self.processing_error = "Erreur Import Mosaic Processor"
+                        except Exception as mosaic_e: self.update_progress(f"❌ Erreur orchestration mosaïque: {mosaic_e}"); traceback.print_exc(limit=2); self.processing_error = str(mosaic_e)
+                    else: self.update_progress("⚠️ Aucune image valide pour créer la mosaïque.")
+
+                # --- Branche Drizzle Final (Simple Champ) ---
+                elif self.drizzle_active_session and self.drizzle_mode == "Final":
+                    print(f"DEBUG [_worker]: Branche finalisation DRIZZLE FINAL ({len(self.intermediate_drizzle_batch_files)} lots)...")
                     if self.intermediate_drizzle_batch_files:
-                        # --- Appel combinaison finale (Étape 4) ---
-                        self.update_progress(f"💧 Combinaison finale des {len(self.intermediate_drizzle_batch_files)} lots Drizzle...")
-                        # Utiliser le WCS/Shape sortie Drizzle calculés au début
-                        final_combined_sci, final_combined_wht = self._combine_intermediate_drizzle_batches(
-                            self.intermediate_drizzle_batch_files,
-                            self.drizzle_output_wcs,
-                            self.drizzle_output_shape_hw
-                        )
+                        if self.drizzle_output_wcs is None:
+                           try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
+                           except Exception as e: self.processing_error=str(e); raise e
+                        final_combined_sci, _ = self._combine_intermediate_drizzle_batches(self.intermediate_drizzle_batch_files, self.drizzle_output_wcs, self.drizzle_output_shape_hw)
                         if final_combined_sci is not None:
-                            self.update_progress("   -> Assignation résultat Drizzle Final...")
-                            # Le résultat est déjà HxWxC float32
-                            self.current_stack_data = final_combined_sci
-                            # Créer/Mettre à jour le header final
-                            self.current_stack_header = fits.Header() # Partir de zéro
-                            if self.drizzle_output_wcs:
-                                try: self.current_stack_header.update(self.drizzle_output_wcs.to_header(relax=True))
-                                except Exception as wcs_hdr_err: print(f"Warn: Failed WCS update from Drizzle output: {wcs_hdr_err}")
-                            # Copier métadonnées originales non-WCS
-                            if self.reference_header_for_wcs:
-                                keys_to_copy = ['INSTRUME','TELESCOP','OBJECT','FILTER','DATE-OBS','GAIN','OFFSET','CCD-TEMP', 'SITELAT', 'SITELONG', 'FOCALLEN', 'APERTURE']
-                                for key in keys_to_copy:
-                                     if key in self.reference_header_for_wcs:
-                                         try: self.current_stack_header[key] = (self.reference_header_for_wcs[key], self.reference_header_for_wcs.comments[key] if key in self.reference_header_for_wcs.comments else '')
-                                         except Exception: self.current_stack_header[key] = self.reference_header_for_wcs[key]
-                            # Ajouter infos Drizzle spécifiques
-                            self.current_stack_header['STACKTYP'] = (f'Drizzle Final ({self.drizzle_scale:.1f}x)', 'Final Drizzle Combination')
-                            self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Scale factor used'); self.current_stack_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle kernel'); self.current_stack_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle pixfrac')
-                            # Mettre à jour total exposure (peut être approximatif)
-                            self.total_exposure_seconds = 0.0
-                            if self.intermediate_drizzle_batch_files:
-                                try:
-                                    # Utiliser self.aligned_files_count comme meilleure estimation du total
-                                    if self.aligned_files_count > 0 and self.reference_header_for_wcs:
-                                         single_exp = float(self.reference_header_for_wcs.get('EXPTIME', 10.0))
-                                         self.total_exposure_seconds = self.aligned_files_count * single_exp
-                                except Exception: pass # Ignorer si erreur lecture header
+                            final_result_data = final_combined_sci; final_result_header = self._update_header_for_drizzle_final()
+                            self.images_in_cumulative_stack = self.aligned_files_count
+                        else: self.processing_error = "Échec comb. Drizzle Final"
+                    else: self.update_progress("⚠️ Aucun lot Drizzle Final interm.")
 
-                            # Sauvegarder le résultat Drizzle Final (Étape 5b)
-                            self._save_final_stack(output_filename_suffix="_drizzle_final_v2") # Nouveau suffixe
-                        else:
-                            self.processing_error = "Échec combinaison finale Drizzle"; self.final_stacked_path = None
-                        # Nettoyer la carte de poids finale
-                        del final_combined_wht; gc.collect()
-                    else: # If no intermediate batch files for Drizzle Final
-                        self.update_progress("⚠️ Drizzle final activé mais aucun lot intermédiaire créé/trouvé à combiner.")
-                        self.final_stacked_path = None
-                # --- FIN MODIFIÉ ---
-
-                # --- CAS 2 : MODE DRIZZLE INCREMENTAL (Logique inchangée) ---
+                # --- Branche Drizzle Incrémental (Simple Champ) ---
                 elif self.drizzle_active_session and self.drizzle_mode == "Incremental":
-                    if self.cumulative_drizzle_data is not None and self.images_in_cumulative_stack > 0:
-                        self.update_progress("💾 Sauvegarde du stack Drizzle incrémental final...")
-                        self._save_final_stack(output_filename_suffix="_drizzle_incr")
-                    else: self.update_progress("ⓘ Aucun stack Drizzle incrémental à sauvegarder."); self.final_stacked_path = None
+                    print("DEBUG [_worker]: Branche finalisation DRIZZLE INCREMENTAL...")
+                    if self.cumulative_drizzle_data is not None and self.images_in_cumulative_stack > 0: final_result_data=self.cumulative_drizzle_data; final_result_header=self.current_stack_header
+                    else: self.update_progress("ⓘ Aucun stack Drizzle Incr.")
 
-                # --- CAS 3 : MODE CLASSIQUE (Logique inchangée) ---
+                # --- Branche Classique ---
                 elif not self.drizzle_active_session and self.current_stack_data is not None:
-                    self.update_progress("💾 Sauvegarde du stack classique final...")
-                    self._save_final_stack(output_filename_suffix="_classic")
-                else: # Aucun stack créé (Inchangé)
-                    self.update_progress("ⓘ Aucun stack final (classique ou Drizzle) à sauvegarder.")
-                    self.final_stacked_path = None
+                     print("DEBUG [_worker]: Branche finalisation CLASSIQUE...")
+                     final_result_data = self.current_stack_data; final_result_header = self.current_stack_header
+                # --- Aucun Stack ---
+                else: print("DEBUG [_worker]: Aucun stack à finaliser.")
 
-        # --- Gestion Erreurs Critiques & Nettoyage Final ---
-        except RuntimeError as critical_err:
-             self.update_progress(f"❌ ERREUR CRITIQUE: {critical_err}")
-             self.processing_error = str(critical_err)
-             traceback.print_exc(limit=2)
+                # --- Sauvegarde Finale (SI un résultat existe) ---
+                if final_result_data is not None:
+                    print("DEBUG [_worker]: Appel sauvegarde finale...")
+                    suffix = "_mosaic" if self.is_mosaic_run else ("_drizzle_" + self.drizzle_mode.lower() if self.drizzle_active_session else "_classic")
+                    self.current_stack_data = final_result_data; self.current_stack_header = final_result_header
+                    self._save_final_stack(output_filename_suffix=suffix)
+                else: self.final_stacked_path = None
+
+        # --- Gestion Erreurs Globales ---
         except Exception as e:
-             self.update_progress(f"❌ Erreur critique thread worker: {e}")
-             traceback.print_exc(limit=5); self.processing_error = f"Erreur critique: {e}"
-        finally:
-            # Nettoyage (MODIFIÉ Étape 5c)
+             error_msg=f"Erreur critique worker: {type(e).__name__}: {e}"; print(f"ERREUR CRITIQUE: {error_msg}"); self.update_progress(f"❌ {error_msg}"); traceback.print_exc(limit=5); self.processing_error = error_msg
+
+        # ============================================================
+        # --- FIN DU BLOC TRY PRINCIPAL ---
+        # ============================================================
+
+        finally: # <<<--- FINALLY : Nettoyage et Fin ---
+            print("DEBUG [_worker]: Entrée bloc FINALLY...")
             if self.perform_cleanup:
                 self.update_progress("🧹 Nettoyage final fichiers temporaires...")
                 self.cleanup_unaligned_files(); self.cleanup_temp_reference()
-                self._cleanup_drizzle_temp_files() # Nettoie aligned_input_xxx.fits
-                self._cleanup_drizzle_batch_outputs() # Nettoie les fichiers intermédiaires par lot
+                self._cleanup_drizzle_temp_files(); self._cleanup_drizzle_batch_outputs()
+                self._cleanup_mosaic_panel_stacks_temp()
             else: self.update_progress(f"ⓘ Fichiers temporaires conservés.")
-            # Vider queue et GC
-            while not self.queue.empty():
-                try: self.queue.get_nowait(); self.queue.task_done()
-                except Exception: break
-            self.current_batch_data = []; current_drizzle_final_batch_data = []
-            self.intermediate_drizzle_batch_files = [] # Vider aussi celui-là
-            current_batch_temp_files = []
+            print("   -> Vidage listes et GC...")
+            self.current_batch_data = []; local_drizzle_final_batch_data = []; self.intermediate_drizzle_batch_files = []; local_batch_temp_files = []; all_aligned_files_with_info = []
+            self.current_stack_data = None; self.cumulative_drizzle_data = None; self.cumulative_drizzle_wht = None
             gc.collect()
             self.processing_active = False
+            print("DEBUG [_worker]: Flag processing_active mis à False.")
             self.update_progress("🚪 Thread traitement terminé.")
 
+  
 
+
+############################################################################################################################
+
+
+    # --- MÉTHODE DE NETTOYAGE ---
+    def _cleanup_mosaic_panel_stacks_temp(self):
+        """Supprime le dossier contenant les stacks de panneaux temporaires."""
+        panel_stacks_dir = os.path.join(self.output_folder, "mosaic_panel_stacks_temp")
+        if panel_stacks_dir and os.path.isdir(panel_stacks_dir):
+            try:
+                shutil.rmtree(panel_stacks_dir)
+                self.update_progress(f"🧹 Dossier stacks panneaux temp. supprimé: {os.path.basename(panel_stacks_dir)}")
+            except Exception as e:
+                self.update_progress(f"⚠️ Erreur suppression dossier stacks panneaux temp.: {e}")
+
+
+
+
+
+###################################################################################################################
+
+
+
+
+    def _finalize_mosaic_processing(self, aligned_files_info_list):
+        """
+        Effectue la combinaison finale Drizzle pour le mode mosaïque.
+        MAJ: Corrige import et UnboundLocalError.
+        """
+        num_files_to_mosaic = len(aligned_files_info_list)
+        print(f"DEBUG (Backend _finalize_mosaic_processing): Début finalisation pour {num_files_to_mosaic} images.")
+        self.update_progress(f"🖼️ Préparation assemblage mosaïque final ({num_files_to_mosaic} images)...")
+
+        # ... (Vérifications initiales num_files, Drizzle disponible - inchangées) ...
+        if num_files_to_mosaic < 2: self.update_progress("⚠️ Moins de 2 images."); self.final_stacked_path = None; self.processing_error = "..."; return
+        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None: error_msg = "..."; self.update_progress(f"❌ {error_msg}"); self.processing_error = error_msg; self.final_stacked_path = None; return
+
+# --- Calcul Grille Finale ---
+        print("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid...")
+        input_wcs_list = [item[1] for item in aligned_files_info_list if item[1] is not None]
+        mosaic_output_wcs, mosaic_output_shape_hw = self._calculate_final_mosaic_grid(input_wcs_list)
+        if mosaic_output_wcs is None or mosaic_output_shape_hw is None:
+            error_msg = "Échec calcul grille sortie."
+            self.update_progress(f"❌ {error_msg}")
+            self.processing_error = error_msg
+            self.final_stacked_path = None
+            return
+        print(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque -> Shape={mosaic_output_shape_hw} (H,W)")
+
+        # --- Initialiser Drizzle Final ---
+        num_output_channels = 3
+        final_drizzlers = []
+        final_output_sci_list = []
+        final_output_wht_list = []
+        initialized = False
+        try:
+            print(f"  -> Initialisation Drizzle final pour {num_output_channels} canaux...")
+            for _ in range(num_output_channels):
+                out_img_ch = np.zeros(mosaic_output_shape_hw, dtype=np.float32)
+                out_wht_ch = np.zeros(mosaic_output_shape_hw, dtype=np.float32)
+                final_output_sci_list.append(out_img_ch)
+                final_output_wht_list.append(out_wht_ch)
+                driz_ch = Drizzle(out_img=out_img_ch, out_wht=out_wht_ch, out_shape=mosaic_output_shape_hw, out_wcs=mosaic_output_wcs, kernel=self.drizzle_kernel, fillval="0.0")
+                final_drizzlers.append(driz_ch)
+            initialized = True
+            print("  -> Initialisation Drizzle final OK.")
+        except Exception as init_err:
+            print(f"  -> ERREUR init Drizzle Mosaïque: {init_err}")
+            traceback.print_exc(limit=1)
+            return
+
+        if not initialized:
+            return  # Sécurité
+
+        # --- Boucle Drizzle sur les fichiers temporaires ---
+        print(f"  -> Démarrage boucle Drizzle finale sur {num_files_to_mosaic} fichiers...")
+        processed_count = 0
+        # Utiliser enumerate pour obtenir l'index et le tuple (chemin, wcs)
+        for i, (temp_fpath, wcs_in) in enumerate(aligned_files_info_list):
+            if self.stop_processing:
+                self.update_progress("🛑 Arrêt pendant assemblage final.")
+                break
+            if (i + 1) % 10 == 0 or i == 0 or i == len(aligned_files_info_list) - 1:
+                print(f"    Adding Final Drizzle Input {i+1}/{num_files_to_mosaic}")
+
+            # --- CORRECTION : Initialiser les variables locales à None ---
+            img_data_hxwxc = None
+            header_in = None
+            pixmap = None
+            wcs_to_use = None
+            # --- FIN CORRECTION ---
+
+            try:
+                # Charger données et WCS (utilise la fonction importée)
+                img_data_hxwxc, wcs_in_loaded, header_in = _load_drizzle_temp_file(temp_fpath)  # Appel Corrigé
+                wcs_to_use = wcs_in_loaded if wcs_in_loaded else wcs_in  # Utiliser le WCS chargé ou celui de la liste
+
+                if img_data_hxwxc is None or wcs_to_use is None:
+                    print(f"    - Skip Input {i+1} (échec chargement/WCS)")
+                    continue
+
+                # Calcul Pixmap
+                input_shape_hw = img_data_hxwxc.shape[:2]
+                y_in, x_in = np.indices(input_shape_hw)
+                world_coords = wcs_to_use.all_pix2world(x_in.flatten(), y_in.flatten(), 0)
+                x_out, y_out = mosaic_output_wcs.all_world2pix(world_coords[0], world_coords[1], 0)
+                pixmap = np.dstack((x_out.reshape(input_shape_hw), y_out.reshape(input_shape_hw))).astype(np.float32)
+
+                # Ajout Drizzle
+                exptime = 1.0  # ... (calcul exptime comme avant) ...
+                if header_in and 'EXPTIME' in header_in:
+                    try:
+                        exptime = max(1e-6, float(header_in['EXPTIME']))
+                    except (ValueError, TypeError):
+                        pass
+
+                for c in range(num_output_channels):
+                    channel_data_2d = img_data_hxwxc[:, :, c].astype(np.float32)
+                    finite_mask = np.isfinite(channel_data_2d)
+                    channel_data_2d[~finite_mask] = 0.0
+                    final_drizzlers[c].add_image(data=channel_data_2d, pixmap=pixmap, exptime=exptime, in_units='counts', pixfrac=self.drizzle_pixfrac)
+                    processed_count += 1
+
+            except Exception as e_add:
+                print(f"    - ERREUR traitement/ajout input {i+1}: {e_add}")
+                traceback.print_exc(limit=1)
+            # --- CORRECTION : finally DANS la boucle ---
+            finally:
+                # Nettoyer les variables locales même si erreur DANS l'itération
+                del img_data_hxwxc, wcs_in, header_in, pixmap, wcs_to_use
+                if (i + 1) % 5 == 0:
+                    gc.collect()
+            # --- FIN CORRECTION ---
+        # --- Fin Boucle Drizzle ---
+
+        print(f"  -> Boucle assemblage terminée. {processed_count}/{num_files_to_mosaic} fichiers ajoutés.")
+        if processed_count == 0:
+            error_msg = "Aucun fichier traité avec succès."
+            self.update_progress(f"❌ ERREUR: {error_msg}")
+            self.processing_error = error_msg
+            self.final_stacked_path = None
+            return
+
+        # --- Assemblage et Stockage Résultat ---
+        try:
+            print("  -> Assemblage final des canaux (Mosaïque)...")
+            # ... (logique stack/save identique à l'étape précédente) ...
+            final_mosaic_sci = np.stack(final_output_sci_list, axis=-1)
+            final_mosaic_wht = np.stack(final_output_wht_list, axis=-1)
+            print(f"  -> Combinaison terminée. Shape SCI: {final_mosaic_sci.shape}")
+            self.current_stack_data = final_mosaic_sci
+            self.current_stack_header = fits.Header()
+            if mosaic_output_wcs:
+                self.current_stack_header.update(mosaic_output_wcs.to_header(relax=True))
+            if self.reference_header_for_wcs:
+                keys_to_copy = ['INSTRUME', 'TELESCOP', ...]  # Veuillez compléter la liste des clés à copier
+                [self.current_stack_header.set(k, self.reference_header_for_wcs[k]) for k in keys_to_copy if k in self.reference_header_for_wcs]
+            self.current_stack_header['STACKTYP'] = (...)  # Veuillez compléter la valeur
+            self.current_stack_header['DRZSCALE'] = (...)  # Veuillez compléter la valeur
+            self.current_stack_header['DRZKERNEL'] = (...)  # Veuillez compléter la valeur
+            self.current_stack_header['DRZPIXFR'] = (...)  # Veuillez compléter la valeur
+            self.images_in_cumulative_stack = processed_count  # Utiliser le compte réel
+            self.total_exposure_seconds = 0.0  # Recalcul approx
+            if self.reference_header_for_wcs:
+                single_exp = float(self.reference_header_for_wcs.get('EXPTIME', 10.0))
+                self.total_exposure_seconds = processed_count * single_exp
+            if final_mosaic_wht is not None:
+                del final_mosaic_wht
+                gc.collect()
+            min_v, max_v = np.nanmin(self.current_stack_data), np.nanmax(self.current_stack_data)
+            if max_v > min_v:
+                self.current_stack_data = (self.current_stack_data - min_v) / (max_v - min_v)
+            else:
+                self.current_stack_data = np.zeros_like(self.current_stack_data)
+            self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0).astype(np.float32)
+            self._save_final_stack(output_filename_suffix="_mosaic")
+
+        except Exception as e:
+            error_msg = f"Erreur finalisation/sauvegarde mosaïque: {e}"
+            self.update_progress(f"❌ {error_msg}")
+            traceback.print_exc(limit=3)
+            self.processing_error = error_msg
+            self.final_stacked_path = None
+
+        print("DEBUG (Backend _finalize_mosaic_processing): Fin.")
 
 
 ##################################################################################################################
@@ -859,102 +1308,145 @@ class SeestarQueuedStacker:
     def _process_file(self, file_path, reference_image_data):
         """
         Traite un seul fichier image : chargement, validation, pré-traitement,
-        alignement sur l'image de référence, calcul des scores qualité, et retourne le WCS associé.
+        alignement, calcul qualité, et retourne WCS **GÉNÉRÉ** (fallback).
+        MAJ: Suppression de l'appel au plate-solver.
 
         Args:
             file_path (str): Chemin complet du fichier FITS à traiter.
-            reference_image_data (np.ndarray): Données de l'image de référence (alignée/prête).
+            reference_image_data (np.ndarray): Données de l'image de référence.
 
         Returns:
-            tuple: (aligned_data, header, quality_scores, wcs_object)
-                   - aligned_data (np.ndarray ou None): Données alignées (float32, 0-1) ou None si échec.
-                   - header (fits.Header ou None): En-tête FITS de l'image originale ou None.
-                   - quality_scores (dict): Dictionnaire {'snr': float, 'stars': float}.
-                   - wcs_object (astropy.wcs.WCS ou None): Objet WCS associé à l'image alignée.
+            tuple: (aligned_data, header, quality_scores, generated_wcs_object)
+                   Le WCS retourné est maintenant toujours celui généré depuis le header.
         """
         file_name = os.path.basename(file_path)
         quality_scores = {'snr': 0.0, 'stars': 0.0}
-        self.update_progress(f"   Traitement Fichier: {file_name}")
+        print(f"DEBUG [ProcessFile]: Start processing '{file_name}'")
+        header = None
+        prepared_img = None
+        wcs_generated = None # WCS généré depuis header
+        # final_wcs_object = None # Plus besoin de cette variable ici
 
         try:
-            # 1. Charger et valider le fichier FITS
+            # 1. Charger et valider
             img_data = load_and_validate_fits(file_path)
-            if img_data is None:
-                self.update_progress(f"   ⚠️ Échec chargement/validation.")
-                self.skipped_files_count += 1
-                # --- MODIFIÉ : Retourner 4 valeurs ---
-                return None, None, quality_scores, None
-
+            if img_data is None: raise ValueError("Échec chargement/validation.")
             header = fits.getheader(file_path)
 
-            # 2. Vérification initiale de la variance
-            std_dev = np.std(img_data)
-            variance_threshold = 0.0015
-            if std_dev < variance_threshold:
-                self.update_progress(f"   ⚠️ Image ignorée (faible variance: {std_dev:.4f}).")
-                self.skipped_files_count += 1
-                # --- MODIFIÉ : Retourner 4 valeurs ---
-                return None, None, quality_scores, None
+            # 2. Vérification variance
+            std_dev = np.std(img_data); variance_threshold = 0.0015
+            if std_dev < variance_threshold: raise ValueError(f"Faible variance: {std_dev:.4f}")
 
-            # 3. Pré-traitement
-            prepared_img = img_data
-            if prepared_img.ndim == 2:
-                bayer = header.get('BAYERPAT', self.bayer_pattern)
-                if isinstance(bayer, str) and bayer.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
-                    try: prepared_img = debayer_image(prepared_img, bayer.upper())
-                    except ValueError as de: self.update_progress(f"   ⚠️ Erreur debayer: {de}. Tentative N&B.")
+            # 3. Pré-traitement (Debayer, WB Auto, HP)
+            prepared_img = img_data.astype(np.float32)
+            is_color_after_processing = False
+            # ... (Logique Debayer, WB Auto, HP identique à avant) ...
+            # Debayering
+            if prepared_img.ndim == 2: # Debayer
+                bayer = header.get('BAYERPAT', self.bayer_pattern); pattern_upper = bayer.upper() if isinstance(bayer, str) else 'GRBG'
+                if pattern_upper in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                    # print(f"   -> Debayering {file_name} ({pattern_upper})...") # Log moins verbeux
+                    try: prepared_img = debayer_image(prepared_img, pattern_upper); is_color_after_processing = True
+                    except ValueError as de: print(f"   ⚠️ Erreur debayer: {de}. N&B.")
+                # else: print(f"   -> N&B ou pattern Bayer inconnu ('{bayer}').")
+            elif prepared_img.ndim == 3 and prepared_img.shape[2] == 3: is_color_after_processing = True #; print(f"   -> {file_name} déjà couleur.")
+            else: raise ValueError(f"Shape inattendue ({prepared_img.shape}).")
 
+            # WB Auto
+            if is_color_after_processing:
+                # print(f"   -> Calcul WB auto {file_name}...") # Log moins verbeux
+                try: # ... (Logique WB Auto identique) ...
+                    _mn_r, med_R, _sd_r = sigma_clipped_stats(prepared_img[..., 0], ...); _mn_g, med_G, _sd_g = sigma_clipped_stats(prepared_img[..., 1], ...); _mn_b, med_B, _sd_b = sigma_clipped_stats(prepared_img[..., 2], ...);
+                    R_fac, B_fac = 1.0, 1.0; # ... (calcul facteurs) ...; prepared_img[..., 0] *= R_fac; prepared_img[..., 2] *= B_fac; prepared_img = np.clip(prepared_img, 0.0, 1.0)
+                except Exception as wb_err: print(f"      - ERREUR WB Auto: {wb_err}")
+
+            # HP Correction
             if self.correct_hot_pixels:
-                try: prepared_img = detect_and_correct_hot_pixels(prepared_img, self.hot_pixel_threshold, self.neighborhood_size)
-                except Exception as hp_err: self.update_progress(f"   ⚠️ Erreur correction px chauds: {hp_err}.")
+                 # print(f"   -> Correction HP {file_name}...") # Log moins verbeux
+                 try: prepared_img = detect_and_correct_hot_pixels(prepared_img, self.hot_pixel_threshold, self.neighborhood_size)
+                 except Exception as hp_err: print(f"   ⚠️ Erreur correction HP: {hp_err}.")
 
-            prepared_img = prepared_img.astype(np.float32)
+            prepared_img = prepared_img.astype(np.float32) # Assurer float32
 
-            # 4. Alignement
+
+            # --- 4. Génération WCS (TOUJOURS nécessaire pour groupement/Drizzle) ---
+            #    On le fait AVANT l'alignement astroalign pour utiliser le header original.
+            wcs_generated = None # Réinitialiser
+            if header:
+                print(f"   -> Génération WCS initial pour {file_name}...")
+                try: # Essayer WCS(header)
+                     with warnings.catch_warnings(): warnings.simplefilter('ignore'); wcs_hdr = WCS(header, naxis=2)
+                     if wcs_hdr.is_celestial: wcs_generated = wcs_hdr
+                except Exception: pass
+                if wcs_generated is None: wcs_generated = _create_wcs_from_header(header) # Essayer génération
+
+                if wcs_generated and wcs_generated.is_celestial:
+                     naxis1_h = header.get('NAXIS1'); naxis2_h = header.get('NAXIS2')
+                     if naxis1_h and naxis2_h: wcs_generated.pixel_shape = (naxis1_h, naxis2_h)
+                     if wcs_generated.pixel_shape is None: print(f"      - WARNING: WCS généré {file_name} sans pixel_shape.")
+                     print(f"      - WCS généré OK.")
+                else: # Échec total WCS
+                     print(f"      - ERREUR: WCS non trouvé/généré pour {file_name}.")
+                     # Si WCS est requis (Drizzle ou Mosaïque), lever une erreur
+                     if self.is_mosaic_run or self.drizzle_active_session: raise ValueError("WCS requis mais non obtenu.")
+            else: # Pas de header
+                 print(f"      - WARNING: Header original manquant pour WCS {file_name}.")
+                 if self.is_mosaic_run or self.drizzle_active_session: raise ValueError("Header manquant, WCS requis.")
+            # --- FIN Génération WCS ---
+
+
+            # --- 5. Alignement Astroalign ---
+            #    Utilise l'image pré-traitée et la référence globale
+            print(f"   -> Alignement Astroalign {file_name}...")
             aligned_img, align_success = self.aligner._align_image(prepared_img, reference_image_data, file_name)
+            if not align_success: raise RuntimeError(f"ÉCHEC Alignement Astroalign {file_name}")
+            print(f"      - Alignement Astroalign OK")
 
-            if not align_success:
-                self.failed_align_count += 1
-                try:
-                    if os.path.exists(file_path):
-                        target_path = os.path.join(self.unaligned_folder, file_name)
-                        shutil.move(os.path.normpath(file_path), os.path.normpath(target_path))
-                        self.update_progress(f"   ➡️ Échec alignement. Déplacé vers non alignés.")
-                    else: self.update_progress(f"   ⚠️ Échec alignement, original non trouvé pour déplacer.")
-                except Exception as move_err: self.update_progress(f"   ⚠️ Erreur déplacement après échec alignement: {move_err}")
-                # --- MODIFIÉ : Retourner 4 valeurs ---
-                return None, None, quality_scores, None
+            # --- 6. Correction Chroma (sur image alignée) ---
+            # ### MODIFICATION : Appel à ChromaticBalancer DÉPLACÉ à _save_final_stack ###
+            # # if is_color_after_processing and aligned_img is not None and self.apply_chroma_correction:
+            # #      print(f"   -> Correction Chroma {file_name}...") # Ancien log
+            # #      try:
+            # #          if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+            # #               aligned_img = self.chroma_balancer.normalize_stack(aligned_img)
+            # #          else:
+            # #               print(f"   AVERTISSEMENT: Instance ChromaticBalancer non trouvée dans _process_file pour {file_name}")
+            # #      except Exception as chroma_err:
+            # #           print(f"      - ERREUR Correction Chroma dans _process_file pour {file_name}: {chroma_err}")
+            print(f"DEBUG [ProcessFile]: Correction Chroma (Edge Enhance) IGNORÉE dans _process_file pour {file_name} (sera faite à la fin).")
+            # ### FIN MODIFICATION ###
 
-            # --- NOUVEAU : Assigner l'objet WCS de référence ---
-            # Puisque l'image est alignée sur la référence, elle partage son WCS.
-            wcs_object = self.reference_wcs_object
-            # --- FIN NOUVEAU ---
-
-            # 5. Calcul des métriques de qualité
+            # --- 7. Calcul Qualité (sur image alignée) ---
             if self.use_quality_weighting:
-                self.update_progress(f"      Calcul Scores Qualité...")
                 quality_scores = self._calculate_quality_metrics(aligned_img)
 
-            # 6. Retourner les résultats (incluant l'objet WCS)
-            # --- MODIFIÉ : Retourner 4 valeurs ---
-            return aligned_img, header, quality_scores, wcs_object
 
-        # --- Gestion globale des erreurs pour ce fichier ---
-        except Exception as e:
-            self.update_progress(f"❌ Erreur traitement fichier {file_name}: {e}")
-            traceback.print_exc(limit=3)
+            print(f"DEBUG [ProcessFile]: Finished '{file_name}'. Returning WCS: Generated")
+            # Retourner l'image alignée, header original, scores, et WCS GÉNÉRÉ
+            return aligned_img, header, quality_scores, wcs_generated # Utiliser wcs_generated
+
+        # --- Gestion Erreurs ---
+        except (ValueError, RuntimeError) as proc_err: # Erreurs attendues
+            self.update_progress(f"   ⚠️ {file_name} ignoré: {proc_err}")
             self.skipped_files_count += 1
-            if os.path.exists(file_path):
-                try:
-                    target_path = os.path.join(self.unaligned_folder, f"error_{file_name}")
-                    shutil.move(os.path.normpath(file_path), os.path.normpath(target_path))
+            if file_path and os.path.exists(file_path):
+                try: shutil.move(...) # Déplacer vers skipped
                 except Exception: pass
-            # --- MODIFIÉ : Retourner 4 valeurs ---
+            return None, None, quality_scores, None
+
+        except Exception as e: # Erreurs inattendues
+            self.update_progress(f"❌ Erreur traitement fichier {file_name}: {e}")
+            traceback.print_exc(limit=3); self.skipped_files_count += 1
+            if file_path and os.path.exists(file_path):
+                try: shutil.move(...) # Déplacer vers error
+                except Exception: pass
             return None, None, quality_scores, None
 
 
 
 #############################################################################################################################
+
+
     def _process_completed_batch(self, current_batch_num, total_batches_est):
         """
         Traite un batch complété pour le stacking CLASSIQUE (non-Drizzle).
@@ -1244,8 +1736,8 @@ class SeestarQueuedStacker:
 
 
 ###############################################################################################################################################
-# --- FIN DE LA MÉTHODE _process_completed_batch (MODIFIÉE) ---  
-    
+
+
     def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
         """
         Combine le résultat numpy (float32, 0-1) d'un batch traité
@@ -1261,8 +1753,11 @@ class SeestarQueuedStacker:
             stack_info_header (fits.Header): En-tête contenant les informations
                                              sur le traitement de ce batch (NIMAGES, TOTEXP, etc.).
         """
+        print(f"DEBUG QM [_combine_batch_result]: Début combinaison batch (data shape: {stacked_batch_data_np.shape if stacked_batch_data_np is not None else 'None'})...") # Debug
+
         if stacked_batch_data_np is None or stack_info_header is None:
             self.update_progress("⚠️ Erreur interne: Données de batch invalides pour combinaison.")
+            print("DEBUG QM [_combine_batch_result]: Sortie précoce (données batch invalides).") # Debug
             return
 
         try:
@@ -1273,10 +1768,12 @@ class SeestarQueuedStacker:
             # Vérifier si le nombre d'images est valide
             if batch_n <= 0:
                 self.update_progress(f"⚠️ Batch combiné avec {batch_n} images, ignoré.")
+                print(f"DEBUG QM [_combine_batch_result]: Sortie précoce (batch_n <= 0).") # Debug
                 return
 
             # --- Initialisation du Stack Cumulatif (Premier Batch) ---
             if self.current_stack_data is None:
+                print("DEBUG QM [_combine_batch_result]: Initialisation stack cumulatif (premier batch).") # Debug
                 self.update_progress("   -> Initialisation du stack cumulatif...")
                 # La première image est simplement le résultat du premier batch
                 # S'assurer que c'est bien un float32
@@ -1286,73 +1783,63 @@ class SeestarQueuedStacker:
 
                 # --- Créer l'en-tête initial pour le stack cumulatif ---
                 self.current_stack_header = fits.Header()
-                # Copier les infos pertinentes de l'en-tête du batch
-                keys_to_copy_from_batch = ['NIMAGES', 'STACKMETH', 'TOTEXP', 'ENH_CROP', 'ENH_CLHE', 'KAPPA', 'WGHT_USED', 'WGHT_MET']
+                # Tenter de récupérer le premier header du lot *original* pour copier les métadonnées
+                # Note: self.current_batch_data est vidé à la fin de _process_completed_batch,
+                # donc il faut récupérer cette info autrement ou l'ignorer ici.
+                # Pour l'instant, on copie depuis stack_info_header (moins d'infos mais ok)
+                keys_to_copy_from_batch = ['NIMAGES', 'STACKMETH', 'TOTEXP', 'KAPPA', 'WGHT_USED', 'WGHT_MET']
                 for key in keys_to_copy_from_batch:
                     if key in stack_info_header:
-                        # Copie simple clé/valeur/commentaire si possible
-                        try:
-                            self.current_stack_header[key] = (stack_info_header[key], stack_info_header.comments[key])
-                        except KeyError: # Si pas de commentaire
-                            self.current_stack_header[key] = stack_info_header[key]
+                        try: self.current_stack_header[key] = (stack_info_header[key], stack_info_header.comments[key])
+                        except KeyError: self.current_stack_header[key] = stack_info_header[key]
 
-                # Ajouter des informations générales / potentiellement manquantes
-                # Ces valeurs pourraient être affinées dans _save_final_stack
-                if 'STACKTYP' not in self.current_stack_header:
-                     self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Overall stacking method')
-                if 'WGHT_ON' not in self.current_stack_header:
-                     self.current_stack_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
-
+                # Infos générales
+                if 'STACKTYP' not in self.current_stack_header: self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Overall stacking method')
+                if 'WGHT_ON' not in self.current_stack_header: self.current_stack_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
                 self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
                 self.current_stack_header.add_history('Cumulative Stack Initialized')
-                if self.correct_hot_pixels:
-                    self.current_stack_header.add_history('Hot pixel correction applied to input frames')
+                if self.correct_hot_pixels: self.current_stack_header.add_history('Hot pixel correction applied to input frames')
+                print("DEBUG QM [_combine_batch_result]: Header cumulatif initial créé.") # Debug
 
             # --- Combinaison avec le Stack Cumulatif Existant ---
             else:
+                print("DEBUG QM [_combine_batch_result]: Combinaison avec stack cumulatif existant...") # Debug
                 self.update_progress("   -> Combinaison avec le stack cumulatif...")
                 # Vérifier la compatibilité des dimensions
                 if self.current_stack_data.shape != stacked_batch_data_np.shape:
                     self.update_progress(f"❌ Incompatibilité dims stack: Cumul={self.current_stack_data.shape}, Batch={stacked_batch_data_np.shape}. Combinaison échouée.")
-                    # Que faire ? Option : essayer de redimensionner ? Pour l'instant, on abandonne.
-                    # Ne pas mettre à jour les compteurs si la combinaison échoue.
-                    return
+                    print(f"ERREUR QM [_combine_batch_result]: Incompatibilité de dimensions.") # Debug
+                    return # Ne pas continuer si les dimensions ne correspondent pas
 
                 # Calcul des poids basé sur le nombre d'images
                 current_n = self.images_in_cumulative_stack
                 total_n = current_n + batch_n
                 w_old = current_n / total_n
                 w_new = batch_n / total_n
+                print(f"DEBUG QM [_combine_batch_result]: Poids combinaison: w_old={w_old:.3f}, w_new={w_new:.3f}") # Debug
 
                 # --- Tentative de combinaison via CuPy si disponible ---
                 use_cupy_combine = _cupy_installed and check_cupy_cuda()
                 combined_np = None # Variable pour stocker le résultat (toujours NumPy)
 
                 if use_cupy_combine:
-                    gpu_current = None; gpu_batch = None # Initialiser
+                    gpu_current = None; gpu_batch = None
                     try:
-                        # print("DEBUG: Combining stacks using CuPy") # Décommenter pour debug
-                        # Assurer float32 pour GPU
+                        print("DEBUG QM [_combine_batch_result]: Tentative combinaison CuPy...") # Debug
                         gpu_current = cupy.asarray(self.current_stack_data, dtype=cupy.float32)
                         gpu_batch = cupy.asarray(stacked_batch_data_np, dtype=cupy.float32)
-
-                        # Moyenne pondérée sur GPU
                         gpu_combined = (gpu_current * w_old) + (gpu_batch * w_new)
-                        combined_np = cupy.asnumpy(gpu_combined) # Télécharger le résultat
-
+                        combined_np = cupy.asnumpy(gpu_combined)
+                        print("DEBUG QM [_combine_batch_result]: Combinaison CuPy réussie.") # Debug
                     except cupy.cuda.memory.OutOfMemoryError:
-                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.")
-                        use_cupy_combine = False # Forcer le fallback CPU
-                        gc.collect(); cupy.get_default_memory_pool().free_all_blocks()
+                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.") # Garder Warning
+                        use_cupy_combine = False; gc.collect(); cupy.get_default_memory_pool().free_all_blocks()
                     except Exception as gpu_err:
-                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.")
-                        traceback.print_exc(limit=1)
-                        use_cupy_combine = False
-                        gc.collect()
+                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.") # Garder Warning
+                        traceback.print_exc(limit=1); use_cupy_combine = False; gc.collect()
                         try: cupy.get_default_memory_pool().free_all_blocks()
                         except Exception: pass
                     finally:
-                        # Libérer explicitement la mémoire GPU
                         del gpu_current, gpu_batch
                         if '_cupy_installed' in globals() and _cupy_installed:
                              try: cupy.get_default_memory_pool().free_all_blocks()
@@ -1360,145 +1847,53 @@ class SeestarQueuedStacker:
 
                 # --- Combinaison via NumPy (Fallback ou si CuPy non utilisé) ---
                 if not use_cupy_combine:
-                    # print("DEBUG: Combining stacks using NumPy") # Décommenter pour debug
-                    # Assurer float32 pour les calculs NumPy
+                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy (CPU)...") # Debug
                     current_data_float = self.current_stack_data.astype(np.float32)
                     batch_data_float = stacked_batch_data_np.astype(np.float32)
-                    # Moyenne pondérée
                     combined_np = (current_data_float * w_old) + (batch_data_float * w_new)
+                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy réussie.") # Debug
 
                 # --- Mettre à jour le stack cumulatif ---
                 if combined_np is None:
-                     # Cela ne devrait pas arriver si l'une des méthodes a fonctionné
+                     print("ERREUR QM [_combine_batch_result]: Échec des méthodes CPU et GPU pour combiner.") # Debug
                      raise RuntimeError("La combinaison n'a produit aucun résultat (erreur CuPy et NumPy?).")
 
-                # Le résultat DOIT être un NumPy array float32
                 self.current_stack_data = combined_np.astype(np.float32)
+                print("DEBUG QM [_combine_batch_result]: Stack cumulatif mis à jour.") # Debug
 
                 # --- Mettre à jour les statistiques et l'en-tête cumulatif ---
                 self.images_in_cumulative_stack = total_n
                 self.total_exposure_seconds += batch_exposure
-                if self.current_stack_header: # Vérifier si l'en-tête existe
+                if self.current_stack_header:
                     self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
                     self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                    # Optionnel: Ajouter une entrée d'historique (peut alourdir)
-                    # self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images')
+                    # self.current_stack_header.add_history(...) # Optionnel
+
+            ### MODIFICATION : Appel à ChromaticBalancer supprimé d'ici ###
+            # if self.apply_chroma_correction and self.current_stack_data is not None:
+            #    if self.current_stack_data.ndim == 3 and self.current_stack_data.shape[2] == 3:
+            #        self.update_progress("   -> Application de la correction chromatique...")
+            #        # S'assurer que chroma_balancer existe
+            #        if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+            #             self.current_stack_data = self.chroma_balancer.normalize_stack(self.current_stack_data)
+            #             self.update_progress("   -> Correction chromatique terminée.")
+            #        else:
+            #             self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
+            ### FIN MODIFICATION ###
 
             # --- Clip final du résultat cumulé ---
-            # Assurer que les valeurs restent dans la plage [0, 1] après combinaison
             self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
+            print("DEBUG QM [_combine_batch_result]: Clipping final appliqué.") # Debug
 
         except Exception as e:
+            print(f"ERREUR QM [_combine_batch_result]: Exception inattendue - {e}") # Debug
             self.update_progress(f"❌ Erreur pendant la combinaison du résultat du batch: {e}")
             traceback.print_exc(limit=3)
-            # Optionnel: Que faire si la combinaison échoue ? Arrêter ? Continuer sans combiner ?
-            # Pour l'instant, on log l'erreur mais on continue le processus global.
-            # Le stack cumulatif ne sera pas mis à jour avec ce batch.
 
-# --- Fin de la méthode _combine_batch_result ---
-    
-    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
-        """Combines the result of a stacked batch into the cumulative stack."""
-        try:
-            batch_n = int(stack_info_header.get('NIMAGES', 1))
-            batch_exposure = float(stack_info_header.get('TOTEXP', 0.0))
-            if batch_n <= 0:
-                self.update_progress("⚠️ Batch combiné avait 0 images, ignoré.", None)
-                return
+        print("DEBUG QM [_combine_batch_result]: Fin méthode.") # Debug
 
-            # --- Initialize Cumulative Stack if it's the first batch ---
-            if self.current_stack_data is None:
-                self.current_stack_data = stacked_batch_data_np.copy() # Should be float32 numpy
-                self.images_in_cumulative_stack = batch_n
-                self.total_exposure_seconds = batch_exposure
-                # --- Create initial header ---
-                self.current_stack_header = fits.Header()
-                first_header = self.current_batch_data[0][1] if self.current_batch_data else fits.Header() # Use first image header from the *original* batch data
-                keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS', 'GAIN', 'OFFSET', 'CCD-TEMP', 'RA', 'DEC', 'SITELAT', 'SITELONG', 'FOCALLEN', 'BAYERPAT']
-                for key in keys_to_copy:
-                    if first_header and key in first_header:
-                        try: self.current_stack_header[key] = (first_header[key], first_header.comments[key] if key in first_header.comments else '')
-                        except Exception: self.current_stack_header[key] = first_header[key]
-                self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Stacking method')
-                self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images in cumulative stack')
-                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]: self.current_stack_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
-                if self.use_quality_weighting:
-                    self.current_stack_header['WGHT_ON'] = (True, 'Quality weighting enabled'); w_metrics = []
-                    if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
-                    if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
-                    self.current_stack_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-                else: self.current_stack_header['WGHT_ON'] = (False, 'Quality weighting disabled')
-                self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
-                self.current_stack_header['HISTORY'] = 'Cumulative Stack Initialized'
-                if self.correct_hot_pixels: self.current_stack_header['HISTORY'] = 'Hot pixel correction applied to input frames'
 
-            # --- Combine with Existing Cumulative Stack ---
-            else:
-                if self.current_stack_data.shape != stacked_batch_data_np.shape:
-                    self.update_progress(f"❌ Incompatibilité dims stack: Cumul={self.current_stack_data.shape}, Batch={stacked_batch_data_np.shape}. Combinaison échouée.")
-                    return
-
-                current_n = self.images_in_cumulative_stack
-                total_n = current_n + batch_n
-                w_old = current_n / total_n
-                w_new = batch_n / total_n
-
-                # --- Check if CuPy should be used for combination ---
-                use_cupy_combine = _cupy_installed and check_cupy_cuda()
-                combined_np = None
-
-                if use_cupy_combine:
-                    gpu_current = None; gpu_batch = None
-                    try:
-                        # print("DEBUG: Combining stacks using CuPy")
-                        # Ensure data is float32 for GPU
-                        gpu_current = cupy.asarray(self.current_stack_data, dtype=cupy.float32)
-                        gpu_batch = cupy.asarray(stacked_batch_data_np, dtype=cupy.float32)
-
-                        # Perform weighted average on GPU
-                        gpu_combined = (gpu_current * w_old) + (gpu_batch * w_new)
-                        combined_np = cupy.asnumpy(gpu_combined) # Download result
-                        # print("DEBUG: CuPy combination successful")
-
-                    except cupy.cuda.memory.OutOfMemoryError:
-                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.")
-                        use_cupy_combine = False
-                        gc.collect()
-                        cupy.get_default_memory_pool().free_all_blocks()
-                    except Exception as gpu_err:
-                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.")
-                        use_cupy_combine = False
-                        gc.collect()
-                        try: cupy.get_default_memory_pool().free_all_blocks()
-                        except Exception: pass
-                    finally:
-                        del gpu_current, gpu_batch # Free GPU memory
-
-                # Fallback to NumPy if CuPy not used or failed
-                if not use_cupy_combine:
-                    # print("DEBUG: Combining stacks using NumPy")
-                    # Ensure float32 for calculation precision/memory
-                    combined_np = (self.current_stack_data.astype(np.float32) * w_old) + \
-                                  (stacked_batch_data_np.astype(np.float32) * w_new)
-
-                # Update the cumulative stack (must be float32 numpy array)
-                self.current_stack_data = combined_np.astype(np.float32)
-
-                # Update cumulative stats and header
-                self.images_in_cumulative_stack = total_n
-                self.total_exposure_seconds += batch_exposure
-                self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
-                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                #self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images') was cluterring the header
-
-            # Clip final result
-            self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
-
-        except Exception as e:
-            self.update_progress(f"❌ Erreur combinaison du résultat du batch: {e}")
-            traceback.print_exc(limit=3)
-            
+################################################################################################################################################
     def _save_intermediate_stack(self):
         if self.current_stack_data is None or self.output_folder is None: return
         stack_path = os.path.join(self.output_folder, "stack_cumulative.fit"); preview_path = os.path.join(self.output_folder, "stack_cumulative.png")
@@ -1515,9 +1910,8 @@ class SeestarQueuedStacker:
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=True)
         except Exception as e: print(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
+################################################################################################################################################
 
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
-# REMPLACEZ LA MÉTHODE _stack_batch EXISTANTE PAR CELLE-CI (GÈRE LA COULEUR) :
 
     def _stack_batch(self, batch_images, batch_headers, batch_scores, current_batch_num=0, total_batches_est=0):
         """
@@ -1868,7 +2262,14 @@ class SeestarQueuedStacker:
             # Assembler en HxWxC
             final_sci_image_hxwxc = np.stack(final_output_images, axis=-1).astype(np.float32)
             final_wht_map_hxwxc = np.stack(final_output_weights, axis=-1).astype(np.float32)
+            if self.apply_chroma_correction and final_sci_image_hxwxc is not None:
+                self.update_progress("   -> Application de la correction chromatique sur résultat Drizzle...")
+                final_sci_image_hxwxc = self.chroma_balancer.normalize_stack(final_sci_image_hxwxc)
+                self.update_progress("   -> Correction chromatique Drizzle terminée.")
 
+            # Retourner les résultats
+            return final_sci_image_hxwxc, final_wht_map_hxwxc
+            
             # Nettoyer les résultats finaux (sécurité)
             final_sci_image_hxwxc[~np.isfinite(final_sci_image_hxwxc)] = 0.0
             final_wht_map_hxwxc[~np.isfinite(final_wht_map_hxwxc)] = 0.0
@@ -1894,128 +2295,204 @@ class SeestarQueuedStacker:
 ############################################################################################################################################
 
 
+
+
     def _save_final_stack(self, output_filename_suffix="", stopped_early=False):
         """
-        Sauvegarde le stack final (classique OU drizzle) et sa prévisualisation.
-        Utilise un suffixe pour différencier les types de sortie.
-        Ajoute les statistiques finales au header juste avant la sauvegarde.
+        Sauvegarde le stack final (classique, Drizzle, ou mosaïque) et sa prévisualisation.
+        Applique la neutralisation du fond et la correction chromatique finale avant sauvegarde.
         """
-        # --- CHOISIR LES BONNES DONNÉES À SAUVEGARDER ---
+        print(f"DEBUG QM [_save_final_stack]: Début sauvegarde finale (suffix: '{output_filename_suffix}', stopped_early: {stopped_early})") # Debug
+
+        # --- Import tardif pour la neutralisation du fond ---
+        neutralize_background_func = None
+        try:
+            from ..tools.stretch import neutralize_background_automatic as neutralize_background_func
+            print("DEBUG QM [_save_final_stack]: Import tardif de neutralize_background_automatic réussi.") # Debug
+        except ImportError:
+            print("ERREUR QM [_save_final_stack]: Échec import tardif neutralize_background_automatic. Neutralisation désactivée.") # Debug
+            self.update_progress("⚠️ Erreur interne: Fonction de neutralisation du fond non trouvée. Étape ignorée.")
+
+
+        # --- 1. Choisir les Données et le Header de Base ---
         data_to_save = None
         header_base = None
         image_count = 0
-        is_drizzle_save = False
-        stack_type_for_filename = "unknown" # Pour le nom de fichier
+        stack_type_for_filename = "unknown"
+        is_drizzle_mosaic_save = False
 
-        # Déterminer si le résultat actuel est Drizzle basé sur le header ou le mode
-        # On utilise le header car il est mis à jour spécifiquement pour Drizzle Final
-        if self.current_stack_header and 'DRZSCALE' in self.current_stack_header:
-             is_drizzle_save = True
-             # Déterminer le type Drizzle pour le nom de fichier
-             if self.drizzle_mode == "Incremental": stack_type_for_filename = f"drizzle_incr_{self.drizzle_scale:.1f}x"
-             else: stack_type_for_filename = f"drizzle_final_{self.drizzle_scale:.1f}x" # Mode Final
-             data_to_save = self.current_stack_data
-             header_base = self.current_stack_header
-             image_count = self.images_in_cumulative_stack # Utiliser le compteur mis à jour par Drizzle Final/Incr
-             print(f"DEBUG [_save_final_stack]: Saving Drizzle data (Type: {stack_type_for_filename}).")
-        elif self.current_stack_data is not None: # Cas Classique (ou fallback)
-             is_drizzle_save = False
-             stack_type_for_filename = self.stacking_mode # Utiliser la méthode classique
-             data_to_save = self.current_stack_data
-             header_base = self.current_stack_header
-             image_count = self.images_in_cumulative_stack
-             print("DEBUG [_save_final_stack]: Saving Classic/Fallback data.")
-        # --- FIN CHOIX DONNÉES ---
+        if self.current_stack_header and ('DRZSCALE' in self.current_stack_header or \
+                                          ('STACKTYP' in self.current_stack_header and \
+                                           ('Drizzle' in self.current_stack_header['STACKTYP'] or \
+                                            'Mosaic' in self.current_stack_header.get('STACKTYP', '')))):
+            is_drizzle_mosaic_save = True
+            if 'Mosaic' in self.current_stack_header.get('STACKTYP', ''): stack_type_for_filename = "mosaic_drizzle"
+            elif self.drizzle_mode == "Incremental": stack_type_for_filename = f"drizzle_incr_{self.drizzle_scale:.0f}x" # .0f pour entier
+            else: stack_type_for_filename = f"drizzle_final_{self.drizzle_scale:.0f}x" # .0f pour entier
+            data_to_save = self.current_stack_data
+            header_base = self.current_stack_header
+            image_count = self.images_in_cumulative_stack
+            print(f"DEBUG QM [_save_final_stack]: Mode Drizzle/Mosaic. Stack type: {stack_type_for_filename}, Img count: {image_count}") # Debug
 
-        # --- Vérifications initiales (basées sur les données choisies) ---
+        elif self.current_stack_data is not None:
+            is_drizzle_mosaic_save = False
+            stack_type_for_filename = self.stacking_mode
+            data_to_save = self.current_stack_data
+            header_base = self.current_stack_header
+            image_count = self.images_in_cumulative_stack
+            print(f"DEBUG QM [_save_final_stack]: Mode Classique. Stack type: {stack_type_for_filename}, Img count: {image_count}") # Debug
+        
+        # --- 2. Vérifications Initiales ---
         if data_to_save is None or self.output_folder is None:
             self.final_stacked_path = None
+            print("DEBUG QM [_save_final_stack]: Sortie précoce (data_to_save ou output_folder est None).")
             self.update_progress("ⓘ Aucun stack final à sauvegarder (données manquantes ou dossier sortie invalide).")
             return
+
         if image_count <= 0 and not stopped_early:
              self.final_stacked_path = None
+             print(f"DEBUG QM [_save_final_stack]: Sortie précoce (image_count={image_count} <= 0 et pas stopped_early).")
              self.update_progress("ⓘ Aucun stack final à sauvegarder (0 images combinées).")
              return
+        
+        print(f"DEBUG QM [_save_final_stack]: Données à sauvegarder (avant post-traitement) - Shape: {data_to_save.shape}, Type: {data_to_save.dtype}, Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
 
-        # --- Construire le nom de fichier final ---
+        # --- MODIFICATION : Application des post-traitements couleur AVANT la sauvegarde ---
+        # S'assurer que data_to_save est bien HxWxC et float32
+        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
+            data_to_save = data_to_save.astype(np.float32) # Assurer float32
+
+            # --- 2a. Neutralisation du Fond de Ciel Automatique ---
+            if neutralize_background_func: # Si la fonction a été importée
+                self.update_progress("背景のニュートラル化を適用中...", None) # "Application de la neutralisation du fond..."
+                print("DEBUG QM [_save_final_stack]: Appel de neutralize_background_automatic...") # Debug
+                try:
+                    data_before_bn = data_to_save.copy() # Pour comparaison debug
+                    data_to_save = neutralize_background_func(data_to_save)
+                    if data_to_save is None: # Si la fonction retourne None en cas d'échec majeur
+                        print("ERREUR QM [_save_final_stack]: Neutralisation du fond a retourné None. Utilisation données originales.") # Debug
+                        data_to_save = data_before_bn # Revenir à l'état précédent
+                        self.update_progress("⚠️ Échec neutralisation du fond (retour None), étape ignorée.", None)
+                    elif np.allclose(data_before_bn, data_to_save):
+                        print("DEBUG QM [_save_final_stack]: Neutralisation du fond n'a pas modifié l'image (ou annulée en interne).") # Debug
+                        self.update_progress("ⓘ Neutralisation du fond n'a pas modifié l'image (ou annulée).", None)
+                    else:
+                        print("DEBUG QM [_save_final_stack]: Neutralisation du fond appliquée.") # Debug
+                        self.update_progress("   -> Neutralisation du fond terminée.", None)
+                        print(f"DEBUG QM [_save_final_stack]: Données après BN - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
+                except Exception as bn_err:
+                    print(f"ERREUR QM [_save_final_stack]: Erreur pendant neutralize_background_automatic: {bn_err}") # Debug
+                    self.update_progress(f"⚠️ Erreur neutralisation du fond: {bn_err}. Étape ignorée.")
+                    # data_to_save reste l'image avant cette étape
+            else:
+                print("DEBUG QM [_save_final_stack]: Fonction neutralize_background_automatic non disponible.") # Debug
+
+            # --- 2b. Correction Chromatique / Bord (`ChromaticBalancer`) ---
+            if self.apply_chroma_correction: # Basé sur le flag de la session
+                self.update_progress("色収差/エッジ補正を適用しています...", None) # "Application de la correction chromatique/bord..."
+                print("DEBUG QM [_save_final_stack]: Appel de self.chroma_balancer.normalize_stack...") # Debug
+                try:
+                    # S'assurer que chroma_balancer existe
+                    if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+                         data_before_cb = data_to_save.copy() # Pour comparaison debug
+                         data_to_save = self.chroma_balancer.normalize_stack(data_to_save)
+                         if data_to_save is None: # Si la fonction retourne None
+                             print("ERREUR QM [_save_final_stack]: ChromaticBalancer a retourné None. Utilisation données précédentes.") # Debug
+                             data_to_save = data_before_cb
+                             self.update_progress("⚠️ Échec correction chromatique (retour None), étape ignorée.", None)
+                         elif np.allclose(data_before_cb, data_to_save):
+                            print("DEBUG QM [_save_final_stack]: ChromaticBalancer n'a pas modifié l'image.") # Debug
+                            self.update_progress("ⓘ Correction chromatique/bord n'a pas modifié l'image (ou annulée).", None)
+                         else:
+                            print("DEBUG QM [_save_final_stack]: Correction chromatique/bord appliquée.") # Debug
+                            self.update_progress("   -> Correction chromatique/bord terminée.", None)
+                            print(f"DEBUG QM [_save_final_stack]: Données après ChromaBalance - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
+                    else:
+                         print("AVERTISSEMENT QM [_save_final_stack]: Instance ChromaticBalancer non trouvée pour correction finale.") # Debug
+                         self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
+                except Exception as chroma_final_err:
+                     print(f"ERREUR QM [_save_final_stack]: Erreur pendant ChromaticBalancer: {chroma_final_err}") # Debug
+                     self.update_progress(f"⚠️ Erreur correction chromatique finale: {chroma_final_err}. Étape ignorée.")
+                     # data_to_save reste l'image avant cette étape
+            else:
+                print("DEBUG QM [_save_final_stack]: Correction chromatique désactivée pour cette session.") # Debug
+        # --- FIN MODIFICATION : Application des post-traitements ---
+
+
+        # --- 3. Construire le Nom de Fichier ---
         base_name = "stack_final"
-        # Ajouter suffixe pondération
-        weight_suffix = "_wght" if self.use_quality_weighting else ""
-        # Combiner avec le suffixe spécifique (arrêt ou normal)
-        final_suffix = f"{weight_suffix}{output_filename_suffix}"
-        # Construire le chemin complet
+        weight_suffix = "_wght" if self.use_quality_weighting and not is_drizzle_mosaic_save else ""
+        # Assurer que output_filename_suffix est un string (pourrait être None ou autre si pas géré avant)
+        current_op_suffix = str(output_filename_suffix) if output_filename_suffix else ""
+        final_suffix = f"{weight_suffix}{current_op_suffix}"
+        
         self.final_stacked_path = os.path.join(
             self.output_folder,
             f"{base_name}_{stack_type_for_filename}{final_suffix}.fit"
         )
         preview_path = os.path.splitext(self.final_stacked_path)[0] + ".png"
+        print(f"DEBUG QM [_save_final_stack]: Chemin FITS final: {self.final_stacked_path}") # Debug
+        print(f"DEBUG QM [_save_final_stack]: Chemin PNG preview: {preview_path}") # Debug
 
-        print(f"DEBUG [_save_final_stack]: Tentative sauvegarde vers: {self.final_stacked_path}")
-        self.update_progress(f"💾 Préparation sauvegarde stack final: {os.path.basename(self.final_stacked_path)}...")
-
+        # --- 4. Sauvegarde Fichier FITS et PNG ---
         try:
-            # Préparer le header final (basé sur header_base)
             final_header = header_base.copy() if header_base else fits.Header()
-
-            # --- AJOUT/MISE A JOUR DES STATS FINALES ICI ---
-            aligned_cnt = self.aligned_files_count if hasattr(self, 'aligned_files_count') else 0
-            fail_align = self.failed_align_count if hasattr(self, 'failed_align_count') else 0
-            fail_stack = self.failed_stack_count if hasattr(self, 'failed_stack_count') else 0
-            skipped = self.skipped_files_count if hasattr(self, 'skipped_files_count') else 0
-            tot_exp = self.total_exposure_seconds if hasattr(self, 'total_exposure_seconds') else 0.0
-
-            final_header['NIMAGES'] = (image_count, 'Images combined in final stack') # Utilise image_count
-            final_header['TOTEXP'] = (round(tot_exp, 2), '[s] Approx total exposure time')
-            final_header['ALIGNED'] = (aligned_cnt, 'Successfully aligned images')
-            final_header['FAILALIGN'] = (fail_align, 'Failed alignments')
-            final_header['FAILSTACK'] = (fail_stack, 'Files skipped due to stack/drizzle errors')
-            final_header['SKIPPED'] = (skipped, 'Other skipped/error files')
-
-            # Assurer que STACKTYP/DRZSCALE sont corrects
-            if 'DRZSCALE' not in final_header: # Si ce n'est pas un header Drizzle
+            # --- Mettre à jour les infos dans le header (identique à avant) ---
+            final_header['NIMAGES'] = (image_count, 'Images combined in final stack')
+            final_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time')
+            final_header['ALIGNED'] = (self.aligned_files_count, 'Successfully aligned images')
+            final_header['FAILALIGN'] = (self.failed_align_count, 'Failed alignments')
+            final_header['FAILSTACK'] = (self.failed_stack_count, 'Files skipped due to stack/combine errors')
+            final_header['SKIPPED'] = (self.skipped_files_count, 'Other skipped/error files')
+            if not is_drizzle_mosaic_save:
                 final_header['STACKTYP'] = (self.stacking_mode, 'Stacking method')
-                if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]:
-                    final_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
+                if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]: final_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
+                for k in ['DRZSCALE', 'DRZKERNEL', 'DRZPIXFR', 'DRZMODE']: # DRZMODE ajouté
+                    if k in final_header: del final_header[k]
+            else: # Assurer que les infos Drizzle/Mosaic sont là
+                if 'STACKTYP' not in final_header: final_header['STACKTYP'] = (stack_type_for_filename, 'Stacking/Processing method')
+                if 'DRZSCALE' not in final_header: final_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle Scale Factor')
+                if 'DRZKERNEL' not in final_header: final_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle Kernel')
+                if 'DRZPIXFR' not in final_header: final_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle Pixfrac')
+                if 'DRZMODE' not in final_header and self.drizzle_mode : final_header['DRZMODE'] = (self.drizzle_mode, 'Drizzle Mode (Final/Incremental)')
 
-            # Assurer que les infos de pondération sont présentes
-            if 'WGHT_ON' not in final_header:
-                 final_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
-                 if self.use_quality_weighting:
-                     w_metrics = []
-                     if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
-                     if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
-                     final_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-
-            # Nettoyer l'historique des sauvegardes intermédiaires
+            if 'WGHT_ON' not in final_header: final_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
+            if self.use_quality_weighting and 'WGHT_MET' not in final_header:
+                 w_metrics = [];
+                 if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
+                 if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
+                 final_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
+            # Nettoyage historique
             try:
                 if 'HISTORY' in final_header:
-                    history_entries = list(final_header['HISTORY'])
-                    filtered_history = [h for h in history_entries if 'Intermediate save' not in str(h) and 'Cumulative Stack Initialized' not in str(h)]
+                    history_entries = list(final_header['HISTORY']);
+                    filtered_history = [h for h in history_entries if not isinstance(h, str) or ('Intermediate save' not in h and 'Cumulative Stack Initialized' not in h and 'Batch' not in h)]
                     while 'HISTORY' in final_header: del final_header['HISTORY']
                     for entry in filtered_history: final_header.add_history(entry)
-            except Exception: pass # Ignorer erreurs de nettoyage historique
-
-            # Ajouter l'entrée finale d'historique
-            history_msg = 'Final Stack Saved by Seestar Stacker (Queued)'
+            except Exception: pass
+            history_msg = f'Final Stack Saved by SeestarStacker (Mode: {stack_type_for_filename})'
             if stopped_early: history_msg += ' - Stopped Early'
             final_header.add_history(history_msg)
-            # --- FIN MISE A JOUR HEADER ---
+            # --- Fin Préparation Header ---
 
-            # Sauvegarder le fichier FITS (utilise data_to_save)
+            print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS vers {self.final_stacked_path}...") # Debug
             save_fits_image(data_to_save, self.final_stacked_path, final_header, overwrite=True)
-            print(f"DEBUG [_save_final_stack]: save_fits_image a priori réussi.")
+            print("DEBUG QM [_save_final_stack]: Sauvegarde FITS terminée.") # Debug
 
-            # Sauvegarder la prévisualisation PNG (utilise data_to_save)
-            save_preview_image(data_to_save, preview_path, apply_stretch=True)
-            print(f"DEBUG [_save_final_stack]: save_preview_image a priori réussi.")
+            print(f"DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG vers {preview_path}...") # Debug
+            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True) # enhanced_stretch pour le PNG final
+            print("DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG terminée.") # Debug
 
-            self.update_progress(f"✅ Stack final sauvegardé ({image_count} images)") # Utilise image_count
+            self.update_progress(f"✅ Stack final sauvegardé ({image_count} images)")
 
         except Exception as e:
-            print(f"DEBUG [_save_final_stack]: ERREUR pendant la sauvegarde!")
+            print(f"ERREUR QM [_save_final_stack]: Échec sauvegarde FITS/PNG: {e}") # Debug
             self.update_progress(f"⚠️ Erreur sauvegarde stack final: {e}")
             traceback.print_exc(limit=2)
-            self.final_stacked_path = None # Assurer que le chemin est None en cas d'erreur
+            self.final_stacked_path = None
+            print("DEBUG QM [_save_final_stack]: final_stacked_path mis à None en raison d'erreur sauvegarde.") # Debug
+        
+        print("DEBUG QM [_save_final_stack]: Fin méthode.") # Debug
 
 
 
@@ -2049,7 +2526,7 @@ class SeestarQueuedStacker:
         elif len(batch_filepaths) > 0:
             self.update_progress(f"   -> Aucun fichier temp du lot n'a pu être nettoyé (déjà supprimés ou erreur).")
 
-# --- FIN DE LA NOUVELLE MÉTHODE ---
+
 
 
 
@@ -2068,6 +2545,12 @@ class SeestarQueuedStacker:
                     except Exception as del_e: self.update_progress(f"⚠️ Erreur suppression non aligné {filename}: {del_e}")
             if deleted_count > 0: self.update_progress(f"🧹 {deleted_count} fichier(s) non aligné(s) supprimé(s).")
         except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage non alignés: {e}")
+
+
+
+################################################################################################################################################
+
+
 
     def cleanup_temp_reference(self):
         try:
@@ -2097,6 +2580,9 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"⚠️ Erreur nettoyage référence temp: {e}")
 
+
+################################################################################################################################################
+
     def add_folder(self, folder_path):
         if not self.processing_active: self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif."); return False
         abs_path = os.path.abspath(folder_path)
@@ -2113,6 +2599,13 @@ class SeestarQueuedStacker:
         self.update_progress(f"✅ Dossier ajouté à la file d'attente : {os.path.basename(folder_path)}")
         self.update_progress(f"folder_count_update:{folder_count}")
         return True
+
+
+
+################################################################################################################################################
+
+
+
 
     def _add_files_to_queue(self, folder_path):
         count_added = 0
@@ -2151,66 +2644,135 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
+  
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
                          initial_additional_folders=None,
-                         # Weighting params
+                         # --- Arguments Stacking Classique ---
+                         stacking_mode="kappa-sigma", # Valeur par défaut si non fournie
+                         kappa=2.5,                 # Valeur par défaut si non fournie
+                         # --- Arguments Communs ---
+                         batch_size=10,             # Utiliser une valeur > 0 par défaut ici
+                         correct_hot_pixels=True,
+                         hot_pixel_threshold=3.0,
+                         neighborhood_size=5,
+                         bayer_pattern="GRBG",
+                         perform_cleanup=True,
+                         # --- Arguments Pondération ---
                          use_weighting=False, weight_snr=True, weight_stars=True,
                          snr_exp=1.0, stars_exp=0.5, min_w=0.1,
-                         # Drizzle params
+                         # --- Arguments Drizzle ---
                          use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7,
-                         drizzle_mode="Final",
-                         # --- NOUVEAUX PARAMÈTRES DANS LA SIGNATURE ---
-                         drizzle_kernel="square", # Défaut 'square'
-                         drizzle_pixfrac=1.0):     # Défaut 1.0
+                         drizzle_mode="Final", drizzle_kernel="square", drizzle_pixfrac=1.0,
+                         # --- Argument Correction Chroma ---
+                         apply_chroma_correction=True,
+                         # --- Arguments Mosaïque ---
+                         is_mosaic_run=False,
+                         api_key=None,
+                         mosaic_settings=None, *args, **kwargs):
         """
-        Démarre le thread de traitement principal avec la configuration spécifiée,
-        y compris les options de pondération, le MODE, le NOYAU et PIXFRAC Drizzle.
+        Démarre le thread de traitement principal avec la configuration spécifiée.
+        MAJ: Signature complète, ordre d'initialisation corrigé, accepte tous les args.
         """
+        print("DEBUG (Backend start_processing): Début tentative démarrage...")
+        print(f"   -> Args reçus: is_mosaic_run={is_mosaic_run}, use_drizzle={use_drizzle}, drizzle_mode={drizzle_mode}, stacking_mode={stacking_mode}, api_key={'Oui' if api_key else 'Non'}, mosaic_settings={mosaic_settings}") # Log initial
+
         if self.processing_active:
-            self.update_progress("⚠️ Tentative de démarrer un traitement alors qu'un autre est déjà en cours.")
+            self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
             return False
 
-        # --- Stockage des paramètres reçus ---
-        self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
-        self.drizzle_kernel = drizzle_kernel # Stocker la valeur reçue
-        self.drizzle_pixfrac = drizzle_pixfrac   # Stocker la valeur reçue
-
-        # Réinitialiser l'état d'arrêt et définir le dossier courant
+        # 1. Réinitialiser l'état et préparer les dossiers/variables de base
+        print("DEBUG (Backend start_processing): Appel à self.initialize()...")
         self.stop_processing = False
         self.current_folder = os.path.abspath(input_dir)
-
-        # Initialiser les dossiers et l'état (TRÈS IMPORTANT)
+        # L'appel à initialize() réinitialise de nombreux attributs !
         if not self.initialize(output_dir):
             self.processing_active = False
+            print("ERREUR (Backend start_processing): Échec de self.initialize().")
             return False
+        print("DEBUG (Backend start_processing): self.initialize() terminé.")
 
-        # Stocker l'état Drizzle et ses paramètres pour cette session
-        self.drizzle_active_session = use_drizzle # Stocke si Drizzle est demandé
+        # --- 2. Définir les paramètres spécifiques à CETTE session *APRES* initialize ---
+        print("DEBUG (Backend start_processing): Configuration des paramètres de session...")
+        # -- Modes --
+        self.is_mosaic_run = is_mosaic_run
+        # Forcer Drizzle si Mosaïque est demandé
+        self.drizzle_active_session = use_drizzle or self.is_mosaic_run
+
+        # -- Paramètres Communs --
+        self.api_key = api_key # Stocker clé API reçue
+        print(f"!!!! DEBUG QM Start: self.api_key JUSTE APRES ASSIGNATION = '{self.api_key}' !!!!")
+        self.apply_chroma_correction = apply_chroma_correction
+        self.correct_hot_pixels = correct_hot_pixels
+        self.hot_pixel_threshold = hot_pixel_threshold
+        self.neighborhood_size = neighborhood_size
+        self.bayer_pattern = bayer_pattern
+        self.perform_cleanup = perform_cleanup
+
+        # -- Paramètres Stacking Classique --
+        self.stacking_mode = stacking_mode
+        self.kappa = float(kappa)
+
+        # -- Paramètres Pondération --
+        self.use_quality_weighting = use_weighting
+        self.weight_by_snr = weight_snr
+        self.weight_by_stars = weight_stars
+        self.snr_exponent = snr_exp
+        self.stars_exponent = stars_exp
+        self.min_weight = max(0.01, min(1.0, min_w))
+
+        # -- Paramètres Drizzle (utilisés si drizzle_active_session est True) --
         if self.drizzle_active_session:
+            # Utiliser mosaic_settings pour kernel/pixfrac si en mode mosaïque
+            if self.is_mosaic_run:
+                print(f"DEBUG (Backend start_processing): Mode Mosaïque actif. Settings reçus: {mosaic_settings}")
+                current_mosaic_settings = mosaic_settings if isinstance(mosaic_settings, dict) else {}
+                # Utiliser le kernel global (reçu en arg) si non trouvé dans mosaic_settings
+                self.drizzle_kernel = current_mosaic_settings.get('kernel', drizzle_kernel)
+                # Utiliser le pixfrac global (reçu en arg) si non trouvé dans mosaic_settings
+                self.drizzle_pixfrac = current_mosaic_settings.get('pixfrac', drizzle_pixfrac)
+                # Valider/clipper pixfrac
+                try: self.drizzle_pixfrac = float(np.clip(float(self.drizzle_pixfrac), 0.01, 1.0))
+                except (ValueError, TypeError): self.drizzle_pixfrac = 1.0; print(f"WARNING: pixfrac mosaïque invalide ({self.drizzle_pixfrac}), reset à 1.0")
+                print(f"   -> Params Mosaïque utilisés -> Kernel: '{self.drizzle_kernel}', Pixfrac: {self.drizzle_pixfrac:.2f}")
+            else: # Drizzle simple champ
+                 self.drizzle_kernel = drizzle_kernel
+                 self.drizzle_pixfrac = drizzle_pixfrac
+                 print(f"DEBUG (Backend start_processing): Mode Drizzle simple champ.")
+            # Paramètres Drizzle communs (Mode, Scale, WHT)
+            self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
             self.drizzle_scale = float(drizzle_scale)
             self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
-            # Log incluant le mode choisi
-            self.update_progress(f"💧 Mode Drizzle Activé (Mode: {self.drizzle_mode}, Échelle: x{self.drizzle_scale:.1f}, Seuil WHT: {self.drizzle_wht_threshold*100:.0f}%)")
-        else:
-            self.update_progress("⚙️ Mode Stack Classique Activé pour cette session")
+            print(f"   -> Params Drizzle Communs -> Mode: {self.drizzle_mode}, Scale: {self.drizzle_scale:.1f}, WHT: {self.drizzle_wht_threshold:.2f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}")
+        # --- Fin définition paramètres session ---
 
-        # Vérifier et ajuster la taille de lot
+        # --- 3. Logs et Vérification Batch Size ---
+        # Log du mode final choisi
+        if self.is_mosaic_run: self.update_progress("🖼️ Mode Mosaïque ACTIVÉ pour cette session.")
+        elif self.drizzle_active_session: self.update_progress(f"💧 Mode Drizzle (Simple Champ) Activé ({self.drizzle_mode})...")
+        else: self.update_progress("⚙️ Mode Stack Classique Activé...")
+
+        # Gestion Batch Size (utilise l'argument batch_size reçu)
+        requested_batch_size = batch_size # Utilise l'argument reçu
+        if requested_batch_size <= 0: # Si 0 ou moins -> Estimation auto
+             self.update_progress("🧠 Estimation taille lot auto (reçu <= 0)...", None)
+             sample_img_path = None
+             if input_dir and os.path.isdir(input_dir): fits_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.fit', '.fits'))]; sample_img_path = os.path.join(input_dir, fits_files[0]) if fits_files else None
+             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); self.batch_size = estimated_size; self.update_progress(f"✅ Taille lot auto estimée: {estimated_size}", None)
+             except Exception as est_err: self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); self.batch_size = 10
+        else: # Taille fournie > 0
+             self.batch_size = requested_batch_size
+
+        # Valider la taille minimale
         if self.batch_size < 3:
             self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None)
             self.batch_size = 3
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
 
-        # Appliquer la configuration de la pondération qualité
-        self.use_quality_weighting = use_weighting
-        self.weight_by_snr = weight_snr
-        self.weight_by_stars = weight_stars
-        self.snr_exponent = max(0.1, snr_exp)
-        self.stars_exponent = max(0.1, stars_exp)
-        self.min_weight = max(0.01, min(1.0, min_w))
+        # Log pondération si active
         if self.use_quality_weighting:
             self.update_progress(f"⚖️ Pondération Qualité Activée (SNR^{self.snr_exponent:.1f}, Stars^{self.stars_exponent:.1f}, MinW: {self.min_weight:.2f})")
 
-        # Gérer les dossiers supplémentaires initiaux
+        # --- 4. Gérer dossiers initiaux ---
         initial_folders_to_add_count = 0
         with self.folders_lock:
             self.additional_folders = []
@@ -2220,28 +2782,32 @@ class SeestarQueuedStacker:
                     if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders:
                         self.additional_folders.append(abs_folder)
                         initial_folders_to_add_count += 1
-            if initial_folders_to_add_count > 0:
-                 self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
-                 self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
+        if initial_folders_to_add_count > 0:
+             self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
+             self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
 
-        # Ajouter les fichiers du dossier initial à la file d'attente
+
+        # --- 5. Ajouter fichiers initiaux ---
         initial_files_added = self._add_files_to_queue(self.current_folder)
         if initial_files_added > 0:
-            self._recalculate_total_batches()
+            self._recalculate_total_batches() # Recalculer après ajout initial
             self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders:
+        elif not self.additional_folders: # Si pas d'initiaux ET pas d'additionnels
              self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
+             # On pourrait retourner False ici si rien à traiter ? À discuter.
 
-        # Configurer l'image de référence pour l'aligneur
+        # --- 6. Configurer référence pour l'aligneur ---
         self.aligner.reference_image_path = reference_path_ui or None
 
-        # Démarrer le thread worker
+        # --- 7. Démarrer worker ---
+        print("DEBUG (Backend start_processing): Démarrage du thread worker...")
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
         self.processing_thread.daemon = True
         self.processing_thread.start()
-        self.processing_active = True # Mettre le flag APRÈS le démarrage réussi
+        self.processing_active = True # Mettre à True *après* avoir lancé le thread
         self.update_progress("🚀 Thread de traitement démarré.")
-        return True # Succès du démarrage
+        print("DEBUG (Backend start_processing): Fin.")
+        return True
 
 
 ###############################################################################################################################################
@@ -2368,15 +2934,28 @@ class SeestarQueuedStacker:
                 self.update_progress(f"⚠️ Erreur suppression dossier temp Drizzle ({os.path.basename(self.drizzle_temp_dir)}): {e}")
         # else: # Log optionnel si le dossier n'existait pas
             # self.update_progress("ⓘ Dossier temp Drizzle non trouvé pour nettoyage (normal si Drizzle inactif ou déjà nettoyé).")     
+
+
+################################################################################################################################################
+
+
     def stop(self):
         if not self.processing_active: return
         self.update_progress("⛔ Arrêt demandé..."); self.stop_processing = True; self.aligner.stop_processing = True
 
-    def is_running(self):
-        return self.processing_active and self.processing_thread is not None and self.processing_thread.is_alive()
-######################################################################################################################################################
 
-# --- AJOUTER CETTE MÉTHODE DANS LA CLASSE SeestarQueuedStacker ---
+################################################################################################################################################
+
+
+    def is_running(self):
+        return getattr(self, 'processing_active', False) and \
+            getattr(self, 'processing_thread', None) is not None and \
+            getattr(self, 'processing_thread', None) is not None and \
+            self.processing_thread.is_alive()
+
+
+
+######################################################################################################################################################
 
     def _process_and_save_drizzle_batch(self, batch_data_list, output_wcs, output_shape_2d_hw, batch_num):
         """

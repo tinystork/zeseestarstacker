@@ -236,7 +236,7 @@ def main():
         print(f"DEBUG (main.py): Instanciation SeestarStackerGUI avec initial_input_dir='{input_dir_from_args}', stack_immediately_from='{stack_immediately_path}'") # <-- AJOUTÉ DEBUG
         app = SeestarStackerGUI(
             initial_input_dir=input_dir_from_args,
-            stack_immediately_from=stack_immediately_path # <-- NOUVEAU PARAMETRE
+            stack_immediately_from=stack_immediately_path 
         )
         # --- FIN MODIFICATION ---
 

@@ -9,6 +9,7 @@ import os
 import tkinter as tk
 import numpy as np
 import traceback
+from .mosaic_gui import VALID_DRIZZLE_KERNELS 
 
 class SettingsManager:
     """
@@ -55,6 +56,17 @@ class SettingsManager:
         self.drizzle_kernel = "square"  # Noyau Drizzle ('square', 'gaussian', etc.)
         self.drizzle_pixfrac = 1.0      # Fraction Pixel Drizzle (0.01 - 1.0)
 
+        # --- Correction Chroma ---
+        self.apply_chroma_correction = True # Activé par défaut
+        print("DEBUG (Settings reset_to_defaults): apply_chroma_correction mis à True (défaut).") # <-- AJOUTÉ DEBUG
+                # --- AJOUTER ICI ---
+        self.mosaic_mode_active = False # Flag pour savoir si le mode est actif
+        self.mosaic_settings = {        # Dictionnaire pour les paramètres spécifiques
+        "kernel": "square",         # Utiliser les défauts globaux comme défauts mosaïque
+        "pixfrac": 1.0
+        # Ajouter d'autres clés spécifiques mosaïque ici plus tard
+        }
+        
         # Preview Settings
         self.preview_stretch_method = "Asinh" # Bon défaut pour l'astro
         self.preview_black_point = 0.01
@@ -79,6 +91,7 @@ class SettingsManager:
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning: Cannot update settings from invalid GUI instance.")
             return
+        print("DEBUG (Settings update_from_ui): Lecture des paramètres depuis l'UI...") # <-- AJOUTÉ DEBUG
         try:
             # --- Processing Settings ---
             # ... (inchangé) ...
@@ -108,15 +121,25 @@ class SettingsManager:
             try: self.drizzle_scale = int(float(scale_str))
             except ValueError: print(f"Warning: Invalid Drizzle scale value '{scale_str}' from UI."); self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
 
-            # --- MODIFIÉ: Lecture Seuil WHT ---
+            # --- LECTURE CORRECTION CHROMA ---
+            self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=self.apply_chroma_correction)).get()
+            print(f"DEBUG (Settings update_from_ui): apply_chroma_correction lu depuis UI: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
+            # ---  ---
+
+            # ---  Lecture Seuil WHT ---
             # Lire directement la variable DoubleVar (0.0-1.0)
             self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=self.drizzle_wht_threshold)).get()
             print(f"DEBUG (Settings update_from_ui): WHT Threshold (0-1) lu: {self.drizzle_wht_threshold}") # <-- AJOUTÉ DEBUG
-            # --- FIN MODIFICATION ---
+            # ---  ---
 
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
             self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=self.drizzle_pixfrac)).get()
+            # --- juste lire les attributs du GUI) ---
+            self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', False) # Lire le flag
+            self.mosaic_settings = getattr(gui_instance, 'mosaic_settings', {}).copy() # Lire le dict (faire une copie)
+            # ---  ---
+
 
             # --- Preview Settings ---
             # ... (inchangé) ...
@@ -198,6 +221,15 @@ class SettingsManager:
             getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
             getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
             getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
+            # --- juste définir les attributs du GUI) ---
+            setattr(gui_instance, 'mosaic_mode_active', bool(self.mosaic_mode_active)) # Assurer booléen
+            setattr(gui_instance, 'mosaic_settings', self.mosaic_settings.copy() if isinstance(self.mosaic_settings, dict) else {}) # Assurer dict, passer copie
+            # Pas besoin de mettre à jour l'UI de la fenêtre modale ici, elle lira à son ouverture
+            # On pourrait mettre à jour l'indicateur visuel sur le GUI principal ici
+            if hasattr(gui_instance, '_update_mosaic_status_indicator'): gui_instance._update_mosaic_status_indicator()
+            # --- ---
+
+
 
             # --- Preview Settings ---
             # ... (inchangé) ...
@@ -228,6 +260,9 @@ class SettingsManager:
         except AttributeError as ae: print(f"Error applying settings to UI (AttributeError): {ae}")
         except tk.TclError as te: print(f"Error applying settings to UI (TclError - widget likely destroyed?): {te}")
         except Exception as e: print(f"Unexpected error applying settings to UI: {e}"); traceback.print_exc(limit=2)
+
+
+
     def validate_settings(self):
         """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
         messages = []
@@ -279,7 +314,7 @@ class SettingsManager:
                   original = self.drizzle_mode
                  self.drizzle_mode = defaults['drizzle_mode'] # Reset to default 'Final'
                  messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
-            # --->>> FIN DU BLOC À INSÉRER <<<---
+            # --->>>  <<<---
 
             # Drizzle Kernel and Pixfrac Validation
              valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
@@ -301,7 +336,13 @@ class SettingsManager:
                  original = self.drizzle_pixfrac
                  self.drizzle_pixfrac = defaults['drizzle_pixfrac'] # Reset to default 1.0
                  messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
-            # --- FIN NOUVEAU BLOC ---
+            # --- FIN  BLOC ---
+
+            # --- CORRECTION CHROMA ---
+            # Assigner la valeur chargée/actuelle à la variable Tkinter correspondante
+                 getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar()).set(self.apply_chroma_correction)
+                 print(f"DEBUG (Settings apply_to_ui): apply_chroma_correction appliqué à l'UI: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
+            # --- FIN AJOUT ---
 
              # --- Preview Settings Validation ---
              self.preview_black_point = float(self.preview_black_point); self.preview_white_point = float(self.preview_white_point)
@@ -332,7 +373,7 @@ class SettingsManager:
         """ Sauvegarde les paramètres actuels dans le fichier JSON. """
         # S'assurer que les types sont corrects pour JSON
         settings_data = {
-            'version': "1.3.0", # Incrémenter la version si la structure change significativement
+            'version': "1.4.0", # Incrémenter la version si la structure change significativement
             # Processing
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
@@ -359,6 +400,14 @@ class SettingsManager:
             'drizzle_mode': str(self.drizzle_mode),
             'drizzle_kernel': str(self.drizzle_kernel),
             'drizzle_pixfrac': float(self.drizzle_pixfrac),
+             # ---  ---
+            'mosaic_mode_active': bool(self.mosaic_mode_active),
+            'mosaic_settings': self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {}, # Sauvegarder le dict
+            # --- FIN AJOUT ---
+
+            # --- CORRECTION CHROMA ---
+            'apply_chroma_correction': bool(self.apply_chroma_correction), # Sauvegarder comme booléen
+            # ---  ---
             # Preview
             'preview_stretch_method': str(self.preview_stretch_method),
             'preview_black_point': float(self.preview_black_point),
@@ -381,7 +430,9 @@ class SettingsManager:
 
     def load_settings(self):
         """ Charge les paramètres depuis le fichier JSON. """
+        print(f"DEBUG (Settings load_settings): Tentative chargement depuis {self.settings_file}...") 
         if not os.path.exists(self.settings_file):
+            print(f"DEBUG (Settings load_settings): Fichier non trouvé. Utilisation défauts.") 
             print(f"Settings file not found: {self.settings_file}. Using defaults and creating file.")
             self.reset_to_defaults()
             self.save_settings() # Créer le fichier avec les défauts
@@ -422,6 +473,23 @@ class SettingsManager:
             self.drizzle_mode = settings_data.get('drizzle_mode', defaults['drizzle_mode'])
             self.drizzle_kernel = settings_data.get('drizzle_kernel', defaults['drizzle_kernel'])
             self.drizzle_pixfrac = settings_data.get('drizzle_pixfrac', defaults['drizzle_pixfrac'])
+                         # --- AJOUTER ICI ---
+            self.mosaic_mode_active = settings_data.get('mosaic_mode_active', defaults['mosaic_mode_active'])
+            loaded_mosaic_settings = settings_data.get('mosaic_settings', defaults['mosaic_settings'])
+            # Valider/Nettoyer les settings mosaïque chargés
+            self.mosaic_settings = {
+                'kernel': loaded_mosaic_settings.get('kernel', defaults['mosaic_settings']['kernel']),
+                'pixfrac': loaded_mosaic_settings.get('pixfrac', defaults['mosaic_settings']['pixfrac'])
+                # Ajouter d'autres clés futures ici avec leurs défauts
+            }
+            if self.mosaic_settings['kernel'] not in VALID_DRIZZLE_KERNELS: # Utiliser la constante définie dans mosaic_gui
+                self.mosaic_settings['kernel'] = defaults['mosaic_settings']['kernel']
+            try:
+                 pf = float(self.mosaic_settings['pixfrac'])
+                 self.mosaic_settings['pixfrac'] = np.clip(pf, 0.01, 1.0)
+            except (ValueError, TypeError):
+                 self.mosaic_settings['pixfrac'] = defaults['mosaic_settings']['pixfrac']
+            # --- FIN AJOUT ---
             
             # Preview
             self.preview_stretch_method = settings_data.get('preview_stretch_method', defaults['preview_stretch_method'])
@@ -435,11 +503,21 @@ class SettingsManager:
             # UI
             self.language = settings_data.get('language', defaults['language'])
             self.window_geometry = settings_data.get('window_geometry', defaults['window_geometry'])
+            
+            # ---CORRECTION CHROMA ---
+            # Utiliser la valeur par défaut de 'defaults' si la clé n'est pas dans le fichier
+            self.apply_chroma_correction = settings_data.get('apply_chroma_correction', defaults['apply_chroma_correction'])
+            # S'assurer que c'est un booléen après chargement
+            self.apply_chroma_correction = bool(self.apply_chroma_correction)
+            print(f"DEBUG (Settings load_settings): apply_chroma_correction chargé: {self.apply_chroma_correction}") # <-- DEBUG
+            # --- ---
+            print(f"DEBUG (Settings load_settings): Paramètres chargés. Validation...") # DEBUG
 
             print(f"Settings loaded from {self.settings_file}")
             # Validate settings after loading
             validation_messages = self.validate_settings()
             if validation_messages:
+                 print("DEBUG (Settings load_settings): Paramètres chargés ajustés après validation:") # <--  DEBUG
                  print("Loaded settings adjusted after validation:")
                  for msg in validation_messages: print(f"  - {msg}")
                  self.save_settings() # Save the corrected settings

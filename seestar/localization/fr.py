@@ -167,8 +167,29 @@ FR_TRANSLATIONS = {
     'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
     'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
     'drizzle_wht_threshold_label': "Seuil WHT%:",
+    # --- Mosaïque ---
+    'Mosaic...': "Mosaïque...",
+    'mosaic_settings_title': "Options Mosaïque",
+    'mosaic_activation_frame': "Activation",
+    'mosaic_activate_label': "Activer le mode de traitement Mosaïque",
+    'cancel': "Annuler",
+    'ok': "OK",
+    'mosaic_window_create_error': "Impossible d'ouvrir la fenêtre d'options Mosaïque.",
+    'mosaic_mode_enabled_log': "Mode mosaïque ACTIVÉ.",
+    'mosaic_mode_disabled_log': "Mode mosaïque DÉSACTIVÉ.",    
+    'mosaic_drizzle_options_frame': "Options Drizzle Mosaïque",
+    'mosaic_drizzle_kernel_label': "Noyau :",
+    'mosaic_drizzle_pixfrac_label': "Pixfrac :",
+    'mosaic_invalid_kernel': "Noyau Drizzle sélectionné invalide.",
+    'mosaic_invalid_pixfrac': "Valeur Pixfrac invalide. Doit être entre 0.01 et 1.0.",
+    'mosaic_mode_enabled_log': "Mode mosaïque ACTIVÉ.",
+    'mosaic_mode_disabled_log': "Mode mosaïque DÉSACTIVÉ.",
+    'mosaic_api_key_frame': "Clé API Astrometry.net (Requise pour Mosaïque)",
+    'mosaic_api_key_label': "Clé API :",
+    'mosaic_api_key_help': "Obtenez votre clé sur nova.astrometry.net (compte gratuit)",
+    'mosaic_api_key_required': "La clé API Astrometry.net est requise lorsque le Mode Mosaïque est activé.",
 
-    # --- NOUVEAU : Textes pour Avertissement Drizzle ---
+    # ---  Textes pour Avertissement Drizzle ---
     'drizzle_warning_title': "Avertissement Drizzle",
     'drizzle_warning_text': (
         "Le traitement Drizzle est activé.\n\n"
@@ -176,8 +197,10 @@ FR_TRANSLATIONS = {
         "- Il créera des fichiers temporaires pouvant occuper beaucoup d'espace disque (potentiellement autant que les images d'entrée).\n",
         "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
         "Continuer avec Drizzle ?"
+
+
     ),
-    # --- Fin Nouveaux Textes ---
+    
 
 
 }
