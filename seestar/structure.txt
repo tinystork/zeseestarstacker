@@ -1,19 +1,17 @@
-
-----------------------------------------------------------------------
 / (PROJECT_ROOT)
 |
 |-- seestar/                           <-- Package principal de l'application
 |   |-- __init__.py                    <-- Rend 'seestar' importable
 |   |-- main.py                        <-- Point d'entrée (si lancé comme module) / Logique principale
-|   |
+|
 |   |-- core/                          <-- Logique métier principale (traitement, alignement...)
 |   |   |-- __init__.py
 |   |   |-- alignment.py
 |   |   |-- hot_pixels.py
 |   |   |-- image_processing.py
 |   |   |-- utils.py
-|   |   |-- (stacking.py)              <-- (Mentionné comme retiré)
-|   |
+|   |   |-- stacking.py                <-- (Ancien fichier de stacking)
+|
 |   |-- gui/                           <-- Interface graphique principale
 |   |   |-- __init__.py
 |   |   |-- file_handling.py
@@ -22,38 +20,38 @@
 |   |   |-- preview.py
 |   |   |-- progress.py
 |   |   |-- settings.py
-|   |
+|
 |   |-- localization/                  <-- Fichiers de traduction
 |   |   |-- __init__.py
 |   |   |-- en.py
 |   |   |-- fr.py
 |   |   |-- localization.py            <-- Classe de gestion des traductions
-|   |
+|
 |   |-- queuep/                        <-- Gestion de la file d'attente / Backend
 |   |   |-- __init__.py
 |   |   |-- queue_manager.py
-|   |
+|
 |   |-- enhancement/                   <-- Améliorations (Drizzle, Post-traitement)
-|   |   |-- __init__.py                <-- (Probablement ajouté)
+|   |   |-- __init__.py
 |   |   |-- drizzle_integration.py
 |   |   |-- stack_enhancement.py
-|   |
+|
 |   |-- tools/                         <-- Outils (Stretch, etc.)
 |   |   |-- __init__.py
 |   |   |-- stretch.py
-|   |
+|
 |   |-- icon/                          <-- Ressources icônes/images
 |       |-- icon.png
 |       |-- back.png
 |
-|-- beforehand/                      <-- Module/Dossier de l'analyseur
-|   |-- __init__.py                    <-- (Recommandé si traité comme un package)
-|   |-- analyse_gui.py                 <-- GUI de l'analyseur
-|   |-- analyse_logic.py               <-- Logique métier de l'analyseur
-|   |-- zone.py                        <-- Traductions pour l'analyseur
-|   |-- snr_module.py                  <-- Module pour calcul SNR (utilisé par analyse_logic)
-|   |-- trail_module.py                <-- Module pour détection traînées (utilisé par analyse_logic)
-|   |-- sat_trail.py                   <-- (Semble être une ancienne version ou un fichier test?)
+|-- beforehand/                        <-- Module/Dossier de l'analyseur
+|   |-- __init__.py
+|   |-- analyse_gui.py
+|   |-- analyse_logic.py
+|   |-- zone.py
+|   |-- snr_module.py
+|   |-- trail_module.py
+|   |-- sat_trail.py
 |
 |-- main.py                            <-- Point d'entrée principal pour LANCER l'application GUI
 |-- seestar_settings.json              <-- Fichier de configuration utilisateur
@@ -61,10 +59,3 @@
 |-- requirements.txt                   <-- (Fichier standard, recommandé)
 |-- .gitignore                         <-- (Fichier standard, recommandé)
 |
-|-- (Fichiers exemples/tests - non inclus dans la structure finale de l'app)
-    |-- main_stacking_script.py        <-- (Votre ancien script de lancement?)
-    |-- script_a_chrono_enhanced.py
-    |-- script_b_enhanced.py
-    |-- inspect_drizzle.py
-
-----------------------------------------------------------------------

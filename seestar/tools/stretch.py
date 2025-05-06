@@ -326,4 +326,139 @@ def save_fits_as_png(data, output_path, enhance=False, color_balance=(1.0,1.0,1.
         if output_dir: os.makedirs(output_dir, exist_ok=True)
         pil_image.save(output_path); return True
     except Exception as e: print(f"Error saving preview image to {output_path}: {e}"); traceback.print_exc(limit=2); return False
+
+
+# --- DANS LE FICHIER seestar/tools/stretch.py ---
+# (Ajoutez cette fonction à la fin du fichier, après les classes et autres fonctions d'aide)
+
+import numpy as np # Assurez-vous que numpy est importé au début du fichier
+from astropy.stats import sigma_clipped_stats # Pour des statistiques robustes
+
+
+
+# --- DANS LE FICHIER seestar/tools/stretch.py ---
+# Modifiez la SIGNATURE et les valeurs par défaut de la fonction
+
+def neutralize_background_automatic(image_data_rgb, grid_size=(32, 32), # Grille plus fine
+                                    bg_percentile_low=5,   # Un peu plus bas
+                                    bg_percentile_high=30, # Plus restrictif sur le haut
+                                    std_factor_threshold=1.8, # Plus strict sur l'uniformité
+                                    min_pixels_per_zone=50): # Réduire si zones plus petites
+    """
+    Neutralise automatiquement le fond de ciel d'une image RGB empilée.
+    (Version avec paramètres par défaut ajustés pour un test plus "agressif")
+    """
+    print("DEBUG [neutralize_background_automatic]: Début neutralisation auto (paramètres test 'agressifs')...")
+
+    if image_data_rgb is None:
+        print("DEBUG [neutralize_background_automatic]: Données image None, sortie.")
+        return None
+    if image_data_rgb.ndim != 3 or image_data_rgb.shape[2] != 3:
+        print("DEBUG [neutralize_background_automatic]: Image non RGB, sortie.")
+        return image_data_rgb
+
+    h, w, _ = image_data_rgb.shape
+    rows, cols = grid_size
+    zone_h, zone_w = h // rows, w // cols
+
+    # Augmenter légèrement la tolérance pour la taille des zones avec une grille plus fine
+    if zone_h < 8 or zone_w < 8: # Si les zones deviennent vraiment trop petites
+        print(f"DEBUG [neutralize_background_automatic]: Zones trop petites ({zone_h}x{zone_w}). Neutralisation annulée.")
+        return image_data_rgb
+
+    print(f"DEBUG [neutralize_background_automatic]: Image {h}x{w}, Grille {rows}x{cols}, Zone {zone_h}x{zone_w}")
+
+    zone_stats = []
+    print("DEBUG [neutralize_background_automatic]: Calcul statistiques par zone...")
+    for r_idx in range(rows):
+        for c_idx in range(cols):
+            y_start, y_end = r_idx * zone_h, (r_idx + 1) * zone_h
+            x_start, x_end = c_idx * zone_w, (c_idx + 1) * zone_w
+            zone = image_data_rgb[y_start:y_end, x_start:x_end, :]
+
+            if zone.size < min_pixels_per_zone * 3:
+                continue
+            try:
+                _, median_r, _ = sigma_clipped_stats(zone[..., 0], sigma=3.0, maxiters=5)
+                _, median_g, _ = sigma_clipped_stats(zone[..., 1], sigma=3.0, maxiters=5)
+                _, median_b, _ = sigma_clipped_stats(zone[..., 2], sigma=3.0, maxiters=5)
+                luminance_zone = 0.299 * zone[..., 0] + 0.587 * zone[..., 1] + 0.114 * zone[..., 2]
+                _, _, std_lum_zone = sigma_clipped_stats(luminance_zone, sigma=3.0, maxiters=5)
+                if not all(np.isfinite([median_r, median_g, median_b, std_lum_zone])):
+                    continue
+                zone_stats.append({
+                    'r': median_r, 'g': median_g, 'b': median_b,
+                    'std_lum': std_lum_zone,
+                    'pixels': zone.reshape(-1, 3)
+                })
+            except Exception as e_stat:
+                # print(f"  DEBUG: Erreur stats zone ({r_idx},{c_idx}): {e_stat}") # Moins verbeux
+                pass
+
+    if not zone_stats:
+        print("DEBUG [neutralize_background_automatic]: Aucune statistique de zone valide collectée. Neutralisation annulée.")
+        return image_data_rgb
+    print(f"DEBUG [neutralize_background_automatic]: {len(zone_stats)} zones analysées avec succès.")
+
+    all_median_luminances = np.array([0.299*s['r'] + 0.587*s['g'] + 0.114*s['b'] for s in zone_stats])
+    all_std_luminances = np.array([s['std_lum'] for s in zone_stats])
+
+    median_lum_threshold_low = np.percentile(all_median_luminances, bg_percentile_low)
+    median_lum_threshold_high = np.percentile(all_median_luminances, bg_percentile_high)
+    median_std_overall = np.median(all_std_luminances)
+    std_dev_threshold_for_bg = median_std_overall * std_factor_threshold
+
+    print(f"DEBUG [neutralize_background_automatic]: Seuils sélection fond: LumMed [{median_lum_threshold_low:.3f}-{median_lum_threshold_high:.3f}], StdLumMax < {std_dev_threshold_for_bg:.4f} (Facteur: {std_factor_threshold}, MedStd: {median_std_overall:.4f})")
+
+    background_pixels_list = []
+    selected_zones_count = 0
+    for s in zone_stats:
+        zone_luminance_median = 0.299*s['r'] + 0.587*s['g'] + 0.114*s['b']
+        is_dark_enough = (median_lum_threshold_low <= zone_luminance_median <= median_lum_threshold_high)
+        is_uniform_enough = (s['std_lum'] <= std_dev_threshold_for_bg)
+        if is_dark_enough and is_uniform_enough:
+            background_pixels_list.append(s['pixels'])
+            selected_zones_count += 1
+
+    if not background_pixels_list:
+        print("DEBUG [neutralize_background_automatic]: Aucune zone de fond de ciel sélectionnée. Neutralisation annulée.")
+        return image_data_rgb
+    print(f"DEBUG [neutralize_background_automatic]: {selected_zones_count} zones de fond sélectionnées.")
+
+    all_background_pixels = np.vstack(background_pixels_list)
+    if all_background_pixels.shape[0] < min_pixels_per_zone:
+        print(f"DEBUG [neutralize_background_automatic]: Pas assez de pixels de fond ({all_background_pixels.shape[0]}). Neutralisation annulée.")
+        return image_data_rgb
+    print(f"DEBUG [neutralize_background_automatic]: Nombre total de pixels de fond utilisés: {all_background_pixels.shape[0]}")
+
+    try:
+        _, median_bg_r, _ = sigma_clipped_stats(all_background_pixels[:, 0], sigma=2.5, maxiters=3)
+        _, median_bg_g, _ = sigma_clipped_stats(all_background_pixels[:, 1], sigma=2.5, maxiters=3)
+        _, median_bg_b, _ = sigma_clipped_stats(all_background_pixels[:, 2], sigma=2.5, maxiters=3)
+    except Exception as e_median_bg:
+        print(f"DEBUG [neutralize_background_automatic]: Erreur calcul médianes BG globales: {e_median_bg}. Neutralisation annulée.")
+        return image_data_rgb
+    print(f"DEBUG [neutralize_background_automatic]: Médianes Fond (R,G,B): ({median_bg_r:.4f}, {median_bg_g:.4f}, {median_bg_b:.4f})")
+
+    # Paramètres de gain plus "agressifs"
+    min_gain, max_gain = 0.3, 3.0 # Permettre des corrections plus fortes
+
+    gain_r = median_bg_g / max(median_bg_r, 1e-7) if median_bg_r > 1e-7 else 1.0
+    gain_g = 1.0
+    gain_b = median_bg_g / max(median_bg_b, 1e-7) if median_bg_b > 1e-7 else 1.0
+    gain_r = np.clip(gain_r, min_gain, max_gain)
+    gain_b = np.clip(gain_b, min_gain, max_gain)
+    print(f"DEBUG [neutralize_background_automatic]: Gains calculés (R,G,B): ({gain_r:.3f}, {gain_g:.3f}, {gain_b:.3f})")
+
+    corrected_image = image_data_rgb.copy()
+    corrected_image[..., 0] *= gain_r
+    corrected_image[..., 2] *= gain_b
+    corrected_image = np.clip(corrected_image, 0.0, 1.0)
+
+    print("DEBUG [neutralize_background_automatic]: Neutralisation auto terminée avec succès (paramètres test 'agressifs').")
+    return corrected_image.astype(np.float32)
+
+
+
+
 # --- END OF FILE seestar/tools/stretch.py ---

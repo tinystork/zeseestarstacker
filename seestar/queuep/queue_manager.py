@@ -314,6 +314,10 @@ class SeestarQueuedStacker:
         """Définit la fonction de rappel pour les mises à jour de l'aperçu."""
         self.preview_callback = callback
 
+
+################################################################################################################################################
+
+
     def _update_preview(self, force_update=False):
         """Safely calls the preview callback, including stack count and batch info."""
         if self.preview_callback is None or self.current_stack_data is None: return
@@ -371,6 +375,9 @@ class SeestarQueuedStacker:
         except Exception as e:
             print(f"Error in _update_preview_incremental_drizzle: {e}")
             traceback.print_exc(limit=2)
+
+
+
 #########################################################################################################################################################
 
 
@@ -633,6 +640,13 @@ class SeestarQueuedStacker:
 
 
 
+
+################################################################################################################################################
+
+
+
+
+
     def _calculate_quality_metrics(self, image_data):
         """Calculates SNR and Star Count, WITH ADDED LOGGING.""" # Docstring updated
         scores = {'snr': 0.0, 'stars': 0.0}
@@ -695,6 +709,9 @@ class SeestarQueuedStacker:
         # --- This section is ONLY reached if the 'try' block succeeds ---
         self.update_progress(f"      Quality Scores -> SNR: {scores['snr']:.2f}, Stars: {scores['stars']:.3f} ({num_stars} raw)")
         return scores # Return the successfully calculated scores
+
+
+
 ##################################################################################################################
 
 
@@ -709,13 +726,20 @@ class SeestarQueuedStacker:
             except Exception as e_align_cb: print(f"Warning QM: Could not set progress callback on aligner: {e_align_cb}")
         else: print("DEBUG QM: Ne configure pas callback aligner (aligner ou méthode manquante).")
 
+
+
+################################################################################################################################################
+
+
+
     def set_preview_callback(self, callback):
         print("DEBUG QM: Appel de set_preview_callback.")
         self.preview_callback = callback
 
-    # ... (Autres méthodes: initialize, update_progress, _update_preview, etc.) ...
 
-    # --- MÉTHODE _worker COMPLÈTE ET CORRIGÉE ---
+################################################################################################################################################
+
+
     def _worker(self):
         """
         Thread principal pour le traitement des images.
@@ -1053,13 +1077,10 @@ class SeestarQueuedStacker:
             print("DEBUG [_worker]: Flag processing_active mis à False.")
             self.update_progress("🚪 Thread traitement terminé.")
 
-    # --- FIN DE LA MÉTHODE _worker (CORRIGÉE) ---
+  
 
-
- 
 
 ############################################################################################################################
-
 
 
     # --- MÉTHODE DE NETTOYAGE ---
@@ -1381,13 +1402,19 @@ class SeestarQueuedStacker:
             if not align_success: raise RuntimeError(f"ÉCHEC Alignement Astroalign {file_name}")
             print(f"      - Alignement Astroalign OK")
 
-
             # --- 6. Correction Chroma (sur image alignée) ---
-            if is_color_after_processing and aligned_img is not None and self.apply_chroma_correction:
-                 print(f"   -> Correction Chroma {file_name}...")
-                 try: aligned_img = self.chroma_balancer.normalize_stack(aligned_img)
-                 except Exception as chroma_err: print(f"      - ERREUR Correction Chroma: {chroma_err}")
-
+            # ### MODIFICATION : Appel à ChromaticBalancer DÉPLACÉ à _save_final_stack ###
+            # # if is_color_after_processing and aligned_img is not None and self.apply_chroma_correction:
+            # #      print(f"   -> Correction Chroma {file_name}...") # Ancien log
+            # #      try:
+            # #          if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+            # #               aligned_img = self.chroma_balancer.normalize_stack(aligned_img)
+            # #          else:
+            # #               print(f"   AVERTISSEMENT: Instance ChromaticBalancer non trouvée dans _process_file pour {file_name}")
+            # #      except Exception as chroma_err:
+            # #           print(f"      - ERREUR Correction Chroma dans _process_file pour {file_name}: {chroma_err}")
+            print(f"DEBUG [ProcessFile]: Correction Chroma (Edge Enhance) IGNORÉE dans _process_file pour {file_name} (sera faite à la fin).")
+            # ### FIN MODIFICATION ###
 
             # --- 7. Calcul Qualité (sur image alignée) ---
             if self.use_quality_weighting:
@@ -1709,8 +1736,8 @@ class SeestarQueuedStacker:
 
 
 ###############################################################################################################################################
-# --- FIN DE LA MÉTHODE _process_completed_batch (MODIFIÉE) ---  
-    
+
+
     def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
         """
         Combine le résultat numpy (float32, 0-1) d'un batch traité
@@ -1726,8 +1753,11 @@ class SeestarQueuedStacker:
             stack_info_header (fits.Header): En-tête contenant les informations
                                              sur le traitement de ce batch (NIMAGES, TOTEXP, etc.).
         """
+        print(f"DEBUG QM [_combine_batch_result]: Début combinaison batch (data shape: {stacked_batch_data_np.shape if stacked_batch_data_np is not None else 'None'})...") # Debug
+
         if stacked_batch_data_np is None or stack_info_header is None:
             self.update_progress("⚠️ Erreur interne: Données de batch invalides pour combinaison.")
+            print("DEBUG QM [_combine_batch_result]: Sortie précoce (données batch invalides).") # Debug
             return
 
         try:
@@ -1738,10 +1768,12 @@ class SeestarQueuedStacker:
             # Vérifier si le nombre d'images est valide
             if batch_n <= 0:
                 self.update_progress(f"⚠️ Batch combiné avec {batch_n} images, ignoré.")
+                print(f"DEBUG QM [_combine_batch_result]: Sortie précoce (batch_n <= 0).") # Debug
                 return
 
             # --- Initialisation du Stack Cumulatif (Premier Batch) ---
             if self.current_stack_data is None:
+                print("DEBUG QM [_combine_batch_result]: Initialisation stack cumulatif (premier batch).") # Debug
                 self.update_progress("   -> Initialisation du stack cumulatif...")
                 # La première image est simplement le résultat du premier batch
                 # S'assurer que c'est bien un float32
@@ -1751,73 +1783,63 @@ class SeestarQueuedStacker:
 
                 # --- Créer l'en-tête initial pour le stack cumulatif ---
                 self.current_stack_header = fits.Header()
-                # Copier les infos pertinentes de l'en-tête du batch
-                keys_to_copy_from_batch = ['NIMAGES', 'STACKMETH', 'TOTEXP', 'ENH_CROP', 'ENH_CLHE', 'KAPPA', 'WGHT_USED', 'WGHT_MET']
+                # Tenter de récupérer le premier header du lot *original* pour copier les métadonnées
+                # Note: self.current_batch_data est vidé à la fin de _process_completed_batch,
+                # donc il faut récupérer cette info autrement ou l'ignorer ici.
+                # Pour l'instant, on copie depuis stack_info_header (moins d'infos mais ok)
+                keys_to_copy_from_batch = ['NIMAGES', 'STACKMETH', 'TOTEXP', 'KAPPA', 'WGHT_USED', 'WGHT_MET']
                 for key in keys_to_copy_from_batch:
                     if key in stack_info_header:
-                        # Copie simple clé/valeur/commentaire si possible
-                        try:
-                            self.current_stack_header[key] = (stack_info_header[key], stack_info_header.comments[key])
-                        except KeyError: # Si pas de commentaire
-                            self.current_stack_header[key] = stack_info_header[key]
+                        try: self.current_stack_header[key] = (stack_info_header[key], stack_info_header.comments[key])
+                        except KeyError: self.current_stack_header[key] = stack_info_header[key]
 
-                # Ajouter des informations générales / potentiellement manquantes
-                # Ces valeurs pourraient être affinées dans _save_final_stack
-                if 'STACKTYP' not in self.current_stack_header:
-                     self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Overall stacking method')
-                if 'WGHT_ON' not in self.current_stack_header:
-                     self.current_stack_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
-
+                # Infos générales
+                if 'STACKTYP' not in self.current_stack_header: self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Overall stacking method')
+                if 'WGHT_ON' not in self.current_stack_header: self.current_stack_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
                 self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
                 self.current_stack_header.add_history('Cumulative Stack Initialized')
-                if self.correct_hot_pixels:
-                    self.current_stack_header.add_history('Hot pixel correction applied to input frames')
+                if self.correct_hot_pixels: self.current_stack_header.add_history('Hot pixel correction applied to input frames')
+                print("DEBUG QM [_combine_batch_result]: Header cumulatif initial créé.") # Debug
 
             # --- Combinaison avec le Stack Cumulatif Existant ---
             else:
+                print("DEBUG QM [_combine_batch_result]: Combinaison avec stack cumulatif existant...") # Debug
                 self.update_progress("   -> Combinaison avec le stack cumulatif...")
                 # Vérifier la compatibilité des dimensions
                 if self.current_stack_data.shape != stacked_batch_data_np.shape:
                     self.update_progress(f"❌ Incompatibilité dims stack: Cumul={self.current_stack_data.shape}, Batch={stacked_batch_data_np.shape}. Combinaison échouée.")
-                    # Que faire ? Option : essayer de redimensionner ? Pour l'instant, on abandonne.
-                    # Ne pas mettre à jour les compteurs si la combinaison échoue.
-                    return
+                    print(f"ERREUR QM [_combine_batch_result]: Incompatibilité de dimensions.") # Debug
+                    return # Ne pas continuer si les dimensions ne correspondent pas
 
                 # Calcul des poids basé sur le nombre d'images
                 current_n = self.images_in_cumulative_stack
                 total_n = current_n + batch_n
                 w_old = current_n / total_n
                 w_new = batch_n / total_n
+                print(f"DEBUG QM [_combine_batch_result]: Poids combinaison: w_old={w_old:.3f}, w_new={w_new:.3f}") # Debug
 
                 # --- Tentative de combinaison via CuPy si disponible ---
                 use_cupy_combine = _cupy_installed and check_cupy_cuda()
                 combined_np = None # Variable pour stocker le résultat (toujours NumPy)
 
                 if use_cupy_combine:
-                    gpu_current = None; gpu_batch = None # Initialiser
+                    gpu_current = None; gpu_batch = None
                     try:
-                        # print("DEBUG: Combining stacks using CuPy") # Décommenter pour debug
-                        # Assurer float32 pour GPU
+                        print("DEBUG QM [_combine_batch_result]: Tentative combinaison CuPy...") # Debug
                         gpu_current = cupy.asarray(self.current_stack_data, dtype=cupy.float32)
                         gpu_batch = cupy.asarray(stacked_batch_data_np, dtype=cupy.float32)
-
-                        # Moyenne pondérée sur GPU
                         gpu_combined = (gpu_current * w_old) + (gpu_batch * w_new)
-                        combined_np = cupy.asnumpy(gpu_combined) # Télécharger le résultat
-
+                        combined_np = cupy.asnumpy(gpu_combined)
+                        print("DEBUG QM [_combine_batch_result]: Combinaison CuPy réussie.") # Debug
                     except cupy.cuda.memory.OutOfMemoryError:
-                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.")
-                        use_cupy_combine = False # Forcer le fallback CPU
-                        gc.collect(); cupy.get_default_memory_pool().free_all_blocks()
+                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.") # Garder Warning
+                        use_cupy_combine = False; gc.collect(); cupy.get_default_memory_pool().free_all_blocks()
                     except Exception as gpu_err:
-                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.")
-                        traceback.print_exc(limit=1)
-                        use_cupy_combine = False
-                        gc.collect()
+                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.") # Garder Warning
+                        traceback.print_exc(limit=1); use_cupy_combine = False; gc.collect()
                         try: cupy.get_default_memory_pool().free_all_blocks()
                         except Exception: pass
                     finally:
-                        # Libérer explicitement la mémoire GPU
                         del gpu_current, gpu_batch
                         if '_cupy_installed' in globals() and _cupy_installed:
                              try: cupy.get_default_memory_pool().free_all_blocks()
@@ -1825,154 +1847,53 @@ class SeestarQueuedStacker:
 
                 # --- Combinaison via NumPy (Fallback ou si CuPy non utilisé) ---
                 if not use_cupy_combine:
-                    # print("DEBUG: Combining stacks using NumPy") # Décommenter pour debug
-                    # Assurer float32 pour les calculs NumPy
+                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy (CPU)...") # Debug
                     current_data_float = self.current_stack_data.astype(np.float32)
                     batch_data_float = stacked_batch_data_np.astype(np.float32)
-                    # Moyenne pondérée
                     combined_np = (current_data_float * w_old) + (batch_data_float * w_new)
+                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy réussie.") # Debug
 
                 # --- Mettre à jour le stack cumulatif ---
                 if combined_np is None:
-                     # Cela ne devrait pas arriver si l'une des méthodes a fonctionné
+                     print("ERREUR QM [_combine_batch_result]: Échec des méthodes CPU et GPU pour combiner.") # Debug
                      raise RuntimeError("La combinaison n'a produit aucun résultat (erreur CuPy et NumPy?).")
 
-                # Le résultat DOIT être un NumPy array float32
                 self.current_stack_data = combined_np.astype(np.float32)
+                print("DEBUG QM [_combine_batch_result]: Stack cumulatif mis à jour.") # Debug
 
                 # --- Mettre à jour les statistiques et l'en-tête cumulatif ---
                 self.images_in_cumulative_stack = total_n
                 self.total_exposure_seconds += batch_exposure
-                if self.current_stack_header: # Vérifier si l'en-tête existe
+                if self.current_stack_header:
                     self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
                     self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                    # Optionnel: Ajouter une entrée d'historique (peut alourdir)
-                    # self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images')
+                    # self.current_stack_header.add_history(...) # Optionnel
+
+            ### MODIFICATION : Appel à ChromaticBalancer supprimé d'ici ###
+            # if self.apply_chroma_correction and self.current_stack_data is not None:
+            #    if self.current_stack_data.ndim == 3 and self.current_stack_data.shape[2] == 3:
+            #        self.update_progress("   -> Application de la correction chromatique...")
+            #        # S'assurer que chroma_balancer existe
+            #        if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+            #             self.current_stack_data = self.chroma_balancer.normalize_stack(self.current_stack_data)
+            #             self.update_progress("   -> Correction chromatique terminée.")
+            #        else:
+            #             self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
+            ### FIN MODIFICATION ###
 
             # --- Clip final du résultat cumulé ---
-            # Assurer que les valeurs restent dans la plage [0, 1] après combinaison
             self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
+            print("DEBUG QM [_combine_batch_result]: Clipping final appliqué.") # Debug
 
         except Exception as e:
+            print(f"ERREUR QM [_combine_batch_result]: Exception inattendue - {e}") # Debug
             self.update_progress(f"❌ Erreur pendant la combinaison du résultat du batch: {e}")
             traceback.print_exc(limit=3)
-            # Optionnel: Que faire si la combinaison échoue ? Arrêter ? Continuer sans combiner ?
-            # Pour l'instant, on log l'erreur mais on continue le processus global.
-            # Le stack cumulatif ne sera pas mis à jour avec ce batch.
 
-# --- Fin de la méthode _combine_batch_result ---
-    
-    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
-        """Combines the result of a stacked batch into the cumulative stack."""
-        try:
-            batch_n = int(stack_info_header.get('NIMAGES', 1))
-            batch_exposure = float(stack_info_header.get('TOTEXP', 0.0))
-            if batch_n <= 0:
-                self.update_progress("⚠️ Batch combiné avait 0 images, ignoré.", None)
-                return
-
-            # --- Initialize Cumulative Stack if it's the first batch ---
-            if self.current_stack_data is None:
-                self.current_stack_data = stacked_batch_data_np.copy() # Should be float32 numpy
-                self.images_in_cumulative_stack = batch_n
-                self.total_exposure_seconds = batch_exposure
-                # --- Create initial header ---
-                self.current_stack_header = fits.Header()
-                first_header = self.current_batch_data[0][1] if self.current_batch_data else fits.Header() # Use first image header from the *original* batch data
-                keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS', 'GAIN', 'OFFSET', 'CCD-TEMP', 'RA', 'DEC', 'SITELAT', 'SITELONG', 'FOCALLEN', 'BAYERPAT']
-                for key in keys_to_copy:
-                    if first_header and key in first_header:
-                        try: self.current_stack_header[key] = (first_header[key], first_header.comments[key] if key in first_header.comments else '')
-                        except Exception: self.current_stack_header[key] = first_header[key]
-                self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Stacking method')
-                self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images in cumulative stack')
-                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]: self.current_stack_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
-                if self.use_quality_weighting:
-                    self.current_stack_header['WGHT_ON'] = (True, 'Quality weighting enabled'); w_metrics = []
-                    if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
-                    if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
-                    self.current_stack_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-                else: self.current_stack_header['WGHT_ON'] = (False, 'Quality weighting disabled')
-                self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
-                self.current_stack_header['HISTORY'] = 'Cumulative Stack Initialized'
-                if self.correct_hot_pixels: self.current_stack_header['HISTORY'] = 'Hot pixel correction applied to input frames'
-
-            # --- Combine with Existing Cumulative Stack ---
-            else:
-                if self.current_stack_data.shape != stacked_batch_data_np.shape:
-                    self.update_progress(f"❌ Incompatibilité dims stack: Cumul={self.current_stack_data.shape}, Batch={stacked_batch_data_np.shape}. Combinaison échouée.")
-                    return
-
-                current_n = self.images_in_cumulative_stack
-                total_n = current_n + batch_n
-                w_old = current_n / total_n
-                w_new = batch_n / total_n
-
-                # --- Check if CuPy should be used for combination ---
-                use_cupy_combine = _cupy_installed and check_cupy_cuda()
-                combined_np = None
-
-                if use_cupy_combine:
-                    gpu_current = None; gpu_batch = None
-                    try:
-                        # print("DEBUG: Combining stacks using CuPy")
-                        # Ensure data is float32 for GPU
-                        gpu_current = cupy.asarray(self.current_stack_data, dtype=cupy.float32)
-                        gpu_batch = cupy.asarray(stacked_batch_data_np, dtype=cupy.float32)
-
-                        # Perform weighted average on GPU
-                        gpu_combined = (gpu_current * w_old) + (gpu_batch * w_new)
-                        combined_np = cupy.asnumpy(gpu_combined) # Download result
-                        # print("DEBUG: CuPy combination successful")
-
-                    except cupy.cuda.memory.OutOfMemoryError:
-                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.")
-                        use_cupy_combine = False
-                        gc.collect()
-                        cupy.get_default_memory_pool().free_all_blocks()
-                    except Exception as gpu_err:
-                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.")
-                        use_cupy_combine = False
-                        gc.collect()
-                        try: cupy.get_default_memory_pool().free_all_blocks()
-                        except Exception: pass
-                    finally:
-                        del gpu_current, gpu_batch # Free GPU memory
-
-                # Fallback to NumPy if CuPy not used or failed
-                if not use_cupy_combine:
-                    # print("DEBUG: Combining stacks using NumPy")
-                    # Ensure float32 for calculation precision/memory
-                    combined_np = (self.current_stack_data.astype(np.float32) * w_old) + \
-                                  (stacked_batch_data_np.astype(np.float32) * w_new)
-
-                # Update the cumulative stack (must be float32 numpy array)
-                self.current_stack_data = combined_np.astype(np.float32)
-
-                # Update cumulative stats and header
-                self.images_in_cumulative_stack = total_n
-                self.total_exposure_seconds += batch_exposure
-                self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
-                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                #self.current_stack_header.add_history(f'Combined with batch stack of {batch_n} images') was cluterring the header
-            
-            
-                # Appliquer la correction chromatique si activée et si l'image est en couleur        
-                if self.apply_chroma_correction and self.current_stack_data is not None:
-                    if self.current_stack_data.ndim == 3 and self.current_stack_data.shape[2] == 3:
-                        self.update_progress("   -> Application de la correction chromatique...")
-                        self.current_stack_data = self.chroma_balancer.normalize_stack(self.current_stack_data)
-                        self.update_progress("   -> Correction chromatique terminée.")
+        print("DEBUG QM [_combine_batch_result]: Fin méthode.") # Debug
 
 
-            # Clip final result
-            self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
-
-        except Exception as e:
-            self.update_progress(f"❌ Erreur combinaison du résultat du batch: {e}")
-            traceback.print_exc(limit=3)
-            
+################################################################################################################################################
     def _save_intermediate_stack(self):
         if self.current_stack_data is None or self.output_folder is None: return
         stack_path = os.path.join(self.output_folder, "stack_cumulative.fit"); preview_path = os.path.join(self.output_folder, "stack_cumulative.png")
@@ -1989,9 +1910,8 @@ class SeestarQueuedStacker:
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=True)
         except Exception as e: print(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
+################################################################################################################################################
 
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
-# REMPLACEZ LA MÉTHODE _stack_batch EXISTANTE PAR CELLE-CI (GÈRE LA COULEUR) :
 
     def _stack_batch(self, batch_images, batch_headers, batch_scores, current_batch_num=0, total_batches_est=0):
         """
@@ -2377,145 +2297,204 @@ class SeestarQueuedStacker:
 
 
 
-# --- START OF COMPLETE SeestarQueuedStacker._save_final_stack METHOD (dans queue_manager.py) ---
-
     def _save_final_stack(self, output_filename_suffix="", stopped_early=False):
         """
         Sauvegarde le stack final (classique, Drizzle, ou mosaïque) et sa prévisualisation.
-        Utilise un suffixe pour différencier les types de sortie.
-        Ajoute/Met à jour les statistiques finales dans le header juste avant la sauvegarde.
+        Applique la neutralisation du fond et la correction chromatique finale avant sauvegarde.
         """
+        print(f"DEBUG QM [_save_final_stack]: Début sauvegarde finale (suffix: '{output_filename_suffix}', stopped_early: {stopped_early})") # Debug
+
+        # --- Import tardif pour la neutralisation du fond ---
+        neutralize_background_func = None
+        try:
+            from ..tools.stretch import neutralize_background_automatic as neutralize_background_func
+            print("DEBUG QM [_save_final_stack]: Import tardif de neutralize_background_automatic réussi.") # Debug
+        except ImportError:
+            print("ERREUR QM [_save_final_stack]: Échec import tardif neutralize_background_automatic. Neutralisation désactivée.") # Debug
+            self.update_progress("⚠️ Erreur interne: Fonction de neutralisation du fond non trouvée. Étape ignorée.")
+
+
         # --- 1. Choisir les Données et le Header de Base ---
         data_to_save = None
         header_base = None
-        image_count = 0 # Nombre d'images *effectivement* dans ce stack final
-        stack_type_for_filename = "unknown" # Pour le nom de fichier
-
-        # Déterminer si les données actuelles proviennent de Drizzle/Mosaïque
+        image_count = 0
+        stack_type_for_filename = "unknown"
         is_drizzle_mosaic_save = False
+
         if self.current_stack_header and ('DRZSCALE' in self.current_stack_header or \
                                           ('STACKTYP' in self.current_stack_header and \
                                            ('Drizzle' in self.current_stack_header['STACKTYP'] or \
                                             'Mosaic' in self.current_stack_header.get('STACKTYP', '')))):
             is_drizzle_mosaic_save = True
             if 'Mosaic' in self.current_stack_header.get('STACKTYP', ''): stack_type_for_filename = "mosaic_drizzle"
-            elif self.drizzle_mode == "Incremental": stack_type_for_filename = f"drizzle_incr_{self.drizzle_scale:.1f}x"
-            else: stack_type_for_filename = f"drizzle_final_{self.drizzle_scale:.1f}x"
+            elif self.drizzle_mode == "Incremental": stack_type_for_filename = f"drizzle_incr_{self.drizzle_scale:.0f}x" # .0f pour entier
+            else: stack_type_for_filename = f"drizzle_final_{self.drizzle_scale:.0f}x" # .0f pour entier
             data_to_save = self.current_stack_data
             header_base = self.current_stack_header
-            # Utiliser le compteur qui a été mis à jour correctement pour ce mode
             image_count = self.images_in_cumulative_stack
-            print(f"DEBUG [_save_final_stack]: Début sauvegarde. Type: Drizzle/Mosaic ({stack_type_for_filename}), data_to_save is None? {data_to_save is None}, image_count={image_count}") # <-- DEBUG
+            print(f"DEBUG QM [_save_final_stack]: Mode Drizzle/Mosaic. Stack type: {stack_type_for_filename}, Img count: {image_count}") # Debug
 
-        # Sinon, c'est un stack Classique (ou un fallback)
         elif self.current_stack_data is not None:
             is_drizzle_mosaic_save = False
             stack_type_for_filename = self.stacking_mode
             data_to_save = self.current_stack_data
             header_base = self.current_stack_header
-            image_count = self.images_in_cumulative_stack # Utilise le compteur classique
-            print(f"DEBUG [_save_final_stack]: Début sauvegarde. Type: Classic/Fallback ({stack_type_for_filename}), data_to_save is None? {data_to_save is None}, image_count={image_count}") # <-- DEBUG
-        # --- Fin Choix Données/Header ---
-
+            image_count = self.images_in_cumulative_stack
+            print(f"DEBUG QM [_save_final_stack]: Mode Classique. Stack type: {stack_type_for_filename}, Img count: {image_count}") # Debug
+        
         # --- 2. Vérifications Initiales ---
         if data_to_save is None or self.output_folder is None:
             self.final_stacked_path = None
-            print("DEBUG [_save_final_stack]: Sortie précoce (data_to_save ou output_folder est None).") # <-- DEBUG
+            print("DEBUG QM [_save_final_stack]: Sortie précoce (data_to_save ou output_folder est None).")
             self.update_progress("ⓘ Aucun stack final à sauvegarder (données manquantes ou dossier sortie invalide).")
             return
 
-        # Ne pas sauvegarder si 0 images (sauf si arrêt utilisateur pour voir état partiel)
-        # Utilise maintenant la variable 'image_count' déterminée ci-dessus
         if image_count <= 0 and not stopped_early:
              self.final_stacked_path = None
-             print(f"DEBUG [_save_final_stack]: Sortie précoce (image_count={image_count} <= 0 et pas stopped_early).") # <-- DEBUG Modifié
+             print(f"DEBUG QM [_save_final_stack]: Sortie précoce (image_count={image_count} <= 0 et pas stopped_early).")
              self.update_progress("ⓘ Aucun stack final à sauvegarder (0 images combinées).")
              return
+        
+        print(f"DEBUG QM [_save_final_stack]: Données à sauvegarder (avant post-traitement) - Shape: {data_to_save.shape}, Type: {data_to_save.dtype}, Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
+
+        # --- MODIFICATION : Application des post-traitements couleur AVANT la sauvegarde ---
+        # S'assurer que data_to_save est bien HxWxC et float32
+        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
+            data_to_save = data_to_save.astype(np.float32) # Assurer float32
+
+            # --- 2a. Neutralisation du Fond de Ciel Automatique ---
+            if neutralize_background_func: # Si la fonction a été importée
+                self.update_progress("背景のニュートラル化を適用中...", None) # "Application de la neutralisation du fond..."
+                print("DEBUG QM [_save_final_stack]: Appel de neutralize_background_automatic...") # Debug
+                try:
+                    data_before_bn = data_to_save.copy() # Pour comparaison debug
+                    data_to_save = neutralize_background_func(data_to_save)
+                    if data_to_save is None: # Si la fonction retourne None en cas d'échec majeur
+                        print("ERREUR QM [_save_final_stack]: Neutralisation du fond a retourné None. Utilisation données originales.") # Debug
+                        data_to_save = data_before_bn # Revenir à l'état précédent
+                        self.update_progress("⚠️ Échec neutralisation du fond (retour None), étape ignorée.", None)
+                    elif np.allclose(data_before_bn, data_to_save):
+                        print("DEBUG QM [_save_final_stack]: Neutralisation du fond n'a pas modifié l'image (ou annulée en interne).") # Debug
+                        self.update_progress("ⓘ Neutralisation du fond n'a pas modifié l'image (ou annulée).", None)
+                    else:
+                        print("DEBUG QM [_save_final_stack]: Neutralisation du fond appliquée.") # Debug
+                        self.update_progress("   -> Neutralisation du fond terminée.", None)
+                        print(f"DEBUG QM [_save_final_stack]: Données après BN - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
+                except Exception as bn_err:
+                    print(f"ERREUR QM [_save_final_stack]: Erreur pendant neutralize_background_automatic: {bn_err}") # Debug
+                    self.update_progress(f"⚠️ Erreur neutralisation du fond: {bn_err}. Étape ignorée.")
+                    # data_to_save reste l'image avant cette étape
+            else:
+                print("DEBUG QM [_save_final_stack]: Fonction neutralize_background_automatic non disponible.") # Debug
+
+            # --- 2b. Correction Chromatique / Bord (`ChromaticBalancer`) ---
+            if self.apply_chroma_correction: # Basé sur le flag de la session
+                self.update_progress("色収差/エッジ補正を適用しています...", None) # "Application de la correction chromatique/bord..."
+                print("DEBUG QM [_save_final_stack]: Appel de self.chroma_balancer.normalize_stack...") # Debug
+                try:
+                    # S'assurer que chroma_balancer existe
+                    if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
+                         data_before_cb = data_to_save.copy() # Pour comparaison debug
+                         data_to_save = self.chroma_balancer.normalize_stack(data_to_save)
+                         if data_to_save is None: # Si la fonction retourne None
+                             print("ERREUR QM [_save_final_stack]: ChromaticBalancer a retourné None. Utilisation données précédentes.") # Debug
+                             data_to_save = data_before_cb
+                             self.update_progress("⚠️ Échec correction chromatique (retour None), étape ignorée.", None)
+                         elif np.allclose(data_before_cb, data_to_save):
+                            print("DEBUG QM [_save_final_stack]: ChromaticBalancer n'a pas modifié l'image.") # Debug
+                            self.update_progress("ⓘ Correction chromatique/bord n'a pas modifié l'image (ou annulée).", None)
+                         else:
+                            print("DEBUG QM [_save_final_stack]: Correction chromatique/bord appliquée.") # Debug
+                            self.update_progress("   -> Correction chromatique/bord terminée.", None)
+                            print(f"DEBUG QM [_save_final_stack]: Données après ChromaBalance - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}") # Debug
+                    else:
+                         print("AVERTISSEMENT QM [_save_final_stack]: Instance ChromaticBalancer non trouvée pour correction finale.") # Debug
+                         self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
+                except Exception as chroma_final_err:
+                     print(f"ERREUR QM [_save_final_stack]: Erreur pendant ChromaticBalancer: {chroma_final_err}") # Debug
+                     self.update_progress(f"⚠️ Erreur correction chromatique finale: {chroma_final_err}. Étape ignorée.")
+                     # data_to_save reste l'image avant cette étape
+            else:
+                print("DEBUG QM [_save_final_stack]: Correction chromatique désactivée pour cette session.") # Debug
+        # --- FIN MODIFICATION : Application des post-traitements ---
+
 
         # --- 3. Construire le Nom de Fichier ---
         base_name = "stack_final"
-        # Ajouter suffixe pondération seulement si PAS Drizzle/Mosaïque ET pondération active
         weight_suffix = "_wght" if self.use_quality_weighting and not is_drizzle_mosaic_save else ""
-        final_suffix = f"{weight_suffix}{output_filename_suffix}" # Ajoute _stopped etc.
-        # L'assignation à self.final_stacked_path est faite AVANT le try
+        # Assurer que output_filename_suffix est un string (pourrait être None ou autre si pas géré avant)
+        current_op_suffix = str(output_filename_suffix) if output_filename_suffix else ""
+        final_suffix = f"{weight_suffix}{current_op_suffix}"
+        
         self.final_stacked_path = os.path.join(
             self.output_folder,
             f"{base_name}_{stack_type_for_filename}{final_suffix}.fit"
         )
         preview_path = os.path.splitext(self.final_stacked_path)[0] + ".png"
-        print(f"DEBUG [_save_final_stack]: Chemin final défini: {self.final_stacked_path}") # <-- DEBUG
+        print(f"DEBUG QM [_save_final_stack]: Chemin FITS final: {self.final_stacked_path}") # Debug
+        print(f"DEBUG QM [_save_final_stack]: Chemin PNG preview: {preview_path}") # Debug
 
         # --- 4. Sauvegarde Fichier FITS et PNG ---
         try:
-            # Préparer le header final (copie du header de base)
             final_header = header_base.copy() if header_base else fits.Header()
-
-            # --- Ajouter/Mettre à jour les Stats Finales dans le Header ---
-            aligned_cnt = self.aligned_files_count
-            fail_align = self.failed_align_count
-            fail_stack = self.failed_stack_count
-            skipped = self.skipped_files_count
-            tot_exp = self.total_exposure_seconds
-
-            final_header['NIMAGES'] = (image_count, 'Images combined in final stack') # Utilise image_count
-            final_header['TOTEXP'] = (round(tot_exp, 2), '[s] Approx total exposure time')
-            final_header['ALIGNED'] = (aligned_cnt, 'Successfully aligned images')
-            final_header['FAILALIGN'] = (fail_align, 'Failed alignments')
-            final_header['FAILSTACK'] = (fail_stack, 'Files skipped due to stack/combine errors')
-            final_header['SKIPPED'] = (skipped, 'Other skipped/error files')
-
-            # Assurer STACKTYP/DRZSCALE/KAPPA sont corrects pour le type de stack
-            if not is_drizzle_mosaic_save: # Si Classique
+            # --- Mettre à jour les infos dans le header (identique à avant) ---
+            final_header['NIMAGES'] = (image_count, 'Images combined in final stack')
+            final_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time')
+            final_header['ALIGNED'] = (self.aligned_files_count, 'Successfully aligned images')
+            final_header['FAILALIGN'] = (self.failed_align_count, 'Failed alignments')
+            final_header['FAILSTACK'] = (self.failed_stack_count, 'Files skipped due to stack/combine errors')
+            final_header['SKIPPED'] = (self.skipped_files_count, 'Other skipped/error files')
+            if not is_drizzle_mosaic_save:
                 final_header['STACKTYP'] = (self.stacking_mode, 'Stacking method')
                 if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]: final_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
-                for k in ['DRZSCALE', 'DRZKERNEL', 'DRZPIXFR']: # Supprimer clés Drizzle
+                for k in ['DRZSCALE', 'DRZKERNEL', 'DRZPIXFR', 'DRZMODE']: # DRZMODE ajouté
                     if k in final_header: del final_header[k]
-            # else: Les infos Drizzle/Mosaic devraient déjà être dans header_base
+            else: # Assurer que les infos Drizzle/Mosaic sont là
+                if 'STACKTYP' not in final_header: final_header['STACKTYP'] = (stack_type_for_filename, 'Stacking/Processing method')
+                if 'DRZSCALE' not in final_header: final_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle Scale Factor')
+                if 'DRZKERNEL' not in final_header: final_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle Kernel')
+                if 'DRZPIXFR' not in final_header: final_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle Pixfrac')
+                if 'DRZMODE' not in final_header and self.drizzle_mode : final_header['DRZMODE'] = (self.drizzle_mode, 'Drizzle Mode (Final/Incremental)')
 
-            # Assurer infos pondération
             if 'WGHT_ON' not in final_header: final_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
             if self.use_quality_weighting and 'WGHT_MET' not in final_header:
                  w_metrics = [];
                  if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
                  if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
                  final_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-
-            # Nettoyer l'historique
+            # Nettoyage historique
             try:
                 if 'HISTORY' in final_header:
-                    history_entries = list(final_header['HISTORY'])
-                    filtered_history = [h for h in history_entries if 'Intermediate save' not in str(h) and 'Cumulative Stack Initialized' not in str(h) and 'Batch' not in str(h)]
+                    history_entries = list(final_header['HISTORY']);
+                    filtered_history = [h for h in history_entries if not isinstance(h, str) or ('Intermediate save' not in h and 'Cumulative Stack Initialized' not in h and 'Batch' not in h)]
                     while 'HISTORY' in final_header: del final_header['HISTORY']
                     for entry in filtered_history: final_header.add_history(entry)
-            except Exception: pass # Ignorer erreurs nettoyage historique
-
-            # Ajouter l'entrée finale d'historique
+            except Exception: pass
             history_msg = f'Final Stack Saved by SeestarStacker (Mode: {stack_type_for_filename})'
             if stopped_early: history_msg += ' - Stopped Early'
             final_header.add_history(history_msg)
             # --- Fin Préparation Header ---
 
-            # Sauvegarder le fichier FITS (utilise data_to_save)
-            print(f"DEBUG [_save_final_stack]: Header préparé. Tentative save_fits_image pour {self.final_stacked_path}...") # <-- DEBUG
+            print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS vers {self.final_stacked_path}...") # Debug
             save_fits_image(data_to_save, self.final_stacked_path, final_header, overwrite=True)
-            print(f"DEBUG [_save_final_stack]: save_fits_image a priori réussi.") # <-- DEBUG
+            print("DEBUG QM [_save_final_stack]: Sauvegarde FITS terminée.") # Debug
 
-            # Sauvegarder la prévisualisation PNG (utilise data_to_save)
-            print(f"DEBUG [_save_final_stack]: Tentative save_preview_image pour {preview_path}...") # <-- DEBUG
-            save_preview_image(data_to_save, preview_path, apply_stretch=True)
-            print(f"DEBUG [_save_final_stack]: save_preview_image a priori réussi.") # <-- DEBUG
+            print(f"DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG vers {preview_path}...") # Debug
+            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True) # enhanced_stretch pour le PNG final
+            print("DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG terminée.") # Debug
 
-            # Confirmer la sauvegarde réussie (utilise image_count)
             self.update_progress(f"✅ Stack final sauvegardé ({image_count} images)")
 
-        # --- Gestion Erreur Sauvegarde ---
         except Exception as e:
-            print(f"DEBUG [_save_final_stack]: ERREUR pendant la sauvegarde! Erreur: {e}") # <-- DEBUG Modifié
+            print(f"ERREUR QM [_save_final_stack]: Échec sauvegarde FITS/PNG: {e}") # Debug
             self.update_progress(f"⚠️ Erreur sauvegarde stack final: {e}")
             traceback.print_exc(limit=2)
-            # TRÈS IMPORTANT : Mettre le chemin final à None si la sauvegarde échoue
             self.final_stacked_path = None
-            print(f"DEBUG [_save_final_stack]: self.final_stacked_path mis à None à cause de l'erreur.") # <-- DEBUG Ajouté
+            print("DEBUG QM [_save_final_stack]: final_stacked_path mis à None en raison d'erreur sauvegarde.") # Debug
+        
+        print("DEBUG QM [_save_final_stack]: Fin méthode.") # Debug
+
+
 
 
 
@@ -2547,7 +2526,7 @@ class SeestarQueuedStacker:
         elif len(batch_filepaths) > 0:
             self.update_progress(f"   -> Aucun fichier temp du lot n'a pu être nettoyé (déjà supprimés ou erreur).")
 
-# --- FIN DE LA NOUVELLE MÉTHODE ---
+
 
 
 
@@ -2566,6 +2545,12 @@ class SeestarQueuedStacker:
                     except Exception as del_e: self.update_progress(f"⚠️ Erreur suppression non aligné {filename}: {del_e}")
             if deleted_count > 0: self.update_progress(f"🧹 {deleted_count} fichier(s) non aligné(s) supprimé(s).")
         except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage non alignés: {e}")
+
+
+
+################################################################################################################################################
+
+
 
     def cleanup_temp_reference(self):
         try:
@@ -2595,6 +2580,9 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"⚠️ Erreur nettoyage référence temp: {e}")
 
+
+################################################################################################################################################
+
     def add_folder(self, folder_path):
         if not self.processing_active: self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif."); return False
         abs_path = os.path.abspath(folder_path)
@@ -2611,6 +2599,13 @@ class SeestarQueuedStacker:
         self.update_progress(f"✅ Dossier ajouté à la file d'attente : {os.path.basename(folder_path)}")
         self.update_progress(f"folder_count_update:{folder_count}")
         return True
+
+
+
+################################################################################################################################################
+
+
+
 
     def _add_files_to_queue(self, folder_path):
         count_added = 0
@@ -2649,7 +2644,7 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
-    # Signature complète incluant TOUS les paramètres passés depuis le GUI
+  
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
                          initial_additional_folders=None,
                          # --- Arguments Stacking Classique ---
@@ -2939,18 +2934,28 @@ class SeestarQueuedStacker:
                 self.update_progress(f"⚠️ Erreur suppression dossier temp Drizzle ({os.path.basename(self.drizzle_temp_dir)}): {e}")
         # else: # Log optionnel si le dossier n'existait pas
             # self.update_progress("ⓘ Dossier temp Drizzle non trouvé pour nettoyage (normal si Drizzle inactif ou déjà nettoyé).")     
+
+
+################################################################################################################################################
+
+
     def stop(self):
         if not self.processing_active: return
         self.update_progress("⛔ Arrêt demandé..."); self.stop_processing = True; self.aligner.stop_processing = True
+
+
+################################################################################################################################################
+
 
     def is_running(self):
         return getattr(self, 'processing_active', False) and \
             getattr(self, 'processing_thread', None) is not None and \
             getattr(self, 'processing_thread', None) is not None and \
             self.processing_thread.is_alive()
-######################################################################################################################################################
 
-# --- AJOUTER CETTE MÉTHODE DANS LA CLASSE SeestarQueuedStacker ---
+
+
+######################################################################################################################################################
 
     def _process_and_save_drizzle_batch(self, batch_data_list, output_wcs, output_shape_2d_hw, batch_num):
         """
