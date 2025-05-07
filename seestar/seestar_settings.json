@@ -1,6 +1,6 @@
 {
-    "version": "1.4.0",
-    "input_folder": "F:\\astro photos\\seestar s 50\\M 94",
+    "version": "1.5.0",
+    "input_folder": "F:\\astro photos\\seestar s 50\\M94",
     "output_folder": "F:\\astro photos\\seestar s 50\\M94\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
@@ -17,7 +17,7 @@
     "snr_exponent": 1.0,
     "stars_exponent": 0.5,
     "min_weight": 0.1,
-    "use_drizzle": false,
+    "use_drizzle": true,
     "drizzle_scale": 2,
     "drizzle_wht_threshold": 0.7,
     "drizzle_mode": "Final",
@@ -29,13 +29,17 @@
         "pixfrac": 1.0
     },
     "apply_chroma_correction": true,
+    "apply_final_scnr": true,
+    "final_scnr_target_channel": "green",
+    "final_scnr_amount": 1.0,
+    "final_scnr_preserve_luminosity": true,
     "preview_stretch_method": "Asinh",
-    "preview_black_point": 0.009,
-    "preview_white_point": 0.0124,
-    "preview_gamma": 0.92,
-    "preview_r_gain": 1.261,
+    "preview_black_point": 0.0343,
+    "preview_white_point": 0.0435,
+    "preview_gamma": 1.0,
+    "preview_r_gain": 1.188,
     "preview_g_gain": 1.0,
-    "preview_b_gain": 1.34,
+    "preview_b_gain": 1.269,
     "language": "en",
-    "window_geometry": "1707x937+182+171"
+    "window_geometry": "1707x937+104+104"
 }

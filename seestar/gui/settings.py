@@ -67,6 +67,12 @@ class SettingsManager:
         # Ajouter d'autres clés spécifiques mosaïque ici plus tard
         }
         
+        ### Paramètres SCNR Final ###
+        self.apply_final_scnr = False  # SCNR désactivé par défaut
+        self.final_scnr_target_channel = 'green' # Cible par défaut
+        self.final_scnr_amount = 0.8   # Intensité par défaut (0.0 à 1.0)
+        self.final_scnr_preserve_luminosity = True # Préserver luminance par défaut
+        
         # Preview Settings
         self.preview_stretch_method = "Asinh" # Bon défaut pour l'astro
         self.preview_black_point = 0.01
@@ -139,6 +145,14 @@ class SettingsManager:
             self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', False) # Lire le flag
             self.mosaic_settings = getattr(gui_instance, 'mosaic_settings', {}).copy() # Lire le dict (faire une copie)
             # ---  ---
+
+            # Lecture Paramètres SCNR Final ###
+            self.apply_final_scnr = getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar(value=self.apply_final_scnr)).get()
+            # self.final_scnr_target_channel reste 'green' pour l'instant (pas d'UI pour changer)
+            self.final_scnr_amount = getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar(value=self.final_scnr_amount)).get()
+            self.final_scnr_preserve_luminosity = getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar(value=self.final_scnr_preserve_luminosity)).get()
+            print(f"DEBUG (Settings update_from_ui): SCNR Final lu -> Apply: {self.apply_final_scnr}, Amount: {self.final_scnr_amount:.2f}, PreserveLum: {self.final_scnr_preserve_luminosity}")
+            
 
 
             # --- Preview Settings ---
@@ -229,7 +243,16 @@ class SettingsManager:
             if hasattr(gui_instance, '_update_mosaic_status_indicator'): gui_instance._update_mosaic_status_indicator()
             # --- ---
 
-
+            # Application Paramètres SCNR Final à l'UI ###
+            getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar()).set(self.apply_final_scnr)
+            # Pas d'UI pour final_scnr_target_channel pour l'instant
+            getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar()).set(self.final_scnr_amount)
+            getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar()).set(self.final_scnr_preserve_luminosity)
+            # Mettre à jour l'état des widgets SCNR si la méthode existe dans le GUI
+            if hasattr(gui_instance, '_update_final_scnr_options_state'):
+                gui_instance._update_final_scnr_options_state()
+            print(f"DEBUG (Settings apply_to_ui): SCNR Final appliqué à UI -> Apply: {self.apply_final_scnr}, Amount: {self.final_scnr_amount:.2f}, PreserveLum: {self.final_scnr_preserve_luminosity}")
+            
 
             # --- Preview Settings ---
             # ... (inchangé) ...
@@ -316,6 +339,27 @@ class SettingsManager:
                  messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
             # --->>>  <<<---
 
+            ### NOUVEAU : Validation Paramètres SCNR Final ###
+             self.apply_final_scnr = bool(self.apply_final_scnr)
+             self.final_scnr_target_channel = str(self.final_scnr_target_channel).lower()
+             if self.final_scnr_target_channel not in ['green', 'blue']: # Pour l'instant, seulement 'green' ou 'blue'
+                 original_target = self.final_scnr_target_channel
+                 self.final_scnr_target_channel = defaults['final_scnr_target_channel']
+                 messages.append(f"Cible SCNR Final ('{original_target}') invalide, réinitialisée à '{self.final_scnr_target_channel}'.")
+
+             try:
+                 self.final_scnr_amount = float(self.final_scnr_amount)
+                 if not (0.0 <= self.final_scnr_amount <= 1.0):
+                     original_amount = self.final_scnr_amount
+                     self.final_scnr_amount = np.clip(self.final_scnr_amount, 0.0, 1.0)
+                     messages.append(f"Intensité SCNR Final ({original_amount:.2f}) hors limites [0.0, 1.0], ajustée à {self.final_scnr_amount:.2f}.")
+             except (ValueError, TypeError):
+                 original_amount = self.final_scnr_amount
+                 self.final_scnr_amount = defaults['final_scnr_amount']
+                 messages.append(f"Intensité SCNR Final ('{original_amount}') invalide, réinitialisée à {self.final_scnr_amount:.2f}.")
+            
+             self.final_scnr_preserve_luminosity = bool(self.final_scnr_preserve_luminosity)
+            
             # Drizzle Kernel and Pixfrac Validation
              valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
              if not isinstance(self.drizzle_kernel, str) or self.drizzle_kernel.lower() not in valid_kernels:
@@ -373,7 +417,7 @@ class SettingsManager:
         """ Sauvegarde les paramètres actuels dans le fichier JSON. """
         # S'assurer que les types sont corrects pour JSON
         settings_data = {
-            'version': "1.4.0", # Incrémenter la version si la structure change significativement
+            'version': "1.5.0", # Incrémenter la version si la structure change significativement
             # Processing
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
@@ -408,6 +452,14 @@ class SettingsManager:
             # --- CORRECTION CHROMA ---
             'apply_chroma_correction': bool(self.apply_chroma_correction), # Sauvegarder comme booléen
             # ---  ---
+            
+            ### Sauvegarde Paramètres SCNR Final ###
+            'apply_final_scnr': bool(self.apply_final_scnr),
+            'final_scnr_target_channel': str(self.final_scnr_target_channel),
+            'final_scnr_amount': float(self.final_scnr_amount),
+            'final_scnr_preserve_luminosity': bool(self.final_scnr_preserve_luminosity),
+            
+
             # Preview
             'preview_stretch_method': str(self.preview_stretch_method),
             'preview_black_point': float(self.preview_black_point),
@@ -514,6 +566,15 @@ class SettingsManager:
             print(f"DEBUG (Settings load_settings): Paramètres chargés. Validation...") # DEBUG
 
             print(f"Settings loaded from {self.settings_file}")
+
+            ###  Chargement Paramètres SCNR Final ###
+            self.apply_final_scnr = bool(settings_data.get('apply_final_scnr', defaults['apply_final_scnr']))
+            self.final_scnr_target_channel = str(settings_data.get('final_scnr_target_channel', defaults['final_scnr_target_channel']))
+            self.final_scnr_amount = float(settings_data.get('final_scnr_amount', defaults['final_scnr_amount']))
+            self.final_scnr_preserve_luminosity = bool(settings_data.get('final_scnr_preserve_luminosity', defaults['final_scnr_preserve_luminosity']))
+            print(f"DEBUG (Settings load_settings): SCNR Final chargé -> Apply: {self.apply_final_scnr}, Target: {self.final_scnr_target_channel}, Amount: {self.final_scnr_amount:.2f}, PreserveLum: {self.final_scnr_preserve_luminosity}")
+            
+
             # Validate settings after loading
             validation_messages = self.validate_settings()
             if validation_messages:

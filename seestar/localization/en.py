@@ -53,6 +53,13 @@ EN_TRANSLATIONS = {
     'stars_exponent_label': "Stars Exp.:",
     'min_weight_label': "Min Weight:",
 
+
+    # SCNR Translations ###
+    'apply_final_scnr_label': "Apply Final SCNR (Green)",
+    'final_scnr_amount_label': "SCNR Amount:",
+    'final_scnr_preserve_lum_label': "Preserve Luminosity (SCNR)",
+    
+
     # --- Preview Tab ---
     'white_balance': "White Balance (Preview)",
     'wb_r': "R Gain:",

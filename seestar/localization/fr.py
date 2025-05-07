@@ -51,7 +51,12 @@ FR_TRANSLATIONS = {
     'snr_exponent_label': "Exp. SNR:",
     'stars_exponent_label': "Exp. Étoiles:",
     'min_weight_label': "Poids Min:",
-
+    
+    ### Traductions SCNR Final ###
+    'apply_final_scnr_label': "Appliquer SCNR Final (Vert)",
+    'final_scnr_amount_label': "Intensité SCNR :",
+    'final_scnr_preserve_lum_label': "Préserver la Luminance (SCNR)",
+    
     # --- Onglet Aperçu ---
     'white_balance': "Balance des Blancs (Aperçu)",
     'wb_r': "Gain R :",
