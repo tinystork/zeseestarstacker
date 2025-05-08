@@ -164,14 +164,66 @@ def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
             ref_scale_matrix = ref_wcs.pixel_scale_matrix; avg_input_scale = np.mean(np.abs(np.diag(ref_scale_matrix))); output_pixel_scale = avg_input_scale / drizzle_scale; output_wcs.wcs.cd = np.array([[-output_pixel_scale, 0.0], [0.0, output_pixel_scale]]); print(f"      - Échelle Sortie: {output_pixel_scale*3600:.3f} arcsec/pix")
         except Exception as scale_err: raise ValueError("Échec calcul échelle WCS sortie.") from scale_err
 
+
         # --- Calcul Shape Sortie ---
-        print("   -> Calcul shape sortie..."); all_output_pixels_x=[]; all_output_pixels_y=[]
-        for footprint_sky in all_footprints_sky:
-            try: pixels_out_x, pixels_out_y = output_wcs.world_to_pixel(footprint_sky); all_output_pixels_x.extend(pixels_out_x); all_output_pixels_y.extend(pixels_out_y)
-            except Exception as proj_err: print(f"      - WARNING: Échec projection coins: {proj_err}.")
-        if not all_output_pixels_x: print("ERREUR: Aucun coin projeté."); return None, None
-        x_min_out=np.min(all_output_pixels_x); x_max_out=np.max(all_output_pixels_x); y_min_out=np.min(all_output_pixels_y); y_max_out=np.max(all_output_pixels_y)
-        out_width=int(np.ceil(x_max_out-x_min_out+1)); out_height=int(np.ceil(y_max_out-y_min_out+1)); out_width=max(10, out_width); out_height=max(10, out_height); output_shape_hw=(out_height, out_width); print(f"      - Dimensions Finales (W, H): ({out_width}, {out_height})")
+        print("   -> Calcul shape sortie...")
+        all_output_pixels_x_valid = [] # Nouvelle liste pour les X valides
+        all_output_pixels_y_valid = [] # Nouvelle liste pour les Y valides
+        projection_errors = 0
+
+        for i, footprint_sky in enumerate(all_footprints_sky):
+            try:
+                # Tenter la projection
+                pixels_out_x, pixels_out_y = output_wcs.world_to_pixel(footprint_sky)
+                
+                # --- AJOUT : Vérification et Filtrage NaN/Inf ---
+                # Créer des masques booléens pour les valeurs finies
+                valid_x_mask = np.isfinite(pixels_out_x)
+                valid_y_mask = np.isfinite(pixels_out_y)
+                # Conserver seulement les coordonnées où X ET Y sont finis
+                valid_mask_combined = valid_x_mask & valid_y_mask
+                
+                # Ajouter les coordonnées valides aux listes
+                all_output_pixels_x_valid.extend(pixels_out_x[valid_mask_combined])
+                all_output_pixels_y_valid.extend(pixels_out_y[valid_mask_combined])
+                
+                # Compter si des points ont été invalidés pour ce footprint
+                if not np.all(valid_mask_combined):
+                    num_invalid = len(pixels_out_x) - np.sum(valid_mask_combined)
+                    print(f"      - WARNING: Footprint {i+1}: {num_invalid} coin(s) projeté(s) hors limites (NaN/Inf).")
+                    projection_errors += 1
+                # --- FIN AJOUT ---
+
+            except Exception as proj_err:
+                 print(f"      - WARNING: Échec projection coins footprint {i+1}: {proj_err}.")
+                 projection_errors += 1 # Compter aussi les erreurs de projection générales
+
+        # Vérifier s'il reste des points valides après filtrage
+        if not all_output_pixels_x_valid or not all_output_pixels_y_valid: # Vérifier si les listes valides sont vides
+            print("ERREUR: Aucun coin valide projeté après filtrage NaN/Inf.")
+            return None, None
+
+        if projection_errors > 0:
+             print(f"   -> INFO: Erreurs de projection ou points hors limites rencontrés pour {projection_errors} footprints.")
+
+        # Calculer min/max sur les listes VALIDES
+        x_min_out = np.min(all_output_pixels_x_valid)
+        x_max_out = np.max(all_output_pixels_x_valid)
+        y_min_out = np.min(all_output_pixels_y_valid)
+        y_max_out = np.max(all_output_pixels_y_valid)
+
+        # S'assurer que min/max sont finis après np.min/np.max (sécurité)
+        if not all(np.isfinite([x_min_out, x_max_out, y_min_out, y_max_out])):
+            print("ERREUR: Les limites min/max calculées ne sont pas finies (problème interne ?).")
+            return None, None
+
+        # Le reste du calcul de out_width/out_height devrait maintenant fonctionner
+        out_width=int(np.ceil(x_max_out-x_min_out+1)); out_height=int(np.ceil(y_max_out-y_min_out+1))
+        out_width=max(10, out_width); out_height=max(10, out_height);
+        output_shape_hw=(out_height, out_width);
+        print(f"      - Dimensions Finales (W, H): ({out_width}, {out_height})")
+
+
 
         # --- Finalisation WCS Sortie ---
         try: center_x_out, center_y_out = output_wcs.world_to_pixel(SkyCoord(ra=central_ra_deg*u.deg, dec=central_dec_deg*u.deg)); output_wcs.wcs.crpix = [center_x_out-x_min_out+1.0, center_y_out-y_min_out+1.0]
