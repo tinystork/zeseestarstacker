@@ -19,6 +19,7 @@ import time
 import gc
 import argparse # Pour gérer les arguments de ligne de commande
 from PIL import Image, ImageTk
+from ..gui.ui_utils import ToolTip 
 
 
 # === Imports Locaux (Logique Métier et Traductions) ===

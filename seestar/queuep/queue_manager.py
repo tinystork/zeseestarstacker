@@ -19,6 +19,7 @@ import warnings
 print("DEBUG QM: Imports standard OK.")
 
 # --- Third-Party Library Imports ---
+from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
 import astroalign as aa
 import cv2
 import numpy as np
@@ -28,6 +29,7 @@ from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 from astropy.wcs import WCS, FITSFixedWarning
 from ccdproc import CCDData, combine as ccdproc_combine
+from ..enhancement.stack_enhancement import apply_edge_crop
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -105,179 +107,203 @@ class SeestarQueuedStacker:
     """
     print("DEBUG QM: Lecture de la définition de la classe SeestarQueuedStacker...")
 
-    def __init__(self, *args, **kwargs):
-        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (Réorganisé) ====")
+    def __init__(self):
+        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (SUM/W) ====")
         
-        # --- 1. Attributs Critiques et Simples EN PREMIER ---
-        print("  -> Initialisation attributs simples...")
-        # Flags & Control
-        self.processing_active = False
-        self.stop_processing = False
-        self.processing_error = None
-        self.is_mosaic_run = False
-        self.drizzle_active_session = False
-        self.perform_cleanup = True
-        self.use_quality_weighting = False
-        self.weight_by_snr = True
-        self.weight_by_stars = True
-        self.correct_hot_pixels = True
-        self.apply_chroma_correction = True
+        # --- 1. Attributs Critiques et Simples ---
+        print("  -> Initialisation attributs simples et flags...")
+        self.processing_active = False; self.stop_processing = False; self.processing_error = None
+        self.is_mosaic_run = False; self.drizzle_active_session = False # Sera défini dans start_processing
+        self.perform_cleanup = True; self.use_quality_weighting = True # Désactivé pour SUM/W initial
+        self.correct_hot_pixels = True; self.apply_chroma_correction = True
+        self.apply_final_scnr = False # Nouveau flag SCNR
         # Callbacks
-        self.progress_callback = None
-        self.preview_callback = None
+        self.progress_callback = None; self.preview_callback = None
         # Queue & Threading
-        self.queue = Queue()
-        self.folders_lock = threading.Lock()  # <<< Défini tôt
-        self.processing_thread = None
+        self.queue = Queue(); self.folders_lock = threading.Lock(); self.processing_thread = None
         # File & Folder Management
-        self.processed_files = set()
-        self.additional_folders = []
-        self.current_folder = None
-        self.output_folder = None
-        self.unaligned_folder = None
-        self.drizzle_temp_dir = None
-        self.drizzle_batch_output_dir = None
-        self.final_stacked_path = None
+        self.processed_files = set(); self.additional_folders = []; self.current_folder = None
+        self.output_folder = None; self.unaligned_folder = None; self.drizzle_temp_dir = None
+        self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         # Astrometry & WCS Refs
-        self.api_key = None
-        self.reference_wcs_object = None  # À utiliser pour l'astrométrie de la mosaïque
-        self.reference_header_for_wcs = None
-        self.reference_pixel_scale_arcsec = None
-        self.drizzle_output_wcs = None
-        self.drizzle_output_shape_hw = None
-        # Batch & Cumulative Data
-        self.current_batch_data = []
-        self.current_stack_data = None
-        self.current_stack_header = None
-        self.images_in_cumulative_stack = 0
-        self.total_exposure_seconds = 0.0
-        self.cumulative_drizzle_data = None
-        self.cumulative_drizzle_wht = None
-        self.intermediate_drizzle_batch_files = []
-        # Processing Parameters
-        self.stacking_mode = "kappa-sigma"
-        self.kappa = 2.5
-        self.batch_size = 10
-        self.hot_pixel_threshold = 3.0
-        self.neighborhood_size = 5
-        self.bayer_pattern = "GRBG"
-        self.drizzle_mode = "Final"
-        self.drizzle_scale = 2.0
-        self.drizzle_wht_threshold = 0.7
-        self.drizzle_kernel = "square"
-        self.drizzle_pixfrac = 1.0
-        self.snr_exponent = 1.0
-        self.stars_exponent = 0.5
-        self.min_weight = 0.1
-        # Statistics
-        self.files_in_queue = 0
-        self.processed_files_count = 0
-        self.aligned_files_count = 0
-        self.stacked_batches_count = 0
-        self.total_batches_estimated = 0
-        self.failed_align_count = 0
-        self.failed_stack_count = 0
-        self.skipped_files_count = 0
-        print("  -> Attributs simples initialisés.")
+        self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
+        self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
+        
+        ### NOUVEAU : Attributs pour SUM / W (Memmap) ###
+        self.sum_memmap_path = None # Sera défini dans initialize
+        self.wht_memmap_path = None # Sera défini dans initialize
+        self.cumulative_sum_memmap = None  # Référence à l'objet memmap SUM
+        self.cumulative_wht_memmap = None  # Référence à l'objet memmap WHT
+        self.memmap_shape = None           # Shape des tableaux (H, W, C ou H, W)
+        self.memmap_dtype_sum = np.float32 # Type pour la somme (float32 devrait suffire)
+        self.memmap_dtype_wht = np.uint16  # Type pour les poids (uint16 = max 65535 images)
+        print("  -> Attributs SUM/W (memmap) initialisés à None.")
+        ### FIN NOUVEAU ###
 
-        # --- 2. Instanciations de Classes (dans des try/except) ---
+        # --- SUPPRIMÉ : Anciens accumulateurs en mémoire ---
+        # self.current_batch_data = [] # Sera toujours utilisé pour un lot TEMPORAIRE
+        # self.current_stack_data = None # Remplacé par cumulative_sum_memmap / wht_memmap
+        # self.cumulative_drizzle_data = None # Remplacé
+        # self.cumulative_drizzle_wht = None # Remplacé
+        # --- FIN SUPPRIMÉ ---
+        
+        self.current_batch_data = [] # Gardé pour le traitement interne d'un lot
+        self.current_stack_header = None # Gardé pour les métadonnées cumulatives
+        self.images_in_cumulative_stack = 0 # Gardé pour stats / UI
+        self.total_exposure_seconds = 0.0 # Gardé pour stats / UI
+        self.intermediate_drizzle_batch_files = []
+
+        # Processing Parameters (valeurs par défaut, seront écrasées par start_processing)
+        self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
+        self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
+        self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
+        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
+        self.snr_exponent = 1.0; self.stars_exponent = 0.5; self.min_weight = 0.1
+        self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
+        
+        # Statistics
+        self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
+        self.stacked_batches_count = 0; self.total_batches_estimated = 0
+        self.failed_align_count = 0; self.failed_stack_count = 0; self.skipped_files_count = 0
+        print("  -> Attributs simples et paramètres par défaut initialisés.")
+
+        # --- 2. Instanciations de Classes ---
         try:
-            print("  -> Tentative instanciation ChromaticBalancer...")
+            print("  -> Instanciation ChromaticBalancer...")
             self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15)
             print("     ✓ ChromaticBalancer OK.")
-        except Exception as e_cb:
-            print(f"  -> ERREUR ChromaticBalancer: {e_cb}")
-            self.chroma_balancer = None; raise
-
+        except Exception as e_cb: print(f"  -> ERREUR ChromaticBalancer: {e_cb}"); self.chroma_balancer = None; raise
         try:
-            print("  -> Tentative instanciation SeestarAligner...")
+            print("  -> Instanciation SeestarAligner...")
             self.aligner = SeestarAligner()
             print("     ✓ SeestarAligner OK.")
-        except Exception as e_align:
-            print(f"  -> ERREUR SeestarAligner: {e_align}")
-            self.aligner = None; raise
+        except Exception as e_align: print(f"  -> ERREUR SeestarAligner: {e_align}"); self.aligner = None; raise
 
-        print("==== FIN INITIALISATION SeestarQueuedStacker (Réorganisé) ====\n")
+        print("==== FIN INITIALISATION SeestarQueuedStacker (SUM/W) ====\n")
+
 
 
 
 ######################################################################################################################################################
 
 
-    def initialize(self, output_dir):
-        """Prépare les dossiers et réinitialise l'état complet avant un nouveau traitement."""
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
+    def initialize(self, output_dir, reference_image_shape):
+        """
+        Prépare les dossiers, réinitialise l'état, et CRÉE/INITIALISE
+        les fichiers memmap pour SUM et WHT.
+
+        Args:
+            output_dir (str): Chemin du dossier de sortie principal.
+            reference_image_shape (tuple): Shape (H, W, C=3) de l'image de référence
+                                           (et donc des accumulateurs SUM/WHT).
+        """
+        print(f"DEBUG QM [initialize SUM/W]: Début avec output_dir='{output_dir}', shape={reference_image_shape}")
+
+        # --- Nettoyage et création dossiers (comme avant) ---
         try:
             self.output_folder = os.path.abspath(output_dir)
             self.unaligned_folder = os.path.join(self.output_folder, "unaligned_files")
-            self.drizzle_temp_dir = os.path.join(self.output_folder, "drizzle_temp_inputs") # Pour aligned_input_xxx.fits
-            # --- NOUVEAU : Définir le chemin pour les sorties de batch Drizzle ---
+            self.drizzle_temp_dir = os.path.join(self.output_folder, "drizzle_temp_inputs")
             self.drizzle_batch_output_dir = os.path.join(self.output_folder, "drizzle_batch_outputs")
-            # --- FIN NOUVEAU ---
+            
+            ### NOUVEAU : Définir chemins memmap ###
+            # Placer les fichiers .npy dans un sous-dossier pour la clarté
+            memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+            self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+            self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+            print(f"DEBUG QM [initialize SUM/W]: Chemins Memmap définis -> SUM='{self.sum_memmap_path}', WHT='{self.wht_memmap_path}'")
+            ### FIN NOUVEAU ###
 
             os.makedirs(self.output_folder, exist_ok=True)
             os.makedirs(self.unaligned_folder, exist_ok=True)
-
-            # Gérer le dossier temporaire Drizzle (aligned_inputs)
-            if self.perform_cleanup and os.path.isdir(self.drizzle_temp_dir):
-                try: shutil.rmtree(self.drizzle_temp_dir); self.update_progress(f"🧹 Ancien dossier temp Drizzle nettoyé.")
-                except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage ancien dossier temp Drizzle: {e}")
             os.makedirs(self.drizzle_temp_dir, exist_ok=True)
+            os.makedirs(self.drizzle_batch_output_dir, exist_ok=True)
+            os.makedirs(memmap_dir, exist_ok=True) # Créer le dossier memmap
 
-            # --- NOUVEAU : Gérer le dossier des sorties de batch ---
-            if self.perform_cleanup and os.path.isdir(self.drizzle_batch_output_dir):
-                try: shutil.rmtree(self.drizzle_batch_output_dir); self.update_progress(f"🧹 Ancien dossier sorties batch Drizzle nettoyé.")
-                except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage ancien dossier sorties batch Drizzle: {e}")
-            os.makedirs(self.drizzle_batch_output_dir, exist_ok=True) # Créer s'il n'existe pas
-            # --- FIN NOUVEAU ---
+            # Nettoyage ancien (si activé)
+            # Pas besoin de nettoyer les fichiers memmap ici, on va les écraser avec mode 'w+'
+            if self.perform_cleanup:
+                if os.path.isdir(self.drizzle_temp_dir):
+                    try: shutil.rmtree(self.drizzle_temp_dir); os.makedirs(self.drizzle_temp_dir) # Recréer après suppression
+                    except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage ancien dossier temp Drizzle: {e}")
+                if os.path.isdir(self.drizzle_batch_output_dir):
+                    try: shutil.rmtree(self.drizzle_batch_output_dir); os.makedirs(self.drizzle_batch_output_dir) # Recréer
+                    except Exception as e: self.update_progress(f"⚠️ Erreur nettoyage ancien dossier sorties batch Drizzle: {e}")
+                # On ne supprime pas explicitement les .npy, open_memmap('w+') va écraser
 
-            # --- CORRIGÉ : Message de log mis à jour ---
-            self.update_progress(
-                f"🗄️ Dossiers prêts: Sortie='{os.path.basename(self.output_folder)}', "
-                f"NonAlign='{os.path.basename(self.unaligned_folder)}', "
-                f"TempInput='{os.path.basename(self.drizzle_temp_dir)}', "
-                f"BatchOut='{os.path.basename(self.drizzle_batch_output_dir)}'" # Utilise le nouveau nom
-            )
-            # --- FIN CORRIGÉ ---
+            self.update_progress(f"🗄️ Dossiers prêts (y compris memmap).")
 
         except OSError as e:
             self.update_progress(f"❌ Erreur critique création dossiers: {e}", 0)
+            print(f"ERREUR QM [initialize SUM/W]: Échec création dossiers.") # Debug
             return False
 
-        # --- Réinitialisations (Ajouter les nouvelles variables ici) ---
-        self.reference_wcs_object = None
-        # self.all_aligned_temp_files = [] # Supprimé à l'étape 1
-        self.intermediate_drizzle_batch_files = [] # Nouvelle liste pour les chemins des lots intermédiaires
-        self.drizzle_output_wcs = None             # WCS de sortie Drizzle
-        self.drizzle_output_shape_hw = None        # Shape de sortie Drizzle
-        self.cumulative_drizzle_data = None
-        self.cumulative_drizzle_wht = None
-        self.drizzle_kernel = "square"
-        self.drizzle_pixfrac = 1.0
-        # ... (autres resets existants) ...
-        self.processed_files.clear()
+        # --- Validation Shape Référence ---
+        if not isinstance(reference_image_shape, tuple) or len(reference_image_shape) != 3 or reference_image_shape[2] != 3:
+            self.update_progress(f"❌ Erreur interne: Shape référence invalide pour memmap ({reference_image_shape}). Attendue (H, W, 3).")
+            print(f"ERREUR QM [initialize SUM/W]: Shape référence invalide.") # Debug
+            return False
+        self.memmap_shape = reference_image_shape # Stocker la shape (H, W, C)
+        wht_shape = reference_image_shape[:2] # Shape pour WHT (H, W)
+        print(f"DEBUG QM [initialize SUM/W]: Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape}") # Debug
+
+        # --- Création et Initialisation des Fichiers Memmap ---
+        print(f"DEBUG QM [initialize SUM/W]: Tentative création/ouverture fichiers memmap (mode 'w+')...")
+        try:
+            # Note: mode='w+' crée ou écrase le fichier.
+            # Utiliser np.float32 pour SUM, car float64 prendrait 2x plus de place
+            # et la somme de floats 0-1 ne devrait pas dépasser les limites de float32 facilement.
+            # Si des problèmes de précision apparaissent, on pourra passer à float64.
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path, mode='w+', dtype=self.memmap_dtype_sum, shape=self.memmap_shape
+            )
+            self.cumulative_sum_memmap[:] = 0.0 # Initialiser à zéro
+            print(f"DEBUG QM [initialize SUM/W]: Memmap SUM créé/ouvert et initialisé à zéro.") # Debug
+
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path, mode='w+', dtype=self.memmap_dtype_wht, shape=wht_shape # Shape H,W et uint16
+            )
+            self.cumulative_wht_memmap[:] = 0 # Initialiser à zéro
+            print(f"DEBUG QM [initialize SUM/W]: Memmap WHT créé/ouvert et initialisé à zéro.") # Debug
+
+        except (IOError, OSError, ValueError, TypeError) as e_memmap:
+            self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
+            print(f"ERREUR QM [initialize SUM/W]: Échec memmap : {e_memmap}") # Debug
+            traceback.print_exc(limit=2)
+            # Nettoyer les références si erreur
+            self.cumulative_sum_memmap = None
+            self.cumulative_wht_memmap = None
+            self.sum_memmap_path = None
+            self.wht_memmap_path = None
+            return False
+            
+        # --- Réinitialisations Autres (comme avant, mais sans les anciens accumulateurs mémoire) ---
+        print("DEBUG QM [initialize SUM/W]: Réinitialisation des autres états...") # Debug
+        self.reference_wcs_object = None; self.intermediate_drizzle_batch_files = []; self.drizzle_output_wcs = None
+        self.drizzle_output_shape_hw = None; # cumulative_drizzle_data/wht sont supprimés
+        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0; self.processed_files.clear()
         with self.folders_lock: self.additional_folders = []
-        self.current_batch_data = []
-        self.current_stack_data = None; self.current_stack_header = None; self.images_in_cumulative_stack = 0
+        self.current_batch_data = []; self.current_stack_header = None; self.images_in_cumulative_stack = 0
         self.total_exposure_seconds = 0.0; self.final_stacked_path = None; self.processing_error = None
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
         self.stacked_batches_count = 0; self.total_batches_estimated = 0
         self.failed_align_count = 0; self.failed_stack_count = 0; self.skipped_files_count = 0
-        self.drizzle_active_session = False
-        self.reference_header_for_wcs = None # Assurer reset
+        self.drizzle_active_session = False; self.reference_header_for_wcs = None
 
         # Vider la queue
         while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-            except Empty:
-                break
-            except Exception:
-                break # Sécurité
+            try: self.queue.get_nowait(); self.queue.task_done()
+            except Exception: break
 
-        # Reset aligner
-        self.aligner.stop_processing = False
+        if hasattr(self, 'aligner'): self.aligner.stop_processing = False
+        print("DEBUG QM [initialize SUM/W]: Initialisation terminée avec succès.") # Debug
         return True
+
+
 
 
 ########################################################################################################################################################
@@ -332,6 +358,140 @@ class SeestarQueuedStacker:
 
 ###########################################################################################################################################################
 
+
+
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
+    # --- NOUVELLE MÉTHODE D'APERÇU POUR SUM/W ---
+    def _update_preview_sum_w(self, downsample_factor=2):
+        """
+        Calcule l'image moyenne depuis SUM/W et appelle le callback preview GUI.
+        Peut réduire la taille de l'image envoyée pour la performance.
+
+        Args:
+            downsample_factor (int): Facteur de réduction de taille pour l'aperçu (ex: 4 pour diviser H et W par 4).
+                                     Mettre à 1 pour ne pas réduire.
+        """
+        print("DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W...") # Debug
+
+        if self.preview_callback is None:
+            print("DEBUG QM [_update_preview_sum_w]: Pas de callback preview défini.") # Debug
+            return
+        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None:
+            print("DEBUG QM [_update_preview_sum_w]: Accumulateurs SUM/WHT non disponibles.") # Debug
+            # Optionnel : Envoyer une image noire ou rien ? Pour l'instant on ne fait rien.
+            # self.preview_callback(None, None, "Error: Accumulators missing", 0, 0, 0, 0)
+            return
+
+        try:
+            # --- Lecture (partielle ou complète) depuis Memmap ---
+            # Pour la performance, surtout avec de grandes images, on pourrait
+            # ne lire qu'une version réduite directement depuis le memmap si
+            # l'aperçu n'a pas besoin de la pleine résolution.
+            # Exemple de lecture réduite (slicing):
+            # sum_data = self.cumulative_sum_memmap[::downsample_factor, ::downsample_factor, :]
+            # wht_data = self.cumulative_wht_memmap[::downsample_factor, ::downsample_factor]
+            
+            # Pour l'instant, lisons tout et réduisons après la division
+            # Attention : lire tout le memmap en mémoire peut être lourd !
+            print("DEBUG QM [_update_preview_sum_w]: Lecture des données depuis memmap...") # Debug
+            # Utiliser np.array() pour charger en mémoire (peut être lourd !)
+            # On pourrait garder les refs memmap et faire la division dessus, mais
+            # l'envoi au GUI via le callback nécessite souvent une copie en mémoire.
+            current_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64) # float64 pour division précise
+            current_wht = np.array(self.cumulative_wht_memmap, dtype=np.float64) # float64 aussi
+            print(f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht.shape}") # Debug
+
+
+            # --- Calcul de l'Image Moyenne (SUM / WHT) ---
+            print("DEBUG QM [_update_preview_sum_w]: Calcul de l'image moyenne (division SUM/WHT)...") # Debug
+            # Ajouter WHT sur l'axe des canaux pour correspondre à SUM
+            # et éviter la division par zéro
+            epsilon = 1e-9 # Petite valeur pour éviter division par zéro
+            wht_broadcasted = np.maximum(current_wht, epsilon)[:, :, np.newaxis] # Ajoute l'axe C et évite zéro
+
+            with np.errstate(divide='ignore', invalid='ignore'): # Ignorer les avertissements de division
+                preview_data_fullres = (current_sum / wht_broadcasted)
+            
+            # Remplacer les NaN/Inf résultants de la division par 0
+            preview_data_fullres = np.nan_to_num(preview_data_fullres, nan=0.0, posinf=0.0, neginf=0.0)
+            print(f"DEBUG QM [_update_preview_sum_w]: Image moyenne calculée. Shape={preview_data_fullres.shape}") # Debug
+
+
+            # --- Normalisation 0-1 (Important pour l'affichage !) ---
+            # L'image SUM/W n'est pas garantie d'être entre 0 et 1
+            min_val = np.nanmin(preview_data_fullres)
+            max_val = np.nanmax(preview_data_fullres)
+            print(f"DEBUG QM [_update_preview_sum_w]: Range avant normalisation 0-1: [{min_val:.3f}, {max_val:.3f}]") # Debug
+            if max_val > min_val:
+                 preview_data_normalized = (preview_data_fullres - min_val) / (max_val - min_val)
+            else: # Image constante
+                 preview_data_normalized = np.zeros_like(preview_data_fullres)
+            
+            preview_data_normalized = np.clip(preview_data_normalized, 0.0, 1.0).astype(np.float32)
+            print(f"DEBUG QM [_update_preview_sum_w]: Image normalisée 0-1.") # Debug
+
+
+            # --- Réduction de Taille (Downsampling) Optionnelle ---
+            preview_data_to_send = preview_data_normalized
+            if downsample_factor > 1:
+                 print(f"DEBUG QM [_update_preview_sum_w]: Réduction taille par facteur {downsample_factor}...") # Debug
+                 try:
+                     h, w, _ = preview_data_normalized.shape
+                     new_h, new_w = h // downsample_factor, w // downsample_factor
+                     if new_h > 10 and new_w > 10: # Seulement si taille résultante est raisonnable
+                          preview_data_to_send = cv2.resize(preview_data_normalized, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                          print(f"DEBUG QM [_update_preview_sum_w]: Image réduite à {preview_data_to_send.shape}") # Debug
+                     else:
+                          print("DEBUG QM [_update_preview_sum_w]: Réduction taille annulée (résultat trop petit).") # Debug
+                 except Exception as e_resize:
+                      print(f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille: {e_resize}") # Debug
+                      # On envoie la version pleine résolution si le resize échoue
+
+            # --- Préparation Header et Infos ---
+            header_copy = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
+            # Ajouter/Mettre à jour NIMAGES/TOTEXP dans le header pour l'aperçu
+            header_copy['NIMAGES'] = (self.images_in_cumulative_stack, 'Images processed so far (SUM/W)')
+            header_copy['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx exposure accumulated (SUM/W)')
+
+            img_count = self.images_in_cumulative_stack
+            total_imgs_est = self.files_in_queue
+            current_batch_num = self.stacked_batches_count # Le dernier lot traité
+            total_batches_est = self.total_batches_estimated
+            stack_name = f"Accum (SUM/W) ({img_count}/{total_imgs_est} Img | Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
+
+            # --- Appel du Callback GUI ---
+            print(f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image shape {preview_data_to_send.shape}...") # Debug
+            self.preview_callback(
+                preview_data_to_send, # Envoyer la version potentiellement réduite
+                header_copy,
+                stack_name,
+                img_count,
+                total_imgs_est,
+                current_batch_num,
+                total_batches_est
+            )
+            print("DEBUG QM [_update_preview_sum_w]: Callback preview terminé.") # Debug
+
+        except MemoryError as mem_err:
+             print(f"ERREUR QM [_update_preview_sum_w]: ERREUR MÉMOIRE - {mem_err}") # Debug
+             self.update_progress(f"❌ ERREUR MÉMOIRE lors de la préparation de l'aperçu SUM/W.")
+             traceback.print_exc(limit=1)
+             # Ne pas envoyer d'aperçu si erreur mémoire
+        except Exception as e:
+            print(f"ERREUR QM [_update_preview_sum_w]: Exception inattendue - {e}") # Debug
+            self.update_progress(f"Error in preview callback (SUM/W): {e}")
+            traceback.print_exc(limit=2)
+
+# --- FIN de la nouvelle méthode _update_preview_sum_w ---
+
+
+
+
+
+#############################################################################################################################################################
 
 
     def _update_preview_incremental_drizzle(self):
@@ -740,247 +900,494 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
+
+
     def _worker(self):
         """
         Thread principal pour le traitement des images.
-        (Version Corrigée pour Batch Processing, TypeError & Import Tardif)
         """
-        print("\n" + "="*10 + " DEBUG [Worker Start]: Initialisation " + "="*10)
+
+        # --------------------------------------------------
+        # 0.  Imports internes au thread (évite les cycles)
+        # --------------------------------------------------
+        import gc
+        import os
+        import time
+        import traceback
+        from queue import Empty
+
+        # --------------------------------------------------
+        # 1.  Initialisation
+        # --------------------------------------------------
+        print("\n" + "=" * 10 + " DEBUG [Worker Start]: Initialisation " + "=" * 10)
+
         self.processing_active = True
         self.processing_error = None
         start_time_session = time.monotonic()
 
-        # --- Initialisation des variables de session ---
-        reference_image_data = None; reference_header = None
-        self.reference_wcs_object = None; self.reference_header_for_wcs = None
+        reference_image_data = None
+        reference_header = None
+        self.reference_wcs_object = None
+        self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None
-        self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
+        self.drizzle_output_wcs = None
+        self.drizzle_output_shape_hw = None
 
-        # --- Listes pour accumuler les résultats ---
-        self.current_batch_data = [] # Classique [(data, header, scores)]
-        local_batch_temp_files = [] # Drizzle Incrémental [temp_path]
-        local_drizzle_final_batch_data = [] # Drizzle Final [(data, hdr, wcs_ref)]
-        self.intermediate_drizzle_batch_files = [] # Drizzle Final [(sci_path, [wht_paths])]
-        all_aligned_files_with_info = [] # Mosaïque [(aligned_data, header, quality_scores, wcs_indiv)]
+        self.current_batch_data = []
+        local_batch_temp_files = []
+        local_drizzle_final_batch_data = []
+        self.intermediate_drizzle_batch_files = []
+        all_aligned_files_with_info = []
 
-        print(f"DEBUG [Worker Start]: Mode reçu -> is_mosaic_run={self.is_mosaic_run}, drizzle_active_session={self.drizzle_active_session}, drizzle_mode='{self.drizzle_mode}'")
+        print(
+            f"DEBUG [Worker Start]: Mode reçu -> "
+            f"is_mosaic_run={self.is_mosaic_run}, "
+            f"drizzle_active_session={self.drizzle_active_session}, "
+            f"drizzle_mode='{self.drizzle_mode}'"
+        )
 
-        # --- IMPORTS TARDIFS (pour éviter dépendances circulaires au chargement) ---
-        # Ces modules sont nécessaires pour le traitement dans la boucle ou la finalisation
+        # --------------------------------------------------
+        # 2.  Imports tardifs (solver WCS & drizzle)
+        # --------------------------------------------------
         solve_image_wcs_func = None
         DrizzleProcessor_class = None
         load_drizzle_temp_file_func = None
         create_wcs_from_header_func = None
+
         try:
-            from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_func
+            from ..enhancement.astrometry_solver import (
+                solve_image_wcs as solve_image_wcs_func,
+            )
+
             print("DEBUG [_worker]: Import tardif solve_image_wcs OK.")
-        except ImportError: print("ERREUR [_worker]: Échec import tardif solve_image_wcs.")
+        except ImportError:
+            print("ERREUR [_worker]: Échec import tardif solve_image_wcs.")
+
         try:
-            from ..enhancement.drizzle_integration import _load_drizzle_temp_file as load_drizzle_temp_file_func
-            from ..enhancement.drizzle_integration import DrizzleProcessor as DrizzleProcessor_class
-            from ..enhancement.drizzle_integration import _create_wcs_from_header as create_wcs_from_header_func
+            from ..enhancement.drizzle_integration import (
+                _load_drizzle_temp_file as load_drizzle_temp_file_func,
+            )
+            from ..enhancement.drizzle_integration import (
+                DrizzleProcessor as DrizzleProcessor_class,
+            )
+            from ..enhancement.drizzle_integration import (
+                _create_wcs_from_header as create_wcs_from_header_func,
+            )
+
             print("DEBUG [_worker]: Import tardif drizzle_integration OK.")
-        except ImportError: print("ERREUR [_worker]: Échec import tardif drizzle_integration.")
-        # L'import de mosaic_processor reste dans la branche de finalisation mosaïque
-        # --- FIN IMPORTS TARDIFS ---
+        except ImportError:
+            print("ERREUR [_worker]: Échec import tardif drizzle_integration.")
 
-        # ============================================================
-        # --- DEBUT DU BLOC TRY PRINCIPAL (couvre tout le worker) ---
-        # ============================================================
+        # --------------------------------------------------
+        # 3.  Corps principal du thread
+        # --------------------------------------------------
         try:
-            # ----------------------------------------------------
-            # Étape 1: Préparation Image Référence et WCS/Échelle
-            # ----------------------------------------------------
-            self.update_progress("⭐ Préparation image référence...")
-            if not self.current_folder or not os.path.isdir(self.current_folder): raise RuntimeError(f"Dossier entrée invalide: {self.current_folder}")
-            initial_files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.fit', '.fits'))])
-            if not initial_files: raise RuntimeError(f"Aucun FITS initial trouvé dans {self.current_folder}")
-            self.aligner.correct_hot_pixels = self.correct_hot_pixels; self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
-            self.aligner.neighborhood_size = self.neighborhood_size; self.aligner.bayer_pattern = self.bayer_pattern
-            reference_image_data, reference_header = self.aligner._get_reference_image(self.current_folder, initial_files)
-            if reference_image_data is None or reference_header is None: raise RuntimeError("Échec obtention image/header référence.")
-            self.reference_header_for_wcs = reference_header.copy(); self.update_progress("   -> Validation/Génération WCS Référence...")
-            # --- Utiliser la fonction importée tardivement ---
-            if create_wcs_from_header_func:
-                 local_ref_wcs_obj = create_wcs_from_header_func(reference_header)
-            else: local_ref_wcs_obj = None
-            # --- Fin utilisation ---
-            if local_ref_wcs_obj is None or not local_ref_wcs_obj.is_celestial: raise RuntimeError("Impossible d'obtenir WCS référence valide.")
-            ref_naxis1 = reference_header.get('NAXIS1'); ref_naxis2 = reference_header.get('NAXIS2')
-            if ref_naxis1 and ref_naxis2: local_ref_wcs_obj.pixel_shape = (ref_naxis1, ref_naxis2)
-            self.reference_wcs_object = local_ref_wcs_obj
-            try: scale_matrix = self.reference_wcs_object.pixel_scale_matrix; self.reference_pixel_scale_arcsec = np.mean(np.abs(np.diag(scale_matrix))) * 3600.0
-            except Exception as scale_err: print(f"   - WARNING: Impossible calculer échelle pixel réf: {scale_err}")
-            self.aligner._save_reference_image(reference_image_data, reference_header, self.output_folder)
-            self.update_progress("⭐ Image de référence et WCS prêts.", 5)
-            self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None # Reporté
+            # 3‑A.  Préparation de l’image de référence
+            self.update_progress("⭐ Préparation image référence…")
 
-            # ----------------------------------------------------
-            # Étape 2: Boucle de traitement de la file
-            # ----------------------------------------------------
-            self._recalculate_total_batches() # Calculer total_batches_est
-            self.update_progress(f"▶️ Démarrage boucle traitement (File: {self.files_in_queue} | Lots Est.: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})")
+            if not self.current_folder or not os.path.isdir(self.current_folder):
+                raise RuntimeError(f"Dossier entrée invalide : {self.current_folder}")
 
+            initial_files = sorted(
+                f
+                for f in os.listdir(self.current_folder)
+                if f.lower().endswith((".fit", ".fits"))
+            )
+
+            if not initial_files and not self.additional_folders:
+                # Aucun fichier FITS ni dossiers additionnels
+                raise RuntimeError(
+                    "Aucun FITS initial trouvé et pas de dossiers additionnels pour référence."
+                )
+
+            # Propager quelques paramètres à l’aligner
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels
+            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
+            self.aligner.neighborhood_size = self.neighborhood_size
+            self.aligner.bayer_pattern = self.bayer_pattern
+
+            # Récupération de l’image de référence
+            reference_image_data, reference_header = self.aligner._get_reference_image(
+                self.current_folder, initial_files
+            )
+            if reference_image_data is None or reference_header is None:
+                raise RuntimeError(
+                    "Échec obtention image/header référence pour alignement."
+                )
+
+            if (
+                (self.drizzle_active_session or self.is_mosaic_run)
+                and self.reference_wcs_object is None
+            ):
+                raise RuntimeError(
+                    "WCS de référence requis pour Drizzle/Mosaïque mais non disponible."
+                )
+
+            if self.reference_header_for_wcs is None:
+                self.reference_header_for_wcs = reference_header.copy()
+
+            # Sauvegarde de l’image de référence (diagnostic)
+            self.aligner._save_reference_image(
+                reference_image_data, reference_header, self.output_folder
+            )
+            self.update_progress("⭐ Image de référence pour alignement prête.", 5)
+
+            # Estimation du nombre total de lots à empiler
+            self._recalculate_total_batches()
+            self.update_progress(
+                "▶️ Démarrage boucle traitement "
+                f"(File: {self.files_in_queue} | Lots Est.: "
+                f"{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'} )"
+            )
+
+            # --------------------------------------------------
+            # 3‑B.  Boucle principale de traitement
+            # --------------------------------------------------
             while not self.stop_processing:
-                file_path = None; aligned_data = None; header = None; quality_scores = None; wcs_object_indiv = None
-                try: # --- Try interne pour une image ---
+                file_path = None
+                aligned_data = None
+                header = None
+                quality_scores = None
+                wcs_object_indiv = None
+
+                try:
                     file_path = self.queue.get(timeout=1.0)
                     file_name = os.path.basename(file_path)
 
-                    # --- AJOUTER L'IMPORT DE SOLVE_IMAGE_WCS ICI (s'il est nécessaire dans _process_file) ---
-                    # Note: Normalement _process_file génère seulement le WCS, mais si le solve est déplacé ici :
                     if self.is_mosaic_run and solve_image_wcs_func is None:
-                         # Si on est en mosaïque et que l'import a échoué, on ne peut pas continuer
-                         raise ImportError("Solveur WCS non importé mais requis pour la mosaïque.")
-                    # --- FIN AJOUT ---
+                        raise ImportError("Solveur WCS requis pour mosaïque.")
 
-                    aligned_data, header, quality_scores, wcs_object_indiv = self._process_file(
-                        file_path, reference_image_data # _process_file a besoin de solve_image_wcs_func si is_mosaic_run
+                    aligned_data, header, quality_scores, wcs_object_indiv = (
+                        self._process_file(file_path, reference_image_data)
                     )
                     self.processed_files_count += 1
 
+                    # --------------------------------------------------
+                    # 3‑B‑1.  En cas de succès
+                    # --------------------------------------------------
                     if aligned_data is not None:
                         self.aligned_files_count += 1
-                        # --- Branche Mosaïque ---
+
                         if self.is_mosaic_run:
-                            print(f"DEBUG [_worker/Loop]: Stockage info MOSAIC pour {file_name}")
-                            current_info = (aligned_data, header, quality_scores, wcs_object_indiv)
-                            all_aligned_files_with_info.append(current_info)
-                        # --- Branche NON-Mosaïque ---
+                            # Branche mosaïque : on stocke simplement
+                            all_aligned_files_with_info.append(
+                                (
+                                    aligned_data,
+                                    header,
+                                    quality_scores,
+                                    wcs_object_indiv,
+                                )
+                            )
+
                         else:
-                            print(f"DEBUG [_worker/Loop]: Traitement BATCH pour {file_name}")
-                            data_for_batch=aligned_data; header_for_batch=header; scores_for_batch=quality_scores; wcs_for_batch=wcs_object_indiv
+                            # Branche non‑mosaïque (Drizzle ou classique)
+                            data_for_batch = aligned_data
+                            header_for_batch = header
+                            scores_for_batch = quality_scores
+                            wcs_for_batch = wcs_object_indiv
 
-                            if self.drizzle_active_session and self.drizzle_mode == "Final":
+                            # --- 3‑B‑1‑a.  Drizzle FINAL ---
+                            if (
+                                self.drizzle_active_session
+                                and self.drizzle_mode == "Final"
+                            ):
                                 if wcs_for_batch:
-                                    local_drizzle_final_batch_data.append((data_for_batch, header_for_batch, self.reference_wcs_object))
-                                    print(f"  -> Ajouté Drizzle Final lot ({len(local_drizzle_final_batch_data)}/{self.batch_size})")
-                                    if len(local_drizzle_final_batch_data) >= self.batch_size:
+                                    local_drizzle_final_batch_data.append(
+                                        (
+                                            data_for_batch,
+                                            header_for_batch,
+                                            self.reference_wcs_object,
+                                        )
+                                    )
+                                    if (
+                                        len(local_drizzle_final_batch_data)
+                                        >= self.batch_size
+                                    ):
                                         if self.drizzle_output_wcs is None:
-                                            try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
-                                            except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle: {e}") from e
+                                            ref_shape_hw = (
+                                                self.memmap_shape[:2]
+                                                if self.memmap_shape
+                                                else reference_image_data.shape[:2]
+                                            )
+                                            (
+                                                self.drizzle_output_wcs,
+                                                self.drizzle_output_shape_hw,
+                                            ) = self._create_drizzle_output_wcs(
+                                                self.reference_wcs_object,
+                                                ref_shape_hw,
+                                                self.drizzle_scale,
+                                            )
                                         self.stacked_batches_count += 1
-                                        sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
-                                        if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-                                        else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                                        (
+                                            sci_path,
+                                            wht_paths,
+                                        ) = self._process_and_save_drizzle_batch(
+                                            local_drizzle_final_batch_data,
+                                            self.drizzle_output_wcs,
+                                            self.drizzle_output_shape_hw,
+                                            self.stacked_batches_count,
+                                        )
+                                        if sci_path and wht_paths:
+                                            self.intermediate_drizzle_batch_files.append(
+                                                (sci_path, wht_paths)
+                                            )
+                                        else:
+                                            self.failed_stack_count += len(
+                                                local_drizzle_final_batch_data
+                                            )
                                         local_drizzle_final_batch_data = []
-                                else: self.skipped_files_count += 1; self.update_progress(f"   ⚠️ {file_name} ignoré Drizzle Final (WCS Généré Invalide).")
+                                else:
+                                    self.skipped_files_count += 1
 
-                            elif self.drizzle_active_session and self.drizzle_mode == "Incremental":
-                                temp_filepath_incr = self._save_drizzle_input_temp(data_for_batch, header_for_batch)
-                                if temp_filepath_incr:
-                                    local_batch_temp_files.append(temp_filepath_incr)
-                                    print(f"  -> Ajouté Drizzle Incr lot ({len(local_batch_temp_files)}/{self.batch_size})")
+                            # --- 3‑B‑1‑b.  Drizzle INCRÉMENTAL ---
+                            elif (
+                                self.drizzle_active_session
+                                and self.drizzle_mode == "Incremental"
+                            ):
+                                temp_file = self._save_drizzle_input_temp(
+                                    data_for_batch, header_for_batch
+                                )
+                                if temp_file:
+                                    local_batch_temp_files.append(temp_file)
                                     if len(local_batch_temp_files) >= self.batch_size:
                                         self.stacked_batches_count += 1
-                                        self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                                        self._process_incremental_drizzle_batch(
+                                            local_batch_temp_files,
+                                            self.stacked_batches_count,
+                                            self.total_batches_estimated,
+                                        )
                                         local_batch_temp_files = []
-                                else: self.skipped_files_count += 1; self.update_progress(f"   ⚠️ {file_name} ignoré Drizzle Incr (Échec sauvegarde temp).")
+                                else:
+                                    self.skipped_files_count += 1
 
-                            else: # Mode Classique
-                                self.current_batch_data.append((data_for_batch, header_for_batch, scores_for_batch))
-                                print(f"  -> Ajouté Classique lot ({len(self.current_batch_data)}/{self.batch_size})")
+                            # --- 3‑B‑1‑c.  Empilage classique ---
+                            else:
+                                self.current_batch_data.append(
+                                    (
+                                        data_for_batch,
+                                        header_for_batch,
+                                        scores_for_batch,
+                                    )
+                                )
                                 if len(self.current_batch_data) >= self.batch_size:
                                     self.stacked_batches_count += 1
-                                    self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                                    self._process_completed_batch(
+                                        self.stacked_batches_count,
+                                        self.total_batches_estimated,
+                                    )
                                     self.current_batch_data = []
 
-                            # Nettoyage Mémoire (non-mosaïque)
-                            print(f"   -> Nettoyage mémoire image {file_name} (non-mosaïque)")
-                            del aligned_data, header, quality_scores, wcs_object_indiv
-                            del data_for_batch, header_for_batch, scores_for_batch, wcs_for_batch
+                            # Libération mémoire itérative
+                            del (
+                                aligned_data,
+                                header,
+                                quality_scores,
+                                wcs_object_indiv,
+                                data_for_batch,
+                                header_for_batch,
+                                scores_for_batch,
+                                wcs_for_batch,
+                            )
                             gc.collect()
 
+                    # Indique au queue que la tâche est terminée
                     self.queue.task_done()
-                    # Mise à jour Progression/ETA
-                    current_progress = (self.processed_files_count / self.files_in_queue) * 100 if self.files_in_queue > 0 else 0
-                    elapsed_time_session = time.monotonic() - start_time_session; time_per_file = elapsed_time_session / self.processed_files_count if self.processed_files_count > 0 else 0
-                    remaining_files = self.files_in_queue - self.processed_files_count; eta_seconds = remaining_files * time_per_file if time_per_file > 0 else 0
-                    h_eta, rem_eta = divmod(int(eta_seconds), 3600); m_eta, s_eta = divmod(rem_eta, 60); time_str = f"{h_eta:02}:{m_eta:02}:{s_eta:02}"
-                    progress_msg = f"📊 ({self.processed_files_count}/{self.files_in_queue}) {file_name} | ETA: {time_str}"; self.update_progress(progress_msg, current_progress)
-                    if self.processed_files_count % 20 == 0: gc.collect()
 
-                except Empty: # Gestion file vide et dossiers sup
-                    self.update_progress("ⓘ File vide. Vérification batch final / dossiers sup...")
-                    # --- Traiter dernier lot partiel (SI PAS MOSAÏQUE) ---
+                # --------------------------------------------------
+                # 3‑B‑2.  File vide → on vide / on passe dossier
+                # --------------------------------------------------
+                except Empty:
+                    self.update_progress(
+                        "ⓘ File vide. Vérification batch final / dossiers sup…"
+                    )
+
                     if not self.is_mosaic_run:
-                        print("DEBUG [_worker/EmptyQueue]: Traitement dernier lot partiel (Non-Mosaïque)...")
-                        if self.drizzle_active_session and self.drizzle_mode == "Final" and local_drizzle_final_batch_data:
-                            print(f"   -> Dernier lot Drizzle Final ({len(local_drizzle_final_batch_data)} images)")
+                        # Traiter le dernier lot partiel si nécessaire
+                        if (
+                            self.drizzle_active_session
+                            and self.drizzle_mode == "Final"
+                            and local_drizzle_final_batch_data
+                        ):
                             if self.drizzle_output_wcs is None:
-                                try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
-                                except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle final: {e}") from e
+                                ref_shape_hw = (
+                                    self.memmap_shape[:2]
+                                    if self.memmap_shape
+                                    else reference_image_data.shape[:2]
+                                )
+                                (
+                                    self.drizzle_output_wcs,
+                                    self.drizzle_output_shape_hw,
+                                ) = self._create_drizzle_output_wcs(
+                                    self.reference_wcs_object,
+                                    ref_shape_hw,
+                                    self.drizzle_scale,
+                                )
                             self.stacked_batches_count += 1
-                            sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
-                            if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-                            else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                            (
+                                sci_path,
+                                wht_paths,
+                            ) = self._process_and_save_drizzle_batch(
+                                local_drizzle_final_batch_data,
+                                self.drizzle_output_wcs,
+                                self.drizzle_output_shape_hw,
+                                self.stacked_batches_count,
+                            )
+                            if sci_path and wht_paths:
+                                self.intermediate_drizzle_batch_files.append(
+                                    (sci_path, wht_paths)
+                                )
+                            else:
+                                self.failed_stack_count += len(
+                                    local_drizzle_final_batch_data
+                                )
                             local_drizzle_final_batch_data = []
-                        elif self.drizzle_active_session and self.drizzle_mode == "Incremental" and local_batch_temp_files:
-                            print(f"   -> Dernier lot Drizzle Incrémental ({len(local_batch_temp_files)} images)")
+
+                        elif (
+                            self.drizzle_active_session
+                            and self.drizzle_mode == "Incremental"
+                            and local_batch_temp_files
+                        ):
                             self.stacked_batches_count += 1
-                            self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                            self._process_incremental_drizzle_batch(
+                                local_batch_temp_files,
+                                self.stacked_batches_count,
+                                self.total_batches_estimated,
+                            )
                             local_batch_temp_files = []
-                        elif not self.drizzle_active_session and self.current_batch_data:
-                            print(f"   -> Dernier lot Classique ({len(self.current_batch_data)} images)")
+
+                        elif (
+                            not self.drizzle_active_session
+                            and self.current_batch_data
+                        ):
                             self.stacked_batches_count += 1
-                            self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                            self._process_completed_batch(
+                                self.stacked_batches_count,
+                                self.total_batches_estimated,
+                            )
                             self.current_batch_data = []
-                    # --- Traiter dossier supplémentaire ---
-                    folder_to_process = None;
+
+                    # Vérifie s’il reste des dossiers additionnels
+                    folder_to_process = None
                     with self.folders_lock:
-                        if self.additional_folders: folder_to_process = self.additional_folders.pop(0); self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
+                        if self.additional_folders:
+                            folder_to_process = self.additional_folders.pop(0)
+                            self.update_progress(
+                                f"folder_count_update:{len(self.additional_folders)}"
+                            )
+
                     if folder_to_process:
-                        self.current_folder = folder_to_process; self.update_progress(f"📂 Traitement dossier supplémentaire: {os.path.basename(folder_to_process)}")
-                        self._add_files_to_queue(folder_to_process); self._recalculate_total_batches()
-                        self.update_progress(f"   -> Fichiers ajoutés. Total Queue={self.files_in_queue}, Lots Est.={self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-                        continue # Revenir au début boucle
+                        self.current_folder = folder_to_process
+                        self.update_progress(
+                            f"📂 Traitement dossier supplémentaire : "
+                            f"{os.path.basename(folder_to_process)}"
+                        )
+                        self._add_files_to_queue(folder_to_process)
+                        self._recalculate_total_batches()
+                        continue  # On repart dans le while
                     else:
                         self.update_progress("✅ Fin file/dossiers.")
-                        break # Sortir boucle principale
-                except Exception as e_inner_loop: # Erreur fichier générale
-                    error_context=f" de {file_name}" if file_path else ""; self.update_progress(f"❌ Erreur boucle worker{error_context}: {e_inner_loop}"); traceback.print_exc(limit=3); self.processing_error = f"Erreur: {e_inner_loop}";
-                    if file_path: self.skipped_files_count += 1;
-                    try: self.queue.task_done()
-                    except ValueError: pass
-                    time.sleep(0.1)
-                finally: # Nettoyage Mémoire Itération
-                    try:
-                        if aligned_data is not None: del aligned_data
-                        if header is not None: del header
-                        if quality_scores is not None: del quality_scores
-                        if wcs_object_indiv is not None: del wcs_object_indiv
-                    except NameError: pass
-            # --- FIN BOUCLE WHILE ---
+                        break  # Sort de la boucle principale
 
-            # --- Traitement dernier lot partiel (si sorti normalement ET non-mosaïque) ---
+                # --------------------------------------------------
+                # 3‑B‑3.  Toute autre exception dans la boucle
+                # --------------------------------------------------
+                except Exception as e_inner_loop:
+                    error_msg_loop = (
+                        f"Erreur boucle interne: {type(e_inner_loop).__name__}: "
+                        f"{e_inner_loop}"
+                    )
+                    print(error_msg_loop)
+                    traceback.print_exc(limit=3)
+                    self.update_progress(f"⚠️ {error_msg_loop}")
+                    self.failed_stack_count += 1
+
+                finally:
+                    # Nettoyage mémoire itératif
+                    gc.collect()
+
+            # --------------------------------------------------
+            # 3‑C.  Traitement du dernier lot (si sortie normale)
+            # --------------------------------------------------
             if not self.stop_processing and not self.is_mosaic_run:
-                print("DEBUG [_worker/AfterLoop]: Traitement dernier lot partiel (sortie normale boucle)...")
-                if self.drizzle_active_session and self.drizzle_mode == "Final" and local_drizzle_final_batch_data:
-                    print(f"   -> Dernier lot Drizzle Final ({len(local_drizzle_final_batch_data)} images)")
+                print(
+                    "DEBUG [_worker/AfterLoop]: Traitement dernier lot partiel "
+                    "(sortie normale boucle)."
+                )
+
+                if (
+                    self.drizzle_active_session
+                    and self.drizzle_mode == "Final"
+                    and local_drizzle_final_batch_data
+                ):
+                    print(
+                        f"   -> Dernier lot Drizzle Final "
+                        f"({len(local_drizzle_final_batch_data)} images)"
+                    )
                     if self.drizzle_output_wcs is None:
-                        try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
-                        except Exception as e: raise RuntimeError(f"Echec création grille sortie Drizzle final: {e}") from e
+                        ref_shape_hw = (
+                            self.memmap_shape[:2]
+                            if self.memmap_shape
+                            else reference_image_data.shape[:2]
+                        )
+                        (
+                            self.drizzle_output_wcs,
+                            self.drizzle_output_shape_hw,
+                        ) = self._create_drizzle_output_wcs(
+                            self.reference_wcs_object,
+                            ref_shape_hw,
+                            self.drizzle_scale,
+                        )
                     self.stacked_batches_count += 1
-                    sci_path, wht_paths = self._process_and_save_drizzle_batch(local_drizzle_final_batch_data, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
-                    if sci_path and wht_paths: self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-                    else: self.failed_stack_count += len(local_drizzle_final_batch_data)
+                    (
+                        sci_path,
+                        wht_paths,
+                    ) = self._process_and_save_drizzle_batch(
+                        local_drizzle_final_batch_data,
+                        self.drizzle_output_wcs,
+                        self.drizzle_output_shape_hw,
+                        self.stacked_batches_count,
+                    )
+                    if sci_path and wht_paths:
+                        self.intermediate_drizzle_batch_files.append(
+                            (sci_path, wht_paths)
+                        )
+                    else:
+                        self.failed_stack_count += len(local_drizzle_final_batch_data)
                     local_drizzle_final_batch_data = []
-                elif self.drizzle_active_session and self.drizzle_mode == "Incremental" and local_batch_temp_files:
-                    print(f"   -> Dernier lot Drizzle Incrémental ({len(local_batch_temp_files)} images)")
+
+                elif (
+                    self.drizzle_active_session
+                    and self.drizzle_mode == "Incremental"
+                    and local_batch_temp_files
+                ):
+                    print(
+                        f"   -> Dernier lot Drizzle Incrémental "
+                        f"({len(local_batch_temp_files)} images)"
+                    )
                     self.stacked_batches_count += 1
-                    self._process_incremental_drizzle_batch(local_batch_temp_files, self.stacked_batches_count, self.total_batches_estimated)
+                    self._process_incremental_drizzle_batch(
+                        local_batch_temp_files,
+                        self.stacked_batches_count,
+                        self.total_batches_estimated,
+                    )
                     local_batch_temp_files = []
+
                 elif not self.drizzle_active_session and self.current_batch_data:
-                    print(f"   -> Dernier lot Classique ({len(self.current_batch_data)} images)")
+                    print(
+                        f"   -> Dernier lot Classique "
+                        f"({len(self.current_batch_data)} images)"
+                    )
                     self.stacked_batches_count += 1
-                    self._process_completed_batch(self.stacked_batches_count, self.total_batches_estimated)
+                    self._process_completed_batch(
+                        self.stacked_batches_count,
+                        self.total_batches_estimated,
+                    )
                     self.current_batch_data = []
 
-            # ==================================================
-            # --- 3. Étape Finale (après la boucle) ---
-            # ==================================================
+            # --------------------------------------------------
+            # 3‑D.  Étape finale (sauvegarde cumul)
+            # --------------------------------------------------
             print("DEBUG [_worker]: Fin boucle principale. Début logique finalisation...")
-            final_result_data = None; final_result_header = None
 
             # --- Nettoyage mémoire si non-mosaïque ---
             if not self.is_mosaic_run:
@@ -988,96 +1395,145 @@ class SeestarQueuedStacker:
                 all_aligned_files_with_info = [] # Vider la liste
                 gc.collect()
 
-            if self.stop_processing: # Si arrêt utilisateur
-                self.update_progress("🛑 Traitement interrompu avant finalisation.")
-                if not self.is_mosaic_run: # Sauvegarde partielle seulement si pas mosaïque
-                    if self.drizzle_mode=="Incremental" and self.cumulative_drizzle_data is not None:
-                        final_result_data=self.cumulative_drizzle_data; final_result_header=self.current_stack_header
-                        self._save_final_stack("_drizzle_incr_stopped", True)
-                    elif not self.drizzle_active_session and self.current_stack_data is not None:
-                        final_result_data=self.current_stack_data; final_result_header=self.current_stack_header
-                        self._save_final_stack("_classic_stopped", True)
-                    elif self.drizzle_mode=="Final" and self.intermediate_drizzle_batch_files:
-                        self.update_progress("ⓘ Lots Drizzle Final interm. conservés si nettoyage désactivé.")
-                self.final_stacked_path = None # Pas de stack final officiel
+            # --- MODIFICATION DE LA LOGIQUE D'ARRÊT ET DE SAUVEGARDE ---
+            final_suffix_for_save = "_unknown_sumw" # Fallback
 
+            if self.is_mosaic_run:
+                # Pour la mosaïque, si arrêtée, il est complexe de sauvegarder un état partiel
+                # de manière significative avec la logique SUM/W actuelle, car l'assemblage final
+                # n'a pas eu lieu. On pourrait choisir de ne rien sauvegarder ou de sauvegarder
+                # les panneaux intermédiaires si le nettoyage est désactivé.
+                # Pour l'instant, si mosaïque et arrêt, on ne sauvegarde pas le stack final.
+                if self.stop_processing:
+                    self.update_progress("🛑 Traitement Mosaïque interrompu. Pas de sauvegarde finale de la mosaïque.")
+                    self.final_stacked_path = None
+                else: # Mosaïque terminée normalement
+                    final_suffix_for_save = "_mosaic_sumw" # sera utilisé par _save_final_stack
+            elif self.drizzle_active_session:
+                final_suffix_for_save = f"_drizzle_{self.drizzle_mode.lower()}_sumw"
+            else: # Classique
+                final_suffix_for_save = f"_classic_{self.stacking_mode}_sumw"
+
+            # Ajouter le suffixe "_stopped" si le traitement a été arrêté par l'utilisateur
+            # mais SEULEMENT si ce n'est pas une mosaïque (car on ne sauvegarde pas de mosaïque stoppée pour l'instant)
+            effective_output_suffix = final_suffix_for_save
+            was_stopped_for_save_call = False
+
+            if self.stop_processing:
+                self.update_progress("🛑 Traitement interrompu par l'utilisateur.")
+                if not self.is_mosaic_run: # On tente une sauvegarde si ce n'est pas une mosaïque
+                    effective_output_suffix += "_stopped"
+                    was_stopped_for_save_call = True
+                    print(f"DEBUG [_worker/Finalize]: Arrêt utilisateur, tentative de sauvegarde partielle avec suffixe: {effective_output_suffix}")
+                # else: pour la mosaïque, on a déjà géré le cas d'arrêt
             else: # Traitement Normal Terminé
-                print("DEBUG [_worker]: Traitement normal terminé. Branchement finalisation par mode...")
-                # --- Branche Mosaïque ---
-                if self.is_mosaic_run:
-                    print(f"DEBUG [_worker]: Branche finalisation MOSAÏQUE ({len(all_aligned_files_with_info)} images)...")
-                    self.update_progress("🖼️ Finalisation Mode Mosaïque...")
-                    if all_aligned_files_with_info:
-                        # --- IMPORT TARDIF MOSAIC PROCESSOR ICI ---
-                        try:
-                            from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files
-                            print("DEBUG [_worker/Finalize]: Import TARDIF de process_mosaic_from_aligned_files réussi.")
-                            final_result_data, final_result_header = process_mosaic_from_aligned_files(all_aligned_files_with_info, self, self.update_progress)
-                            if final_result_data is None: self.processing_error = self.processing_error or "Échec orchestration mosaïque."
-                        except ImportError as imp_err_mosaic: self.update_progress(f"❌ Erreur Import Tardif Mosaic Processor: {imp_err_mosaic}"); self.processing_error = "Erreur Import Mosaic Processor"
-                        except Exception as mosaic_e: self.update_progress(f"❌ Erreur orchestration mosaïque: {mosaic_e}"); traceback.print_exc(limit=2); self.processing_error = str(mosaic_e)
-                    else: self.update_progress("⚠️ Aucune image valide pour créer la mosaïque.")
-
-                # --- Branche Drizzle Final (Simple Champ) ---
-                elif self.drizzle_active_session and self.drizzle_mode == "Final":
-                    print(f"DEBUG [_worker]: Branche finalisation DRIZZLE FINAL ({len(self.intermediate_drizzle_batch_files)} lots)...")
-                    if self.intermediate_drizzle_batch_files:
-                        if self.drizzle_output_wcs is None:
-                           try: self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(self.reference_wcs_object, reference_image_data.shape[:2], self.drizzle_scale)
-                           except Exception as e: self.processing_error=str(e); raise e
-                        final_combined_sci, _ = self._combine_intermediate_drizzle_batches(self.intermediate_drizzle_batch_files, self.drizzle_output_wcs, self.drizzle_output_shape_hw)
-                        if final_combined_sci is not None:
-                            final_result_data = final_combined_sci; final_result_header = self._update_header_for_drizzle_final()
-                            self.images_in_cumulative_stack = self.aligned_files_count
-                        else: self.processing_error = "Échec comb. Drizzle Final"
-                    else: self.update_progress("⚠️ Aucun lot Drizzle Final interm.")
-
-                # --- Branche Drizzle Incrémental (Simple Champ) ---
-                elif self.drizzle_active_session and self.drizzle_mode == "Incremental":
-                    print("DEBUG [_worker]: Branche finalisation DRIZZLE INCREMENTAL...")
-                    if self.cumulative_drizzle_data is not None and self.images_in_cumulative_stack > 0: final_result_data=self.cumulative_drizzle_data; final_result_header=self.current_stack_header
-                    else: self.update_progress("ⓘ Aucun stack Drizzle Incr.")
-
-                # --- Branche Classique ---
-                elif not self.drizzle_active_session and self.current_stack_data is not None:
-                     print("DEBUG [_worker]: Branche finalisation CLASSIQUE...")
-                     final_result_data = self.current_stack_data; final_result_header = self.current_stack_header
-                # --- Aucun Stack ---
-                else: print("DEBUG [_worker]: Aucun stack à finaliser.")
-
-                # --- Sauvegarde Finale (SI un résultat existe) ---
-                if final_result_data is not None:
-                    print("DEBUG [_worker]: Appel sauvegarde finale...")
-                    suffix = "_mosaic" if self.is_mosaic_run else ("_drizzle_" + self.drizzle_mode.lower() if self.drizzle_active_session else "_classic")
-                    self.current_stack_data = final_result_data; self.current_stack_header = final_result_header
-                    self._save_final_stack(output_filename_suffix=suffix)
-                else: self.final_stacked_path = None
-
-        # --- Gestion Erreurs Globales ---
+                print("DEBUG [_worker]: Traitement normal terminé. Préparation pour sauvegarde finale SUM/W...")
+            
+            # --- Vérifier s'il y a quelque chose à sauvegarder ---
+            # On appelle _save_final_stack si on a des images ET 
+            # (soit le traitement n'a pas été stoppé, OU il a été stoppé MAIS ce n'est pas une mosaïque)
+            if self.images_in_cumulative_stack > 0 and \
+               (not self.stop_processing or (self.stop_processing and not self.is_mosaic_run)):
+                
+                print(f"DEBUG [_worker]: Appel _save_final_stack (images={self.images_in_cumulative_stack}, suffix='{effective_output_suffix}', stopped_early={was_stopped_for_save_call})...")
+                self._save_final_stack(
+                    output_filename_suffix=effective_output_suffix,
+                    stopped_early=was_stopped_for_save_call
+                )
+            elif self.stop_processing and self.is_mosaic_run:
+                # Cas spécifique: Mosaïque arrêtée, on a déjà loggué, on s'assure que final_stacked_path est None
+                self.final_stacked_path = None
+            else: # Pas d'images accumulées ou autre cas non géré pour la sauvegarde
+                print("DEBUG [_worker]: Appel _save_final_stack ignoré (images_in_cumulative_stack <= 0 ou condition d'arrêt non remplie pour sauvegarde).")
+                self.update_progress("ⓘ Aucun stack final à sauvegarder (0 images accumulées ou arrêt non compatible avec sauvegarde partielle).")
+                self.final_stacked_path = None
+            
+        # ------------------------------------------------------
+        # 4.  Gestion des exceptions globales
+        # ------------------------------------------------------
         except Exception as e:
-             error_msg=f"Erreur critique worker: {type(e).__name__}: {e}"; print(f"ERREUR CRITIQUE: {error_msg}"); self.update_progress(f"❌ {error_msg}"); traceback.print_exc(limit=5); self.processing_error = error_msg
+            error_msg = f"Erreur critique worker: {type(e).__name__}: {e}"
+            print(f"ERREUR CRITIQUE: {error_msg}")
+            self.update_progress(f"❌ {error_msg}")
+            traceback.print_exc(limit=5)
+            self.processing_error = error_msg
+            print(
+                "DEBUG [_worker EXCEPTION]: Tentative de fermeture des memmaps suite à erreur…"
+            )
+            self._close_memmaps()
 
-        # ============================================================
-        # --- FIN DU BLOC TRY PRINCIPAL ---
-        # ============================================================
+        # ------------------------------------------------------
+        # 5.  Bloc finally → nettoyage systématique
+        # ------------------------------------------------------
+        finally:
+            print("DEBUG [_worker]: Entrée bloc FINALLY…")
 
-        finally: # <<<--- FINALLY : Nettoyage et Fin ---
-            print("DEBUG [_worker]: Entrée bloc FINALLY...")
             if self.perform_cleanup:
-                self.update_progress("🧹 Nettoyage final fichiers temporaires...")
-                self.cleanup_unaligned_files(); self.cleanup_temp_reference()
-                self._cleanup_drizzle_temp_files(); self._cleanup_drizzle_batch_outputs()
+                self.update_progress("🧹 Nettoyage final fichiers temporaires…")
+
+                # Nettoyages divers
+                self.cleanup_unaligned_files()
+                self.cleanup_temp_reference()
+                self._cleanup_drizzle_temp_files()
+                self._cleanup_drizzle_batch_outputs()
                 self._cleanup_mosaic_panel_stacks_temp()
-            else: self.update_progress(f"ⓘ Fichiers temporaires conservés.")
-            print("   -> Vidage listes et GC...")
-            self.current_batch_data = []; local_drizzle_final_batch_data = []; self.intermediate_drizzle_batch_files = []; local_batch_temp_files = []; all_aligned_files_with_info = []
-            self.current_stack_data = None; self.cumulative_drizzle_data = None; self.cumulative_drizzle_wht = None
+
+                # Suppression des memmaps SUM/WHT
+                print("DEBUG [_worker FINALLY]: Nettoyage fichiers memmap .npy…")
+                if (
+                    hasattr(self, "sum_memmap_path")
+                    and self.sum_memmap_path
+                    and os.path.exists(self.sum_memmap_path)
+                ):
+                    try:
+                        os.remove(self.sum_memmap_path)
+                        print("   -> Fichier SUM.npy supprimé.")
+                    except Exception as e_del_sum:
+                        print(f"   -> WARN: Erreur suppression SUM.npy: {e_del_sum}")
+
+                if (
+                    hasattr(self, "wht_memmap_path")
+                    and self.wht_memmap_path
+                    and os.path.exists(self.wht_memmap_path)
+                ):
+                    try:
+                        os.remove(self.wht_memmap_path)
+                        print("   -> Fichier WHT.npy supprimé.")
+                    except Exception as e_del_wht:
+                        print(f"   -> WARN: Erreur suppression WHT.npy: {e_del_wht}")
+
+                # Efface le dossier memmap s’il est vide
+                memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+                try:
+                    if os.path.isdir(memmap_dir) and not os.listdir(memmap_dir):
+                        os.rmdir(memmap_dir)
+                        print(f"   -> Dossier memmap vide supprimé: {memmap_dir}")
+                except Exception as e_rmdir:
+                    print(
+                        f"   -> INFO: Erreur suppression dossier memmap vide: {e_rmdir}"
+                    )
+            else:
+                self.update_progress(
+                    "ⓘ Fichiers temporaires et memmap conservés."
+                )
+
+            # Purge finale des listes et GC
+            print("   -> Vidage listes et GC…")
+            self.current_batch_data = []
+            local_drizzle_final_batch_data = []
+            self.intermediate_drizzle_batch_files = []
+            local_batch_temp_files = []
+            all_aligned_files_with_info = []
+            self._close_memmaps()
             gc.collect()
+
+            # Flag activité
             self.processing_active = False
             print("DEBUG [_worker]: Flag processing_active mis à False.")
             self.update_progress("🚪 Thread traitement terminé.")
 
-  
+
+
 
 
 ############################################################################################################################
@@ -1558,10 +2014,12 @@ class SeestarQueuedStacker:
         # --- Combiner le résultat du batch dans le stack cumulatif ---
         if stacked_batch_data_np is not None:
             self._combine_batch_result(stacked_batch_data_np, stack_info_header)
-            # Mettre à jour l'aperçu avec le stack cumulatif
-            self._update_preview()
+            print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...") # Debug
+            self._update_preview_sum_w()
+            ### MODIFICATION : Supprimer ou commenter l'appel à la sauvegarde intermédiaire ###
+            # La sauvegarde intermédiaire n'a plus vraiment de sens avec SUM/W et est coûteuse.
             # Sauvegarder le stack intermédiaire (cumulatif)
-            self._save_intermediate_stack()
+            #self._save_intermediate_stack()
         else:
             # Si _stack_batch a échoué pour ce lot
             # Compter les images VALIDES qui ont échoué au stack
@@ -1574,129 +2032,204 @@ class SeestarQueuedStacker:
 ##############################################################################################################################################
 
 
+
+
+
+
     def _process_incremental_drizzle_batch(self, batch_temp_filepaths, current_batch_num=0, total_batches_est=0):
         """
-        Traite un batch pour le Drizzle Incrémental :
-        1. Appelle DrizzleProcessor sur les fichiers temporaires du lot.
-        2. Combine le résultat avec le Drizzle cumulatif.
-        3. Nettoie les fichiers temporaires du lot.
+        [MODE SUM/W - DRIZZLE INCR] Traite un batch pour le Drizzle Incrémental :
+        1. Appelle DrizzleProcessor sur les fichiers temporaires du lot pour obtenir SCI et WHT du lot.
+        2. Accumule (SCI_lot * WHT_lot) dans cumulative_sum_memmap.
+        3. Accumule WHT_lot dans cumulative_wht_memmap.
+        4. Nettoie les fichiers temporaires du lot.
         """
+        print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Début traitement Drizzle Incr. Lot #{current_batch_num}...") # Debug
+
         if not batch_temp_filepaths:
-            self.update_progress(f"⚠️ Tentative de traiter un batch Drizzle incrémental vide (Batch #{current_batch_num}).")
+            self.update_progress(f"⚠️ Tentative de traiter un batch Drizzle incrémental vide (Lot #{current_batch_num}).")
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Sortie précoce (lot vide).") # Debug
             return
 
         num_files_in_batch = len(batch_temp_filepaths)
         progress_info = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
         self.update_progress(f"💧 Traitement Drizzle incrémental du batch {progress_info} ({num_files_in_batch} fichiers)...")
 
-        # 1. Appeler Drizzle sur le lot courant
-        drizzle_result_batch = None
-        wht_map_batch = None
+        # --- Vérifications Memmap ---
+        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
+             self.update_progress("❌ Erreur critique: Accumulateurs Memmap SUM/WHT non initialisés pour Drizzle Incr.")
+             print("ERREUR QM [_process_incremental_drizzle_batch SUM/W]: Memmap non initialisé.") # Debug
+             self.processing_error = "Memmap non initialisé (Drizzle Incr)"
+             self.stop_processing = True
+             return
+
+        # --- 1. Appeler Drizzle sur le lot courant ---
+        drizzle_result_batch_sci = None # Image science normalisée (Counts/Sec ou équivalent)
+        wht_map_batch = None          # Carte de poids du lot
+        drizzle_proc = None           # Référence à l'instance DrizzleProcessor
+
         try:
-            # Instancier DrizzleProcessor avec les bons paramètres de la session
+            # --- Import Tardif (sécurité, même si déjà fait dans _worker) ---
+            try: from ..enhancement.drizzle_integration import DrizzleProcessor
+            except ImportError: raise RuntimeError("DrizzleProcessor non importable.")
+
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Instanciation DrizzleProcessor...") # Debug
             drizzle_proc = DrizzleProcessor(
                 scale_factor=self.drizzle_scale,
-                pixfrac=self.drizzle_pixfrac, # Utilise l'attribut stocké
-                kernel=self.drizzle_kernel   # Utilise l'attribut stocké
+                pixfrac=self.drizzle_pixfrac,
+                kernel=self.drizzle_kernel
             )
-            # Appeler apply_drizzle avec la liste des chemins du lot
-            drizzle_result_batch, wht_map_batch = drizzle_proc.apply_drizzle(batch_temp_filepaths)
 
-            if drizzle_result_batch is None:
+            # --- Déterminer la grille de sortie si pas encore fait ---
+            # (Normalement fait au début du worker, mais sécurité)
+            if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                 print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Grille Drizzle non définie, tentative de création...") # Debug
+                 if self.reference_wcs_object is None or self.memmap_shape is None:
+                     raise RuntimeError("WCS ou Shape référence manquant pour créer grille Drizzle.")
+                 # Utiliser la shape H,W du memmap (qui vient de la réf)
+                 ref_shape_for_grid_hw = self.memmap_shape[:2]
+                 self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
+                     self.reference_wcs_object, ref_shape_for_grid_hw, self.drizzle_scale
+                 )
+                 print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Grille Drizzle créée : {self.drizzle_output_shape_hw}") # Debug
+
+            # --- Vérifier compatibilité shape sortie memmap vs grille Drizzle ---
+            # WHT memmap est (H,W), SUM est (H,W,C)
+            # La sortie Drizzle sera (H,W,C) pour SCI et WHT après stack des canaux
+            if self.drizzle_output_shape_hw != self.memmap_shape[:2]:
+                 raise RuntimeError(f"Incompatibilité Shape Drizzle ({self.drizzle_output_shape_hw}) et Memmap ({self.memmap_shape[:2]})")
+
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Appel DrizzleProcessor.apply_drizzle pour lot #{current_batch_num}...") # Debug
+            # Utiliser le WCS et Shape de sortie définis pour Drizzle
+            drizzle_result_batch_sci, wht_map_batch = drizzle_proc.apply_drizzle(
+                batch_temp_filepaths,
+                output_wcs=self.drizzle_output_wcs,
+                output_shape_2d_hw=self.drizzle_output_shape_hw
+            )
+
+            if drizzle_result_batch_sci is None:
                  raise RuntimeError(f"Échec Drizzle sur le lot {progress_info}.")
             if wht_map_batch is None:
-                 self.update_progress(f"   ⚠️ Carte WHT non retournée pour le lot {progress_info}, combinaison pondérée impossible.")
-                 # Fallback: utiliser des poids uniformes pour ce lot? Ou ignorer le lot?
-                 # Pour l'instant, on ignore le lot si WHT manque.
-                 raise RuntimeError(f"Carte WHT manquante pour lot {progress_info}.")
+                 # Note: apply_drizzle devrait toujours retourner un wht map s'il retourne sci
+                 print(f"AVERTISSEMENT QM [_process_incremental_drizzle_batch SUM/W]: Carte WHT non retournée pour le lot {progress_info}. Tentative avec poids=1.")
+                 wht_map_batch = np.ones_like(drizzle_result_batch_sci, dtype=np.float32) # Fallback très simple
 
-            self.update_progress(f"   -> Drizzle lot {progress_info} terminé (Shape: {drizzle_result_batch.shape})")
+            self.update_progress(f"   -> Drizzle lot {progress_info} terminé (Shape SCI: {drizzle_result_batch_sci.shape}, WHT: {wht_map_batch.shape})")
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Drizzle lot OK. SCI Range: [{np.nanmin(drizzle_result_batch_sci):.3f}, {np.nanmax(drizzle_result_batch_sci):.3f}], WHT Range: [{np.nanmin(wht_map_batch):.1f}, {np.nanmax(wht_map_batch):.1f}]") # Debug
 
         except Exception as e:
             self.update_progress(f"❌ Erreur Drizzle sur lot {progress_info}: {e}")
+            print(f"ERREUR QM [_process_incremental_drizzle_batch SUM/W]: Échec Drizzle lot: {e}") # Debug
             traceback.print_exc(limit=2)
-            # Nettoyer les fichiers temporaires de ce lot même en cas d'échec Drizzle
             self._cleanup_batch_temp_files(batch_temp_filepaths)
-            # Compter comme échec pour les stats
             self.failed_stack_count += num_files_in_batch
-            return # Ne pas tenter de combiner
+            return # Ne pas tenter d'accumuler
 
-        # 2. Combiner avec le résultat cumulatif
+        # --- 2. Accumuler dans SUM et WHT ---
         try:
-            self.update_progress(f"   -> Combinaison Drizzle lot {progress_info} avec cumulatif...")
+            self.update_progress(f"   -> Accumulation Drizzle lot {progress_info} (SUM/W)...")
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Début accumulation memmap...") # Debug
 
-            # S'assurer que les données sont en float32 pour la combinaison
-            drizzle_result_batch = drizzle_result_batch.astype(np.float32)
-            wht_map_batch = wht_map_batch.astype(np.float32)
+            # S'assurer que les données sont en float32/64
+            sci_batch_float = drizzle_result_batch_sci.astype(np.float64) # Utiliser float64 pour multiplication
+            wht_batch_float = wht_map_batch.astype(np.float64)
 
-            # Cas initial : premier lot traité
-            if self.cumulative_drizzle_data is None:
-                self.cumulative_drizzle_data = drizzle_result_batch
-                self.cumulative_drizzle_wht = wht_map_batch
-                # Initialiser aussi le header pour les infos cumulatives Drizzle
-                self.current_stack_header = fits.Header()
-                self.current_stack_header['STACKTYP'] = (f'Drizzle Incr ({self.drizzle_scale}x)', 'Incremental Drizzle')
-                self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
-                self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
-                self.images_in_cumulative_stack = 0 # Sera mis à jour ci-dessous
-                self.total_exposure_seconds = 0.0   # Sera mis à jour ci-dessous
+            # Nettoyer les poids (doivent être >= 0)
+            wht_batch_float[~np.isfinite(wht_batch_float)] = 0.0
+            wht_batch_float = np.maximum(wht_batch_float, 0.0)
 
-            # Cas : combinaison avec le cumulatif existant
-            else:
-                # Vérifier compatibilité shapes
-                if self.cumulative_drizzle_data.shape != drizzle_result_batch.shape:
-                    self.update_progress(f"❌ Incompatibilité dims Drizzle: Cumul={self.cumulative_drizzle_data.shape}, Lot={drizzle_result_batch.shape}. Combinaison échouée.")
-                    # Nettoyer les fichiers temporaires de ce lot
-                    self._cleanup_batch_temp_files(batch_temp_filepaths)
-                    self.failed_stack_count += num_files_in_batch # Compter comme échec
-                    return
+            # Calculer le signal pondéré pour ce lot: SCI * WHT
+            weighted_signal_batch = sci_batch_float * wht_batch_float
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Signal pondéré calculé. Range: [{np.nanmin(weighted_signal_batch):.3f}, {np.nanmax(weighted_signal_batch):.3f}]") # Debug
 
-                # Pondération par les WHT maps
-                current_cumul_wht = self.cumulative_drizzle_wht.astype(np.float32)
-                total_wht = current_cumul_wht + wht_map_batch
-                # Éviter division par zéro là où le poids total est nul
-                epsilon = 1e-12
-                safe_total_wht = np.maximum(total_wht, epsilon)
+            # --- Accumulation SUM ---
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Addition à cumulative_sum_memmap...") # Debug
+            self.cumulative_sum_memmap[:] += weighted_signal_batch.astype(self.memmap_dtype_sum)
+            if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Addition SUM terminée et flushée.") # Debug
 
-                # Calcul de la moyenne pondérée
-                weighted_cumul = self.cumulative_drizzle_data * (current_cumul_wht / safe_total_wht)
-                weighted_batch = drizzle_result_batch * (wht_map_batch / safe_total_wht)
-                new_cumulative_data = weighted_cumul + weighted_batch
+            # --- Accumulation WHT ---
+            # La carte de poids WHT est HxWxC, mais notre WHT memmap est HxW.
+            # On doit sommer les poids des 3 canaux pour obtenir le poids total par pixel.
+            # Ou utiliser le poids d'un seul canal si on suppose qu'ils sont similaires ?
+            # Plus sûr: Sommer les poids des canaux.
+            wht_batch_sum_channels = np.sum(wht_batch_float, axis=2)
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Addition à cumulative_wht_memmap (somme des canaux WHT)...") # Debug
+            self.cumulative_wht_memmap[:] += wht_batch_sum_channels.astype(self.memmap_dtype_wht)
+            if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Addition WHT terminée et flushée.") # Debug
 
-                # Mettre à jour les données et la WHT map cumulative
-                self.cumulative_drizzle_data = new_cumulative_data.astype(np.float32)
-                self.cumulative_drizzle_wht = total_wht.astype(np.float32)
-
-            # Mettre à jour les compteurs globaux (même pour le premier lot)
+            # --- Mise à jour compteurs globaux ---
+            # Pour Drizzle, le nombre d'images ajoutées est num_files_in_batch
             self.images_in_cumulative_stack += num_files_in_batch
-            # Estimation de l'exposition ajoutée (peut être imprécis si EXPTIME varie)
+            # Exposition : essayer de lire depuis le premier header du lot temp
             try:
                  first_hdr_batch = fits.getheader(batch_temp_filepaths[0])
                  exp_time_batch = float(first_hdr_batch.get('EXPTIME', 0.0))
                  self.total_exposure_seconds += num_files_in_batch * exp_time_batch
-            except Exception: pass # Ignorer si lecture header échoue
+            except Exception: pass
+            print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Compteurs mis à jour: images={self.images_in_cumulative_stack}, exp={self.total_exposure_seconds:.1f}") # Debug
 
-            # Mettre à jour le header cumulatif
-            if self.current_stack_header:
-                self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Approx images in incremental drizzle')
-                self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure')
 
-            self.update_progress(f"   -> Combinaison lot {progress_info} terminée.")
+            # --- Mise à jour Header Cumulatif (Minimale ici) ---
+            if self.current_stack_header is None: # Initialiser si premier lot Drizzle
+                self.current_stack_header = fits.Header()
+                # Copier infos Drizzle depuis l'output WCS si possible
+                if self.drizzle_output_wcs:
+                     try: self.current_stack_header.update(self.drizzle_output_wcs.to_header(relax=True))
+                     except Exception as e_hdr: print(f"WARN: Erreur copie WCS header: {e_hdr}")
+                # Copier quelques infos de base
+                if self.reference_header_for_wcs:
+                    keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS']
+                    for key in keys_to_copy:
+                         if key in self.reference_header_for_wcs: self.current_stack_header[key] = self.reference_header_for_wcs[key]
+                self.current_stack_header['STACKTYP'] = (f'Drizzle Incr SUM/W ({self.drizzle_scale:.0f}x)', 'Incremental Drizzle SUM/W')
+                self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
+                self.current_stack_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle kernel used')
+                self.current_stack_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle pixfrac used')
+                self.current_stack_header['CREATOR'] = ('SeestarStacker (SUM/W)', 'Processing Software')
+                self.current_stack_header['HISTORY'] = 'Drizzle SUM/W Accumulation Initialized'
+                if self.correct_hot_pixels: self.current_stack_header['HISTORY'] = 'Hot pixel correction applied'
 
-            # Mettre à jour l'aperçu avec le nouveau cumulatif Drizzle
-            self._update_preview_incremental_drizzle() # Nouvelle méthode d'aperçu spécifique
+            # Mettre à jour NIMAGES/TOTEXP
+            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images accumulated in Drizzle SUM/W')
+            self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx exposure accumulated')
 
+            self.update_progress(f"   -> Accumulation lot {progress_info} terminée.")
+
+            # --- Mettre à jour l'aperçu ---
+            # Utilise une nouvelle méthode qui lira SUM/W et fera la division
+            print("DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Appel _update_preview_sum_w...") # Debug
+            self._update_preview_sum_w() # Nouvelle méthode d'aperçu pour SUM/W
+
+        except MemoryError as mem_err:
+             print(f"ERREUR QM [_process_incremental_drizzle_batch SUM/W]: ERREUR MÉMOIRE - {mem_err}") # Debug
+             self.update_progress(f"❌ ERREUR MÉMOIRE lors de l'accumulation du batch Drizzle.")
+             traceback.print_exc(limit=1)
+             self.processing_error = "Erreur Mémoire Accumulation Drizzle"
+             self.stop_processing = True
         except Exception as e:
+            print(f"ERREUR QM [_process_incremental_drizzle_batch SUM/W]: Exception inattendue accumulation - {e}") # Debug
             self.update_progress(f"❌ Erreur combinaison Drizzle lot {progress_info}: {e}")
             traceback.print_exc(limit=2)
-            # Compter comme échec
             self.failed_stack_count += num_files_in_batch
 
-        # 3. Nettoyer les fichiers temporaires de ce lot (TOUJOURS, sauf si debug)
-        if self.perform_cleanup: # Seulement si le nettoyage est activé
+        # --- 3. Nettoyer les fichiers temporaires du lot ---
+        if self.perform_cleanup:
+             print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Nettoyage fichiers temp lot #{current_batch_num}...") # Debug
              self._cleanup_batch_temp_files(batch_temp_filepaths)
         else:
-             self.update_progress(f"   -> Fichiers temporaires du lot {progress_info} conservés (nettoyage désactivé).")
+             print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Fichiers temp lot #{current_batch_num} conservés.") # Debug
+             self.update_progress(f"   -> Fichiers temporaires du lot {progress_info} conservés.")
+        
+        print(f"DEBUG QM [_process_incremental_drizzle_batch SUM/W]: Fin traitement lot #{current_batch_num}.") # Debug
+
+
+
+
+
+
+
 
 #################################################################################################################################################
 
@@ -1809,159 +2342,136 @@ class SeestarQueuedStacker:
 ###############################################################################################################################################
 
 
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
     def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
         """
-        Combine le résultat numpy (float32, 0-1) d'un batch traité
-        dans le stack cumulatif (self.current_stack_data).
+        [MODE SUM/W - CLASSIQUE] Accumule le résultat numpy (float32, 0-1) d'un batch classique
+        traité (par _stack_batch) dans les accumulateurs memmap SUM et WHT.
 
-        Gère l'initialisation du stack cumulatif lors du premier batch.
-        Utilise une moyenne pondérée par le nombre d'images pour combiner.
-        Tente d'utiliser CuPy pour l'accélération si disponible.
+        NOTE: Pour cette version, la pondération par qualité est ignorée.
+              Le poids accumulé est simplement le nombre d'images du batch.
 
         Args:
-            stacked_batch_data_np (np.ndarray): Image (float32, 0-1) résultant du
+            stacked_batch_data_np (np.ndarray): Image MOYENNE (float32, 0-1) résultant du
                                                 traitement du batch par _stack_batch.
             stack_info_header (fits.Header): En-tête contenant les informations
-                                             sur le traitement de ce batch (NIMAGES, TOTEXP, etc.).
+                                             sur le traitement de ce batch (NIMAGES, etc.).
         """
-        print(f"DEBUG QM [_combine_batch_result]: Début combinaison batch (data shape: {stacked_batch_data_np.shape if stacked_batch_data_np is not None else 'None'})...") # Debug
+        print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation batch classique...") # Debug
 
+        # --- Vérifications initiales ---
         if stacked_batch_data_np is None or stack_info_header is None:
-            self.update_progress("⚠️ Erreur interne: Données de batch invalides pour combinaison.")
-            print("DEBUG QM [_combine_batch_result]: Sortie précoce (données batch invalides).") # Debug
+            self.update_progress("⚠️ Erreur interne: Données batch invalides pour accumulation SUM/W.")
+            print("DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données invalides).") # Debug
             return
+        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
+             self.update_progress("❌ Erreur critique: Accumulateurs Memmap SUM/WHT non initialisés.")
+             print("ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé.") # Debug
+             # Marquer une erreur fatale ?
+             self.processing_error = "Memmap non initialisé"
+             self.stop_processing = True # Arrêter le traitement
+             return
+        if stacked_batch_data_np.shape != self.memmap_shape:
+             self.update_progress(f"❌ Incompatibilité shape batch: Attendu {self.memmap_shape}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
+             print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape batch.") # Debug
+             # Compter comme échec pour les images de ce batch ?
+             try: batch_n_error = int(stack_info_header.get('NIMAGES', 1))
+             except: batch_n_error = 1
+             self.failed_stack_count += batch_n_error
+             return
 
         try:
-            # Récupérer les informations du batch depuis l'en-tête fourni
             batch_n = int(stack_info_header.get('NIMAGES', 1))
             batch_exposure = float(stack_info_header.get('TOTEXP', 0.0))
 
-            # Vérifier si le nombre d'images est valide
             if batch_n <= 0:
-                self.update_progress(f"⚠️ Batch combiné avec {batch_n} images, ignoré.")
-                print(f"DEBUG QM [_combine_batch_result]: Sortie précoce (batch_n <= 0).") # Debug
+                self.update_progress(f"⚠️ Batch avec {batch_n} images, ignoré pour accumulation.")
+                print(f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (batch_n <= 0).") # Debug
                 return
 
-            # --- Initialisation du Stack Cumulatif (Premier Batch) ---
-            if self.current_stack_data is None:
-                print("DEBUG QM [_combine_batch_result]: Initialisation stack cumulatif (premier batch).") # Debug
-                self.update_progress("   -> Initialisation du stack cumulatif...")
-                # La première image est simplement le résultat du premier batch
-                # S'assurer que c'est bien un float32
-                self.current_stack_data = stacked_batch_data_np.astype(np.float32)
-                self.images_in_cumulative_stack = batch_n
-                self.total_exposure_seconds = batch_exposure
+            print(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation de {batch_n} images...") # Debug
 
-                # --- Créer l'en-tête initial pour le stack cumulatif ---
+            # --- Accumulation SUM ---
+            # Puisque stacked_batch_data_np est la MOYENNE du lot,
+            # le SIGNAL TOTAL du lot est Moyenne * N.
+            # On utilise float64 pour l'accumulateur temporaire pour la précision.
+            signal_total_batch = stacked_batch_data_np.astype(np.float64) * float(batch_n)
+
+            # Ajouter au memmap SUM (float32). L'assignation gère la conversion.
+            # On utilise += pour l'addition in-place sur le memmap.
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition à cumulative_sum_memmap...") # Debug
+            self.cumulative_sum_memmap[:] += signal_total_batch.astype(self.memmap_dtype_sum)
+            # Forcer l'écriture sur disque (important pour memmap !)
+            if hasattr(self.cumulative_sum_memmap, 'flush'):
+                 self.cumulative_sum_memmap.flush()
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM terminée et flushée.") # Debug
+
+            # --- Accumulation WHT ---
+            # Le poids ici est simplement le nombre d'images.
+            # On ajoute batch_n à chaque pixel du memmap WHT (uint16).
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition à cumulative_wht_memmap...") # Debug
+            self.cumulative_wht_memmap[:] += batch_n # L'addition gère le type uint16
+            # Forcer l'écriture sur disque
+            if hasattr(self.cumulative_wht_memmap, 'flush'):
+                 self.cumulative_wht_memmap.flush()
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition WHT terminée et flushée.") # Debug
+
+            # --- Mise à jour des compteurs globaux ---
+            # Note: images_in_cumulative_stack représente maintenant le *poids total* accumulé
+            # Pour l'affichage UI, on veut peut-être toujours le nombre d'images *traitées*.
+            # Gardons self.images_in_cumulative_stack pour le nombre d'images,
+            # même si ce n'est plus directement le poids pour la moyenne finale.
+            # La moyenne finale sera SUM / WHT.
+            self.images_in_cumulative_stack += batch_n # Compte le nombre d'images traitées
+            self.total_exposure_seconds += batch_exposure
+            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images={self.images_in_cumulative_stack}, exp={self.total_exposure_seconds:.1f}") # Debug
+
+            # --- Mise à jour Header Cumulatif (Minimale ici) ---
+            # On garde le header pour les métadonnées globales, mais NIMAGES/TOTEXP finaux
+            # seront recalculés/vérifiés lors de la sauvegarde finale.
+            if self.current_stack_header is None: # Initialiser si premier lot
                 self.current_stack_header = fits.Header()
-                # Tenter de récupérer le premier header du lot *original* pour copier les métadonnées
-                # Note: self.current_batch_data est vidé à la fin de _process_completed_batch,
-                # donc il faut récupérer cette info autrement ou l'ignorer ici.
-                # Pour l'instant, on copie depuis stack_info_header (moins d'infos mais ok)
-                keys_to_copy_from_batch = ['NIMAGES', 'STACKMETH', 'TOTEXP', 'KAPPA', 'WGHT_USED', 'WGHT_MET']
-                for key in keys_to_copy_from_batch:
-                    if key in stack_info_header:
-                        try: self.current_stack_header[key] = (stack_info_header[key], stack_info_header.comments[key])
-                        except KeyError: self.current_stack_header[key] = stack_info_header[key]
+                # Copier quelques infos de base une seule fois
+                first_header = stack_info_header # Ou récupérer header de la première image du lot si possible
+                keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS', 'GAIN', 'OFFSET', 'CCD-TEMP', 'RA', 'DEC', 'SITELAT', 'SITELONG', 'FOCALLEN', 'BAYERPAT']
+                for key in keys_to_copy:
+                    if first_header and key in first_header:
+                        try: self.current_stack_header[key] = (first_header[key], first_header.comments[key] if key in first_header.comments else '')
+                        except Exception: self.current_stack_header[key] = first_header[key]
+                self.current_stack_header['STACKTYP'] = (f'Classic SUM/W ({self.stacking_mode})', 'Stacking method')
+                self.current_stack_header['CREATOR'] = ('SeestarStacker (SUM/W)', 'Processing Software')
+                if self.correct_hot_pixels: self.current_stack_header['HISTORY'] = 'Hot pixel correction applied'
+                self.current_stack_header['HISTORY'] = 'SUM/W Accumulation Initialized'
 
-                # Infos générales
-                if 'STACKTYP' not in self.current_stack_header: self.current_stack_header['STACKTYP'] = (self.stacking_mode, 'Overall stacking method')
-                if 'WGHT_ON' not in self.current_stack_header: self.current_stack_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
-                self.current_stack_header['CREATOR'] = ('SeestarStacker (Queued)', 'Processing Software')
-                self.current_stack_header.add_history('Cumulative Stack Initialized')
-                if self.correct_hot_pixels: self.current_stack_header.add_history('Hot pixel correction applied to input frames')
-                print("DEBUG QM [_combine_batch_result]: Header cumulatif initial créé.") # Debug
+            # Mettre à jour NIMAGES dans le header juste pour info (sera recalculé à la fin)
+            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images processed so far')
+            self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx exposure accumulated')
 
-            # --- Combinaison avec le Stack Cumulatif Existant ---
-            else:
-                print("DEBUG QM [_combine_batch_result]: Combinaison avec stack cumulatif existant...") # Debug
-                self.update_progress("   -> Combinaison avec le stack cumulatif...")
-                # Vérifier la compatibilité des dimensions
-                if self.current_stack_data.shape != stacked_batch_data_np.shape:
-                    self.update_progress(f"❌ Incompatibilité dims stack: Cumul={self.current_stack_data.shape}, Batch={stacked_batch_data_np.shape}. Combinaison échouée.")
-                    print(f"ERREUR QM [_combine_batch_result]: Incompatibilité de dimensions.") # Debug
-                    return # Ne pas continuer si les dimensions ne correspondent pas
 
-                # Calcul des poids basé sur le nombre d'images
-                current_n = self.images_in_cumulative_stack
-                total_n = current_n + batch_n
-                w_old = current_n / total_n
-                w_new = batch_n / total_n
-                print(f"DEBUG QM [_combine_batch_result]: Poids combinaison: w_old={w_old:.3f}, w_new={w_new:.3f}") # Debug
+            # Pas de clipping ici, on accumule les sommes. Le clipping se fera sur le résultat final.
 
-                # --- Tentative de combinaison via CuPy si disponible ---
-                use_cupy_combine = _cupy_installed and check_cupy_cuda()
-                combined_np = None # Variable pour stocker le résultat (toujours NumPy)
+            print("DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée.") # Debug
 
-                if use_cupy_combine:
-                    gpu_current = None; gpu_batch = None
-                    try:
-                        print("DEBUG QM [_combine_batch_result]: Tentative combinaison CuPy...") # Debug
-                        gpu_current = cupy.asarray(self.current_stack_data, dtype=cupy.float32)
-                        gpu_batch = cupy.asarray(stacked_batch_data_np, dtype=cupy.float32)
-                        gpu_combined = (gpu_current * w_old) + (gpu_batch * w_new)
-                        combined_np = cupy.asnumpy(gpu_combined)
-                        print("DEBUG QM [_combine_batch_result]: Combinaison CuPy réussie.") # Debug
-                    except cupy.cuda.memory.OutOfMemoryError:
-                        print("Warning: GPU Out of Memory during stack combination. Falling back to CPU.") # Garder Warning
-                        use_cupy_combine = False; gc.collect(); cupy.get_default_memory_pool().free_all_blocks()
-                    except Exception as gpu_err:
-                        print(f"Warning: CuPy error during stack combination: {gpu_err}. Falling back to CPU.") # Garder Warning
-                        traceback.print_exc(limit=1); use_cupy_combine = False; gc.collect()
-                        try: cupy.get_default_memory_pool().free_all_blocks()
-                        except Exception: pass
-                    finally:
-                        del gpu_current, gpu_batch
-                        if '_cupy_installed' in globals() and _cupy_installed:
-                             try: cupy.get_default_memory_pool().free_all_blocks()
-                             except Exception: pass
-
-                # --- Combinaison via NumPy (Fallback ou si CuPy non utilisé) ---
-                if not use_cupy_combine:
-                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy (CPU)...") # Debug
-                    current_data_float = self.current_stack_data.astype(np.float32)
-                    batch_data_float = stacked_batch_data_np.astype(np.float32)
-                    combined_np = (current_data_float * w_old) + (batch_data_float * w_new)
-                    print("DEBUG QM [_combine_batch_result]: Combinaison NumPy réussie.") # Debug
-
-                # --- Mettre à jour le stack cumulatif ---
-                if combined_np is None:
-                     print("ERREUR QM [_combine_batch_result]: Échec des méthodes CPU et GPU pour combiner.") # Debug
-                     raise RuntimeError("La combinaison n'a produit aucun résultat (erreur CuPy et NumPy?).")
-
-                self.current_stack_data = combined_np.astype(np.float32)
-                print("DEBUG QM [_combine_batch_result]: Stack cumulatif mis à jour.") # Debug
-
-                # --- Mettre à jour les statistiques et l'en-tête cumulatif ---
-                self.images_in_cumulative_stack = total_n
-                self.total_exposure_seconds += batch_exposure
-                if self.current_stack_header:
-                    self.current_stack_header['NIMAGES'] = self.images_in_cumulative_stack
-                    self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Total exposure time')
-                    # self.current_stack_header.add_history(...) # Optionnel
-
-            ### MODIFICATION : Appel à ChromaticBalancer supprimé d'ici ###
-            # if self.apply_chroma_correction and self.current_stack_data is not None:
-            #    if self.current_stack_data.ndim == 3 and self.current_stack_data.shape[2] == 3:
-            #        self.update_progress("   -> Application de la correction chromatique...")
-            #        # S'assurer que chroma_balancer existe
-            #        if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
-            #             self.current_stack_data = self.chroma_balancer.normalize_stack(self.current_stack_data)
-            #             self.update_progress("   -> Correction chromatique terminée.")
-            #        else:
-            #             self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
-            ### FIN MODIFICATION ###
-
-            # --- Clip final du résultat cumulé ---
-            self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0)
-            print("DEBUG QM [_combine_batch_result]: Clipping final appliqué.") # Debug
-
+        except MemoryError as mem_err:
+             print(f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}") # Debug
+             self.update_progress(f"❌ ERREUR MÉMOIRE lors de l'accumulation du batch classique.")
+             traceback.print_exc(limit=1)
+             self.processing_error = "Erreur Mémoire Accumulation"
+             self.stop_processing = True
         except Exception as e:
-            print(f"ERREUR QM [_combine_batch_result]: Exception inattendue - {e}") # Debug
-            self.update_progress(f"❌ Erreur pendant la combinaison du résultat du batch: {e}")
+            print(f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}") # Debug
+            self.update_progress(f"❌ Erreur pendant l'accumulation du résultat du batch: {e}")
             traceback.print_exc(limit=3)
+            # Ne pas arrêter le processus complet pour une erreur d'accumulation ? Ou si ?
+            # Pour l'instant, on continue mais on log l'erreur.
+            self.failed_stack_count += batch_n # Compter les images du lot comme échec d'accumulation
 
-        print("DEBUG QM [_combine_batch_result]: Fin méthode.") # Debug
+# --- FIN de _combine_batch_result MODIFIÉ ---
+
+
 
 
 ################################################################################################################################################
@@ -2314,245 +2824,315 @@ class SeestarQueuedStacker:
 
 
 
-    def _save_final_stack(self, output_filename_suffix="", stopped_early=False):
-        """
-        Sauvegarde le stack final (classique, Drizzle, ou mosaïque) et sa prévisualisation.
-        Applique la neutralisation du fond, la correction chromatique, ET SCNR final avant sauvegarde.
-        """
-        print(f"DEBUG QM [_save_final_stack]: Début sauvegarde finale (suffix: '{output_filename_suffix}', stopped_early: {stopped_early})")
 
-        # --- Imports tardifs ---
+
+
+    def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False):
+        """
+        [MODE SUM/W] Calcule l'image finale depuis SUM/W, applique les post‑traitements,
+        le rognage, sauvegarde le stack final et sa pré‑visualisation, puis libère les memmaps.
+        """
+        print(f"DEBUG QM [_save_final_stack SUM/W]: Début sauvegarde finale "
+            f"(suffix: '{output_filename_suffix}', stopped_early: {stopped_early})")
+
+        # ------------------------------------------------------------------ #
+        # 0)  Imports optionnels (BN, SCNR, Edge‑Crop)                       #
+        # ------------------------------------------------------------------ #
         neutralize_background_func = None
+        apply_scnr_func            = None
+        apply_edge_crop_func       = None
+
         try:
             from ..tools.stretch import neutralize_background_automatic as neutralize_background_func
-            print("DEBUG QM [_save_final_stack]: Import tardif de neutralize_background_automatic réussi.")
         except ImportError:
-            print("ERREUR QM [_save_final_stack]: Échec import tardif neutralize_background_automatic. Neutralisation désactivée.")
-            self.update_progress("⚠️ Erreur interne: Fonction de neutralisation du fond non trouvée. Étape ignorée.")
+            print("ERREUR QM [_save_final_stack SUM/W]: Échec import neutralize_background_automatic.")
 
-        ### NOUVEAU : Import tardif pour SCNR ###
-        apply_scnr_func = None
         try:
             from ..enhancement.color_correction import apply_scnr as apply_scnr_func
-            print("DEBUG QM [_save_final_stack]: Import tardif de apply_scnr réussi.")
         except ImportError:
-            print("ERREUR QM [_save_final_stack]: Échec import tardif apply_scnr. SCNR final désactivé.")
-            self.update_progress("⚠️ Erreur interne: Fonction SCNR non trouvée. Étape ignorée.")
-        ### FIN NOUVEAU ###
+            print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_scnr.")
 
-        # --- 1. Choisir les Données et le Header de Base ---
-        # ... (cette partie reste identique à la version précédente) ...
-        data_to_save = None
-        header_base = None
-        image_count = 0
-        stack_type_for_filename = "unknown"
-        is_drizzle_mosaic_save = False
-
-        if self.current_stack_header and ('DRZSCALE' in self.current_stack_header or \
-                                          ('STACKTYP' in self.current_stack_header and \
-                                           ('Drizzle' in self.current_stack_header['STACKTYP'] or \
-                                            'Mosaic' in self.current_stack_header.get('STACKTYP', '')))):
-            is_drizzle_mosaic_save = True
-            if 'Mosaic' in self.current_stack_header.get('STACKTYP', ''): stack_type_for_filename = "mosaic_drizzle"
-            elif self.drizzle_mode == "Incremental": stack_type_for_filename = f"drizzle_incr_{self.drizzle_scale:.0f}x"
-            else: stack_type_for_filename = f"drizzle_final_{self.drizzle_scale:.0f}x"
-            data_to_save = self.current_stack_data
-            header_base = self.current_stack_header
-            image_count = self.images_in_cumulative_stack
-            print(f"DEBUG QM [_save_final_stack]: Mode Drizzle/Mosaic. Stack type: {stack_type_for_filename}, Img count: {image_count}")
-
-        elif self.current_stack_data is not None:
-            is_drizzle_mosaic_save = False
-            stack_type_for_filename = self.stacking_mode
-            data_to_save = self.current_stack_data
-            header_base = self.current_stack_header
-            image_count = self.images_in_cumulative_stack
-            print(f"DEBUG QM [_save_final_stack]: Mode Classique. Stack type: {stack_type_for_filename}, Img count: {image_count}")
-        
-        # --- 2. Vérifications Initiales ---
-        if data_to_save is None or self.output_folder is None:
-            self.final_stacked_path = None; print("DEBUG QM [_save_final_stack]: Sortie précoce (data_to_save ou output_folder est None).")
-            self.update_progress("ⓘ Aucun stack final à sauvegarder (données manquantes ou dossier sortie invalide)."); return
-        if image_count <= 0 and not stopped_early:
-             self.final_stacked_path = None; print(f"DEBUG QM [_save_final_stack]: Sortie précoce (image_count={image_count} <= 0 et pas stopped_early).")
-             self.update_progress("ⓘ Aucun stack final à sauvegarder (0 images combinées)."); return
-        
-        print(f"DEBUG QM [_save_final_stack]: Données à sauvegarder (avant post-traitement) - Shape: {data_to_save.shape}, Type: {data_to_save.dtype}, Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-
-        # --- Application des post-traitements couleur ---
-        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
-            data_to_save = data_to_save.astype(np.float32)
-
-            # --- 2a. Neutralisation du Fond de Ciel Automatique ---
-            if neutralize_background_func:
-                self.update_progress("Appel de la fonction Neutralisation du fond...", None)
-                print("DEBUG QM [_save_final_stack]: Appel de neutralize_background_automatic...")
-                try:
-                    data_before_bn = data_to_save.copy()
-                    data_to_save = neutralize_background_func(data_to_save) # Utilise les params par défaut de la fonction pour l'instant
-                    if data_to_save is None: data_to_save = data_before_bn; self.update_progress("⚠️ Échec neutralisation (retour None).", None)
-                    elif np.allclose(data_before_bn, data_to_save): self.update_progress("ⓘ Neutralisation du fond n'a pas modifié l'image.", None)
-                    else: self.update_progress("   -> Neutralisation du fond terminée.", None)
-                    print(f"DEBUG QM [_save_final_stack]: Données après BN - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-                except Exception as bn_err: print(f"ERREUR QM [_save_final_stack]: Erreur neutralize_background_automatic: {bn_err}"); self.update_progress(f"⚠️ Erreur neutralisation: {bn_err}.")
-            
-
-            # --- 2b. Correction Chromatique / Bord (`ChromaticBalancer`) ---
-            if self.apply_chroma_correction: # Contrôlé par la checkbox "Edge Enhance" (via settings)
-                self.update_progress("Application de la Correction Chromatique/Bord...", None)
-                print("DEBUG QM [_save_final_stack]: Appel de self.chroma_balancer.normalize_stack...")
-                try:
-                    if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
-                         data_before_cb = data_to_save.copy()
-                         data_to_save = self.chroma_balancer.normalize_stack(data_to_save)
-                         if data_to_save is None: data_to_save = data_before_cb; self.update_progress("⚠️ Échec correction chroma (retour None).", None)
-                         elif np.allclose(data_before_cb, data_to_save): self.update_progress("ⓘ Correction chromatique/bord n'a pas modifié l'image.", None)
-                         else: self.update_progress("   -> Correction chromatique/bord terminée.", None)
-                         print(f"DEBUG QM [_save_final_stack]: Données après ChromaBalance - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-                    else: self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
-                except Exception as chroma_final_err: print(f"ERREUR QM [_save_final_stack]: Erreur ChromaticBalancer: {chroma_final_err}"); self.update_progress(f"⚠️ Erreur correction chromatique: {chroma_final_err}.")
-                        # 2b. Correction Chromatique / Bord
-            if self.apply_chroma_correction:
-                # ... (logique appel self.chroma_balancer.normalize_stack identique) ...
-                self.update_progress("Application de la Correction Chromatique/Bord...", None); print("DEBUG QM [_save_final_stack]: Appel de self.chroma_balancer.normalize_stack...")
-                try:
-                    if hasattr(self, 'chroma_balancer') and self.chroma_balancer:
-                         data_before_cb = data_to_save.copy(); data_to_save = self.chroma_balancer.normalize_stack(data_to_save)
-                         if data_to_save is None: data_to_save = data_before_cb; self.update_progress("⚠️ Échec correction chroma (retour None).", None)
-                         elif np.allclose(data_before_cb, data_to_save): self.update_progress("ⓘ Correction chromatique/bord n'a pas modifié l'image.", None)
-                         else: self.update_progress("   -> Correction chromatique/bord terminée.", None)
-                         print(f"DEBUG QM [_save_final_stack]: Données après ChromaBalance - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-                    else: self.update_progress("   -> AVERTISSEMENT: Instance ChromaticBalancer non trouvée.")
-                except Exception as chroma_final_err: print(f"ERREUR QM [_save_final_stack]: Erreur ChromaticBalancer: {chroma_final_err}"); self.update_progress(f"⚠️ Erreur correction chromatique: {chroma_final_err}.")
-
-            ### MODIFIÉ : Utilisation des paramètres SCNR de self ###
-            # Remplacer apply_final_scnr_hardcoded_for_test par self.apply_final_scnr
-            # Remplacer final_scnr_amount_hardcoded_for_test par self.final_scnr_amount
-            if self.apply_final_scnr and apply_scnr_func and data_to_save is not None:
-                self.update_progress(f"Application SCNR final ({self.final_scnr_target_channel}, Amount: {self.final_scnr_amount:.2f})...", None)
-                print(f"DEBUG QM [_save_final_stack]: Appel de apply_scnr (final) avec Amount={self.final_scnr_amount}, PreserveLum={self.final_scnr_preserve_luminosity}...")
-                try:
-                    data_before_scnr = data_to_save.copy()
-                    data_to_save = apply_scnr_func(
-                        data_to_save,
-                        target_channel=self.final_scnr_target_channel, # Utilise l'attribut de self
-                        amount=self.final_scnr_amount,                 # Utilise l'attribut de self
-                        preserve_luminosity=self.final_scnr_preserve_luminosity # Utilise l'attribut de self
-                    )
-                    if data_to_save is None: data_to_save = data_before_scnr; self.update_progress("⚠️ Échec SCNR final (retour None).", None)
-                    elif np.allclose(data_before_scnr, data_to_save): self.update_progress("ⓘ SCNR final n'a pas modifié l'image.", None)
-                    else: self.update_progress("   -> SCNR final terminé.", None)
-                    print(f"DEBUG QM [_save_final_stack]: Données après SCNR Final - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-                except Exception as scnr_final_err:
-                    print(f"ERREUR QM [_save_final_stack]: Erreur pendant SCNR final: {scnr_final_err}")
-                    self.update_progress(f"⚠️ Erreur SCNR final: {scnr_final_err}. Étape ignorée.")
-            elif self.apply_final_scnr and not apply_scnr_func:
-                print("DEBUG QM [_save_final_stack]: SCNR final demandé mais fonction non importée.")
-            
-
-            ### NOUVEAU : 2c. Application SCNR Final Optionnel ###
-            # Pour l'instant, on active SCNR par défaut pour ce test avec un amount fixe.
-            # Plus tard, self.apply_final_scnr et self.final_scnr_amount viendront des settings/UI.
-            apply_final_scnr_hardcoded_for_test = True # <<< METTEZ True POUR TESTER SCNR
-            final_scnr_amount_hardcoded_for_test = 0.8 # <<< Amount (0.0 à 1.0)
-
-            if apply_final_scnr_hardcoded_for_test and apply_scnr_func and data_to_save is not None:
-                self.update_progress("Application SCNR final (Vert)...", None)
-                print("DEBUG QM [_save_final_stack]: Appel de apply_scnr (final)...")
-                try:
-                    data_before_scnr = data_to_save.copy()
-                    data_to_save = apply_scnr_func(data_to_save, target_channel='green', amount=final_scnr_amount_hardcoded_for_test)
-                    if data_to_save is None: data_to_save = data_before_scnr; self.update_progress("⚠️ Échec SCNR final (retour None).", None)
-                    elif np.allclose(data_before_scnr, data_to_save): self.update_progress("ⓘ SCNR final n'a pas modifié l'image.", None)
-                    else: self.update_progress("   -> SCNR final terminé.", None)
-                    print(f"DEBUG QM [_save_final_stack]: Données après SCNR Final - Min: {np.nanmin(data_to_save):.3f}, Max: {np.nanmax(data_to_save):.3f}")
-                except Exception as scnr_final_err:
-                    print(f"ERREUR QM [_save_final_stack]: Erreur pendant SCNR final: {scnr_final_err}")
-                    self.update_progress(f"⚠️ Erreur SCNR final: {scnr_final_err}. Étape ignorée.")
-            elif apply_final_scnr_hardcoded_for_test and not apply_scnr_func:
-                print("DEBUG QM [_save_final_stack]: SCNR final demandé mais fonction non importée.")
-            ### FIN NOUVEAU ###
-
-        # --- Rognage (si configuré) ---
-        # ... (votre code de rognage, s'il est ici, reste le même) ...
-        # Exemple :
-        # crop_percent_val = getattr(self, 'edge_crop_percent_from_settings', 0.00)
-        # if data_to_save is not None and isinstance(crop_percent_val, (float, int)) and crop_percent_val > 0.0:
-        #     # ... (logique de rognage) ...
-
-
-        # --- 3. Construire le Nom de Fichier ---
-        # ... (cette partie reste identique) ...
-        base_name = "stack_final"; weight_suffix = "_wght" if self.use_quality_weighting and not is_drizzle_mosaic_save else ""
-        current_op_suffix = str(output_filename_suffix) if output_filename_suffix else ""; final_suffix = f"{weight_suffix}{current_op_suffix}"
-        self.final_stacked_path = os.path.join(self.output_folder, f"{base_name}_{stack_type_for_filename}{final_suffix}.fit")
-        preview_path = os.path.splitext(self.final_stacked_path)[0] + ".png"
-        print(f"DEBUG QM [_save_final_stack]: Chemin FITS final: {self.final_stacked_path}")
-        print(f"DEBUG QM [_save_final_stack]: Chemin PNG preview: {preview_path}")
-
-        # --- 4. Sauvegarde Fichier FITS et PNG ---
         try:
-            final_header = header_base.copy() if header_base else fits.Header()
-            # --- Mise à jour header (identique) ---
-            final_header['NIMAGES'] = (image_count, 'Images combined in final stack') # ... etc.
-            final_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time')
-            final_header['ALIGNED'] = (self.aligned_files_count, 'Successfully aligned images')
-            final_header['FAILALIGN'] = (self.failed_align_count, 'Failed alignments')
-            final_header['FAILSTACK'] = (self.failed_stack_count, 'Files skipped due to stack/combine errors')
-            final_header['SKIPPED'] = (self.skipped_files_count, 'Other skipped/error files')
-            if not is_drizzle_mosaic_save:
-                final_header['STACKTYP'] = (self.stacking_mode, 'Stacking method')
-                if self.stacking_mode in ["kappa-sigma", "winsorized-sigma"]: final_header['KAPPA'] = (self.kappa, 'Kappa value for clipping')
-                for k in ['DRZSCALE', 'DRZKERNEL', 'DRZPIXFR', 'DRZMODE']:
-                    if k in final_header: del final_header[k]
-            else:
-                if 'STACKTYP' not in final_header: final_header['STACKTYP'] = (stack_type_for_filename, 'Stacking/Processing method')
-                if 'DRZSCALE' not in final_header: final_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle Scale Factor')
-                if 'DRZKERNEL' not in final_header: final_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle Kernel')
-                if 'DRZPIXFR' not in final_header: final_header['DRZPIXFR'] = (self.drizzle_pixfrac, 'Drizzle Pixfrac')
-                if 'DRZMODE' not in final_header and self.drizzle_mode : final_header['DRZMODE'] = (self.drizzle_mode, 'Drizzle Mode (Final/Incremental)')
-            if 'WGHT_ON' not in final_header: final_header['WGHT_ON'] = (self.use_quality_weighting, 'Quality weighting status')
-            if self.use_quality_weighting and 'WGHT_MET' not in final_header:
-                 w_metrics = [];
-                 if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
-                 if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
-                 final_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-            # --- FIN MODIFIÉ : Ajout info SCNR au header si appliqué ---
-            if apply_final_scnr_hardcoded_for_test: # Si SCNR a été tenté
-                final_header['SCNR_APP'] = (True, 'SCNR (Green) applied to final stack')
-                final_header['SCNR_AMT'] = (final_scnr_amount_hardcoded_for_test, 'SCNR amount factor')
-            # --- FIN MODIFIÉ ---
-            try: # Nettoyage historique
-                if 'HISTORY' in final_header:
-                    history_entries = list(final_header['HISTORY']);
-                    filtered_history = [h for h in history_entries if not isinstance(h, str) or ('Intermediate save' not in h and 'Cumulative Stack Initialized' not in h and 'Batch' not in h)]
-                    while 'HISTORY' in final_header: del final_header['HISTORY']
-                    for entry in filtered_history: final_header.add_history(entry)
-            except Exception: pass
-            history_msg = f'Final Stack Saved by SeestarStacker (Mode: {stack_type_for_filename})'
-            if stopped_early: history_msg += ' - Stopped Early'
-            final_header.add_history(history_msg)
-            # --- Fin Préparation Header ---
+            from ..enhancement.stack_enhancement import apply_edge_crop as apply_edge_crop_func
+        except ImportError:
+            print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_edge_crop.")
 
-            print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS vers {self.final_stacked_path}...")
-            save_fits_image(data_to_save, self.final_stacked_path, final_header, overwrite=True)
-            print("DEBUG QM [_save_final_stack]: Sauvegarde FITS terminée.")
-
-            print(f"DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG vers {preview_path}...")
-            # Pour le PNG, on veut toujours le meilleur étirement possible, indépendamment de SCNR sur FITS
-            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True)
-            print("DEBUG QM [_save_final_stack]: Sauvegarde Preview PNG terminée.")
-
-            self.update_progress(f"✅ Stack final sauvegardé ({image_count} images)")
-
-        except Exception as e:
-            print(f"ERREUR QM [_save_final_stack]: Échec sauvegarde FITS/PNG: {e}")
-            self.update_progress(f"⚠️ Erreur sauvegarde stack final: {e}")
-            traceback.print_exc(limit=2)
+        # ... (Section 1: Sécurité - inchangée) ...
+        if (self.cumulative_sum_memmap is None
+                or self.cumulative_wht_memmap is None
+                or self.output_folder is None):
             self.final_stacked_path = None
-            print("DEBUG QM [_save_final_stack]: final_stacked_path mis à None en raison d'erreur sauvegarde.")
+            print("DEBUG QM [_save_final_stack SUM/W]: Sortie précoce "
+                "(memmap/output_folder non défini).")
+            self.update_progress("ⓘ Aucun stack final (accumulateurs/dossier sortie invalide).")
+            self._close_memmaps()
+            return
+
+        image_count = self.images_in_cumulative_stack
+        if image_count <= 0 and not stopped_early:
+            self.final_stacked_path = None
+            print(f"DEBUG QM [_save_final_stack SUM/W]: Sortie précoce (image_count={image_count}).")
+            self.update_progress("ⓘ Aucun stack final (0 images accumulées).")
+            self._close_memmaps()
+            return
+        print(f"DEBUG QM [_save_final_stack SUM/W]: Image count = {image_count}")
+
+        # ... (Section 2: Lecture memmaps & calcul stack final - inchangée) ...
+        try:
+            print("DEBUG QM [_save_final_stack SUM/W]: Lecture finale memmaps SUM/WHT…")
+            final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
+            final_wht = np.array(self.cumulative_wht_memmap, dtype=np.float64)
+            self._close_memmaps()
+
+            print("DEBUG QM [_save_final_stack SUM/W]: Calcul image moyenne (SUM/WHT)…")
+            epsilon             = 1e-9
+            wht_broadcasted     = np.maximum(final_wht, epsilon)[:, :, np.newaxis]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                final_raw       = final_sum / wht_broadcasted
+            final_raw           = np.nan_to_num(final_raw, nan=0.0, posinf=0.0, neginf=0.0)
+            min_r, max_r        = np.nanmin(final_raw), np.nanmax(final_raw)
+            if max_r > min_r:
+                final_image     = (final_raw - min_r) / (max_r - min_r)
+            else:
+                final_image     = np.zeros_like(final_raw)
+            final_image         = np.clip(final_image, 0.0, 1.0).astype(np.float32)
+            del final_sum, final_wht, wht_broadcasted, final_raw
+            gc.collect()
+        except Exception as e_calc:
+            print(f"ERREUR QM [_save_final_stack SUM/W]: Erreur calcul final SUM/W - {e_calc}")
+            traceback.print_exc(limit=2)
+            self.update_progress(f"❌ Erreur lors du calcul final SUM/W: {e_calc}")
+            self.processing_error = f"Erreur Calcul Final: {e_calc}"
+            self._close_memmaps() # Assurer la fermeture même si erreur
+            return
+        if final_image is None:
+            self.final_stacked_path = None
+            print("DEBUG QM [_save_final_stack SUM/W]: Échec calcul final SUM/W.")
+            self.update_progress("ⓘ Aucun stack final (échec calcul SUM/W).")
+            return
+
+        data_to_save = final_image
+        print("DEBUG QM [_save_final_stack SUM/W]: Données pour post‑traitement - "
+            f"Shape: {data_to_save.shape}, Min: {np.nanmin(data_to_save):.3f}, "
+            f"Max: {np.nanmax(data_to_save):.3f}")
+        background_model_photutils = None
+
+        # ------------------------------------------------------------------ #
+        # 3)  Post‑traitements (Photutils BN, BN couleur, CB, SCNR, etc.)    #
+        # ------------------------------------------------------------------ #
+        print(f"DEBUG QM _save_final_stack: CHECK Photutils -> apply_flag={getattr(self, 'apply_photutils_bn', 'FLAG_NON_DEFINI')}, lib_available={_PHOTOUTILS_BG_SUB_AVAILABLE}")
+        if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
+            print("DEBUG QM [_save_final_stack SUM/W]: Appel subtract_background_2d (Photutils)…")
+            self.update_progress("Soustraction de Fond 2D (Photutils)…", None)
+            try:
+                box   = getattr(self, 'photutils_bn_box_size', 128)
+                filt  = getattr(self, 'photutils_bn_filter_size', 5)
+                sigma = getattr(self, 'photutils_bn_sigma_clip', 3.0)
+                excl  = getattr(self, 'photutils_bn_exclude_percentile', 98.0)
+                data_corr, bkg_model = subtract_background_2d(data_to_save, box_size=box, filter_size=filt, sigma_clip_val=sigma, exclude_percentile=excl)
+                if data_corr is not None:
+                    data_to_save = data_corr; background_model_photutils = bkg_model
+                    mn, mx = np.nanmin(data_to_save), np.nanmax(data_to_save)
+                    print("DEBUG QM [_save_final_stack SUM/W]: Données après Photutils BN - Range avant re‑norm: [{mn:.3f}, {mx:.3f}]")
+                    if mx > mn: data_to_save = (data_to_save - mn) / (mx - mn)
+                    else: data_to_save = np.zeros_like(data_to_save)
+                    data_to_save = np.clip(data_to_save, 0.0, 1.0).astype(np.float32)
+                    self.update_progress("   -> Soustraction de Fond 2D terminée.", None)
+                else: self.update_progress("⚠️ Échec Soustraction de Fond 2D, étape ignorée.", None)
+            except Exception as photutils_err:
+                print(f"ERREUR QM [_save_final_stack SUM/W]: Erreur pendant subtract_background_2d: {photutils_err}"); self.update_progress(f"⚠️ Erreur Soustraction Fond 2D: {photutils_err}. Étape ignorée.")
+        elif getattr(self, 'apply_photutils_bn', False) and not _PHOTOUTILS_BG_SUB_AVAILABLE:
+            self.update_progress("⚠️ Soustraction Fond 2D demandée mais Photutils indisponible.", None)
+
+        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
+            if neutralize_background_func:
+                print("DEBUG QM [_save_final_stack SUM/W]: Appel neutralize_background_automatic…")
+                try:
+                    rows, cols = (16, 16); parts = self.bn_grid_size_str.split('x')
+                    if len(parts) == 2: rows, cols = int(parts[0]), int(parts[1])
+                    data_to_save = neutralize_background_func(data_to_save, grid_size=(rows, cols), bg_percentile_low=self.bn_perc_low, bg_percentile_high=self.bn_perc_high, std_factor_threshold=self.bn_std_factor, min_applied_gain=self.bn_min_gain, max_applied_gain=self.bn_max_gain)
+                except Exception as bn_err: print(f"ERREUR QM: Erreur BN: {bn_err}"); self.update_progress(f"⚠️ Erreur neutralisation: {bn_err}.")
+            if self.apply_chroma_correction and hasattr(self, 'chroma_balancer'):
+                print("DEBUG QM [_save_final_stack SUM/W]: Appel chroma_balancer.normalize_stack…")
+                try:
+                    cb = self.chroma_balancer; cb.border_size = self.cb_border_size; cb.blur_radius = self.cb_blur_radius
+                    cb.r_factor_min = getattr(self, 'cb_min_r_factor', 0.7); cb.r_factor_max = getattr(self, 'cb_max_r_factor', 1.3)
+                    cb.b_factor_min = self.cb_min_b_factor; cb.b_factor_max = self.cb_max_b_factor
+                    data_to_save = cb.normalize_stack(data_to_save)
+                except Exception as cb_err: print(f"ERREUR QM: Erreur chroma balancer: {cb_err}"); self.update_progress(f"⚠️ Erreur correction chroma: {cb_err}.")
+            if self.apply_final_scnr and apply_scnr_func:
+                print(f"DEBUG QM [_save_final_stack SUM/W]: Appel apply_scnr (final) Amount={self.final_scnr_amount}…")
+                try: data_to_save = apply_scnr_func(data_to_save, target_channel=self.final_scnr_target_channel, amount=self.final_scnr_amount, preserve_luminosity=self.final_scnr_preserve_luminosity)
+                except Exception as scnr_err: print(f"ERREUR QM: Erreur SCNR: {scnr_err}"); self.update_progress(f"⚠️ Erreur SCNR final: {scnr_err}.")
+
+        # ------------------------------------------------------------------ #
+        # 4)  Header FITS & éventuel rognage                                 #
+        # ------------------------------------------------------------------ #
+        final_header = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
+        final_header['NIMAGES'] = (image_count, 'Images contributing to final stack (SUM/W)')
+        final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time (SUM/W)')
+        stack_type_actual = final_header.get('STACKTYP', 'SUM_W_unknown')
+        if 'SUM/W' not in stack_type_actual: stack_type_actual = f"{stack_type_actual} SUM/W"
+        final_header['STACKTYP'] = (stack_type_actual, 'SUM/W based stacking method')
+
+        # --- AJOUT DES PARAMÈTRES EXPERT AU HEADER ---
+        #    (Doit être fait AVANT l'ajout du commentaire Photutils qui dépend de BN_GRID)
+        print("DEBUG QM [_save_final_stack SUM/W]: Ajout des paramètres Expert au header FITS...")
+        final_header.add_comment("--- Expert Settings ---")
+        # BN
+        final_header['BN_GRID'] = (str(self.bn_grid_size_str), "BN: Grid size (RxC)")
+        final_header['BN_PLOW'] = (int(self.bn_perc_low), "BN: Background Percentile Low")
+        final_header['BN_PHIGH'] = (int(self.bn_perc_high), "BN: Background Percentile High")
+        final_header['BN_STD_F'] = (float(self.bn_std_factor), "BN: Background StdDev Factor")
+        final_header['BN_MING'] = (float(self.bn_min_gain), "BN: Min Gain Applied")
+        final_header['BN_MAXG'] = (float(self.bn_max_gain), "BN: Max Gain Applied")
+        # CB
+        final_header['CB_BORD'] = (int(self.cb_border_size), "CB: Border size (px)")
+        final_header['CB_BLUR'] = (int(self.cb_blur_radius), "CB: Blur radius (px)")
+        final_header['CB_MINBF'] = (float(self.cb_min_b_factor), "CB: Min Blue Factor")
+        final_header['CB_MAXBF'] = (float(self.cb_max_b_factor), "CB: Max Blue Factor")
+        # Crop
+        final_header['CROP_PCT'] = (float(self.final_edge_crop_percent_decimal * 100.0), "Final Edge Crop (%)")
+        # --- FIN AJOUT PARAMÈTRES EXPERT ---
+
+        # --- AJOUT : Mots-clés Expert Photutils BN au Header ---
+        if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
+            # S'assurer que BN_GRID existe maintenant si on veut mettre le commentaire avant.
+            # Si BN_GRID n'a pas été ajouté (ex: si ce n'est pas une image couleur),
+            # on peut omettre `before` ou choisir un autre mot-clé de référence.
+            # Pour plus de robustesse, on vérifie si BN_GRID existe avant de l'utiliser dans `before`.
+            before_keyword_for_photutils_comment = 'BN_GRID' if 'BN_GRID' in final_header else None
+            final_header.add_comment("--- Photutils Background Subtraction ---", before=before_keyword_for_photutils_comment)
+            final_header['PB_APP'] = (True, "Photutils Background2D Applied")
+            final_header['PB_BOX'] = (getattr(self, 'photutils_bn_box_size', 128), "Photutils: Box Size (px)")
+            final_header['PB_FILT'] = (getattr(self, 'photutils_bn_filter_size', 5), "Photutils: Filter Size (px, odd)")
+            final_header['PB_SIG'] = (getattr(self, 'photutils_bn_sigma_clip', 3.0), "Photutils: Sigma Clip value")
+            final_header['PB_EXCP'] = (getattr(self, 'photutils_bn_exclude_percentile', 98.0), "Photutils: Exclude Brightest Percentile")
+
+        if self.apply_final_scnr:
+            final_header['SCNR_APP'] = (True, 'SCNR applied')
+            final_header['SCNR_TRG'] = (self.final_scnr_target_channel, 'SCNR target')
+            final_header['SCNR_AMT'] = (self.final_scnr_amount, 'SCNR amount')
+            final_header['SCNR_LUM'] = (self.final_scnr_preserve_luminosity, 'SCNR lum preserved')
+
+        if (apply_edge_crop_func and getattr(self, 'final_edge_crop_percent_decimal', 0.0) > 0.0):
+            print("DEBUG QM [_save_final_stack SUM/W]: Rognage final demandé…")
+            self.update_progress("Rognage final des bords…", None)
+            try:
+                before_shape = data_to_save.shape
+                data_to_save = apply_edge_crop_func(data_to_save, self.final_edge_crop_percent_decimal)
+                if data_to_save is None: # Si apply_edge_crop retourne None en cas d'erreur
+                    self.update_progress("⚠️ Échec rognage, utilisation de l'image non rognée.", None)
+                    # Il faudrait récupérer data_to_save d'avant l'appel à apply_edge_crop
+                    # Pour l'instant, on ne fait rien, ce qui signifie que si crop échoue, on continue avec data_to_save=None
+                    # ce qui causera une erreur à la sauvegarde. Mieux:
+                    # data_to_save = final_image # Revenir à l'image avant tentative de crop
+                    # Le plus simple est de s'assurer que apply_edge_crop retourne l'original si erreur.
+                    # (Actuellement, il retourne l'original, donc data_to_save ne devrait pas être None ici)
+                    if data_to_save is None and final_image is not None : data_to_save = final_image.copy() # Sécurité
+                    else: self.update_progress("⚠️ Échec rognage, et image originale non disponible.", None); return # Ne pas sauvegarder si échec critique
+
+            except Exception as crop_err:
+                print(f"ERREUR QM: Erreur rognage: {crop_err}"); self.update_progress(f"⚠️ Erreur rognage: {crop_err}.")
+                if final_image is not None : data_to_save = final_image.copy() # Revenir à l'original
+                else: self.update_progress("⚠️ Échec rognage, et image originale non disponible.", None); return
+
+
+        # ... (Sections 5, 6, 7: Nom de fichier, Sauvegarde FITS, Sauvegarde Preview - inchangées) ...
+        stack_type_for_filename = "classic_sumw"
+        if self.current_stack_header and 'STACKTYP' in self.current_stack_header:
+            fn_part = str(final_header['STACKTYP']).split('(')[0].strip()
+            fn_part = fn_part.replace(' ', '_').replace('/', '_').lower()
+            stack_type_for_filename = f"{fn_part}_sumw"
+        base_name = "stack_final"
+        final_suffix_cleaned = f"{output_filename_suffix}".replace('_sumw', '')
+        fits_path = os.path.join(self.output_folder, f"{base_name}_{stack_type_for_filename}{final_suffix_cleaned}.fit")
+        preview_path  = os.path.splitext(fits_path)[0] + ".png"
+        self.final_stacked_path = fits_path
+        print(f"DEBUG QM [_save_final_stack SUM/W]: Chemin FITS final: {fits_path}")
+
+        try:
+            if (getattr(self, 'apply_photutils_bn', False) and background_model_photutils is not None and _PHOTOUTILS_BG_SUB_AVAILABLE): # Vérifier _PHOTOUTILS_BG_SUB_AVAILABLE
+                primary_hdu = fits.PrimaryHDU(data_to_save.astype(np.float32), header=final_header)
+                bkg_hdu_data = None
+                if background_model_photutils.ndim == 3 and background_model_photutils.shape[2] == 3:
+                    bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32)
+                elif background_model_photutils.ndim == 2:
+                    bkg_hdu_data = background_model_photutils.astype(np.float32)
+                
+                if bkg_hdu_data is not None:
+                    bkg_hdu = fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL")
+                    fits.HDUList([primary_hdu, bkg_hdu]).writeto(fits_path, overwrite=True, checksum=True)
+                else: # Fallback si bkg_model n'a pas pu être traité
+                    save_fits_image(data_to_save, fits_path, final_header, overwrite=True)
+            else:
+                save_fits_image(data_to_save, fits_path, final_header, overwrite=True)
+            print("DEBUG QM [_save_final_stack SUM/W]: Sauvegarde FITS OK.")
+        except Exception as save_err:
+            print(f"ERREUR QM: Échec sauvegarde FITS: {save_err}"); traceback.print_exc(limit=2)
+            self.update_progress(f"⚠️ Erreur sauvegarde FITS: {save_err}"); return
+
+        try:
+            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True)
+            print("DEBUG QM [_save_final_stack SUM/W]: Sauvegarde Preview PNG OK.")
+            self.update_progress(f"✅ Stack final SUM/W sauvegardé ({image_count} images)")
+        except Exception as prev_err:
+            print(f"ERREUR QM: Échec sauvegarde PNG: {prev_err}"); self.update_progress(f"⚠️ Erreur sauvegarde preview: {prev_err}")
+
+        print("DEBUG QM [_save_final_stack SUM/W]: Fin méthode.")
+
+
+
+
+
+
+
+
+
+#############################################################################################################################################################
+    def _close_memmaps(self):
+        """Ferme proprement les objets memmap s'ils existent."""
+        print("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
+        closed_sum = False
+        if hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None:
+            try:
+                # La documentation suggère que la suppression de la référence devrait suffire
+                # mais un appel explicite à close() existe sur certaines versions/objets
+                if hasattr(self.cumulative_sum_memmap, '_mmap') and self.cumulative_sum_memmap._mmap is not None:
+                     self.cumulative_sum_memmap._mmap.close()
+                # Supprimer la référence pour permettre la libération des ressources
+                del self.cumulative_sum_memmap
+                self.cumulative_sum_memmap = None
+                closed_sum = True
+                print("DEBUG QM [_close_memmaps]: Référence memmap SUM supprimée.")
+            except Exception as e_close_sum:
+                print(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap SUM: {e_close_sum}")
         
-        print("DEBUG QM [_save_final_stack]: Fin méthode.")
+        closed_wht = False
+        if hasattr(self, 'cumulative_wht_memmap') and self.cumulative_wht_memmap is not None:
+            try:
+                if hasattr(self.cumulative_wht_memmap, '_mmap') and self.cumulative_wht_memmap._mmap is not None:
+                     self.cumulative_wht_memmap._mmap.close()
+                del self.cumulative_wht_memmap
+                self.cumulative_wht_memmap = None
+                closed_wht = True
+                print("DEBUG QM [_close_memmaps]: Référence memmap WHT supprimée.")
+            except Exception as e_close_wht:
+                print(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap WHT: {e_close_wht}")
+        
+        # Optionnel: Essayer de supprimer les fichiers .npy si le nettoyage est activé
+        # Cela devrait être fait dans le bloc finally de _worker après l'appel à _save_final_stack
+        # if self.perform_cleanup:
+        #      if self.sum_memmap_path and os.path.exists(self.sum_memmap_path):
+        #          try: os.remove(self.sum_memmap_path); print("DEBUG: Fichier SUM.npy supprimé.")
+        #          except Exception as e: print(f"WARN: Erreur suppression SUM.npy: {e}")
+        #      if self.wht_memmap_path and os.path.exists(self.wht_memmap_path):
+        #          try: os.remove(self.wht_memmap_path); print("DEBUG: Fichier WHT.npy supprimé.")
+        #          except Exception as e: print(f"WARN: Erreur suppression WHT.npy: {e}")
+
+# --- FIN de _save_final_stack et ajout de _close_memmaps ---
+
+
 
 
 
@@ -2703,151 +3283,247 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
-  
+
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
                          initial_additional_folders=None,
-                         # --- Arguments Stacking Classique ---
-                         stacking_mode="kappa-sigma", # Valeur par défaut si non fournie
-                         kappa=2.5,                 # Valeur par défaut si non fournie
-                         # --- Arguments Communs ---
-                         batch_size=10,             # Utiliser une valeur > 0 par défaut ici
-                         correct_hot_pixels=True,
-                         hot_pixel_threshold=3.0,
-                         neighborhood_size=5,
-                         bayer_pattern="GRBG",
-                         perform_cleanup=True,
-                         # --- Arguments Pondération ---
+                         # ... (tous les autres paramètres comme avant, y compris SCNR) ...
+                         stacking_mode="kappa-sigma", kappa=2.5,
+                         batch_size=10, correct_hot_pixels=True, hot_pixel_threshold=3.0,
+                         neighborhood_size=5, bayer_pattern="GRBG", perform_cleanup=True,
                          use_weighting=False, weight_snr=True, weight_stars=True,
                          snr_exp=1.0, stars_exp=0.5, min_w=0.1,
-                         # --- Arguments Drizzle ---
                          use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7,
                          drizzle_mode="Final", drizzle_kernel="square", drizzle_pixfrac=1.0,
-                         # --- Argument Correction Chroma ---
                          apply_chroma_correction=True,
-                         ### NOUVEAU : Arguments SCNR Final ###
-                         apply_final_scnr=False,
-                         final_scnr_target_channel='green', # Garder 'green' par défaut pour l'instant
-                         final_scnr_amount=0.8,
-                         final_scnr_preserve_luminosity=True,
+                         apply_final_scnr=False, final_scnr_target_channel='green',
+                         final_scnr_amount=0.8, final_scnr_preserve_luminosity=True,
+                         ### Arguments pour Paramètres Expert ###
+                         bn_grid_size_str="16x16", bn_perc_low=5, bn_perc_high=30,
+                         bn_std_factor=1.0, bn_min_gain=0.2, bn_max_gain=7.0,
+                         cb_border_size=25, cb_blur_radius=8,
+                         cb_min_b_factor=0.4, cb_max_b_factor=1.5,
+                         final_edge_crop_percent=2.0, # En pourcentage
+                         ### Arguments pour Paramètres Photutils BN ###
+                         apply_photutils_bn=False,
+                         photutils_bn_box_size=128,
+                         photutils_bn_filter_size=5,
+                         photutils_bn_sigma_clip=3.0,
+                         photutils_bn_exclude_percentile=98.0,
                          ### FIN NOUVEAU ###
-                         # --- Arguments Mosaïque ---
-                         is_mosaic_run=False,
-                         api_key=None,
-                         mosaic_settings=None, *args, **kwargs):
+                         ### FIN expert ###
+                         is_mosaic_run=False, api_key=None, mosaic_settings=None):
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MAJ: Signature complète, ordre d'initialisation corrigé, accepte tous les args.
+        MAJ: Intègre l'initialisation pour SUM/W memmap.
         """
-        print("DEBUG (Backend start_processing): Début tentative démarrage...")
-        print(f"   -> Args reçus: is_mosaic_run={is_mosaic_run}, use_drizzle={use_drizzle}, drizzle_mode={drizzle_mode}, stacking_mode={stacking_mode}, api_key={'Oui' if api_key else 'Non'}, mosaic_settings={mosaic_settings}") # Log initial
+        print("DEBUG (Backend start_processing SUM/W): Début tentative démarrage...")
+        # ... (log des args reçus comme avant) ...
+        print(f"   -> Args SCNR reçus: Apply={apply_final_scnr}, Target={final_scnr_target_channel}, Amount={final_scnr_amount}, PreserveLum={final_scnr_preserve_luminosity}")
 
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
             return False
 
-        # 1. Réinitialiser l'état et préparer les dossiers/variables de base
-        print("DEBUG (Backend start_processing): Appel à self.initialize()...")
+        # 1. Reset flag stop et définir dossier courant (comme avant)
         self.stop_processing = False
         self.current_folder = os.path.abspath(input_dir)
-        # L'appel à initialize() réinitialise de nombreux attributs !
-        if not self.initialize(output_dir):
+        
+        # --- 2. Préparation de la Référence et Obtention de la SHAPE ---
+        #    (On a besoin de la shape AVANT d'appeler initialize pour les memmaps)
+        print("DEBUG (Backend start_processing SUM/W): Étape 2 - Préparation référence & shape...")
+        reference_image_data_for_shape = None 
+        reference_header_for_shape = None 
+        ref_shape_hwc = None                  # Shape finale (H,W,C) pour memmap
+
+        try:
+            # Construire la liste des dossiers potentiels où trouver une image pour la shape
+            potential_folders_for_shape = []
+            if self.current_folder and os.path.isdir(self.current_folder): # Dossier principal d'input
+                potential_folders_for_shape.append(self.current_folder)
+            
+            if initial_additional_folders: # Dossiers additionnels passés au démarrage
+                for add_f in initial_additional_folders:
+                    abs_add_f = os.path.abspath(add_f)
+                    if abs_add_f and os.path.isdir(abs_add_f) and abs_add_f not in potential_folders_for_shape:
+                        potential_folders_for_shape.append(abs_add_f)
+
+            if not potential_folders_for_shape:
+                raise RuntimeError("Aucun dossier d'entrée (principal ou additionnel) valide fourni pour trouver une image de référence.")
+
+            current_folder_to_scan_for_shape = None
+            files_in_folder_for_shape = []
+
+            for folder_path in potential_folders_for_shape:
+                print(f"DEBUG QM [start_processing SUM/W]: Scan pour FITS dans: {folder_path}")
+                temp_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.fit', '.fits'))])
+                if temp_files:
+                    files_in_folder_for_shape = temp_files
+                    current_folder_to_scan_for_shape = folder_path
+                    print(f"DEBUG QM [start_processing SUM/W]: Fichiers FITS trouvés dans '{os.path.basename(current_folder_to_scan_for_shape)}' pour déterminer la shape.")
+                    break # On a trouvé un dossier avec des fichiers
+
+            if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
+                # Si reference_path_ui est fourni ET valide, on pourrait essayer de l'utiliser directement pour la shape
+                # mais _get_reference_image a besoin d'un dossier et d'une liste de fichiers pour son mode auto fallback.
+                # Donc, si aucun fichier n'est trouvé dans les dossiers, on lève une erreur, même si reference_path_ui existe.
+                # L'utilisateur doit fournir au moins un dossier avec des images.
+                raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée spécifiés pour déterminer la shape de référence.")
+
+            # Configurer l'aligneur (celui de l'instance, pas un temporaire)
+            # car il sera utilisé ensuite dans _worker pour l'alignement réel.
+            # Les paramètres sont passés à start_processing.
+            self.aligner.correct_hot_pixels = correct_hot_pixels
+            self.aligner.hot_pixel_threshold = hot_pixel_threshold
+            self.aligner.neighborhood_size = neighborhood_size
+            self.aligner.bayer_pattern = bayer_pattern
+            self.aligner.reference_image_path = reference_path_ui or None # Valeur de l'UI
+
+            print(f"DEBUG QM [start_processing SUM/W]: Appel _get_reference_image sur dossier '{os.path.basename(current_folder_to_scan_for_shape)}' (Nombre de fichiers: {len(files_in_folder_for_shape)}). Réf UI: '{self.aligner.reference_image_path}'")
+            
+            reference_image_data_for_shape, reference_header_for_shape = self.aligner._get_reference_image(
+                current_folder_to_scan_for_shape, 
+                files_in_folder_for_shape
+            )
+
+            if reference_image_data_for_shape is None or reference_header_for_shape is None:
+                # _get_reference_image devrait déjà logguer la raison de l'échec
+                raise RuntimeError("Échec obtention image/header référence pour déterminer la shape (via _get_reference_image).")
+
+           
+            # --- Obtenir la Shape ---
+            # S'assurer qu'elle est bien (H, W, 3) même si l'image de référence est N&B
+            ref_shape_initial = reference_image_data_for_shape.shape
+            if len(ref_shape_initial) == 2: # Si N&B
+                ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3)
+                print(f"DEBUG (Backend start_processing SUM/W): Réf N&B, shape pour memmap sera {ref_shape_hwc}")
+            elif len(ref_shape_initial) == 3 and ref_shape_initial[2] == 3: # Si déjà couleur
+                ref_shape_hwc = ref_shape_initial
+                print(f"DEBUG (Backend start_processing SUM/W): Réf couleur, shape pour memmap est {ref_shape_hwc}")
+            else:
+                raise RuntimeError(f"Shape de l'image référence non supportée: {ref_shape_initial}")
+
+            # Stocker le header de référence pour plus tard (WCS, métadonnées)
+            self.reference_header_for_wcs = reference_header_for_shape.copy()
+
+            # --- Nettoyer la mémoire de l'image de référence temporaire ---
+            del reference_image_data_for_shape, reference_header_for_shape
+            gc.collect()
+            print("DEBUG (Backend start_processing SUM/W): Shape obtenue et mémoire libérée.")
+
+        except Exception as e_ref_shape:
+            self.update_progress(f"❌ Erreur préparation référence/shape: {e_ref_shape}")
+            print(f"ERREUR QM [start_processing SUM/W]: Échec préparation référence/shape : {e_ref_shape}")
+            traceback.print_exc(limit=2)
+            # self.processing_active = False # Pas besoin ici, car initialize n'a pas été appelé
+            return False # Empêche de continuer si la shape n'est pas trouvée
+        # --- Fin Préparation Référence et Shape ---
+
+        # --- 3. Appel à initialize AVEC la shape ---
+        print(f"DEBUG (Backend start_processing SUM/W): Appel à self.initialize() avec shape={ref_shape_hwc}...")
+        # L'appel à initialize() réinitialise les compteurs, flags, et crée les memmaps
+        if not self.initialize(output_dir, ref_shape_hwc):
             self.processing_active = False
-            print("ERREUR (Backend start_processing): Échec de self.initialize().")
+            print("ERREUR (Backend start_processing SUM/W): Échec de self.initialize() pour SUM/W.")
+            # initialize a déjà loggé l'erreur spécifique
             return False
-        print("DEBUG (Backend start_processing): self.initialize() terminé.")
+        print("DEBUG (Backend start_processing SUM/W): self.initialize() terminé avec succès.")
 
-        # --- 2. Définir les paramètres spécifiques à CETTE session *APRES* initialize ---
-        print("DEBUG (Backend start_processing): Configuration des paramètres de session...")
-        # -- Modes --
+        # --- 4. Définir les paramètres spécifiques à CETTE session *APRES* initialize ---
+        #    (Cette partie est identique à la version précédente, assigne les arguments aux attributs self.)
+        print("DEBUG (Backend start_processing SUM/W): Configuration des paramètres de session...")
         self.is_mosaic_run = is_mosaic_run
-        # Forcer Drizzle si Mosaïque est demandé
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
-
-        # -- Paramètres Communs --
-        self.api_key = api_key # Stocker clé API reçue
-        print(f"!!!! DEBUG QM Start: self.api_key JUSTE APRES ASSIGNATION = '{self.api_key}' !!!!")
+        self.api_key = api_key
         self.apply_chroma_correction = apply_chroma_correction
         self.correct_hot_pixels = correct_hot_pixels
         self.hot_pixel_threshold = hot_pixel_threshold
         self.neighborhood_size = neighborhood_size
         self.bayer_pattern = bayer_pattern
         self.perform_cleanup = perform_cleanup
-
-        # -- Paramètres Stacking Classique --
         self.stacking_mode = stacking_mode
         self.kappa = float(kappa)
-
-        # -- Paramètres Pondération --
-        self.use_quality_weighting = use_weighting
-        self.weight_by_snr = weight_snr
-        self.weight_by_stars = weight_stars
-        self.snr_exponent = snr_exp
-        self.stars_exponent = stars_exp
-        self.min_weight = max(0.01, min(1.0, min_w))
-
-        # -- Paramètres Drizzle (utilisés si drizzle_active_session est True) --
-        if self.drizzle_active_session:
-            # Utiliser mosaic_settings pour kernel/pixfrac si en mode mosaïque
-            if self.is_mosaic_run:
-                print(f"DEBUG (Backend start_processing): Mode Mosaïque actif. Settings reçus: {mosaic_settings}")
-                current_mosaic_settings = mosaic_settings if isinstance(mosaic_settings, dict) else {}
-                # Utiliser le kernel global (reçu en arg) si non trouvé dans mosaic_settings
-                self.drizzle_kernel = current_mosaic_settings.get('kernel', drizzle_kernel)
-                # Utiliser le pixfrac global (reçu en arg) si non trouvé dans mosaic_settings
-                self.drizzle_pixfrac = current_mosaic_settings.get('pixfrac', drizzle_pixfrac)
-                # Valider/clipper pixfrac
-                try: self.drizzle_pixfrac = float(np.clip(float(self.drizzle_pixfrac), 0.01, 1.0))
-                except (ValueError, TypeError): self.drizzle_pixfrac = 1.0; print(f"WARNING: pixfrac mosaïque invalide ({self.drizzle_pixfrac}), reset à 1.0")
-                print(f"   -> Params Mosaïque utilisés -> Kernel: '{self.drizzle_kernel}', Pixfrac: {self.drizzle_pixfrac:.2f}")
-            else: # Drizzle simple champ
-                 self.drizzle_kernel = drizzle_kernel
-                 self.drizzle_pixfrac = drizzle_pixfrac
-                 print(f"DEBUG (Backend start_processing): Mode Drizzle simple champ.")
-            # Paramètres Drizzle communs (Mode, Scale, WHT)
-            self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
-            self.drizzle_scale = float(drizzle_scale)
-            self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
-            print(f"   -> Params Drizzle Communs -> Mode: {self.drizzle_mode}, Scale: {self.drizzle_scale:.1f}, WHT: {self.drizzle_wht_threshold:.2f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}")
-        # --- Fin définition paramètres session ---
-
-        ### NOUVEAU : Stockage des paramètres SCNR Final dans self ###
+        #self.use_quality_weighting = False  #Forcé à False pour le test SUM/W initial décommenter si besoin pour tests 
+        if use_weighting: print("INFO: Pondération qualité demandée mais DÉSACTIVÉE pour le test SUM/W.")
+        # self.weight_by_snr = weight_snr # Pas besoin si use_quality_weighting = False
+        # self.weight_by_stars = weight_stars # idem
+        # self.snr_exponent = snr_exp # idem
+        # self.stars_exponent = stars_exp # idem
+        # self.min_weight = max(0.01, min(1.0, min_w)) # idem
         self.apply_final_scnr = apply_final_scnr
         self.final_scnr_target_channel = final_scnr_target_channel
         self.final_scnr_amount = final_scnr_amount
         self.final_scnr_preserve_luminosity = final_scnr_preserve_luminosity
-        print(f"DEBUG (Backend start_processing): self.apply_final_scnr = {self.apply_final_scnr}")
-        print(f"DEBUG (Backend start_processing): self.final_scnr_amount = {self.final_scnr_amount}")
-        ### FIN NOUVEAU ###
+        
+        if self.drizzle_active_session:
+            if self.is_mosaic_run:
+                current_mosaic_settings = mosaic_settings if isinstance(mosaic_settings, dict) else {}
+                self.drizzle_kernel = current_mosaic_settings.get('kernel', drizzle_kernel)
+                self.drizzle_pixfrac = current_mosaic_settings.get('pixfrac', drizzle_pixfrac)
+                try: self.drizzle_pixfrac = float(np.clip(float(self.drizzle_pixfrac), 0.01, 1.0))
+                except (ValueError, TypeError): self.drizzle_pixfrac = 1.0
+            else:
+                 self.drizzle_kernel = drizzle_kernel
+                 self.drizzle_pixfrac = drizzle_pixfrac
+            self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
+            self.drizzle_scale = float(drizzle_scale)
+            self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
+            print(f"   -> Params Drizzle Actifs -> Mode: {self.drizzle_mode}, Scale: {self.drizzle_scale:.1f}, WHT: {self.drizzle_wht_threshold:.2f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}")
+        else:
+             print("DEBUG (Backend start_processing SUM/W): Session Drizzle non active.")
 
+        ### Stockage des paramètres Expert dans self ###
+        print("DEBUG (Backend start_processing SUM/W): Stockage des paramètres Expert...")
+        # BN
+        self.bn_grid_size_str = bn_grid_size_str
+        self.bn_perc_low = bn_perc_low
+        self.bn_perc_high = bn_perc_high
+        self.bn_std_factor = bn_std_factor
+        self.bn_min_gain = bn_min_gain
+        self.bn_max_gain = bn_max_gain
+        # CB
+        self.cb_border_size = cb_border_size
+        self.cb_blur_radius = cb_blur_radius
+        self.cb_min_b_factor = cb_min_b_factor # Nom pour correspondre à SettingsManager
+        self.cb_max_b_factor = cb_max_b_factor # Nom pour correspondre à SettingsManager
+        # Rognage (convertir % en décimal pour usage interne)
 
-        # --- 3. Logs et Vérification Batch Size ---
-        # Log du mode final choisi
+        self.final_edge_crop_percent_decimal = float(final_edge_crop_percent) / 100.0
+        ### Stockage des paramètres Photutils BN dans self ###
+        print("DEBUG (Backend start_processing SUM/W): Stockage des paramètres Photutils BN...")
+        self.apply_photutils_bn = apply_photutils_bn
+        print(f"DEBUG (Backend start_processing SUM/W): self.apply_photutils_bn MIS À = {self.apply_photutils_bn}")
+        self.photutils_bn_box_size = photutils_bn_box_size
+        self.photutils_bn_filter_size = photutils_bn_filter_size
+        self.photutils_bn_sigma_clip = photutils_bn_sigma_clip
+        self.photutils_bn_exclude_percentile = photutils_bn_exclude_percentile
+        print(f"   -> self.apply_photutils_bn = {self.apply_photutils_bn}")
+        ### FIN Stockage des paramètres Photutils BN###
+        print(f"   -> BN Grid='{self.bn_grid_size_str}', CB Border={self.cb_border_size}, CropDecimal={self.final_edge_crop_percent_decimal:.3f}")
+        ### FIN ###
+
+        # --- 5. Logs et Vérification Batch Size ---
+        #    (Identique à la version précédente)
         if self.is_mosaic_run: self.update_progress("🖼️ Mode Mosaïque ACTIVÉ pour cette session.")
         elif self.drizzle_active_session: self.update_progress(f"💧 Mode Drizzle (Simple Champ) Activé ({self.drizzle_mode})...")
-        else: self.update_progress("⚙️ Mode Stack Classique Activé...")
+        else: self.update_progress("⚙️ Mode Stack Classique (SUM/W) Activé...")
 
-        # Gestion Batch Size (utilise l'argument batch_size reçu)
-        requested_batch_size = batch_size # Utilise l'argument reçu
-        if requested_batch_size <= 0: # Si 0 ou moins -> Estimation auto
+        requested_batch_size = batch_size
+        if requested_batch_size <= 0:
+             # ... (estimation auto) ...
              self.update_progress("🧠 Estimation taille lot auto (reçu <= 0)...", None)
              sample_img_path = None
              if input_dir and os.path.isdir(input_dir): fits_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.fit', '.fits'))]; sample_img_path = os.path.join(input_dir, fits_files[0]) if fits_files else None
              try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); self.batch_size = estimated_size; self.update_progress(f"✅ Taille lot auto estimée: {estimated_size}", None)
              except Exception as est_err: self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); self.batch_size = 10
-        else: # Taille fournie > 0
-             self.batch_size = requested_batch_size
-
-        # Valider la taille minimale
-        if self.batch_size < 3:
-            self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None)
-            self.batch_size = 3
+        else: self.batch_size = requested_batch_size
+        if self.batch_size < 3: self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None); self.batch_size = 3
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
+        if self.apply_final_scnr: self.update_progress(f"🎨 SCNR Final (Vert, {self.final_scnr_amount*100:.0f}%) sera appliqué.")
+        # Pas de log pour pondération qualité car désactivée pour ce test
 
-        # Log pondération si active
-        if self.use_quality_weighting:
-            self.update_progress(f"⚖️ Pondération Qualité Activée (SNR^{self.snr_exponent:.1f}, Stars^{self.stars_exponent:.1f}, MinW: {self.min_weight:.2f})")
 
-        # --- 4. Gérer dossiers initiaux ---
+        # --- 6. Gérer dossiers initiaux ---
+        #    (Identique à la version précédente)
         initial_folders_to_add_count = 0
         with self.folders_lock:
             self.additional_folders = []
@@ -2855,34 +3531,33 @@ class SeestarQueuedStacker:
                 for folder in initial_additional_folders:
                     abs_folder = os.path.abspath(folder)
                     if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders:
-                        self.additional_folders.append(abs_folder)
-                        initial_folders_to_add_count += 1
-        if initial_folders_to_add_count > 0:
-             self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
-             self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
+                        self.additional_folders.append(abs_folder); initial_folders_to_add_count += 1
+        if initial_folders_to_add_count > 0: self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente."); self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
 
-
-        # --- 5. Ajouter fichiers initiaux ---
+        # --- 7. Ajouter fichiers initiaux ---
+        #    (Identique à la version précédente)
         initial_files_added = self._add_files_to_queue(self.current_folder)
-        if initial_files_added > 0:
-            self._recalculate_total_batches() # Recalculer après ajout initial
-            self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders: # Si pas d'initiaux ET pas d'additionnels
-             self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
-             # On pourrait retourner False ici si rien à traiter ? À discuter.
-
-        # --- 6. Configurer référence pour l'aligneur ---
+        if initial_files_added > 0: self._recalculate_total_batches(); self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
+        elif not self.additional_folders: self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
+        
+        # --- 8. Configurer référence pour l'aligneur ---
+        #    (Identique à la version précédente)
+        #    Note: self.aligner.reference_image_path est utilisé par _get_reference_image SI fourni.
+        #    Mais l'image de référence pour l'alignement dans la boucle _worker est passée explicitement.
         self.aligner.reference_image_path = reference_path_ui or None
 
-        # --- 7. Démarrer worker ---
-        print("DEBUG (Backend start_processing): Démarrage du thread worker...")
-        self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-        self.processing_active = True # Mettre à True *après* avoir lancé le thread
+        # --- 9. Démarrer worker ---
+        #    (Identique à la version précédente)
+        print("DEBUG (Backend start_processing SUM/W): Démarrage du thread worker...")
+        self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker"); self.processing_thread.daemon = True
+        self.processing_thread.start(); self.processing_active = True
         self.update_progress("🚀 Thread de traitement démarré.")
-        print("DEBUG (Backend start_processing): Fin.")
+        print("DEBUG (Backend start_processing SUM/W): Fin.")
         return True
+
+# --- FIN de start_processing MODIFIÉ ---
+
+
 
 
 ###############################################################################################################################################
@@ -3023,10 +3698,22 @@ class SeestarQueuedStacker:
 
 
     def is_running(self):
-        return getattr(self, 'processing_active', False) and \
-            getattr(self, 'processing_thread', None) is not None and \
-            getattr(self, 'processing_thread', None) is not None and \
-            self.processing_thread.is_alive()
+        """Vérifie si le thread de traitement est actif et en cours d'exécution."""
+        # Vérifier si l'attribut processing_active existe et est True
+        is_processing_flag_active = getattr(self, 'processing_active', False)
+        
+        # Vérifier si l'attribut processing_thread existe
+        thread_exists = hasattr(self, 'processing_thread')
+        
+        # Si les deux existent, vérifier si le thread est non None et vivant
+        is_thread_alive_and_valid = False
+        if thread_exists:
+            thread_obj = getattr(self, 'processing_thread', None)
+            if thread_obj is not None and thread_obj.is_alive():
+                is_thread_alive_and_valid = True
+        
+        # print(f"DEBUG QM [is_running]: processing_active={is_processing_flag_active}, thread_exists={thread_exists}, thread_alive={is_thread_alive_and_valid}") # Debug
+        return is_processing_flag_active and thread_exists and is_thread_alive_and_valid
 
 
 

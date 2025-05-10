@@ -77,6 +77,71 @@ FR_TRANSLATIONS = {
     'saturation': "Saturation :",
     'reset_bcs': "Réinit. Réglages",
 
+
+
+    ###  Traductions pour l'Onglet Expert ###
+    'tab_expert_title': "Expert",
+    'expert_warning_text': "Toi qui entre ici, perds tout espoir ! (Réglages Avancés)",
+    
+    # Section Neutralisation du Fond (BN)
+    'bn_frame_title': "Neutralisation Fond Auto (BN)",
+    'bn_grid_size_label': "Taille Grille BN :",
+    'bn_perc_low_label': "Perc. Bas Fond :",
+    'bn_perc_high_label': "Perc. Haut Fond :",
+    'bn_std_factor_label': "Facteur Std Fond :",
+    'bn_min_gain_label': "Gain Min BN :",
+    'bn_max_gain_label': "Gain Max BN :",
+
+    # Section ChromaticBalancer (CB) / Edge Enhance
+    'cb_frame_title': "Correction Bords/Chroma (CB)",
+    'cb_border_size_label': "Taille Bord CB (px) :",
+    'cb_blur_radius_label': "Flou Bord CB (px) :",
+    'cb_min_b_factor_label': "Facteur Bleu Min CB :", # Supposant qu'on expose le facteur Bleu
+    'cb_max_b_factor_label': "Facteur Bleu Max CB :", # et potentiellement R aussi
+    # 'cb_intensity_label': "Intensité Correction Bords :", # Si vous ajoutez ce slider
+
+    # Section Rognage Final
+    'crop_frame_title': "Rognage Final",
+    'final_edge_crop_label': "Rognage Bords (%) :",
+
+    # Bouton Réinitialiser Expert
+    'reset_expert_button': "Réinitialiser Réglages Expert",
+    
+    ### Traductions Photutils Background Subtraction (Onglet Expert) ###
+    'photutils_bn_frame_title': "Soustraction Fond 2D (Photutils)",
+    'apply_photutils_bn_label': "Activer Soustraction Fond 2D Photutils",
+    'photutils_bn_box_size_label': "Taille Boîte (px) :",
+    'photutils_bn_filter_size_label': "Taille Filtre (px, impair) :",
+    'photutils_bn_sigma_clip_label': "Sigma Clip :",
+    'photutils_bn_exclude_percentile_label': "Exclure Plus Brillants (%) :",
+    ### FIN onglet expert ###
+
+  
+    ### Tooltips pour Onglet Expert ###
+    'tooltip_bn_grid_size': "BN: Grille RxC pour analyse du fond. Plus de zones (32x32) = analyse locale fine, sensible au bruit. Moins (8x8) = stats robustes, moins bon pour gradients complexes. Défaut: 16x16.",
+    'tooltip_bn_perc_low': "BN: Percentile bas pour luminance des zones de fond. Les zones SOUS ce percentile global sont moins considérées comme fond. Plage: 0-40. Défaut: 5.",
+    'tooltip_bn_perc_high': "BN: Percentile haut pour luminance des zones de fond. Les zones AU-DESSUS sont exclues du fond. Plage: (Perc.Bas+1)-95. Défaut: 30.",
+    'tooltip_bn_std_factor': "BN: Facteur pour l'écart-type. Zones de fond si leur std_dev < (std_dev_médian_global * facteur). Bas = strict. Haut = permissif. Plage: 0.5-5. Défaut: 1.0.",
+    'tooltip_bn_min_gain': "BN: Gain minimal appliqué aux canaux R/B pour égaler G. Limite la correction. Plage: 0.1-2. Défaut: 0.2.",
+    'tooltip_bn_max_gain': "BN: Gain maximal appliqué aux canaux R/B. Limite la correction. Plage: 1-10. Défaut: 7.0.",
+    'tooltip_cb_border_size': "Correct.Bords: Largeur (px) de la zone de bord analysée pour les décalages couleur locaux. Petit = cible franges fines. Grand = correction plus large. Plage: 5-150. Défaut: 25.",
+    'tooltip_cb_blur_radius': "Correct.Bords: Rayon (px) du flou sur le masque de bord. Adoucit la transition de la correction. Petit = transition nette. Plage: 0-50. Défaut: 8.",
+    'tooltip_cb_min_b_factor': "Correct.Bords: Facteur de gain minimal appliqué au canal Bleu dans les bords pour égaler le Vert local. Limite la réduction. Plage: 0.1-1.0. Défaut: 0.4.",
+    'tooltip_cb_max_b_factor': "Correct.Bords: Facteur de gain maximal appliqué au canal Bleu. Limite l'amplification. Plage: 1.0-3.0. Défaut: 1.5.",
+    'tooltip_final_edge_crop_percent': "Rognage Final: Pourcentage de l'image à rogner sur CHAQUE côté (G,D,H,B) avant sauvegarde. Ex: 2.0 pour 2%. Plage: 0-25. Défaut: 2.0.",
+    'tooltip_apply_final_scnr': "SCNR: Applique une Réduction Subtile du Bruit de Couleur au stack final, ciblant le Vert par défaut pour réduire les dominantes vert/magenta.", # Déjà existant, mais bon de vérifier
+    'tooltip_final_scnr_amount': "Intensité SCNR: Force de la réduction du Vert (0.0=aucune, 1.0=remplacement complet par réf. R/B). Typique: 0.6-0.9. Défaut: 0.8.", # Déjà existant
+    'tooltip_final_scnr_preserve_lum': "Préserver Luminance SCNR: Si coché, tente de restaurer la luminance originale des pixels après correction couleur, évitant un assombrissement excessif.", # Déjà existant
+    # Tooltips pour Photutils BN
+    'tooltip_apply_photutils_bn': "PB2D: Active la soustraction d'un modèle de fond 2D calculé par Photutils. Agit avant la Neutralisation de Fond globale. Utile pour les gradients complexes.",
+    'tooltip_photutils_bn_box_size': "PB2D: Taille des boîtes (px) pour l'estimation locale du fond. Doit être assez grand pour éviter les étoiles, mais assez petit pour suivre le gradient. Défaut: 128.",
+    'tooltip_photutils_bn_filter_size': "PB2D: Taille du filtre médian (px, impair) appliqué à la carte des estimations de fond locales pour la lisser. Défaut: 5.",
+    'tooltip_photutils_bn_sigma_clip': "PB2D: Valeur Sigma pour le rejet itératif des pixels (étoiles) dans chaque boîte lors de l'estimation du fond. Défaut: 3.0.",
+    'tooltip_photutils_bn_exclude_percentile': "PB2D: Pourcentage (0-100) des pixels les plus brillants à ignorer dans chaque boîte avant l'estimation du fond. Aide à rejeter les étoiles sans masque. Défaut: 98.0.",
+    ### FIN Tooltips Photo utils ###
+    ### FIN tooltips expert ###
+
+
     # --- Zone Progression ---
     'progress': "Progression",
     'estimated_time': "ETA:",
@@ -95,10 +160,10 @@ FR_TRANSLATIONS = {
     'start': "Démarrer",
     'stop': "Arrêter",
     'add_folder_button': "Ajouter Dossier",
-    # NOUVEAU: Clés pour les nouveaux boutons
     'copy_log_button_text': "Copier",
     'open_output_button_text': "Ouvrir Sortie",
     'show_folders_button_text': "Voir Entrées",
+    'analyze_folder_button': "Analyser Dossier (Externe)",
 
     # --- Titres Dialogues ---
     'Select Input Folder': "Sélectionner Dossier d'Entrée",

@@ -7,17 +7,29 @@ class ChromaticBalancer:
     et corriger les artefacts colorés lors du stacking d'images.
     """
     
-    def __init__(self, border_size=50, blur_radius=25):#<-----------------------------------------------------------------------------------------------------------
+    def __init__(self, border_size=25, blur_radius=8, 
+                 r_factor_limits=(0.7, 1.3), # Limites par défaut pour le facteur R
+                 b_factor_limits=(0.4, 1.5)  # Limites par défaut pour le facteur B
+                ):
         """
         Initialise le balancer avec les paramètres donnés.
         
         Args:
-            border_size (int): Taille de la bordure à analyser en pixels
-            blur_radius (int): Rayon de flou pour les transitions
+            border_size (int): Taille de la bordure à analyser en pixels.
+            blur_radius (int): Rayon de flou pour les transitions.
+            r_factor_limits (tuple): (min_r_factor, max_r_factor) pour clipper le gain Rouge.
+            b_factor_limits (tuple): (min_b_factor, max_b_factor) pour clipper le gain Bleu.
         """
-        self.border_size = border_size
-        self.blur_radius = blur_radius
-    
+        self.border_size = int(border_size)
+        self.blur_radius = int(blur_radius)
+        
+        # Stocker les limites de gain pour les facteurs
+        self.r_factor_min = float(r_factor_limits[0])
+        self.r_factor_max = float(r_factor_limits[1])
+        self.b_factor_min = float(b_factor_limits[0])
+        self.b_factor_max = float(b_factor_limits[1])
+
+        print(f"DEBUG [ChromaticBalancer]: Initialisé avec border={self.border_size}, blur={self.blur_radius}, R_limits=[{self.r_factor_min:.2f},{self.r_factor_max:.2f}], B_limits=[{self.b_factor_min:.2f},{self.b_factor_max:.2f}]")
 
 
 #################################################################################################################################################
@@ -96,76 +108,89 @@ class ChromaticBalancer:
 
 #######################################################################################################################################
 
-
     def normalize_stack(self, stacked_data, reference_ratios=None):
         """
         Normalise une image stackée pour corriger les artefacts de couleur.
-        
-        Args:
-            stacked_data (np.ndarray): Image stackée (H, W, 3)
-            reference_ratios (tuple): Ratios de référence (R/G, B/G) ou None
-            
-        Returns:
-            np.ndarray: Image avec couleurs corrigées
+        Utilise self.r_factor_min/max et self.b_factor_min/max pour clipper les gains.
         """
-        if stacked_data.ndim != 3 or stacked_data.shape[2] != 3:
-            return stacked_data  # Non-RGB, retourner tel quel
-            
-        # Créer une copie pour éviter de modifier l'original
-        corrected = stacked_data.copy()
+        print(f"DEBUG [ChromaticBalancer normalize_stack]: Début. R_limits=[{self.r_factor_min:.2f},{self.r_factor_max:.2f}], B_limits=[{self.b_factor_min:.2f},{self.b_factor_max:.2f}]")
+        if stacked_data is None or stacked_data.ndim != 3 or stacked_data.shape[2] != 3:
+            print("DEBUG [ChromaticBalancer normalize_stack]: Données invalides ou non RGB.")
+            return stacked_data
+
+        corrected = stacked_data.astype(np.float32, copy=True) # Travailler sur une copie float32
         
-        # Calculer les ratios si non fournis
         if reference_ratios is None:
-            # Utiliser le centre de l'image comme référence
-            h, w = stacked_data.shape[:2]
-            center_h, center_w = h // 2, w // 2
-            center_size = min(h, w) // 4
-            
-            center_slice = stacked_data[
-                center_h - center_size:center_h + center_size,
-                center_w - center_size:center_w + center_size
-            ]
-            
-            reference_ratios = self.calculate_channel_ratios(center_slice)
+            h_ref, w_ref = corrected.shape[:2]
+            center_h_ref, center_w_ref = h_ref // 2, w_ref // 2
+            center_size_ref = min(h_ref, w_ref) // 4
+            center_slice_ref = corrected[center_h_ref - center_size_ref : center_h_ref + center_size_ref,
+                                         center_w_ref - center_size_ref : center_w_ref + center_size_ref]
+            if center_slice_ref.size > 0:
+                 reference_ratios = self.calculate_channel_ratios(center_slice_ref)
+                 print(f"DEBUG [ChromaticBalancer normalize_stack]: Ratios de référence (centre): R/G={reference_ratios[0]:.2f}, B/G={reference_ratios[1]:.2f}")
+            else:
+                 print("WARN [ChromaticBalancer normalize_stack]: Slice centrale vide pour référence. Utilisation ratios par défaut (1,1).")
+                 reference_ratios = (1.0, 1.0) # Fallback
+
+        edge_mask = self.create_edge_mask(corrected.shape[:2])
+        h, w = corrected.shape[:2]
         
-        # Créer un masque pour les bords
-        edge_mask = self.create_edge_mask(stacked_data.shape[:2])
+        # Utiliser des pas plus grands si l'image est grande pour la performance
+        step = max(1, self.border_size // 2, min(h, w) // 20) # Assurer au moins 1, ne pas dépasser 1/20 de la dim
         
-        # Pour chaque pixel, analyser l'équilibre local des couleurs
-        h, w = stacked_data.shape[:2]
-        for y in range(0, h, self.border_size):
-            for x in range(0, w, self.border_size):
-                # Définir la région locale
-                y_end = min(y + self.border_size, h)
-                x_end = min(x + self.border_size, w)
+        print(f"DEBUG [ChromaticBalancer normalize_stack]: Boucle sur régions avec step={step}, border_size={self.border_size}")
+        for y_start_loop in range(0, h, step):
+            for x_start_loop in range(0, w, step):
+                y_end_loop = min(y_start_loop + self.border_size, h)
+                x_end_loop = min(x_start_loop + self.border_size, w)
                 
-                # Extraire la région
-                region = stacked_data[y:y_end, x:x_end]
-                
-                # Calculer les ratios de cette région
+                region = corrected[y_start_loop:y_end_loop, x_start_loop:x_end_loop]
+                if region.size == 0: continue
+
                 local_ratios = self.calculate_channel_ratios(region)
                 
-                # Calculer les facteurs de correction
                 r_factor = reference_ratios[0] / max(local_ratios[0], 1e-8)
                 b_factor = reference_ratios[1] / max(local_ratios[1], 1e-8)
                 
-                # Limiter les facteurs pour éviter les corrections extrêmes
-                r_factor = np.clip(r_factor, 0.5, 1.5)
-                b_factor = np.clip(b_factor, 0.5, 1.5)
+                ### MODIFIÉ : Utilisation des attributs self pour les limites de clipping ###
+                r_factor = np.clip(r_factor, self.r_factor_min, self.r_factor_max)
+                b_factor = np.clip(b_factor, self.b_factor_min, self.b_factor_max)
+                ### FIN MODIFICATION ###
                 
-                # Appliquer la correction avec fusion pondérée par masque de bord
-                for i in range(y, y_end):
-                    for j in range(x, x_end):
-                        # Force de la correction basée sur le masque
-                        strength = 1.0 - edge_mask[i, j]
+                # Debug log moins fréquent pour éviter de spammer la console
+                # if y_start_loop % (step * 5) == 0 and x_start_loop % (step * 5) == 0 :
+                #    print(f"  Region ({y_start_loop}:{y_end_loop},{x_start_loop}:{x_end_loop}) LocalRatios: R/G={local_ratios[0]:.2f}, B/G={local_ratios[1]:.2f} | Factors: R={r_factor:.2f}, B={b_factor:.2f}")
+
+                # Appliquer la correction à la *partie centrale* de la fenêtre de calcul
+                # pour éviter les effets de bord de la fenêtre elle-même, ou pondérer
+                # l'application pour une fusion plus douce.
+                # Pour l'instant, on applique à toute la région de calcul pour la simplicité,
+                # mais la pondération par edge_mask est la plus importante.
+
+                # Boucle sur les pixels de la région actuelle pour appliquer la correction pondérée
+                # Cette partie est coûteuse. Si possible, des opérations vectorielles seraient mieux.
+                # Mais pour la pondération par edge_mask pixel par pixel, une boucle est plus simple à écrire.
+                for y_pix in range(y_start_loop, y_end_loop):
+                    for x_pix in range(x_start_loop, x_end_loop):
+                        strength = 1.0 - edge_mask[y_pix, x_pix] # 0 aux bords définis par border_size, 1 au centre
                         
-                        # Appliquer la correction
-                        corrected[i, j, 0] = stacked_data[i, j, 0] * (1.0 - strength + strength * r_factor)
-                        # Canal vert inchangé (référence)
-                        corrected[i, j, 2] = stacked_data[i, j, 2] * (1.0 - strength + strength * b_factor)
-        
-        return np.clip(corrected, 0.0, 1.0)
-    
+                        # Appliquer la correction additivement ou multiplicativement
+                        # L'application actuelle est multiplicative mais tend vers l'original si strength=0
+                        # et vers la pleine correction si strength=1
+                        # original_r = stacked_data[y_pix, x_pix, 0] # Lire depuis l'original pour éviter accumulation d'erreurs
+                        # original_b = stacked_data[y_pix, x_pix, 2]
+                        # corrected[y_pix, x_pix, 0] = original_r * (1.0 - strength + strength * r_factor)
+                        # corrected[y_pix, x_pix, 2] = original_b * (1.0 - strength + strength * b_factor)
+
+                        # Simplification: appliquer sur 'corrected' qui est une copie de stacked_data
+                        # Cette version modifie 'corrected' en place.
+                        corrected[y_pix, x_pix, 0] = corrected[y_pix, x_pix, 0] * (1.0 - strength + strength * r_factor)
+                        corrected[y_pix, x_pix, 2] = corrected[y_pix, x_pix, 2] * (1.0 - strength + strength * b_factor)
+
+        final_corrected = np.clip(corrected, 0.0, 1.0)
+        print("DEBUG [ChromaticBalancer normalize_stack]: Normalisation terminée.")
+        return final_corrected
 
 
 #####################################################################################################################################################

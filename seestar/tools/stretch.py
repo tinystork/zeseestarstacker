@@ -10,6 +10,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps # Added ImageOps
 import os # For save_fits_as_png
 import traceback # For error reporting
 from ..core.utils import check_cuda
+from astropy.stats import sigma_clipped_stats # Pour des statistiques robustes
 
 # --- Presets d'Étirement ---
 class StretchPresets:
@@ -328,22 +329,17 @@ def save_fits_as_png(data, output_path, enhance=False, color_balance=(1.0,1.0,1.
     except Exception as e: print(f"Error saving preview image to {output_path}: {e}"); traceback.print_exc(limit=2); return False
 
 
-# --- DANS LE FICHIER seestar/tools/stretch.py ---
-# (Ajoutez cette fonction à la fin du fichier, après les classes et autres fonctions d'aide)
-
-import numpy as np # Assurez-vous que numpy est importé au début du fichier
-from astropy.stats import sigma_clipped_stats # Pour des statistiques robustes
 
 
 
-# --- DANS LE FICHIER seestar/tools/stretch.py ---
-# Modifiez la SIGNATURE et les valeurs par défaut de la fonction
-
-def neutralize_background_automatic(image_data_rgb, grid_size=(32, 32), # Grille plus fine
+def neutralize_background_automatic(image_data_rgb, grid_size=(16, 16), # Grille plus fine
                                     bg_percentile_low=5,   # Un peu plus bas
-                                    bg_percentile_high=30, # Plus restrictif sur le haut
-                                    std_factor_threshold=1.8, # Plus strict sur l'uniformité
-                                    min_pixels_per_zone=50): # Réduire si zones plus petites
+                                    bg_percentile_high=45, # Plus restrictif sur le haut
+                                    std_factor_threshold=1.5, # Plus strict sur l'uniformité
+                                    min_pixels_per_zone=50,
+                                    min_applied_gain=0.2, # Valeur par défaut si non fournie
+                                    max_applied_gain=7.0  # Valeur par défaut si non fournie
+                                    ): # Réduire si zones plus petites
     """
     Neutralise automatiquement le fond de ciel d'une image RGB empilée.
     (Version avec paramètres par défaut ajustés pour un test plus "agressif")
@@ -441,13 +437,16 @@ def neutralize_background_automatic(image_data_rgb, grid_size=(32, 32), # Grille
     print(f"DEBUG [neutralize_background_automatic]: Médianes Fond (R,G,B): ({median_bg_r:.4f}, {median_bg_g:.4f}, {median_bg_b:.4f})")
 
     # Paramètres de gain plus "agressifs"
-    min_gain, max_gain = 0.3, 3.0 # Permettre des corrections plus fortes
+    #min_gain, max_gain = 0.2, 7.0 # Permettre des corrections plus fortes
 
     gain_r = median_bg_g / max(median_bg_r, 1e-7) if median_bg_r > 1e-7 else 1.0
     gain_g = 1.0
     gain_b = median_bg_g / max(median_bg_b, 1e-7) if median_bg_b > 1e-7 else 1.0
-    gain_r = np.clip(gain_r, min_gain, max_gain)
-    gain_b = np.clip(gain_b, min_gain, max_gain)
+    ### MODIFIÉ : Utilisation des arguments min_applied_gain et max_applied_gain ###
+    gain_r = np.clip(gain_r, min_applied_gain, max_applied_gain)
+    gain_b = np.clip(gain_b, min_applied_gain, max_applied_gain)
+    # Le gain_g reste à 1.0, pas besoin de le clipper ici.
+    
     print(f"DEBUG [neutralize_background_automatic]: Gains calculés (R,G,B): ({gain_r:.3f}, {gain_g:.3f}, {gain_b:.3f})")
 
     corrected_image = image_data_rgb.copy()

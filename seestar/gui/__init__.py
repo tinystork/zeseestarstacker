@@ -20,5 +20,6 @@ __all__ = [
     'FileHandlingManager',
     'ProgressManager',
     'SettingsManager',
+    'ToolTip',
     ]
 # --- END OF FILE seestar/gui/__init__.py ---

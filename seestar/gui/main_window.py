@@ -18,6 +18,7 @@ import platform # NOUVEL import
 import subprocess # NOUVEL import
 import gc #
 from PIL import Image, ImageTk 
+from .ui_utils import ToolTip
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys # Pour sys.executable
 # ----------------------------------------------------
@@ -89,6 +90,7 @@ from .histogram_widget import HistogramWidget
 class SeestarStackerGUI:
     """ GUI principale pour Seestar. """
     # --- MODIFIÉ: Signature du constructeur ---
+
     def __init__(self, initial_input_dir=None, stack_immediately_from=None): # <-- AJOUTÉ stack_immediately_from
         """Initialise l'interface graphique."""
         print("DEBUG (GUI __init__): Initialisation SeestarStackerGUI...") # <-- AJOUTÉ DEBUG
@@ -118,7 +120,11 @@ class SeestarStackerGUI:
         self.time_per_image = 0
         self.global_start_time = None
         self.additional_folders_to_process = []
-
+        self.tooltips = {}
+        print("DEBUG (GUI __init__): Dictionnaire self.tooltips initialisé.")
+        ### Compteur pour Auto-Refresh Aperçu ###
+        self.batches_processed_for_preview_refresh = 0
+        self.preview_auto_refresh_batch_interval = 10 # Rafraîchir tous les 10 lots
         # --- Variables état mosaïque ---
         self.mosaic_mode_active = False
         # self.mosaic_panel_folders = [] # Sera utilisé plus tard
@@ -192,6 +198,9 @@ class SeestarStackerGUI:
         self.root.bind("<Configure>", self._debounce_resize)
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
+        # --- Variable onglets expert ---
+        self._update_final_scnr_options_state()
+        self._update_photutils_bn_options_state() 
         # --- Variables état aperçu (Inchangé) ---
         self.preview_img_count = 0; self.preview_total_imgs = 0
         self.preview_current_batch = 0; self.preview_total_batches = 0
@@ -309,9 +318,35 @@ class SeestarStackerGUI:
         self.final_scnr_preserve_lum_var = tk.BooleanVar(value=True) # Préserver luminance par défaut
         # Pas de variable pour target_channel pour l'instant, on le fixe à 'green'
         print("DEBUG (GUI init_variables): Variables SCNR Final créées.")
+                
+        # Neutralisation du Fond (BN)
+        self.bn_grid_size_str_var = tk.StringVar(value="16x16") # Ex: "8x8", "16x16", "32x32"
+        self.bn_perc_low_var = tk.IntVar(value=5)
+        self.bn_perc_high_var = tk.IntVar(value=30)
+        self.bn_std_factor_var = tk.DoubleVar(value=1.0)
+        self.bn_min_gain_var = tk.DoubleVar(value=0.2)
+        self.bn_max_gain_var = tk.DoubleVar(value=7.0)
+
+        # ChromaticBalancer (CB)
+        self.cb_border_size_var = tk.IntVar(value=25)
+        self.cb_blur_radius_var = tk.IntVar(value=8)
+        self.cb_min_b_factor_var = tk.DoubleVar(value=0.4) # Pour le facteur B de CB
+        self.cb_max_b_factor_var = tk.DoubleVar(value=1.5) # Pour le facteur B de CB
+        # self.cb_intensity_var = tk.DoubleVar(value=1.0) # Optionnel, pour moduler la correction
+
+        # Rognage Final
+        self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0) # En %, ex: 2.0 pour 2%
+
+        print("DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées.")
+
+        ###  Variables Tkinter pour Soustraction Fond 2D (Photutils) ###
+        self.apply_photutils_bn_var = tk.BooleanVar(value=False) # Désactivé par défaut
+        self.photutils_bn_box_size_var = tk.IntVar(value=128)     # Défaut: 128
+        self.photutils_bn_filter_size_var = tk.IntVar(value=5)    # Défaut: 5 (doit être impair)
+        self.photutils_bn_sigma_clip_var = tk.DoubleVar(value=3.0) # Défaut: 3.0
+        self.photutils_bn_exclude_percentile_var = tk.DoubleVar(value=98.0) # Défaut: 98.0
+        print("DEBUG (GUI init_variables): Variables pour Photutils Background Subtraction créées.")
         
-
-
 #######################################################################################################################
 
 
@@ -615,11 +650,11 @@ class SeestarStackerGUI:
         self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
 
         # 2. Notebook pour les Onglets d'Options (juste en dessous de la langue)
-        control_notebook = ttk.Notebook(self.left_content_frame)
-        control_notebook.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(0, 5), padx=5) # fill=tk.X, expand=True
+        self.control_notebook = ttk.Notebook(self.left_content_frame) # PARENT: self.left_content_frame
+        self.control_notebook.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(0, 5), padx=5)
 
         # --- Onglet Empilement ---
-        tab_stacking = ttk.Frame(control_notebook)
+        tab_stacking = ttk.Frame(self.control_notebook)
 
         # Section Dossiers
         self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders"))
@@ -672,7 +707,7 @@ class SeestarStackerGUI:
         kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
         self.drizzle_kernel_label = ttk.Label(kernel_frame, text=self.tr("drizzle_kernel_label"))
         self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5))
-        valid_kernels = ['square', 'turbo''point', 'tophat']#'gaussian',, 'lanczos2', 'lanczos3' 
+        valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
         self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12)
         self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame)
@@ -697,16 +732,225 @@ class SeestarStackerGUI:
         self.chroma_correction_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Edge Enhance", variable=self.apply_chroma_correction_var) # Texte fixe ou à traduire
         self.chroma_correction_check.pack(side=tk.LEFT, padx=5, pady=5)
 
-        control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking")} ')
+        self.control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking")} ')
+        
+        ### NOUVEAU : Onglet Expert ###
+        tab_expert = ttk.Frame(self.control_notebook)
+        # ... (contenu de tab_expert) ...
+        expert_tab_text_for_debug = self.tr("tab_expert_title", default="Expert") # Récupérer le texte
+        print(f"DEBUG: Texte pour tab_expert avant add: '{expert_tab_text_for_debug}' (Langue UI: {self.language_var.get()})")
+        self.control_notebook.add(tab_expert, text=f' {expert_tab_text_for_debug} ')
+        self.control_notebook.add(tab_expert, text=f' {self.tr("tab_expert_title", default="Expert")} ')
+
+        expert_scroll_canvas = tk.Canvas(tab_expert, highlightthickness=0)
+        expert_scrollbar = ttk.Scrollbar(tab_expert, orient="vertical", command=expert_scroll_canvas.yview)
+        expert_scroll_canvas.configure(yscrollcommand=expert_scrollbar.set)
+        expert_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        expert_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        expert_content_frame = ttk.Frame(expert_scroll_canvas)
+        expert_content_frame_id = expert_scroll_canvas.create_window((0,0), window=expert_content_frame, anchor="nw")
+
+
+        def _on_expert_content_configure(event):
+            expert_scroll_canvas.configure(scrollregion=expert_scroll_canvas.bbox("all"))
+            if expert_scroll_canvas.winfo_width() > 1:
+                 expert_scroll_canvas.itemconfig(expert_content_frame_id, width=expert_scroll_canvas.winfo_width())
+        
+        expert_content_frame.bind("<Configure>", _on_expert_content_configure)
+        expert_scroll_canvas.bind("<Configure>", lambda e, c=expert_scroll_canvas, i=expert_content_frame_id: \
+                                 c.itemconfig(i, width=e.width) if e.width > 1 else None)
 
         # --- Onglet Aperçu ---
-        tab_preview = ttk.Frame(control_notebook)
+        tab_preview = ttk.Frame(self.control_notebook)
+        # ... (contenu de tab_preview) ...
+        preview_tab_text_for_debug = self.tr("tab_preview") # Récupérer le texte
+        print(f"DEBUG: Texte pour tab_preview avant add: '{preview_tab_text_for_debug}' (Langue UI: {self.language_var.get()})")
+        self.control_notebook.add(tab_preview, text=f' {preview_tab_text_for_debug} ')
         # ... (contenu de tab_preview comme avant) ...
-        self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance")); self.wb_frame.pack(fill=tk.X, pady=5, padx=5); self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain); self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain); self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain); wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5); self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_wb_button.pack(side=tk.LEFT, padx=5); self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
+        self.wb_frame = ttk.LabelFrame(tab_preview, text=self.tr("white_balance"))
+        self.wb_frame.pack(fill=tk.X, pady=5, padx=5)
+        self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain)
+        self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain)
+        self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain)
+        wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5)
+        self.auto_wb_button = ttk.Button(wb_btn_frame, text=self.tr("auto_wb"), command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED)
+        self.auto_wb_button.pack(side=tk.LEFT, padx=5)
+        self.reset_wb_button = ttk.Button(wb_btn_frame, text=self.tr("reset_wb"), command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
         self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text=self.tr("stretch_options")); self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5); stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2); self.stretch_method_label = ttk.Label(stretch_method_frame, text=self.tr("stretch_method")); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5)); self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly"); self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview); self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders); self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders); self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma); stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5); self.auto_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("auto_stretch"), command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_stretch_button.pack(side=tk.LEFT, padx=5); self.reset_stretch_button = ttk.Button(stretch_btn_frame, text=self.tr("reset_stretch"), command=self.reset_stretch); self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
         self.bcs_frame = ttk.LabelFrame(tab_preview, text=self.tr("image_adjustments")); self.bcs_frame.pack(fill=tk.X, pady=5, padx=5); self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness); self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast); self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation); bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5); self.reset_bcs_button = ttk.Button(bcs_btn_frame, text=self.tr("reset_bcs"), command=self.reset_brightness_contrast_saturation); self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
-        control_notebook.add(tab_preview, text=f' {self.tr("tab_preview")} ')
+        self.control_notebook.add(tab_preview, text=f' {self.tr("tab_preview")} ')
         # --- Fin du Notebook ---
+        
+        # Avertissement
+        self.warning_label = ttk.Label(expert_content_frame, text=self.tr("expert_warning_text"), foreground="red", font=("Arial", 10, "italic"))
+        self.warning_label.pack(pady=(5,10), padx=5, fill=tk.X)
+
+        # --- Section Neutralisation du Fond (BN) ---
+        self.bn_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("bn_frame_title"), padding=5)
+        self.bn_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.bn_frame.columnconfigure(1, weight=0) # Les spinbox n'ont pas besoin de s'étendre
+        self.bn_frame.columnconfigure(3, weight=0)
+
+
+        # Grille BN
+        self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_grid_size_label"))
+        self.bn_grid_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_grid_size_tt'] = ToolTip(self.bn_grid_size_actual_label, lambda: self.tr('tooltip_bn_grid_size'))
+        self.bn_grid_size_combo = ttk.Combobox(self.bn_frame, textvariable=self.bn_grid_size_str_var, values=["8x8", "16x16", "32x32", "64x64"], width=7, state="readonly")
+        self.bn_grid_size_combo.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_grid_size_combo_tt'] = ToolTip(self.bn_grid_size_combo, lambda: self.tr('tooltip_bn_grid_size'))
+
+
+        # Percentiles BN
+        self.bn_perc_low_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_perc_low_label"))
+        self.bn_perc_low_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_perc_low_tt'] = ToolTip(self.bn_perc_low_actual_label, lambda: self.tr('tooltip_bn_perc_low'))
+        spin_bn_perc_low = ttk.Spinbox(self.bn_frame, from_=0, to=40, increment=1, width=5, textvariable=self.bn_perc_low_var) # Range ajusté
+        spin_bn_perc_low.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_perc_low_spin_tt'] = ToolTip(spin_bn_perc_low, lambda: self.tr('tooltip_bn_perc_low'))
+        
+        self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_perc_high_label"))
+        self.bn_perc_high_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_perc_high_tt'] = ToolTip(self.bn_perc_high_actual_label, lambda: self.tr('tooltip_bn_perc_high'))
+        spin_bn_perc_high = ttk.Spinbox(self.bn_frame, from_=10, to=95, increment=1, width=5, textvariable=self.bn_perc_high_var) # Range ajusté
+        spin_bn_perc_high.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_perc_high_spin_tt'] = ToolTip(spin_bn_perc_high, lambda: self.tr('tooltip_bn_perc_high'))
+
+        # Std Factor BN
+        self.bn_std_factor_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_std_factor_label"))
+        self.bn_std_factor_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_std_factor_tt'] = ToolTip(self.bn_std_factor_actual_label, lambda: self.tr('tooltip_bn_std_factor'))
+        spin_bn_std_factor = ttk.Spinbox(self.bn_frame, from_=0.5, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_std_factor_var)
+        spin_bn_std_factor.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_std_factor_spin_tt'] = ToolTip(spin_bn_std_factor, lambda: self.tr('tooltip_bn_std_factor'))
+        
+        # Limites Gain BN
+        self.bn_min_gain_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_min_gain_label"))
+        self.bn_min_gain_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_min_gain_tt'] = ToolTip(self.bn_min_gain_actual_label, lambda: self.tr('tooltip_bn_min_gain'))
+        spin_bn_min_gain = ttk.Spinbox(self.bn_frame, from_=0.1, to=2.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_min_gain_var)
+        spin_bn_min_gain.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_min_gain_spin_tt'] = ToolTip(spin_bn_min_gain, lambda: self.tr('tooltip_bn_min_gain'))
+        
+        self.bn_max_gain_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_max_gain_label"))
+        self.bn_max_gain_actual_label.grid(row=3, column=2, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_max_gain_tt'] = ToolTip(self.bn_max_gain_actual_label, lambda: self.tr('tooltip_bn_max_gain'))
+        spin_bn_max_gain = ttk.Spinbox(self.bn_frame, from_=1.0, to=10.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_max_gain_var)
+        spin_bn_max_gain.grid(row=3, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['bn_max_gain_spin_tt'] = ToolTip(spin_bn_max_gain, lambda: self.tr('tooltip_bn_max_gain'))
+
+        # --- Section ChromaticBalancer (CB) ---
+        self.cb_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("cb_frame_title"), padding=5)
+        self.cb_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.cb_frame.columnconfigure(1, weight=0)
+        self.cb_frame.columnconfigure(3, weight=0)
+
+        self.cb_border_size_actual_label = ttk.Label(self.cb_frame, text=self.tr("cb_border_size_label"))
+        self.cb_border_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_border_size_tt'] = ToolTip(self.cb_border_size_actual_label, lambda: self.tr('tooltip_cb_border_size'))
+        spin_cb_border_size = ttk.Spinbox(self.cb_frame, from_=5, to=150, increment=5, width=5, textvariable=self.cb_border_size_var)
+        spin_cb_border_size.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_border_size_spin_tt'] = ToolTip(spin_cb_border_size, lambda: self.tr('tooltip_cb_border_size'))
+        
+        self.cb_blur_radius_actual_label = ttk.Label(self.cb_frame, text=self.tr("cb_blur_radius_label"))
+        self.cb_blur_radius_actual_label.grid(row=0, column=2, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_blur_radius_tt'] = ToolTip(self.cb_blur_radius_actual_label, lambda: self.tr('tooltip_cb_blur_radius'))
+        spin_cb_blur_radius = ttk.Spinbox(self.cb_frame, from_=0, to=50, increment=1, width=5, textvariable=self.cb_blur_radius_var) # 0 pour pas de flou
+        spin_cb_blur_radius.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_blur_radius_spin_tt'] = ToolTip(spin_cb_blur_radius, lambda: self.tr('tooltip_cb_blur_radius'))
+
+        self.cb_min_b_factor_actual_label = ttk.Label(self.cb_frame, text=self.tr("cb_min_b_factor_label"))
+        self.cb_min_b_factor_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_min_b_factor_tt'] = ToolTip(self.cb_min_b_factor_actual_label, lambda: self.tr('tooltip_cb_min_b_factor'))
+        spin_cb_min_b_factor = ttk.Spinbox(self.cb_frame, from_=0.1, to=1.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_min_b_factor_var)
+        spin_cb_min_b_factor.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_min_b_factor_spin_tt'] = ToolTip(spin_cb_min_b_factor, lambda: self.tr('tooltip_cb_min_b_factor'))
+        
+        self.cb_max_b_factor_actual_label = ttk.Label(self.cb_frame, text=self.tr("cb_max_b_factor_label"))
+        self.cb_max_b_factor_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_max_b_factor_tt'] = ToolTip(self.cb_max_b_factor_actual_label, lambda: self.tr('tooltip_cb_max_b_factor'))
+        spin_cb_max_b_factor = ttk.Spinbox(self.cb_frame, from_=1.0, to=3.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_max_b_factor_var)
+        spin_cb_max_b_factor.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['cb_max_b_factor_spin_tt'] = ToolTip(spin_cb_max_b_factor, lambda: self.tr('tooltip_cb_max_b_factor'))
+
+        # --- Section Rognage Final ---
+        self.crop_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("crop_frame_title"), padding=5)
+        self.crop_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.final_edge_crop_actual_label = ttk.Label(self.crop_frame, text=self.tr("final_edge_crop_label"))
+        self.final_edge_crop_actual_label.pack(side=tk.LEFT, padx=(2,5), pady=2)
+        self.tooltips['final_edge_crop_tt'] = ToolTip(self.final_edge_crop_actual_label, lambda: self.tr('tooltip_final_edge_crop_percent'))
+
+        spin_final_edge_crop = ttk.Spinbox(self.crop_frame, from_=0.0, to=25.0, increment=0.5, width=6, format="%.1f", textvariable=self.final_edge_crop_percent_var)
+        spin_final_edge_crop.pack(side=tk.LEFT, padx=2, pady=2)
+        self.tooltips['final_edge_crop_spin_tt'] = ToolTip(spin_final_edge_crop, lambda: self.tr('tooltip_final_edge_crop_percent'))
+    
+        ### Section Soustraction de Fond 2D (Photutils) ###
+        self.photutils_bn_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("photutils_bn_frame_title", default="2D Background Subtraction (Photutils)"), padding=5)
+        self.photutils_bn_frame.pack(fill=tk.X, padx=5, pady=5)
+        # self.photutils_bn_frame.columnconfigure(1, weight=0) # Pas nécessaire si pack
+
+        # Checkbox pour activer / désactiver Photutils BN
+        self.apply_photutils_bn_check = ttk.Checkbutton(
+        self.photutils_bn_frame,                     # <-- on garde TON Frame
+        text=self.tr("apply_photutils_bn_label",
+        default="Enable Photutils 2‑D Background Subtraction"),
+        variable=self.apply_photutils_bn_var,
+        command=self._update_photutils_bn_options_state   # Callback pour griser/dégriser
+        )
+        self.apply_photutils_bn_check.pack(anchor=tk.W, padx=5, pady=(5,2))
+        self.tooltips['apply_photutils_bn_tt'] = ToolTip(self.apply_photutils_bn_check, lambda: self.tr('tooltip_apply_photutils_bn'))
+
+
+        # Sous-cadre pour les paramètres, sera grisé si désactivé
+        self.photutils_params_frame = ttk.Frame(self.photutils_bn_frame)
+        self.photutils_params_frame.pack(fill=tk.X, padx=(20,0), pady=2) # Indentation
+        self.photutils_params_frame.columnconfigure(1, weight=0) # Colonne des spinbox fixe
+        self.photutils_params_frame.columnconfigure(3, weight=0) # Colonne des spinbox fixe
+
+        # Box Size
+        self.photutils_bn_box_size_label = ttk.Label(self.photutils_params_frame, text=self.tr("photutils_bn_box_size_label", default="Box Size (px):"))
+        self.photutils_bn_box_size_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_box_size_tt'] = ToolTip(self.photutils_bn_box_size_label, lambda: self.tr('tooltip_photutils_bn_box_size'))
+        spin_pb_box = ttk.Spinbox(self.photutils_params_frame, from_=16, to=1024, increment=16, width=6, textvariable=self.photutils_bn_box_size_var)
+        spin_pb_box.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_box_size_spin_tt'] = ToolTip(spin_pb_box, lambda: self.tr('tooltip_photutils_bn_box_size'))
+
+        # Filter Size
+        self.photutils_bn_filter_size_label = ttk.Label(self.photutils_params_frame, text=self.tr("photutils_bn_filter_size_label", default="Filter Size (px, odd):"))
+        self.photutils_bn_filter_size_label.grid(row=0, column=2, sticky=tk.W, padx=(10,2), pady=2)
+        self.tooltips['photutils_bn_filter_size_tt'] = ToolTip(self.photutils_bn_filter_size_label, lambda: self.tr('tooltip_photutils_bn_filter_size'))
+        spin_pb_filt = ttk.Spinbox(self.photutils_params_frame, from_=1, to=15, increment=2, width=5, textvariable=self.photutils_bn_filter_size_var) # Doit être impair
+        spin_pb_filt.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_filter_size_spin_tt'] = ToolTip(spin_pb_filt, lambda: self.tr('tooltip_photutils_bn_filter_size'))
+
+        # Sigma Clip
+        self.photutils_bn_sigma_clip_label = ttk.Label(self.photutils_params_frame, text=self.tr("photutils_bn_sigma_clip_label", default="Sigma Clip Value:"))
+        self.photutils_bn_sigma_clip_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_sigma_clip_tt'] = ToolTip(self.photutils_bn_sigma_clip_label, lambda: self.tr('tooltip_photutils_bn_sigma_clip'))
+        spin_pb_sig = ttk.Spinbox(self.photutils_params_frame, from_=1.0, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.photutils_bn_sigma_clip_var)
+        spin_pb_sig.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_sigma_clip_spin_tt'] = ToolTip(spin_pb_sig, lambda: self.tr('tooltip_photutils_bn_sigma_clip'))
+
+        # Exclude Percentile
+        self.photutils_bn_exclude_percentile_label = ttk.Label(self.photutils_params_frame, text=self.tr("photutils_bn_exclude_percentile_label", default="Exclude Brightest (%):"))
+        self.photutils_bn_exclude_percentile_label.grid(row=1, column=2, sticky=tk.W, padx=(10,2), pady=2)
+        self.tooltips['photutils_bn_exclude_percentile_tt'] = ToolTip(self.photutils_bn_exclude_percentile_label, lambda: self.tr('tooltip_photutils_bn_exclude_percentile'))
+        spin_pb_excl = ttk.Spinbox(self.photutils_params_frame, from_=0.0, to=100.0, increment=1.0, width=6, format="%.1f", textvariable=self.photutils_bn_exclude_percentile_var) # 0-100%
+        spin_pb_excl.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.tooltips['photutils_bn_exclude_percentile_spin_tt'] = ToolTip(spin_pb_excl, lambda: self.tr('tooltip_photutils_bn_exclude_percentile'))
+    
+        # Bouton Réinitialiser Expert
+        self.reset_expert_button = ttk.Button(expert_content_frame, text=self.tr("reset_expert_button"), command=self._reset_expert_settings)
+        self.reset_expert_button.pack(pady=(10,5))
+        ### FIN de la création des widgets de tab_expert ###
+
+        # Avertissement (stocker le label pour traduction)
+        self.warning_label = ttk.Label(expert_content_frame, text=self.tr("expert_warning_text", default="Toi qui entre ici..."), foreground="red", font=("Arial", 10, "italic"))
+        self.warning_label.pack(pady=(5,10), padx=5, fill=tk.X)        
+        ### : Onglet Expert ###
+
 
         # --- Zone Progression (ENFANT DE self.left_content_frame, packé EN BAS) ---
         self.progress_frame = ttk.LabelFrame(self.left_content_frame, text=self.tr("progress"))
@@ -760,10 +1004,54 @@ class SeestarStackerGUI:
 ##############################################################################################################################
 
 
+    def _update_photutils_bn_options_state(self, *args):
+        """
+        Enable/disable every direct child of self.photutils_params_frame
+        instead of guessing fixed indices.
+        """
+        new_state = tk.NORMAL if self.apply_photutils_bn_var.get() else tk.DISABLED
+
+        # Toggle *all* direct children (labels, spin‑boxes, …)
+        for widget in self.photutils_params_frame.winfo_children():
+            if widget.winfo_exists():
+                try:
+                    widget.config(state=new_state)
+                except tk.TclError:
+                    pass          # e.g. a Label – no 'state' option
 
 
-# --- DANS SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
+
+
+#        try:
+#           photutils_bn_active = self.apply_photutils_bn_var.get()
+#           new_state = tk.NORMAL if photutils_bn_active else tk.DISABLED
+#
+#            # Widgets à contrôler (les spinboxes et leurs labels)
+#            widgets_to_toggle = [
+#                getattr(self, 'photutils_bn_box_size_label', None),
+#                # Le spinbox est un enfant du frame, il faut le retrouver ou le stocker
+#                self.photutils_params_frame.winfo_children()[1] if hasattr(self, 'photutils_params_frame') and len(self.photutils_params_frame.winfo_children()) > 1 else None, # spin_pb_box
+#                getattr(self, 'photutils_bn_filter_size_label', None),
+#                self.photutils_params_frame.winfo_children()[3] if hasattr(self, 'photutils_params_frame') and len(self.photutils_params_frame.winfo_children()) > 3 else None, # spin_pb_filt
+#                getattr(self, 'photutils_bn_sigma_clip_label', None),
+#                self.photutils_params_frame.winfo_children()[5] if hasattr(self, 'photutils_params_frame') and len(self.photutils_params_frame.winfo_children()) > 5 else None, # spin_pb_sig
+#                getattr(self, 'photutils_bn_exclude_percentile_label', None),
+#                self.photutils_params_frame.winfo_children()[7] if hasattr(self, 'photutils_params_frame') and len(self.photutils_params_frame.winfo_children()) > 7 else None, # spin_pb_excl
+#            ]
+#            
+#            for widget in widgets_to_toggle:
+#                if widget and hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+#                    widget.config(state=new_state)
+#            # print(f"DEBUG: État options Photutils BN mis à jour vers: {new_state}")
+#        except tk.TclError: pass
+#        except AttributeError: pass # Si photutils_params_frame n'est pas encore créé
+#        except Exception as e: print(f"ERREUR inattendue dans _update_photutils_bn_options_state: {e}")
+
+
+
+
+##############################################################################################################################
     def _toggle_kappa_visibility(self, event=None):
         """Affiche ou cache les widgets Kappa en fonction de la méthode de stacking, en utilisant grid."""
         show_kappa = self.stacking_mode.get() in ["kappa-sigma", "winsorized-sigma"]
@@ -1300,6 +1588,33 @@ class SeestarStackerGUI:
             # Le label pour scnr_amount est dans le groupe, _create_slider_spinbox_group s'en occupe
             "final_scnr_amount_label": getattr(self, 'scnr_amount_ctrls', {}).get('label'),
             "final_scnr_preserve_lum_label": getattr(self, 'final_scnr_preserve_lum_check', None),
+
+            ### Références Onglet Expert ###
+            #"tab_expert_title": (self.control_notebook, 2) if self.control_notebook and self.control_notebook.index("end") > 2 else None, # Index 2 si c'est le 3ème onglet
+            "expert_warning_text": getattr(self, 'warning_label', None),
+            "bn_frame_title": getattr(self, 'bn_frame', None),
+            "bn_grid_size_label": getattr(self, 'bn_grid_size_actual_label', None),
+            "bn_perc_low_label": getattr(self, 'bn_perc_low_actual_label', None),
+            "bn_perc_high_label": getattr(self, 'bn_perc_high_actual_label', None),
+            "bn_std_factor_label": getattr(self, 'bn_std_factor_actual_label', None),
+            "bn_min_gain_label": getattr(self, 'bn_min_gain_actual_label', None),
+            "bn_max_gain_label": getattr(self, 'bn_max_gain_actual_label', None),
+            "cb_frame_title": getattr(self, 'cb_frame', None),
+            "cb_border_size_label": getattr(self, 'cb_border_size_actual_label', None),
+            "cb_blur_radius_label": getattr(self, 'cb_blur_radius_actual_label', None),
+            "cb_min_b_factor_label": getattr(self, 'cb_min_b_factor_actual_label', None),
+            "cb_max_b_factor_label": getattr(self, 'cb_max_b_factor_actual_label', None),
+            "crop_frame_title": getattr(self, 'crop_frame', None),
+            "final_edge_crop_label": getattr(self, 'final_edge_crop_actual_label', None),
+            "reset_expert_button": getattr(self, 'reset_expert_button', None),
+            ### Références pour Photutils BN ###
+            "photutils_bn_frame_title": getattr(self, 'photutils_bn_frame', None),
+            "apply_photutils_bn_label": getattr(self, 'apply_photutils_bn_check', None),
+            "photutils_bn_box_size_label": getattr(self, 'photutils_bn_box_size_label', None),
+            "photutils_bn_filter_size_label": getattr(self, 'photutils_bn_filter_size_label', None),
+            "photutils_bn_sigma_clip_label": getattr(self, 'photutils_bn_sigma_clip_label', None),
+            "photutils_bn_exclude_percentile_label": getattr(self, 'photutils_bn_exclude_percentile_label', None),
+            ###  ###
             
 
         }
@@ -1324,6 +1639,24 @@ class SeestarStackerGUI:
             print("Warning: Widget reference dictionary not found for translation.")
             return
         for key, widget_info in self.widgets_to_translate.items():
+                        # --- DÉBUT DEBUG SPÉCIFIQUE ---
+            if key == "tab_preview":
+                print(f"DEBUG UI_LANG: Traitement clé '{key}'")
+                current_lang_for_tr = self.localization.language
+                print(f"DEBUG UI_LANG: Langue actuelle pour self.tr: '{current_lang_for_tr}'")
+                
+                translation_directe_langue_courante = self.localization.translations[current_lang_for_tr].get(key)
+                print(f"DEBUG UI_LANG: Traduction directe pour '{key}' en '{current_lang_for_tr}': '{translation_directe_langue_courante}'")
+                
+                traduction_fallback_anglais = self.localization.translations['en'].get(key)
+                print(f"DEBUG UI_LANG: Traduction fallback anglais pour '{key}': '{traduction_fallback_anglais}'")
+
+                default_text_calcul = self.localization.translations['en'].get(key, key.replace("_", " ").title())
+                print(f"DEBUG UI_LANG: default_text calculé pour '{key}': '{default_text_calcul}'")
+
+                translation_finale_pour_tab = self.tr(key, default=default_text_calcul)
+                print(f"DEBUG UI_LANG: self.tr('{key}') a retourné: '{translation_finale_pour_tab}'")
+            # --- FIN DEBUG SPÉCIFIQUE ---
             default_text = self.localization.translations['en'].get(key, key.replace("_", " ").title())
             translation = self.tr(key, default=default_text)
             try:
@@ -1406,8 +1739,63 @@ class SeestarStackerGUI:
         self.histogram_widget.update_histogram(data_for_histogram)
         self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
 
-      
-# Inside SeestarStackerGUI class in main_window.py
+
+
+
+    def _reset_expert_settings(self):
+        """Réinitialise les paramètres de l'onglet Expert à leurs valeurs par défaut
+           telles que définies dans SettingsManager.reset_to_defaults()."""
+        print("DEBUG (GUI _reset_expert_settings): Réinitialisation des paramètres Expert...")
+        
+        # Créer une instance temporaire de SettingsManager pour obtenir ses valeurs par défaut
+        default_settings = SettingsManager()
+        # reset_to_defaults() est appelé implicitement par __init__,
+        # ou vous pouvez l'appeler explicitement si __init__ fait autre chose.
+        # Pour être sûr, on peut faire:
+        # default_settings.reset_to_defaults() # Mais __init__ le fait déjà.
+        
+        try:
+            # Neutralisation du Fond (BN)
+            if hasattr(self, 'bn_grid_size_str_var'):
+                self.bn_grid_size_str_var.set(default_settings.bn_grid_size_str)
+            if hasattr(self, 'bn_perc_low_var'):
+                self.bn_perc_low_var.set(default_settings.bn_perc_low)
+            if hasattr(self, 'bn_perc_high_var'):
+                self.bn_perc_high_var.set(default_settings.bn_perc_high)
+            if hasattr(self, 'bn_std_factor_var'):
+                self.bn_std_factor_var.set(default_settings.bn_std_factor)
+            if hasattr(self, 'bn_min_gain_var'):
+                self.bn_min_gain_var.set(default_settings.bn_min_gain)
+            if hasattr(self, 'bn_max_gain_var'):
+                self.bn_max_gain_var.set(default_settings.bn_max_gain)
+
+            # ChromaticBalancer (CB)
+            if hasattr(self, 'cb_border_size_var'):
+                self.cb_border_size_var.set(default_settings.cb_border_size)
+            if hasattr(self, 'cb_blur_radius_var'):
+                self.cb_blur_radius_var.set(default_settings.cb_blur_radius)
+            if hasattr(self, 'cb_min_b_factor_var'): # Assurez-vous que cette variable Tk existe
+                self.cb_min_b_factor_var.set(default_settings.cb_min_b_factor)
+            if hasattr(self, 'cb_max_b_factor_var'): # Assurez-vous que cette variable Tk existe
+                self.cb_max_b_factor_var.set(default_settings.cb_max_b_factor)
+
+            # Rognage Final
+            if hasattr(self, 'final_edge_crop_percent_var'):
+                self.final_edge_crop_percent_var.set(default_settings.final_edge_crop_percent)
+            
+            self.update_progress_gui("ⓘ Réglages Expert réinitialisés aux valeurs par défaut.", None)
+            print("DEBUG (GUI _reset_expert_settings): Paramètres Expert réinitialisés dans l'UI.")
+
+        except tk.TclError as e:
+            print(f"ERREUR (GUI _reset_expert_settings): Erreur Tcl lors de la réinitialisation des widgets: {e}")
+        except AttributeError as e:
+            print(f"ERREUR (GUI _reset_expert_settings): Erreur d'attribut (widget ou variable Tk manquant?): {e}")
+        except Exception as e:
+            print(f"ERREUR (GUI _reset_expert_settings): Erreur inattendue: {e}")
+            traceback.print_exc(limit=1)
+
+
+
 
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
         """Callback function triggered by the backend worker."""
@@ -1437,6 +1825,41 @@ class SeestarStackerGUI:
         self.preview_total_imgs = total_imgs
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
+        # --- NOUVELLE LOGIQUE POUR AUTO-REFRESH PÉRIODIQUE ---
+        self.batches_processed_for_preview_refresh += 1
+        print(f"DEBUG GUI: Preview refresh counter: {self.batches_processed_for_preview_refresh}/{self.preview_auto_refresh_batch_interval}")
+
+        # Mettre à jour les infos texte de l'aperçu immédiatement
+        # (elles ne dépendent pas des auto-stretch/wb)
+        if hasattr(self.preview_manager, 'trigger_redraw'): # Pour redessiner le texte
+            try: self.root.after_idle(self.preview_manager.trigger_redraw)
+            except tk.TclError: pass
+
+
+        if self.batches_processed_for_preview_refresh >= self.preview_auto_refresh_batch_interval:
+            print(f"DEBUG GUI: Seuil de {self.preview_auto_refresh_batch_interval} lots atteint. Déclenchement Auto WB & Auto Stretch pour l'aperçu.")
+            self.update_progress_gui("ⓘ Auto-ajustement de l'aperçu...", None)
+            
+            # Appeler Auto WB. Cela va .set() les variables des sliders et déclencher _debounce_refresh_preview
+            self.apply_auto_white_balance() 
+            
+            # Appeler Auto Stretch. Cela va .set() les variables des sliders et déclencher _debounce_refresh_preview
+            # Il est important que apply_auto_stretch utilise les données après la potentielle nouvelle WB
+            # ce qui est le cas car apply_auto_stretch utilise self.preview_manager.image_data_wb
+            # ou recalcule la WB si image_data_wb est None.
+            # Pour être sûr, on peut forcer un refresh_preview avant l'auto_stretch
+            # pour que image_data_wb soit à jour, mais les appels set() devraient suffire.
+            
+            # Un petit délai pour s'assurer que la WB est appliquée avant l'auto-stretch
+            # qui se base sur les données après WB pour son analyse de luminance.
+            self.root.after(50, self.apply_auto_stretch) 
+            
+            self.batches_processed_for_preview_refresh = 0 # Réinitialiser le compteur
+        else:
+            # Si pas d'auto-ajustement, rafraîchir simplement avec les réglages UI actuels
+            # print("DEBUG GUI: Pas d'auto-ajustement ce lot, refresh normal.")
+            self.refresh_preview() # Déclenche le pipeline de PreviewManager avec les réglages actuels
+        # --- FIN NOUVELLE LOGIQUE ---
 
         # Get current preview parameters from UI
         try:
@@ -1905,7 +2328,17 @@ class SeestarStackerGUI:
                  print("  -> !!! ATTRIBUT 'folders_lock' MANQUANT SUR L'INSTANCE !!!")
                  print(f"  -> Attributs présents: {dir(self.queued_stacker)}") # Lister ce qui est présent
             # --- FIN AJOUT DEBUG ---
-
+     
+        print("-" * 20)
+        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
+        if hasattr(self, 'queued_stacker'):
+            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
+            print(f"  -> Attributs de self.queued_stacker: {dir(self.queued_stacker)}") # AFFICHE TOUS LES ATTRIBUTS
+            has_is_running_method = hasattr(self.queued_stacker, 'is_running')
+            print(f"  -> self.queued_stacker a l'attribut 'is_running'? {has_is_running_method}")
+            if has_is_running_method:
+                print(f"  -> Type de self.queued_stacker.is_running: {type(self.queued_stacker.is_running)}")
+     
             # Condition originale pour lire depuis le backend
             if self.processing and self.queued_stacker.is_running(): # Ajout check is_running pour sécurité
                 try:
@@ -1941,8 +2374,6 @@ class SeestarStackerGUI:
         except tk.TclError: pass
         except AttributeError: pass
     # --- FIN MÉTHODE MODIFIÉE ---
-
-
 
 
     def stop_processing(self):
@@ -2437,164 +2868,239 @@ class SeestarStackerGUI:
 #########################################################################################################################################
 
 
+
+
+
+
+# --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
+
     def start_processing(self):
         """
-        Démarre le traitement, affiche l'avertissement Drizzle, gère la config
-        et lance le thread backend avec les bons paramètres (y compris mosaïque).
+        Démarre le traitement :
+        1. Valide les chemins d'entrée/sortie.
+        2. Affiche l'avertissement Drizzle si nécessaire.
+        3. Met à jour l'instance self.settings avec les valeurs actuelles de l'UI.
+        4. Valide les settings (ce qui peut les modifier).
+        5. Ré-applique les settings (potentiellement modifiés par la validation) à l'UI.
+        6. Prépare tous les arguments pour le backend en lisant depuis self.settings.
+        7. Lance le thread de traitement du backend (SeestarQueuedStacker).
         """
-        print("DEBUG (GUI start_processing): Début tentative démarrage...")
+        print("DEBUG (GUI start_processing): Début tentative démarrage du traitement...")
 
-        # Désactiver bouton Start immédiatement
         if hasattr(self, 'start_button'):
             try: self.start_button.config(state=tk.DISABLED)
-            except tk.TclError: pass
+            except tk.TclError: pass # Ignorer si widget détruit
 
-        # --- Validation des chemins ---
+        # --- 1. Validation des chemins et de la présence de fichiers FITS ---
+        print("DEBUG (GUI start_processing): Phase 1 - Validation des chemins...")
         input_folder = self.input_path.get()
         output_folder = self.output_path.get()
+
         if not input_folder or not output_folder:
             messagebox.showerror(self.tr("error"), self.tr("select_folders"))
-            if hasattr(self, 'start_button'):
-                try:
-                    self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
+            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(input_folder):
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
-            if hasattr(self, 'start_button'):
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
+            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(output_folder):
-            try: os.makedirs(output_folder, exist_ok=True); self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
-            except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}");
-            if hasattr(self, 'start_button'):
-                try: self.start_button.config(state=tk.NORMAL)
-                except tk.TclError: pass
-            return
+            try:
+                os.makedirs(output_folder, exist_ok=True)
+                self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
+            except Exception as e:
+                messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}")
+                if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+                return
         try:
-            # Vérifier s'il y a des fichiers FITS (sauf si dossier vide ET dossiers additionnels prévus)
             has_initial_fits = any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder))
             has_additional = bool(self.additional_folders_to_process)
             if not has_initial_fits and not has_additional:
                 if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
-                    if hasattr(self, 'start_button'):
-                        try: self.start_button.config(state=tk.NORMAL)
-                        except tk.TclError: pass
+                    if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
                     return
-        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-        # Il manquait un return ici si erreur lecture dossier
-        if hasattr(self, 'start_button'):
-            try: self.start_button.config(state=tk.NORMAL)
-            except tk.TclError: pass
-        # === AVERTISSEMENT DRIZZLE ===
-        drizzle_enabled = self.use_drizzle_var.get()
-        # --- Vérification supplémentaire : Si mode mosaïque, Drizzle est implicitement requis par le backend ---
-        is_mosaic_mode_for_warning = getattr(self, 'mosaic_mode_active', False)
-        if (drizzle_enabled or is_mosaic_mode_for_warning): # Afficher si Drizzle coché OU mode Mosaïque actif
+        except Exception as e: 
+            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
+            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+            return
+        print("DEBUG (GUI start_processing): Phase 1 - Validation des chemins OK.")
+
+        # --- 2. Avertissement Drizzle (si Drizzle ou Mosaïque activé) ---
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle...")
+        drizzle_globally_enabled_ui = self.use_drizzle_var.get() # Drizzle simple champ
+        is_mosaic_mode_ui = getattr(self, 'mosaic_mode_active', False) # Mode Mosaïque
+
+        if drizzle_globally_enabled_ui or is_mosaic_mode_ui:
             warning_title = self.tr('drizzle_warning_title')
-            warning_text = self.tr('drizzle_warning_text')
-            if is_mosaic_mode_for_warning and not drizzle_enabled: # Ajouter une note si mosaïque force Drizzle
-                 warning_text += "\n\n" + self.tr("mosaic_requires_drizzle_note", default="(Note: Mosaic mode requires Drizzle for final combination.)")
-            continue_processing = messagebox.askyesno(warning_title, warning_text, parent=self.root)
+            base_warning_text = self.tr('drizzle_warning_text')
+            full_warning_text = base_warning_text
+            if is_mosaic_mode_ui and not drizzle_globally_enabled_ui: # Mosaïque active, Drizzle simple non -> Drizzle sera forcé
+                 full_warning_text += "\n\n" + self.tr("mosaic_requires_drizzle_note", default="(Note: Mosaic mode requires Drizzle for final combination.)")
+            
+            print(f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire. Texte: \"{full_warning_text[:50]}...\"")
+            continue_processing = messagebox.askyesno(warning_title, full_warning_text, parent=self.root)
             if not continue_processing:
-                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur.", None)
-                if hasattr(self, 'start_button'):
-                    try: self.start_button.config(state=tk.NORMAL)
-                    except tk.TclError: pass
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur après avertissement Drizzle/Mosaïque.", None)
+                if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
                 return
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle OK (ou non applicable).")
 
-
-        # --- Logique principale de démarrage ---
-        print("DEBUG (GUI start_processing): Démarrage logique principale...")
-        self.processing = True; self.time_per_image = 0; self.global_start_time = time.monotonic()
-        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}"); self.aligned_files_var.set(default_aligned_fmt.format(count=0))
-        # Passer une COPIE de la liste des dossiers additionnels au backend
-        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        # --- 3. Initialisation de l'état de traitement ---
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement...")
+        self.processing = True
+        self.time_per_image = 0
+        self.global_start_time = time.monotonic()
+        self.batches_processed_for_preview_refresh = 0 # Réinitialiser compteur pour l'aperçu
+        
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+        
+        folders_to_pass_to_backend = list(self.additional_folders_to_process) # Copie
         self.additional_folders_to_process = [] # Vider la liste du GUI
-        self.update_additional_folders_display() # Mettre à jour affichage GUI
-        self._set_parameter_widgets_state(tk.DISABLED) # Désactiver les contrôles UI
+        self.update_additional_folders_display() # Mettre à jour l'affichage UI (devrait montrer 0)
+        
+        self._set_parameter_widgets_state(tk.DISABLED) # Désactiver les contrôles UI principaux
         if hasattr(self, "stop_button"): self.stop_button.config(state=tk.NORMAL)
         if hasattr(self, "open_output_button"): self.open_output_button.config(state=tk.DISABLED)
-        if hasattr(self, "progress_manager"): self.progress_manager.reset(); self.progress_manager.start_timer()
-        if hasattr(self, "status_text"): # Initialiser le log
-            self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END); self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n"); self.status_text.config(state=tk.DISABLED)
+        
+        if hasattr(self, "progress_manager"):
+            self.progress_manager.reset()
+            self.progress_manager.start_timer()
+        
+        if hasattr(self, "status_text"):
+            self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END)
+            self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n"); self.status_text.config(state=tk.DISABLED)
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement OK.")
 
-        # Mettre à jour et valider les settings AVANT de les passer
-        self.settings.update_from_ui(self); validation_messages = self.settings.validate_settings()
+        # --- 4. Mise à jour, Validation, et Ré-application des Settings ---
+        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")
+        print("  -> Appel self.settings.update_from_ui(self)...")
+        self.settings.update_from_ui(self) # Lit toutes les valeurs de l'UI -> self.settings
+        
+        # Log de la valeur Photutils BN juste après lecture de l'UI
+        print(f"  DEBUG SETTINGS SYNC: Valeur self.settings.apply_photutils_bn APRES update_from_ui = {self.settings.apply_photutils_bn}")
+
+        print("  -> Appel self.settings.validate_settings()...")
+        validation_messages = self.settings.validate_settings() # Valide les valeurs dans self.settings
+        print(f"DEBUG GUI Start: self.settings.apply_photutils_bn APRES VALIDATION = {self.settings.apply_photutils_bn}")
+
         if validation_messages:
-            self.update_progress_gui("⚠️ Paramètres ajustés:", None); [self.update_progress_gui(f"  - {msg}", None) for msg in validation_messages];
-            self.settings.apply_to_ui(self) # Réappliquer les settings validés à l'UI (visuel)
+            self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
+            for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None)
+            print("  -> Appel self.settings.apply_to_ui(self) pour refléter les settings validés...")
+            self.settings.apply_to_ui(self) # Ré-applique les settings (potentiellement corrigés) à l'UI
+        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        # --- Préparation des arguments pour le backend ---
-        # Récupérer l'état mosaïque et les settings spécifiques
-        is_mosaic_mode = getattr(self, 'mosaic_mode_active', False)
-        current_mosaic_settings = getattr(self, 'mosaic_settings', {})
-        if not isinstance(current_mosaic_settings, dict): current_mosaic_settings = {}
-        # Récupérer la clé API depuis la variable Tkinter
-        current_api_key = getattr(self, 'astrometry_api_key_var', tk.StringVar()).get()
-        # Récupérer la valeur de correction chroma
-        apply_chroma = self.apply_chroma_correction_var.get()
+        # --- 5. Préparation des arguments pour le backend EN LISANT DEPUIS self.settings ---
+        # self.settings est maintenant la source de vérité la plus à jour.
+        print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings...")
+        
+        # Mosaïque
+        is_mosaic_mode_backend = self.settings.mosaic_mode_active
+        current_mosaic_settings_backend = self.settings.mosaic_settings # C'est déjà une copie
+        current_api_key_backend = self.settings.astrometry_api_key
+        
+        # Corrections de couleur
+        apply_chroma_val_backend = self.settings.apply_chroma_correction
+        apply_final_scnr_backend = self.settings.apply_final_scnr
+        final_scnr_target_channel_backend = self.settings.final_scnr_target_channel
+        final_scnr_amount_backend = self.settings.final_scnr_amount
+        final_scnr_preserve_lum_backend = self.settings.final_scnr_preserve_luminosity
+        
+        # Paramètres Expert - BN Globale
+        bn_grid_size_str_backend = self.settings.bn_grid_size_str
+        bn_perc_low_backend = self.settings.bn_perc_low
+        bn_perc_high_backend = self.settings.bn_perc_high
+        bn_std_factor_backend = self.settings.bn_std_factor
+        bn_min_gain_backend = self.settings.bn_min_gain
+        bn_max_gain_backend = self.settings.bn_max_gain
+        # Paramètres Expert - CB
+        cb_border_size_backend = self.settings.cb_border_size
+        cb_blur_radius_backend = self.settings.cb_blur_radius
+        cb_min_b_factor_backend = self.settings.cb_min_b_factor
+        cb_max_b_factor_backend = self.settings.cb_max_b_factor
+        # Paramètres Expert - Rognage
+        final_edge_crop_percent_backend = self.settings.final_edge_crop_percent # En %
+        # Paramètres Expert - Photutils BN
+        apply_photutils_bn_backend = self.settings.apply_photutils_bn
+        photutils_bn_box_size_backend = self.settings.photutils_bn_box_size
+        photutils_bn_filter_size_backend = self.settings.photutils_bn_filter_size
+        photutils_bn_sigma_clip_backend = self.settings.photutils_bn_sigma_clip
+        photutils_bn_exclude_percentile_backend = self.settings.photutils_bn_exclude_percentile
 
-        print(f"!!!! DEBUG GUI Start: Lancement avec is_mosaic_run = {is_mosaic_mode} !!!!")
-        print(f"!!!! DEBUG GUI Start: Settings Mosaïque passés = {current_mosaic_settings} !!!!")
-        print(f"!!!! DEBUG GUI Start: Clé API passée = {'Oui' if current_api_key else 'Non'} !!!!")
+        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): Mosaïque={is_mosaic_mode_backend}, APIKey Présente={'Oui' if current_api_key_backend else 'Non'} !!!!")
+        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): ApplyChroma={apply_chroma_val_backend}, ApplySCNR={apply_final_scnr_backend} !!!!")
+        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): Expert -> BN Grid='{bn_grid_size_str_backend}', CB Border={cb_border_size_backend}, Crop%={final_edge_crop_percent_backend}, ApplyPhotutilsBN={apply_photutils_bn_backend} !!!!")
+        print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée.")
 
-        # --- Appel à queued_stacker.start_processing ---
+        # --- 6. Appel à queued_stacker.start_processing ---
+        print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
         processing_started = self.queued_stacker.start_processing(
-            # Chemins et dossiers
-            input_dir=input_folder,                            # Doit être string
-            output_dir=output_folder,                          # Doit être string
-            reference_path_ui=self.settings.reference_image_path, # String ou None
-            initial_additional_folders=folders_to_pass_to_backend, # Liste de strings
-            # Paramètres Stacking Classique
-            stacking_mode=self.settings.stacking_mode,         # String
-            kappa=self.settings.kappa,                         # Float
-            # Paramètres Communs
-            batch_size=self.settings.batch_size,               # Int (QueueManager le gérera si 0)
-            correct_hot_pixels=self.settings.correct_hot_pixels, # Bool
-            hot_pixel_threshold=self.settings.hot_pixel_threshold, # Float
-            neighborhood_size=self.settings.neighborhood_size,     # Int
-            bayer_pattern=self.settings.bayer_pattern,             # String
-            perform_cleanup=self.cleanup_temp_var.get(),           # Bool
-            # Pondération
-            use_weighting=self.settings.use_quality_weighting, # Bool
-            weight_snr=self.settings.weight_by_snr,            # Bool
-            weight_stars=self.settings.weight_by_stars,        # Bool
-            snr_exp=self.settings.snr_exponent,                # Float
-            stars_exp=self.settings.stars_exponent,            # Float
-            min_w=self.settings.min_weight,                    # Float
-            # Drizzle (valeurs globales, seront ignorées/écrasées si Mosaïque pour kernel/pixfrac)
-            use_drizzle=self.use_drizzle_var.get(),            # Bool
-            drizzle_scale=float(self.drizzle_scale_var.get()), # Float
-            drizzle_wht_threshold=self.drizzle_wht_threshold_var.get(), # Float (0-1)
-            drizzle_mode=self.drizzle_mode_var.get(),          # String ("Final" ou "Incremental")
-            drizzle_kernel=self.drizzle_kernel_var.get(),      # String
-            drizzle_pixfrac=self.drizzle_pixfrac_var.get(),    # Float (0.01-1.0)
-            # Correction Chroma
-            apply_chroma_correction=apply_chroma,              # Bool
-            # --- Arguments Mosaïque ---
-            is_mosaic_run=is_mosaic_mode,                      # Bool
-            api_key=current_api_key,                           # String (clé API)
-            mosaic_settings=current_mosaic_settings            # Dict ({'kernel': ..., 'pixfrac': ...})
+            input_dir=input_folder,
+            output_dir=output_folder,
+            reference_path_ui=self.settings.reference_image_path,
+            initial_additional_folders=folders_to_pass_to_backend,
+            stacking_mode=self.settings.stacking_mode,
+            kappa=self.settings.kappa,
+            batch_size=self.settings.batch_size,
+            correct_hot_pixels=self.settings.correct_hot_pixels,
+            hot_pixel_threshold=self.settings.hot_pixel_threshold,
+            neighborhood_size=self.settings.neighborhood_size,
+            bayer_pattern=self.settings.bayer_pattern,
+            perform_cleanup=self.settings.cleanup_temp,
+            use_weighting=self.settings.use_quality_weighting, # Rappel: forcé à False dans backend pour SUM/W initial
+            weight_snr=self.settings.weight_by_snr,
+            weight_stars=self.settings.weight_by_stars,
+            snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent,
+            min_w=self.settings.min_weight,
+            use_drizzle=self.settings.use_drizzle,
+            drizzle_scale=float(self.settings.drizzle_scale),
+            drizzle_wht_threshold=self.settings.drizzle_wht_threshold,
+            drizzle_mode=self.settings.drizzle_mode,
+            drizzle_kernel=self.settings.drizzle_kernel,
+            drizzle_pixfrac=self.settings.drizzle_pixfrac,
+            apply_chroma_correction=apply_chroma_val_backend,
+            apply_final_scnr=apply_final_scnr_backend,
+            final_scnr_target_channel=final_scnr_target_channel_backend,
+            final_scnr_amount=final_scnr_amount_backend,
+            final_scnr_preserve_luminosity=final_scnr_preserve_lum_backend,
+            bn_grid_size_str=bn_grid_size_str_backend,
+            bn_perc_low=bn_perc_low_backend,
+            bn_perc_high=bn_perc_high_backend,
+            bn_std_factor=bn_std_factor_backend,
+            bn_min_gain=bn_min_gain_backend,
+            bn_max_gain=bn_max_gain_backend,
+            cb_border_size=cb_border_size_backend,
+            cb_blur_radius=cb_blur_radius_backend,
+            cb_min_b_factor=cb_min_b_factor_backend,
+            cb_max_b_factor=cb_max_b_factor_backend,
+            final_edge_crop_percent=final_edge_crop_percent_backend,
+            apply_photutils_bn=apply_photutils_bn_backend,
+            photutils_bn_box_size=photutils_bn_box_size_backend,
+            photutils_bn_filter_size=photutils_bn_filter_size_backend,
+            photutils_bn_sigma_clip=photutils_bn_sigma_clip_backend,
+            photutils_bn_exclude_percentile=photutils_bn_exclude_percentile_backend,
+            is_mosaic_run=is_mosaic_mode_backend,
+            api_key=current_api_key_backend,
+            mosaic_settings=current_mosaic_settings_backend
         )
-        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait.")
+        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
-        # --- Gérer résultat démarrage backend ---
+        # --- 7. Gérer résultat démarrage backend ---
         if processing_started:
-            # ... (démarrage thread _track_processing_progress comme avant) ...
             if hasattr(self, 'stop_button'): self.stop_button.config(state=tk.NORMAL)
             self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
             self.thread.start()
         else:
-            # ... (réactiver bouton start, reset flag processing comme avant) ...
             if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
             self.processing = False
-            self.update_progress_gui("ⓘ Échec démarrage traitement (backend a refusé).", None)
+            self.update_progress_gui("ⓘ Échec démarrage traitement (backend a refusé ou erreur de paramètre).", None)
+            self._set_parameter_widgets_state(tk.NORMAL) # Réactiver les contrôles si échec démarrage
+        print("DEBUG (GUI start_processing): Fin de la méthode.")
 
-        print("DEBUG (GUI start_processing): Fin.")
 
-# --- FIN DE LA MÉTHODE start_processing (CORRIGÉE) ---
+
 
 
 

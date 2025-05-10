@@ -155,7 +155,14 @@ class PreviewManager:
              self.display_font = None # Ensure PIL font isn't used
 
 
-    def update_preview(self, raw_image_data, params, stack_count=None, total_images=None, current_batch=None, total_batches=None): # Add new args with defaults
+
+
+
+
+# --- DANS seestar/gui/preview.py ---
+# --- DANS la classe PreviewManager ---
+
+    def update_preview(self, raw_image_data, params, stack_count=None, total_images=None, current_batch=None, total_batches=None):
         """
         Updates the preview with raw data, display parameters, and tracking info.
         Zoom/pan only reset if image dimensions change.
@@ -168,66 +175,112 @@ class PreviewManager:
         # --- End Store ---
 
         if raw_image_data is None:
-            if self.image_data_raw is not None: self.clear_preview("No Image Data")
+            if self.image_data_raw is not None: # Si on avait une image avant
+                self.clear_preview("No Image Data") # Effacer l'ancienne et afficher message
             return None, None
 
         if not isinstance(raw_image_data, np.ndarray):
             print("Error: update_preview received non-numpy array data.")
-            if self.image_data_raw is not None: self.clear_preview("Preview Error")
+            if self.image_data_raw is not None:
+                self.clear_preview("Preview Error")
             return None, None
 
         new_shape = raw_image_data.shape
         dimensions_changed = (self.image_data_raw_shape is None or new_shape != self.image_data_raw_shape)
-        params_changed = self.current_display_params != params
+        
+        # params_changed = self.current_display_params != params # On peut garder ça pour info mais on ne l'utilise plus pour sauter le traitement
 
         if dimensions_changed:
             print("Preview dimensions changed, resetting zoom/pan.")
             self.reset_zoom_and_pan()
             self.image_data_raw_shape = new_shape
 
-        self.image_data_raw = raw_image_data # Update reference AFTER checking dimensions
-        # Always update if data/params changed OR if text needs drawing/updating
-        if not dimensions_changed and not params_changed and self.last_displayed_pil_image is not None:
-            if self._text_id_on_canvas or self.display_img_count > 0: self._redraw_canvas()
-            return self.last_displayed_pil_image, self.image_data_wb
-
+        # Toujours mettre à jour les données brutes de référence
+        self.image_data_raw = raw_image_data 
+        # Et les paramètres d'affichage courants
         self.current_display_params = params.copy()
 
+        ### LE BLOC 'if not dimensions_changed and not params_changed...' A ÉTÉ SUPPRIMÉ ###
+        ### CE QUI FORCE À TOUJOURS EXÉCUTER LE PIPELINE DE TRAITEMENT CI-DESSOUS ###
+        print("DEBUG [PreviewManager]: Exécution complète du pipeline de traitement pour l'aperçu.") # Debug
+
         try:
-            processing_data = self.image_data_raw.copy()
+            processing_data = self.image_data_raw.copy() # Utiliser la dernière version de raw_image_data
+            
             # --- Pipeline Steps (1-5) ---
             # 1. White Balance
-            if processing_data.ndim == 3 and processing_data.shape[2] == 3: self.image_data_wb = self.color_correction.white_balance(processing_data, r=params.get('r_gain', 1.0), g=params.get('g_gain', 1.0), b=params.get('b_gain', 1.0))
-            else: self.image_data_wb = processing_data
-            data_for_histogram = self.image_data_wb.copy()
+            if processing_data.ndim == 3 and processing_data.shape[2] == 3:
+                self.image_data_wb = self.color_correction.white_balance(
+                    processing_data, 
+                    r=params.get('r_gain', 1.0), 
+                    g=params.get('g_gain', 1.0), 
+                    b=params.get('b_gain', 1.0)
+                )
+            else:
+                self.image_data_wb = processing_data # Pour N&B ou si déjà couleur non traitable
+            
+            data_for_histogram = self.image_data_wb.copy() # Pour l'histogramme AVANT étirement/gamma
+            
             # 2. Stretch
-            stretch_method = params.get('stretch_method', 'Linear'); bp = params.get('black_point', 0.0); wp = params.get('white_point', 1.0)
-            data_stretched = self.image_data_wb
-            if stretch_method == "Linear": data_stretched = self.stretch_presets.linear(data_stretched, bp, wp)
-            elif stretch_method == "Asinh": asinh_scale = 10.0 / max(0.01, wp - bp) if wp > bp else 10.0; data_stretched = self.stretch_presets.asinh(data_stretched, scale=asinh_scale, bp=bp)
-            elif stretch_method == "Log": log_scale = 10.0; data_stretched = self.stretch_presets.logarithmic(data_stretched, scale=log_scale, bp=bp)
+            data_to_stretch = self.image_data_wb # Partir de l'image après WB
+            stretch_method = params.get('stretch_method', 'Linear')
+            bp = params.get('black_point', 0.0)
+            wp = params.get('white_point', 1.0)
+            data_stretched = data_to_stretch # Fallback
+            if stretch_method == "Linear":
+                data_stretched = self.stretch_presets.linear(data_to_stretch, bp, wp)
+            elif stretch_method == "Asinh":
+                asinh_scale = 10.0 / max(0.01, wp - bp) if wp > bp else 10.0
+                data_stretched = self.stretch_presets.asinh(data_to_stretch, scale=asinh_scale, bp=bp)
+            elif stretch_method == "Log":
+                log_scale = 10.0 # Ou un autre paramètre d'échelle
+                data_stretched = self.stretch_presets.logarithmic(data_to_stretch, scale=log_scale, bp=bp)
+            
             data_stretched = np.clip(data_stretched, 0.0, 1.0)
+            
             # 3. Gamma
-            gamma = params.get('gamma', 1.0); data_gamma_corrected = self.stretch_presets.gamma(data_stretched, gamma); data_gamma_corrected = np.clip(data_gamma_corrected, 0.0, 1.0)
+            gamma = params.get('gamma', 1.0)
+            data_gamma_corrected = self.stretch_presets.gamma(data_stretched, gamma)
+            data_gamma_corrected = np.clip(data_gamma_corrected, 0.0, 1.0)
+            
             # 4. Convert to PIL
-            display_uint8 = (np.nan_to_num(data_gamma_corrected) * 255).astype(np.uint8); pil_img = None
-            if display_uint8.ndim == 2: pil_img = Image.fromarray(display_uint8, mode='L')
-            elif display_uint8.ndim == 3 and display_uint8.shape[2] == 3: pil_img = Image.fromarray(display_uint8, mode='RGB')
-            else: raise ValueError(f"Cannot create PIL image from processed shape {display_uint8.shape}")
-            # 5. BCS
-            brightness = params.get('brightness', 1.0); contrast = params.get('contrast', 1.0); saturation = params.get('saturation', 1.0)
-            if abs(brightness - 1.0) > 1e-3: enhancer = ImageEnhance.Brightness(pil_img); pil_img = enhancer.enhance(brightness)
-            if abs(contrast - 1.0) > 1e-3: enhancer = ImageEnhance.Contrast(pil_img); pil_img = enhancer.enhance(contrast)
-            if pil_img.mode == 'RGB' and abs(saturation - 1.0) > 1e-3: enhancer = ImageEnhance.Color(pil_img); pil_img = enhancer.enhance(saturation)
+            display_uint8 = (np.nan_to_num(data_gamma_corrected) * 255).astype(np.uint8)
+            pil_img = None
+            if display_uint8.ndim == 2:
+                pil_img = Image.fromarray(display_uint8, mode='L')
+            elif display_uint8.ndim == 3 and display_uint8.shape[2] == 3:
+                pil_img = Image.fromarray(display_uint8, mode='RGB')
+            else:
+                raise ValueError(f"Cannot create PIL image from processed shape {display_uint8.shape}")
+            
+            # 5. BCS (Brightness, Contrast, Saturation)
+            brightness = params.get('brightness', 1.0)
+            contrast = params.get('contrast', 1.0)
+            saturation = params.get('saturation', 1.0)
+
+            if abs(brightness - 1.0) > 1e-3: # Seuil pour éviter traitement inutile
+                enhancer = ImageEnhance.Brightness(pil_img)
+                pil_img = enhancer.enhance(brightness)
+            if abs(contrast - 1.0) > 1e-3:
+                enhancer = ImageEnhance.Contrast(pil_img)
+                pil_img = enhancer.enhance(contrast)
+            if pil_img.mode == 'RGB' and abs(saturation - 1.0) > 1e-3:
+                enhancer = ImageEnhance.Color(pil_img)
+                pil_img = enhancer.enhance(saturation)
             # --- End Pipeline ---
 
-            self.last_displayed_pil_image = pil_img
-            self._redraw_canvas() # Call redraw which now handles text
+            self.last_displayed_pil_image = pil_img # Stocker la nouvelle image PIL
+            self._redraw_canvas() # Redessiner le canvas avec la nouvelle image et le texte
             return pil_img, data_for_histogram
 
         except Exception as e:
             print(f"Error during preview processing pipeline: {e}"); traceback.print_exc(limit=2)
-            self.clear_preview("Preview Processing Error"); return None, None
+            self.clear_preview("Preview Processing Error")
+            return None, None
+
+
+
+
 
     def _redraw_canvas(self):
         """Redessine l'image de fond (si chargée), l'image PIL astro et le texte d'info."""

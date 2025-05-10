@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 from skimage import exposure
 import time
+import traceback # Garder pour les logs d'erreur
+
 # Import ccdproc SEULEMENT si on décide de garder une fonction de combine ici
 # Pour l'instant, on suppose que ccdproc est utilisé dans queue_manager
 # try:
@@ -165,6 +167,60 @@ class StackEnhancer:
              print(f"   -> ERREUR inattendue pendant CLAHE: {e}")
              traceback.print_exc(limit=1)
              return img
+
+
+def apply_edge_crop(img_data, crop_percent_decimal):
+    """
+    Applique un rognage en pourcentage sur les bords d'une image.
+
+    Args:
+        img_data (np.ndarray): Image à rogner.
+        crop_percent_decimal (float): Pourcentage à rogner (ex: 0.05 pour 5%).
+
+    Returns:
+        np.ndarray: Image rognée, ou l'originale si rognage non applicable/erreur.
+    """
+    if img_data is None:
+        print("WARN [apply_edge_crop]: Données image None, pas de rognage.")
+        return None
+    if not (isinstance(crop_percent_decimal, (float, int)) and 0 < crop_percent_decimal < 0.5):
+        # print("DEBUG [apply_edge_crop]: Pourcentage de rognage invalide ou nul, pas de rognage.")
+        return img_data # Pas de rognage si 0 ou invalide
+
+    print(f"DEBUG [apply_edge_crop]: Rognage des bords demandé ({crop_percent_decimal*100:.1f}%)...")
+    try:
+        h, w = img_data.shape[:2]
+        crop_h_pixels = int(h * crop_percent_decimal)
+        crop_w_pixels = int(w * crop_percent_decimal)
+
+        if (crop_h_pixels * 2 >= h) or (crop_w_pixels * 2 >= w):
+            print(f"   WARN [apply_edge_crop]: Rognage excessif demandé. Annulé.")
+            return img_data
+
+        if crop_h_pixels > 0 or crop_w_pixels > 0:
+            y_start, y_end = crop_h_pixels, h - crop_h_pixels
+            x_start, x_end = crop_w_pixels, w - crop_w_pixels
+            
+            cropped_img = None
+            if img_data.ndim == 3:
+                cropped_img = img_data[y_start:y_end, x_start:x_end, :].copy() # .copy() pour éviter problèmes de vue
+            elif img_data.ndim == 2:
+                cropped_img = img_data[y_start:y_end, x_start:x_end].copy()
+            else:
+                print(f"   WARN [apply_edge_crop]: Format image inattendu ({img_data.ndim}D). Pas de rognage.")
+                return img_data
+            
+            print(f"DEBUG [apply_edge_crop]: Rognage terminé. Nouvelle shape: {cropped_img.shape}.")
+            return cropped_img
+        else:
+            # print("DEBUG [apply_edge_crop]: Pixels de rognage calculés à 0, pas de rognage effectué.")
+            return img_data # Pas de rognage si pixels = 0
+
+    except Exception as e:
+         print(f"   ERREUR [apply_edge_crop]: Erreur pendant le rognage: {e}")
+         traceback.print_exc(limit=1)
+         return img_data # Retourner l'original en cas d'erreur
+
 
     def process(self, images, use_drizzle=False, images_headers=None):
         """

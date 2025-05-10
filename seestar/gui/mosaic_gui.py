@@ -10,7 +10,7 @@ import traceback
 import numpy as np # Ajouté pour np.clip
 
 # Liste des noyaux valides (pour le Combobox)
-VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'tophat' ] # , 'lanczos2', 'lanczos3', 'gaussian'
+VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point'] # , 'lanczos2', 'lanczos3', 'gaussian', 'tophat' 
 
 class MosaicSettingsWindow(tk.Toplevel):
     """
