@@ -268,6 +268,21 @@ EN_TRANSLATIONS = {
     'mosaic_api_key_help': "Get your key from nova.astrometry.net (free account)",
     'mosaic_api_key_required': "Astrometry.net API Key is required when Mosaic Mode is enabled.",
    
+    # final log popup 
+    'Post-Processing Applied': "Post-Processing Applied",
+    'Photutils 2D Background': "Photutils 2D Background",
+    'Global Background Neutralization (BN)': "Global Background Neutralization (BN)",
+    'Edge/Chroma Correction (CB)': "Edge/Chroma Correction (CB)",
+    'Final SCNR': "Final SCNR",
+    'Final Edge Crop': "Final Edge Crop",
+    'Yes': "Yes",
+    'No': "No",
+    'Not Found!': "Not Found!", # Pour le cas où final_stack_path existe mais pas le fichier
+    # --- Section Feathering ---
+    'feathering_frame_title': "Feathering (Weight Map Smoothing)",
+    'apply_feathering_label': "Enable Feathering by Weight Map",
+    'feather_blur_px_label': "Feather Blur Radius (px):",
+    # ---  ---
 
 
 }

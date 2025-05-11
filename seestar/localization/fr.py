@@ -231,12 +231,28 @@ FR_TRANSLATIONS = {
     'report_minutes': "minutes",
     'report_hours': "heures",
     'eta_calculating': "Calcul...",
+    
+    #Log pop up final
+    'Post-Processing Applied': "Post-Traitements Appliqués",
+    'Photutils 2D Background': "Soustraction Fond 2D Photutils",
+    'Global Background Neutralization (BN)': "Neutralisation Fond Globale (BN)",
+    'Edge/Chroma Correction (CB)': "Correction Bords/Chroma (CB)",
+    'Final SCNR': "SCNR Final",
+    'Final Edge Crop': "Rognage Final des Bords",
+    'Yes': "Oui",
+    'No': "Non",
+    'Not Found!': "Non Trouvé !",
+    
+    
     # --- Weighting Info Display ---
     'Weighting': 'Pondération', # Clé pour label 'WGHT_ON'
     'W. Metrics': 'Métr. Poids', # Clé pour label 'WGHT_MET'
     'weighting_enabled': "Activée", # Valeur pour WGHT_ON=True
     'weighting_disabled': "Désactivée", # Valeur pour WGHT_ON=False
     'drizzle_wht_threshold_label': "Seuil WHT%:",
+    
+    
+    
     # --- Mosaïque ---
     'Mosaic...': "Mosaïque...",
     'mosaic_settings_title': "Options Mosaïque",
@@ -258,6 +274,10 @@ FR_TRANSLATIONS = {
     'mosaic_api_key_label': "Clé API :",
     'mosaic_api_key_help': "Obtenez votre clé sur nova.astrometry.net (compte gratuit)",
     'mosaic_api_key_required': "La clé API Astrometry.net est requise lorsque le Mode Mosaïque est activé.",
+    #--- Tooltips pour Feathering ---
+    'tooltip_apply_feathering': "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
+    'tooltip_feather_blur_px': "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",
+    # ---  ---
 
     # ---  Textes pour Avertissement Drizzle ---
     'drizzle_warning_title': "Avertissement Drizzle",
@@ -267,6 +287,7 @@ FR_TRANSLATIONS = {
         "- Il créera des fichiers temporaires pouvant occuper beaucoup d'espace disque (potentiellement autant que les images d'entrée).\n",
         "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
         "Continuer avec Drizzle ?"
+    
 
 
     ),

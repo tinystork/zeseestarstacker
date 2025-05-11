@@ -221,202 +221,151 @@ def apply_edge_crop(img_data, crop_percent_decimal):
          traceback.print_exc(limit=1)
          return img_data # Retourner l'original en cas d'erreur
 
+# DANS stack_enhancement.py (ou où vous l'avez mise)
 
-    def process(self, images, use_drizzle=False, images_headers=None):
-        """
-        Pipeline MAJ v5: Gère Drizzle ou retourne None pour le chemin classique.
-        Le stacking classique est maintenant géré par queue_manager._stack_batch.
-        Cette méthode gère UNIQUEMENT le chemin Drizzle.
+def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
+    print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")
+    # ... (vérifications initiales img, wht, etc. inchangées) ...
+    if img is None or wht is None: return img
+    if img.ndim != 3 or img.shape[2] != 3 or wht.ndim != 2 or img.shape[:2] != wht.shape: return img
 
-        Args:
-            images (list): Liste d'images (numpy arrays, float32, 0-1). Déjà alignées.
-            use_drizzle (bool): Utiliser Drizzle pour le stacking.
-            images_headers (list, optional): Headers pour Drizzle WCS.
+    try:
+        img_f32 = img.astype(np.float32, copy=False)
+        wht_f32 = wht.astype(np.float32, copy=False)
+        blur_px = max(1, int(blur_px)); kernel_size = (blur_px // 2) * 2 + 1
+        print(f"DEBUG [feather_by_weight_map]: Kernel: {kernel_size}x{kernel_size}")
 
-        Returns:
-            tuple: (final_image, final_weight_map) si Drizzle réussi, ou (None, None).
-        """
-        # --- Initialisation et vérifications ---
-        if not images:
-            print("StackEnhancer: Aucune image à traiter.")
-            return None, None
-        images_processed = [img for img in images if img is not None and img.size > 0]
-        if not images_processed:
-            print("StackEnhancer: Aucune image valide fournie.")
-            return None, None
+        wht_blurred = cv2.GaussianBlur(wht_f32, (kernel_size, kernel_size), 0)
+        wht_min_for_gain = np.percentile(wht_f32[wht_f32 > eps], 1) # Prendre le 1er percentile des poids non nuls comme seuil min
+        wht_min_for_gain = max(wht_min_for_gain, eps * 10) # Assurer qu'il est un peu au-dessus de epsilon
+        
+        gain_map = wht_blurred / np.maximum(wht_f32, wht_min_for_gain) # Utiliser un wht minimum plus élevé
+        
+        # --- CLIPPING DU GAIN ---
+        gain_map_clipped = np.clip(gain_map, min_gain, max_gain)
+        print(f"DEBUG [feather_by_weight_map]: GainMapNonClipped Range: [{np.min(gain_map):.2f}-{np.max(gain_map):.2f}]")
+        print(f"DEBUG [feather_by_weight_map]: GainMapClipped   Range: [{np.min(gain_map_clipped):.2f}-{np.max(gain_map_clipped):.2f}]")
+        
+        gain_map_blurred = cv2.GaussianBlur(gain_map_clipped, (kernel_size, kernel_size), 0) # Flouter le gain clippé
+        print(f"DEBUG [feather_by_weight_map]: GainMapBlurred(Clipped) Range: [{np.min(gain_map_blurred):.2f}-{np.max(gain_map_blurred):.2f}]")
 
-        start_time = time.time()
-        print(f"--- Début StackEnhancer Process (Mode: {'Drizzle' if use_drizzle else 'PostProcessing Only - via apply_postprocessing()'}) ---")
-
-        stacked_image = None # Image résultant du stacking (Drizzle seulement)
-        weight_map = None    # Carte de poids (uniquement pour Drizzle réussi)
-
-        # --- Étape 1: Stacking (Soit Drizzle, soit RIEN ici) ---
-
-        # --- Chemin Drizzle ---
-        if use_drizzle:
-            if _drizzle_available and DrizzleProcessor:
-                try:
-                    print(f"--> StackEnhancer: Appel DrizzleProcessor...")
-                    drizzle_proc = DrizzleProcessor(
-                        scale_factor=self.config['drizzle_scale'],
-                        pixfrac=self.config['drizzle_pixfrac'],
-                        # kernel='square' # Utilise le défaut du constructeur DrizzleProcessor
-                    )
-                    # Passer les headers s'ils sont fournis
-                    stacked_image, weight_map = drizzle_proc.apply_drizzle(
-                        images_processed, images_headers=images_headers
-                    )
-                    if stacked_image is None:
-                        raise RuntimeError("Drizzle a échoué (apply_drizzle a retourné None).")
-                    print(f"    -> Drizzle réussi (Shape: {stacked_image.shape})")
-
-                except ImportError: # Juste au cas où
-                     print("StackEnhancer: Erreur Import DrizzleProcessor.")
-                     stacked_image, weight_map = None, None
-                except Exception as drizzle_err:
-                    print(f"   -> ERREUR pendant Drizzle: {drizzle_err}")
-                    traceback.print_exc(limit=2)
-                    stacked_image, weight_map = None, None
-            else:
-                print("   -> ERREUR CRITIQUE: Drizzle demandé mais non disponible/importé.")
-                stacked_image, weight_map = None, None
-        # --- Fin du chemin Drizzle ---
-
-        # --- Chemin Stacking Classique (NE FAIT PLUS RIEN ICI) ---
-        else: # if not use_drizzle:
-            print("StackEnhancer.process: Mode non-Drizzle. Retourne None (stacking fait ailleurs).")
-            stacked_image, weight_map = None, None
-            # Pas besoin de continuer le post-traitement ici si on ne fait pas le stack
-            end_time = time.time()
-            print(f"--- Fin StackEnhancer Process (Durée: {end_time - start_time:.2f}s) ---")
-            return None, None # Important de retourner None si pas Drizzle
-        # --- Fin Chemin Stacking Classique ---
+        feathered_image = img_f32 * gain_map_blurred[..., None]
+        feathered_image_clipped = np.clip(feathered_image, 0., 1.)
+        return feathered_image_clipped.astype(np.float32)
+    except Exception as e:
+        print(f"ERREUR [feather_by_weight_map]: {e}"); traceback.print_exc(limit=2)
+        return img
 
 
-        # --- Vérification après Drizzle ---
-        if stacked_image is None:
-            print("StackEnhancer: Échec de l'étape de stacking Drizzle.")
-            return None, None # Retourner tuple
 
-        # --- Étape 2: Post-traitement des bords (UNIQUEMENT pour Drizzle ici) ---
-        final_image_before_norm = None
-        if use_drizzle and weight_map is not None: # On a réussi Drizzle
-            print("... Application du masque basé sur la carte de poids Drizzle (WHT)...")
-            try:
-                # Utilisation du seuil WHT de la config
-                wht_threshold_ratio = self.config.get('drizzle_wht_threshold', 0.7)
-                max_wht = np.nanmax(weight_map)
-                if max_wht > 1e-9:
-                    threshold_wht = max_wht * wht_threshold_ratio
-                    mask = weight_map >= threshold_wht
-                    print(f"    -> Seuil WHT appliqué: {threshold_wht:.2f} ({wht_threshold_ratio*100:.0f}% du max {max_wht:.2f})")
-                    if stacked_image.ndim == 3 and mask.ndim == 2:
-                         mask = np.expand_dims(mask, axis=-1)
-                    final_image_before_norm = np.where(mask, stacked_image, 0.0)
-                else:
-                     print("    -> Warning: Carte WHT vide ou nulle, pas de masquage appliqué.")
-                     final_image_before_norm = stacked_image
-            except Exception as wht_err:
-                print(f"    -> ERREUR application masque WHT: {wht_err}")
-                traceback.print_exc(limit=1)
-                final_image_before_norm = stacked_image # Fallback
+
+# DANS stack_enhancement.py (ou où vous l'avez mise)
+
+def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
+    print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")
+    # ... (vérifications initiales img, wht, etc. inchangées) ...
+    if img is None or wht is None: return img
+    if img.ndim != 3 or img.shape[2] != 3 or wht.ndim != 2 or img.shape[:2] != wht.shape: return img
+
+    try:
+        img_f32 = img.astype(np.float32, copy=False)
+        wht_f32 = wht.astype(np.float32, copy=False)
+        blur_px = max(1, int(blur_px)); kernel_size = (blur_px // 2) * 2 + 1
+        print(f"DEBUG [feather_by_weight_map]: Kernel: {kernel_size}x{kernel_size}")
+
+        wht_blurred = cv2.GaussianBlur(wht_f32, (kernel_size, kernel_size), 0)
+        wht_min_for_gain = np.percentile(wht_f32[wht_f32 > eps], 1) # Prendre le 1er percentile des poids non nuls comme seuil min
+        wht_min_for_gain = max(wht_min_for_gain, eps * 10) # Assurer qu'il est un peu au-dessus de epsilon
+        
+        gain_map = wht_blurred / np.maximum(wht_f32, wht_min_for_gain) # Utiliser un wht minimum plus élevé
+        
+        # --- CLIPPING DU GAIN ---
+        gain_map_clipped = np.clip(gain_map, min_gain, max_gain)
+        print(f"DEBUG [feather_by_weight_map]: GainMapNonClipped Range: [{np.min(gain_map):.2f}-{np.max(gain_map):.2f}]")
+        print(f"DEBUG [feather_by_weight_map]: GainMapClipped   Range: [{np.min(gain_map_clipped):.2f}-{np.max(gain_map_clipped):.2f}]")
+        
+        gain_map_blurred = cv2.GaussianBlur(gain_map_clipped, (kernel_size, kernel_size), 0) # Flouter le gain clippé
+        print(f"DEBUG [feather_by_weight_map]: GainMapBlurred(Clipped) Range: [{np.min(gain_map_blurred):.2f}-{np.max(gain_map_blurred):.2f}]")
+
+        feathered_image = img_f32 * gain_map_blurred[..., None]
+        feathered_image_clipped = np.clip(feathered_image, 0., 1.)
+        return feathered_image_clipped.astype(np.float32)
+    except Exception as e:
+        print(f"ERREUR [feather_by_weight_map]: {e}"); traceback.print_exc(limit=2)
+        return img
+
+
+
+
+# --- NOUVELLE MÉTHODE pour appliquer post-traitement seul ---
+def apply_postprocessing(self, image_data):
+    """
+    Applique uniquement les étapes de post-traitement (rognage, CLAHE)
+    à une image déjà combinée.
+
+    Args:
+        image_data (np.ndarray): Image combinée (float32, 0-1).
+
+    Returns:
+        np.ndarray: Image post-traitée (float32, 0-1).
+    """
+    if image_data is None:
+        print("StackEnhancer.apply_postprocessing: Aucune donnée fournie.")
+        return None
+
+    print("StackEnhancer: Application post-traitement (Rognage, CLAHE)...")
+    processed_data = image_data.copy() # Travailler sur une copie
+
+    # 1. Rognage basé sur le pourcentage de la config
+    processed_data = self._postprocess_edges(processed_data)
+    if processed_data is None: return image_data # Retourner l'original si rognage échoue
+
+    # 2. CLAHE (Optionnel - Décommenter pour activer)
+    # print("... Application CLAHE DÉSACTIVÉE pour test (dans apply_postprocessing)...")
+    # processed_data = self._apply_clahe(processed_data)
+    # if processed_data is None: return image_data # Retourner l'original si CLAHE échoue
+
+    print("StackEnhancer: Post-traitement terminé.")
+    return processed_data.astype(np.float32) # Assurer float32
+# --- FIN NOUVELLE MÉTHODE ---
+
+def _postprocess_edges(self, img):
+    """
+    Réduction des artefacts de bord par rognage simple basé sur un pourcentage.
+    (Méthode inchangée)
+    """
+    if img is None:
+        print("   -> Warning: _postprocess_edges reçu None.")
+        return None
+
+    crop_percent = self.config.get('edge_crop_percent', 0.02)
+
+    if not isinstance(crop_percent, (float, int)) or crop_percent <= 0.0:
+        return img # Pas de rognage
+
+    print(f"... Rognage des bords ({crop_percent*100:.1f}%)...")
+    try:
+        h, w = img.shape[:2]
+        crop_h_pixels = int(h * crop_percent)
+        crop_w_pixels = int(w * crop_percent)
+
+        if (crop_h_pixels * 2 >= h) or (crop_w_pixels * 2 >= w):
+            print(f"   -> Warning: Rognage excessif demandé ({crop_percent*100:.1f}%). Rognage annulé.")
+            return img
+
+        if crop_h_pixels > 0 or crop_w_pixels > 0:
+            y_start, y_end = crop_h_pixels, h - crop_h_pixels
+            x_start, x_end = crop_w_pixels, w - crop_w_pixels
+            if img.ndim == 3: cropped_img = img[y_start:y_end, x_start:x_end, :]
+            elif img.ndim == 2: cropped_img = img[y_start:y_end, x_start:x_end]
+            else: print(f"   -> Warning: Format d'image inattendu ({img.ndim}D) pour le rognage."); return img
+            print(f"... Rognage terminé (Nouvelle shape: {cropped_img.shape}).")
+            return cropped_img
         else:
-             # Si Drizzle a réussi mais pas de WHT, ou si on voulait du rognage aussi
-             # On pourrait appliquer le rognage % ici si souhaité, mais WHT est mieux pour Drizzle
-             final_image_before_norm = stacked_image
+            return img
 
-        # --- Étape 3: CLAHE (Toujours désactivé pour ce test) ---
-        print("... Application CLAHE DÉSACTIVÉE pour test...")
-        # final_image_clahe = self._apply_clahe(final_image_before_norm)
-        # if final_image_clahe is None: print("StackEnhancer: Échec CLAHE."); return None, None
-        # final_image_processed = final_image_clahe
-        final_image_processed = final_image_before_norm # Utiliser l'image avant CLAHE
-
-        # --- Étape 4: Normalisation Finale (Min-Max) ---
-        print("... Normalisation finale Min-Max...")
-        min_f, max_f = np.nanmin(final_image_processed), np.nanmax(final_image_processed)
-        if max_f > min_f:
-            final_image = (final_image_processed - min_f) / (max_f - min_f)
-        else:
-            final_image = np.zeros_like(final_image_processed)
-        final_image = np.clip(final_image, 0.0, 1.0).astype(np.float32) # Assurer float32
-
-        end_time = time.time()
-        print(f"--- Fin StackEnhancer Process (Durée: {end_time - start_time:.2f}s) ---")
-
-        # --- Retourner le tuple final ---
-        return final_image, weight_map
-
-    # --- NOUVELLE MÉTHODE pour appliquer post-traitement seul ---
-    def apply_postprocessing(self, image_data):
-        """
-        Applique uniquement les étapes de post-traitement (rognage, CLAHE)
-        à une image déjà combinée.
-
-        Args:
-            image_data (np.ndarray): Image combinée (float32, 0-1).
-
-        Returns:
-            np.ndarray: Image post-traitée (float32, 0-1).
-        """
-        if image_data is None:
-            print("StackEnhancer.apply_postprocessing: Aucune donnée fournie.")
-            return None
-
-        print("StackEnhancer: Application post-traitement (Rognage, CLAHE)...")
-        processed_data = image_data.copy() # Travailler sur une copie
-
-        # 1. Rognage basé sur le pourcentage de la config
-        processed_data = self._postprocess_edges(processed_data)
-        if processed_data is None: return image_data # Retourner l'original si rognage échoue
-
-        # 2. CLAHE (Optionnel - Décommenter pour activer)
-        # print("... Application CLAHE DÉSACTIVÉE pour test (dans apply_postprocessing)...")
-        # processed_data = self._apply_clahe(processed_data)
-        # if processed_data is None: return image_data # Retourner l'original si CLAHE échoue
-
-        print("StackEnhancer: Post-traitement terminé.")
-        return processed_data.astype(np.float32) # Assurer float32
-    # --- FIN NOUVELLE MÉTHODE ---
-
-    def _postprocess_edges(self, img):
-        """
-        Réduction des artefacts de bord par rognage simple basé sur un pourcentage.
-        (Méthode inchangée)
-        """
-        if img is None:
-            print("   -> Warning: _postprocess_edges reçu None.")
-            return None
-
-        crop_percent = self.config.get('edge_crop_percent', 0.02)
-
-        if not isinstance(crop_percent, (float, int)) or crop_percent <= 0.0:
-            return img # Pas de rognage
-
-        print(f"... Rognage des bords ({crop_percent*100:.1f}%)...")
-        try:
-            h, w = img.shape[:2]
-            crop_h_pixels = int(h * crop_percent)
-            crop_w_pixels = int(w * crop_percent)
-
-            if (crop_h_pixels * 2 >= h) or (crop_w_pixels * 2 >= w):
-                print(f"   -> Warning: Rognage excessif demandé ({crop_percent*100:.1f}%). Rognage annulé.")
-                return img
-
-            if crop_h_pixels > 0 or crop_w_pixels > 0:
-                y_start, y_end = crop_h_pixels, h - crop_h_pixels
-                x_start, x_end = crop_w_pixels, w - crop_w_pixels
-                if img.ndim == 3: cropped_img = img[y_start:y_end, x_start:x_end, :]
-                elif img.ndim == 2: cropped_img = img[y_start:y_end, x_start:x_end]
-                else: print(f"   -> Warning: Format d'image inattendu ({img.ndim}D) pour le rognage."); return img
-                print(f"... Rognage terminé (Nouvelle shape: {cropped_img.shape}).")
-                return cropped_img
-            else:
-                return img
-
-        except Exception as e:
-             print(f"   -> ERREUR pendant le rognage: {e}")
-             traceback.print_exc(limit=1)
-             return img # Retourner l'original en cas d'erreur
+    except Exception as e:
+            print(f"   -> ERREUR pendant le rognage: {e}")
+            traceback.print_exc(limit=1)
+            return img # Retourner l'original en cas d'erreur
 # --- END OF FILE seestar/enhancement/stack_enhancement.py (MODIFIED) ---

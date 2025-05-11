@@ -149,9 +149,20 @@ class SeestarStackerGUI:
 
         # --- Chargement Settings & Langue ---
         self.settings.load_settings()
+        # ---  Forcer la désactivation du mode mosaïque au démarrage ---
+        if hasattr(self.settings, 'mosaic_mode_active'):
+            print(f"DEBUG (GUI __init__): Valeur self.settings.mosaic_mode_active APRES load: {self.settings.mosaic_mode_active}")
+            self.settings.mosaic_mode_active = False # Remettre à False pour cette session
+            print(f"DEBUG (GUI __init__): self.settings.mosaic_mode_active FORCÉ à False pour le démarrage de l'UI.")
+        
         self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
         print(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.") # <-- AJOUTÉ DEBUG
+
+        # --- AJOUT DEBUG SPÉCIFIQUE POUR LA CLÉ API ---
+        print(f"DEBUG (GUI __init__): Valeur de self.settings.astrometry_api_key APRES load_settings: '{self.settings.astrometry_api_key}' (longueur: {len(self.settings.astrometry_api_key)})")
+        # --- FIN AJOUT ---
+
 
         # --- Gestion des arguments d'entrée (MODIFIÉ) ---
         # Priorité 1: Stacking immédiat demandé par l'analyseur
@@ -179,6 +190,13 @@ class SeestarStackerGUI:
 
         # --- Application Settings & UI Updates (Inchangé) ---
         self.settings.apply_to_ui(self)
+        # --- DEBUG SPÉCIFIQUE POUR LA CLÉ API ---
+        try:
+            api_key_val_after_apply = self.astrometry_api_key_var.get()
+            print(f"DEBUG (GUI __init__): Valeur de self.astrometry_api_key_var APRES apply_to_ui: '{api_key_val_after_apply}' (longueur: {len(api_key_val_after_apply)})")
+        except Exception as e_get_var:
+            print(f"DEBUG (GUI __init__): Erreur lecture self.astrometry_api_key_var après apply_to_ui: {e_get_var}")
+        # --- FIN AJOUT ---
         if hasattr(self, '_update_spinbox_from_float'): self._update_spinbox_from_float()
         self._update_weighting_options_state()
         self._update_drizzle_options_state() # S'assurer que les options drizzle sont à jour
@@ -200,7 +218,8 @@ class SeestarStackerGUI:
 
         # --- Variable onglets expert ---
         self._update_final_scnr_options_state()
-        self._update_photutils_bn_options_state() 
+        self._update_photutils_bn_options_state()
+        self._update_feathering_options_state()
         # --- Variables état aperçu (Inchangé) ---
         self.preview_img_count = 0; self.preview_total_imgs = 0
         self.preview_current_batch = 0; self.preview_total_batches = 0
@@ -345,6 +364,12 @@ class SeestarStackerGUI:
         self.photutils_bn_filter_size_var = tk.IntVar(value=5)    # Défaut: 5 (doit être impair)
         self.photutils_bn_sigma_clip_var = tk.DoubleVar(value=3.0) # Défaut: 3.0
         self.photutils_bn_exclude_percentile_var = tk.DoubleVar(value=98.0) # Défaut: 98.0
+
+        # --- NOUVELLES VARIABLES TKINTER POUR FEATHERING ---
+        self.apply_feathering_var = tk.BooleanVar(value=False)  # Désactivé par défaut
+        self.feather_blur_px_var = tk.IntVar(value=256)      # Valeur de flou par défaut
+        print("DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var).")
+        # --- FIN NOUVELLES VARIABLES ---
         print("DEBUG (GUI init_variables): Variables pour Photutils Background Subtraction créées.")
         
 #######################################################################################################################
@@ -785,6 +810,41 @@ class SeestarStackerGUI:
         # Avertissement
         self.warning_label = ttk.Label(expert_content_frame, text=self.tr("expert_warning_text"), foreground="red", font=("Arial", 10, "italic"))
         self.warning_label.pack(pady=(5,10), padx=5, fill=tk.X)
+        
+
+        # --- Section Feathering  ---
+        self.feathering_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("feathering_frame_title", default="Feathering (Weight Map Smoothing)"), padding=5)
+        self.feathering_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.apply_feathering_check = ttk.Checkbutton(
+            self.feathering_frame,
+            text=self.tr("apply_feathering_label", default="Enable Feathering by Weight Map"),
+            variable=self.apply_feathering_var,
+            command=self._update_feathering_options_state # Callback pour griser/dégriser
+        )
+        self.apply_feathering_check.pack(anchor=tk.W, padx=5, pady=(5,2))
+        self.tooltips['apply_feathering_tt'] = ToolTip(self.apply_feathering_check, lambda: self.tr('tooltip_apply_feathering'))
+
+        feather_params_frame = ttk.Frame(self.feathering_frame)
+        feather_params_frame.pack(fill=tk.X, padx=(20,0), pady=2) # Indentation
+        
+        self.feather_blur_px_label = ttk.Label(feather_params_frame, text=self.tr("feather_blur_px_label", default="Blur Radius (px):"))
+        self.feather_blur_px_label.pack(side=tk.LEFT, padx=(0,5), pady=2)
+        self.tooltips['feather_blur_px_tt'] = ToolTip(self.feather_blur_px_label, lambda: self.tr('tooltip_feather_blur_px'))
+
+        # Le Spinbox pour blur_px
+        # Plage de 32 à 1024, par pas de 16 ou 32 ? Ou laisser libre ?
+        # Le kernel sera recalculé pour être impair, donc la valeur peut être paire/impaire.
+        self.feather_blur_px_spinbox = ttk.Spinbox(
+            feather_params_frame,
+            from_=32, to=512, increment=16, # Plage et pas
+            width=6,
+            textvariable=self.feather_blur_px_var
+        )
+        self.feather_blur_px_spinbox.pack(side=tk.LEFT, padx=2, pady=2)
+        self.tooltips['feather_blur_px_spin_tt'] = ToolTip(self.feather_blur_px_spinbox, lambda: self.tr('tooltip_feather_blur_px'))
+        # --- ---
+
 
         # --- Section Neutralisation du Fond (BN) ---
         self.bn_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("bn_frame_title"), padding=5)
@@ -797,7 +857,7 @@ class SeestarStackerGUI:
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text=self.tr("bn_grid_size_label"))
         self.bn_grid_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
         self.tooltips['bn_grid_size_tt'] = ToolTip(self.bn_grid_size_actual_label, lambda: self.tr('tooltip_bn_grid_size'))
-        self.bn_grid_size_combo = ttk.Combobox(self.bn_frame, textvariable=self.bn_grid_size_str_var, values=["8x8", "16x16", "32x32", "64x64"], width=7, state="readonly")
+        self.bn_grid_size_combo = ttk.Combobox(self.bn_frame, textvariable=self.bn_grid_size_str_var, values=["8x8", "16x16", "24x24", "32x32", "64x64"], width=7, state="readonly")
         self.bn_grid_size_combo.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
         self.tooltips['bn_grid_size_combo_tt'] = ToolTip(self.bn_grid_size_combo, lambda: self.tr('tooltip_bn_grid_size'))
 
@@ -998,6 +1058,32 @@ class SeestarStackerGUI:
         # L'état des options SCNR sera géré par _update_final_scnr_options_state,
         # qui est appelé dans __init__ après le chargement des settings.
         print("DEBUG (GUI create_layout): Fin création layout.")
+
+#################################################################################################################################
+
+
+
+
+    def _update_feathering_options_state(self, *args):
+        """Active ou désactive le Spinbox de flou du feathering."""
+        try:
+            feathering_active = self.apply_feathering_var.get()
+            new_state = tk.NORMAL if feathering_active else tk.DISABLED
+
+            if hasattr(self, 'feather_blur_px_spinbox') and self.feather_blur_px_spinbox.winfo_exists():
+                self.feather_blur_px_spinbox.config(state=new_state)
+            if hasattr(self, 'feather_blur_px_label') and self.feather_blur_px_label.winfo_exists():
+                 self.feather_blur_px_label.config(state=new_state) # Griser le label aussi
+
+            print(f"DEBUG (GUI): État options Feathering (Blur Px Spinbox) mis à jour: {new_state}")
+        except tk.TclError: pass
+        except AttributeError: pass
+        except Exception as e:
+            print(f"ERREUR inattendue dans _update_feathering_options_state: {e}")
+            traceback.print_exc(limit=1)
+    
+
+
 
 
 
@@ -1607,6 +1693,13 @@ class SeestarStackerGUI:
             "crop_frame_title": getattr(self, 'crop_frame', None),
             "final_edge_crop_label": getattr(self, 'final_edge_crop_actual_label', None),
             "reset_expert_button": getattr(self, 'reset_expert_button', None),
+
+            # --- Références pour Feathering ---
+            "feathering_frame_title": getattr(self, 'feathering_frame', None),
+            "apply_feathering_label": getattr(self, 'apply_feathering_check', None),
+            "feather_blur_px_label": getattr(self, 'feather_blur_px_label', None),
+            # ---  ---
+
             ### Références pour Photutils BN ###
             "photutils_bn_frame_title": getattr(self, 'photutils_bn_frame', None),
             "apply_photutils_bn_label": getattr(self, 'apply_photutils_bn_check', None),
@@ -1774,15 +1867,44 @@ class SeestarStackerGUI:
                 self.cb_border_size_var.set(default_settings.cb_border_size)
             if hasattr(self, 'cb_blur_radius_var'):
                 self.cb_blur_radius_var.set(default_settings.cb_blur_radius)
-            if hasattr(self, 'cb_min_b_factor_var'): # Assurez-vous que cette variable Tk existe
+            if hasattr(self, 'cb_min_b_factor_var'): 
                 self.cb_min_b_factor_var.set(default_settings.cb_min_b_factor)
-            if hasattr(self, 'cb_max_b_factor_var'): # Assurez-vous que cette variable Tk existe
+            if hasattr(self, 'cb_max_b_factor_var'): 
                 self.cb_max_b_factor_var.set(default_settings.cb_max_b_factor)
 
             # Rognage Final
             if hasattr(self, 'final_edge_crop_percent_var'):
                 self.final_edge_crop_percent_var.set(default_settings.final_edge_crop_percent)
             
+            # --- Réinitialiser Feathering ---
+            if hasattr(self, 'apply_feathering_var'):
+                self.apply_feathering_var.set(default_settings.apply_feathering) # Sera False par défaut
+            if hasattr(self, 'feather_blur_px_var'):
+                self.feather_blur_px_var.set(default_settings.feather_blur_px)   # Sera 256 par défaut
+            # ---  ---
+
+            # --- Réinitialiser Photutils BN ---
+            if hasattr(self, 'apply_photutils_bn_var'):
+                self.apply_photutils_bn_var.set(default_settings.apply_photutils_bn) # Sera False par défaut
+            if hasattr(self, 'photutils_bn_box_size_var'):
+                self.photutils_bn_box_size_var.set(default_settings.photutils_bn_box_size)
+            if hasattr(self, 'photutils_bn_filter_size_var'):
+                self.photutils_bn_filter_size_var.set(default_settings.photutils_bn_filter_size)
+            if hasattr(self, 'photutils_bn_sigma_clip_var'):
+                self.photutils_bn_sigma_clip_var.set(default_settings.photutils_bn_sigma_clip)
+            if hasattr(self, 'photutils_bn_exclude_percentile_var'):
+                self.photutils_bn_exclude_percentile_var.set(default_settings.photutils_bn_exclude_percentile)
+            # ---  ---
+            
+            # Mettre à jour l'état des widgets après réinitialisation
+            # C'est important que ces appels soient APRÈS avoir .set() les BooleanVar
+            if hasattr(self, '_update_photutils_bn_options_state'):
+                self._update_photutils_bn_options_state()
+            if hasattr(self, '_update_feathering_options_state'):
+                self._update_feathering_options_state()
+            # Si d'autres groupes d'options dans l'onglet expert ont des états dépendants,
+            # appelez leurs méthodes _update_..._state() ici aussi.
+
             self.update_progress_gui("ⓘ Réglages Expert réinitialisés aux valeurs par défaut.", None)
             print("DEBUG (GUI _reset_expert_settings): Paramètres Expert réinitialisés dans l'UI.")
 
@@ -1790,12 +1912,14 @@ class SeestarStackerGUI:
             print(f"ERREUR (GUI _reset_expert_settings): Erreur Tcl lors de la réinitialisation des widgets: {e}")
         except AttributeError as e:
             print(f"ERREUR (GUI _reset_expert_settings): Erreur d'attribut (widget ou variable Tk manquant?): {e}")
+            traceback.print_exc(limit=1) # Pour voir quel attribut manque
         except Exception as e:
             print(f"ERREUR (GUI _reset_expert_settings): Erreur inattendue: {e}")
             traceback.print_exc(limit=1)
 
 
 
+###########################################################################################################################################
 
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
         """Callback function triggered by the backend worker."""
@@ -2507,6 +2631,17 @@ class SeestarStackerGUI:
         Ouvre la fenêtre modale pour configurer les options de mosaïque.
         """
         print("DEBUG (GUI): Clic sur bouton 'Mosaïque...' - Appel de _open_mosaic_settings_window.")
+        # --- AJOUT DEBUG ---
+        current_api_key_in_main_gui_var = "NOT_FOUND"
+        if hasattr(self, 'astrometry_api_key_var'):
+            try:
+                current_api_key_in_main_gui_var = self.astrometry_api_key_var.get()
+                print(f"DEBUG (GUI _open_mosaic_settings_window): Valeur de self.astrometry_api_key_var.get() = '{current_api_key_in_main_gui_var}' (longueur: {len(current_api_key_in_main_gui_var)})")
+            except tk.TclError:
+                print("DEBUG (GUI _open_mosaic_settings_window): Erreur TclError lecture astrometry_api_key_var (fenêtre détruite?)")
+        else:
+            print("DEBUG (GUI _open_mosaic_settings_window): self.astrometry_api_key_var N'EXISTE PAS sur self (SeestarStackerGUI).")
+        # --- FIN AJOUT DEBUG ---
 
         # Vérifier si une instance existe déjà (sécurité, normalement inutile car modal)
         # (Optionnel, mais peut être utile pour le développement)
@@ -2612,20 +2747,16 @@ class SeestarStackerGUI:
 #############################################################################################################################################
 
 
-
     def _processing_finished(self):
         """Actions finales après la fin ou l'arrêt du traitement."""
         if not self.processing:
-            # print("DEBUG: _processing_finished called but not processing. Skipping.") # Optionnel
-            return # Évite exécutions multiples
+            return 
 
-        print("DEBUG: Entering _processing_finished...") # Log entrée
-        self.processing = False # Marquer comme terminé
+        print("DEBUG: Entering _processing_finished...")
+        self.processing = False 
 
-        # Arrêter le timer de la barre de progression
         if hasattr(self, 'progress_manager'):
             self.progress_manager.stop_timer()
-            # Arrêter la barre de progression indéterminée si elle l'était
             try:
                 pb = self.progress_manager.progress_bar
                 if pb.winfo_exists():
@@ -2633,93 +2764,86 @@ class SeestarStackerGUI:
                      if current_mode == 'indeterminate':
                          pb.stop()
                          pb.config(mode='determinate')
-                     # Optionnel: Mettre la barre à 100% si pas d'erreur critique
-                     if not hasattr(self, 'queued_stacker') or not getattr(self.queued_stacker, 'processing_error', True): # Si pas d'erreur
+                     if not hasattr(self, 'queued_stacker') or not getattr(self.queued_stacker, 'processing_error', True):
                          pb.configure(value=100)
-                     else: # Laisser la valeur où elle était si erreur
-                          pass
-            except (tk.TclError, AttributeError): pass # Ignorer si widgets détruits
+            except (tk.TclError, AttributeError): pass
 
         # --- Récupération état final du backend ---
-        final_message_for_status_bar = self.tr("stacking_finished") # Message par défaut
+        final_message_for_status_bar = self.tr("stacking_finished")
         final_stack_path = None; processing_error_details = None; images_stacked = 0
         aligned_count = 0; failed_align_count = 0; failed_stack_count = 0; skipped_count = 0
         processed_files_count = 0; total_exposure = 0.0
         was_stopped_by_user = False; output_folder_exists = False; can_open_output = False
-        final_stack_exists = False; is_drizzle_result = False; final_stack_type = "Classic" # Défaut
+        final_stack_exists = False; is_drizzle_result = False; final_stack_type = "Classic"
+
+        # --- NOUVEAU: Récupérer les flags de post-traitement appliqués ---
+        photutils_applied_this_run_backend = False
+        bn_globale_applied_this_run_backend = False
+        cb_applied_this_run_backend = False
+        scnr_applied_this_run_backend = False
+        crop_applied_this_run_backend = False
+        photutils_params_used_backend = {}
+        # --- FIN NOUVEAU ---
 
         if hasattr(self, "queued_stacker"):
             q_stacker = self.queued_stacker
-            # Récupérer les informations depuis le backend
             final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
             drizzle_active_session = getattr(q_stacker, 'drizzle_active_session', False)
             drizzle_mode = getattr(q_stacker, 'drizzle_mode', 'Final')
-            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False) # Flag d'arrêt demandé
-            processing_error_details = getattr(q_stacker, 'processing_error', None) # Erreur critique interne
-            images_in_cumulative = getattr(q_stacker, 'images_in_cumulative_stack', 0) # Compteur pour Classique ET Drizzle Incr
-            aligned_count = getattr(q_stacker, 'aligned_files_count', 0) # Compteur total alignés
+            was_stopped_by_user = getattr(q_stacker, 'stop_processing', False) 
+            processing_error_details = getattr(q_stacker, 'processing_error', None)
+            images_in_cumulative = getattr(q_stacker, 'images_in_cumulative_stack', 0)
+            aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
             failed_align_count = getattr(q_stacker, 'failed_align_count', 0)
             failed_stack_count = getattr(q_stacker, 'failed_stack_count', 0)
             skipped_count = getattr(q_stacker, 'skipped_files_count', 0)
             processed_files_count = getattr(q_stacker, 'processed_files_count', 0)
             total_exposure = getattr(q_stacker, 'total_exposure_seconds', 0.0)
 
-            print(f"DEBUG [_processing_finished]: final_stack_path from backend = {final_stack_path}") # Log
+            # --- NOUVEAU: Récupérer les flags et params de post-traitement ---
+            photutils_applied_this_run_backend = getattr(q_stacker, 'photutils_bn_applied_in_session', False)
+            bn_globale_applied_this_run_backend = getattr(q_stacker, 'bn_globale_applied_in_session', False)
+            cb_applied_this_run_backend = getattr(q_stacker, 'cb_applied_in_session', False)
+            scnr_applied_this_run_backend = getattr(q_stacker, 'scnr_applied_in_session', False)
+            crop_applied_this_run_backend = getattr(q_stacker, 'crop_applied_in_session', False)
+            photutils_params_used_backend = getattr(q_stacker, 'photutils_params_used_in_session', {})
+            # --- FIN NOUVEAU ---
 
-            # Déterminer si le résultat final EST un résultat Drizzle valide
+            print(f"DEBUG [_processing_finished]: final_stack_path from backend = {final_stack_path}")
             is_drizzle_result = (
                 drizzle_active_session and
                 not was_stopped_by_user and
                 processing_error_details is None and
                 final_stack_path is not None and
-                ( # Vérifier que le nom de fichier correspond à un Drizzle
-                    "_drizzle_final" in os.path.basename(final_stack_path) or
-                    "_drizzle_incr" in os.path.basename(final_stack_path)
-                )
+                ("_drizzle" in os.path.basename(final_stack_path).lower()) # Simplifié
             )
-            print(f"DEBUG [_processing_finished]: is_drizzle_result = {is_drizzle_result}") # Log
-
-            # --- Correction Compteur Images Stackées ---
+            print(f"DEBUG [_processing_finished]: is_drizzle_result = {is_drizzle_result}")
+            
             if is_drizzle_result:
-                # Pour Drizzle (Final ou Incrémental réussi), le nombre d'images
-                # est celui qui a été effectivement combiné dans ce stack final.
-                # Pour le Final, c'est aligned_count. Pour l'Incrémental, c'est images_in_cumulative_stack.
-                # Le plus simple est de se fier à NIMAGES dans le header final si possible,
-                # mais utilisons les compteurs pour l'instant.
-                if drizzle_mode == "Final":
-                    images_stacked = aligned_count # Toutes les images alignées ont contribué
-                else: # Incremental
-                    images_stacked = images_in_cumulative # Le cumulatif drizzle
-            else: # Cas Classique (ou Drizzle échoué/stoppé)
-                images_stacked = images_in_cumulative # Le cumulatif classique
-            print(f"DEBUG [_processing_finished]: images_stacked calculated = {images_stacked}") # Log
-            # --- Fin Correction Compteur ---
+                if drizzle_mode == "Final": images_stacked = aligned_count
+                else: images_stacked = images_in_cumulative
+            else: images_stacked = images_in_cumulative
+            print(f"DEBUG [_processing_finished]: images_stacked calculated = {images_stacked}")
 
-            # Mettre à jour l'affichage du compteur d'alignés une dernière fois
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
             try:
                 if hasattr(self, 'aligned_files_var'): self.aligned_files_var.set(default_aligned_fmt.format(count=aligned_count))
             except tk.TclError: pass
 
-            # Vérifier existence dossier/fichier sortie
             if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
             final_stack_exists = final_stack_path and os.path.exists(final_stack_path)
-            print(f"DEBUG [_processing_finished]: final_stack_exists = {final_stack_exists}") # Log
-            # Déterminer si on peut ouvrir le dossier sortie
+            print(f"DEBUG [_processing_finished]: final_stack_exists = {final_stack_exists}")
             can_open_output = output_folder_exists and (final_stack_exists or not processing_error_details)
-
         else:
-            # Cas où le backend n'existe pas (ne devrait pas arriver si processing=True)
             final_message_for_status_bar = "Erreur: Stacker non trouvé."; processing_error_details = final_message_for_status_bar
             if hasattr(self, 'output_path') and self.output_path.get(): output_folder_exists = os.path.isdir(self.output_path.get())
             can_open_output = output_folder_exists and not processing_error_details
 
-        # --- Déterminer message statut final et type de stack ---
+        status_text = "" # Initialiser
         if was_stopped_by_user:
             status_text = self.tr('processing_stopped')
-            # Essayer de déterminer le type de stack même si arrêté
-            if final_stack_path and ("_drizzle" in os.path.basename(final_stack_path)): final_stack_type = "Drizzle (Stopped)"
-            elif final_stack_path and ("_classic" in os.path.basename(final_stack_path)): final_stack_type = "Classic (Stopped)"
+            if final_stack_path and ("_drizzle" in os.path.basename(final_stack_path).lower()): final_stack_type = "Drizzle (Stopped)"
+            elif final_stack_path and ("_classic" in os.path.basename(final_stack_path).lower()): final_stack_type = "Classic (Stopped)"
             else: final_stack_type = "Unknown (Stopped)"
         elif processing_error_details:
             status_text = f"{self.tr('stacking_error_msg')} {processing_error_details}"
@@ -2729,21 +2853,18 @@ class SeestarStackerGUI:
             final_stack_type = "None"
         elif is_drizzle_result:
             status_text = self.tr("Drizzle Complete", default="Drizzle Complete")
-            final_stack_type = "Drizzle" # Mode Drizzle réussi
-        else: # Stack classique réussi
+            final_stack_type = "Drizzle" 
+        else: 
             status_text = self.tr("Stacking Complete", default="Stacking Complete")
             final_stack_type = "Classic"
 
-        # Mettre à jour la barre de statut simple
         if hasattr(self, 'progress_manager'):
-             try: self.progress_manager.update_progress(status_text, self.progress_bar['value']) # Garder la valeur actuelle ou 100
+             try: self.progress_manager.update_progress(status_text, self.progress_bar['value'])
              except tk.TclError: pass
 
-        # --- Charger aperçu final (si possible) ---
         preview_load_error_msg = None
         if final_stack_exists:
             try:
-                # self.update_progress_gui(f"Chargement aperçu final...", None) # Optionnel
                 final_image_data = load_and_validate_fits(final_stack_path)
                 if final_image_data is not None:
                     final_header = fits.getheader(final_stack_path)
@@ -2765,37 +2886,72 @@ class SeestarStackerGUI:
         summary_lines.append(f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}")
         total_rejected = failed_align_count + failed_stack_count + skipped_count
         summary_lines.append(f"{self.tr('Files Rejected (Total)', default='Files Rejected (Total)')}: {total_rejected} ({self.tr('Align', default='Align')}: {failed_align_count}, {self.tr('Stack Err', default='Stack Err')}: {failed_stack_count}, {self.tr('Other', default='Other')}: {skipped_count})")
-        # Utiliser la variable images_stacked corrigée
         summary_lines.append(f"{self.tr('Images in Final Stack', default='Images in Final Stack')} ({final_stack_type}): {images_stacked}")
         summary_lines.append(f"{self.tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {self._format_duration(total_exposure)}")
-        if final_stack_exists: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
-        elif final_stack_path: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path} (Not Found!)")
+
+        # --- NOUVEAU: Ajouter les détails du post-traitement au résumé ---
+        summary_lines.append(f"\n--- {self.tr('Post-Processing Applied', default='Post-Processing Applied')} ---")
+        if photutils_applied_this_run_backend:
+            params_str_list = []
+            if 'box_size' in photutils_params_used_backend: params_str_list.append(f"Box={photutils_params_used_backend['box_size']}")
+            if 'filter_size' in photutils_params_used_backend: params_str_list.append(f"Filt={photutils_params_used_backend['filter_size']}")
+            if 'sigma_clip_val' in photutils_params_used_backend: params_str_list.append(f"Sig={photutils_params_used_backend['sigma_clip_val']:.1f}")
+            if 'exclude_percentile' in photutils_params_used_backend: params_str_list.append(f"Excl%={photutils_params_used_backend['exclude_percentile']:.1f}")
+            params_str = ", ".join(params_str_list) if params_str_list else "Default/Unknown"
+            summary_lines.append(f"  - {self.tr('Photutils 2D Background', default='Photutils 2D Background')}: {self.tr('Yes', default='Yes')} ({params_str})")
+        else:
+            summary_lines.append(f"  - {self.tr('Photutils 2D Background', default='Photutils 2D Background')}: {self.tr('No', default='No')}")
+
+        summary_lines.append(f"  - {self.tr('Global Background Neutralization (BN)', default='Global Background Neutralization (BN)')}: {'Yes' if bn_globale_applied_this_run_backend else 'No'}")
+        summary_lines.append(f"  - {self.tr('Edge/Chroma Correction (CB)', default='Edge/Chroma Correction (CB)')}: {'Yes' if cb_applied_this_run_backend else 'No'}")
+        
+        scnr_info_summary = self.tr('No', default='No')
+        if scnr_applied_this_run_backend and hasattr(self, "queued_stacker"):
+            q_s = self.queued_stacker
+            # Utiliser les valeurs des attributs du backend, qui ont été passés par l'UI via SettingsManager
+            scnr_target = getattr(q_s, 'final_scnr_target_channel', '?')
+            scnr_amount = getattr(q_s, 'final_scnr_amount', 0.0)
+            scnr_lum = getattr(q_s, 'final_scnr_preserve_luminosity', '?')
+            scnr_info_summary = f"{self.tr('Yes', default='Yes')} (Target: {scnr_target}, Amount: {scnr_amount:.2f}, PreserveLum: {scnr_lum})"
+        elif scnr_applied_this_run_backend: # Si appliqué mais q_stacker non dispo (ne devrait pas arriver)
+            scnr_info_summary = f"{self.tr('Yes', default='Yes')} (params unknown)"
+        summary_lines.append(f"  - {self.tr('Final SCNR', default='Final SCNR')}: {scnr_info_summary}")
+
+        crop_info_summary = self.tr('No', default='No')
+        if crop_applied_this_run_backend and hasattr(self, "queued_stacker"):
+             q_s = self.queued_stacker
+             # L'attribut dans q_stacker est final_edge_crop_percent_decimal (0.0-1.0)
+             crop_perc_decimal = getattr(q_s, 'final_edge_crop_percent_decimal', 0.0)
+             crop_info_summary = f"{self.tr('Yes', default='Yes')} ({crop_perc_decimal*100.0:.1f}%)"
+        elif crop_applied_this_run_backend:
+             crop_info_summary = f"{self.tr('Yes', default='Yes')} (percentage unknown)"
+        summary_lines.append(f"  - {self.tr('Final Edge Crop', default='Final Edge Crop')}: {crop_info_summary}")
+        summary_lines.append("-------------------------------")
+        # --- FIN NOUVEAU ---
+
+        if final_stack_exists: summary_lines.append(f"\n{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
+        elif final_stack_path: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path} ({self.tr('Not Found!', default='Not Found!')})")
         else: summary_lines.append(self.tr('Final Stack File: Not created or not found.', default='Final Stack File: Not created or not found.'))
-        if preview_load_error_msg: summary_lines.append(f"\n{preview_load_error_msg}") # Ajouter erreur preview si besoin
+        
+        if preview_load_error_msg: summary_lines.append(f"\n{preview_load_error_msg}")
+        
         full_summary_text_for_dialog = "\n".join(summary_lines)
 
-        # --- Afficher Dialogue (ou erreur) ---
-        # Ne pas montrer le résumé si arrêté par l'utilisateur, juste loguer
         if was_stopped_by_user:
-             print("--- Processing Stopped by User ---")
-             print(full_summary_text_for_dialog)
-             print("---------------------------------")
+             print("--- Processing Stopped by User ---"); print(full_summary_text_for_dialog); print("---------------------------------")
         elif processing_error_details:
-            # Afficher l'erreur critique dans une messagebox
-             messagebox.showerror(self.tr("error"), f"{status_text}") # status_text contient déjà les détails
+             messagebox.showerror(self.tr("error"), f"{status_text}")
         else:
-            # Afficher le dialogue résumé normal
             self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output)
 
         # --- Réinitialiser UI ---
-        self._set_parameter_widgets_state(tk.NORMAL)  # Réactive les contrôles
+        self._set_parameter_widgets_state(tk.NORMAL) 
         if hasattr(self, "start_button"):
             try: self.start_button.config(state=tk.NORMAL)
             except tk.TclError: pass
         if hasattr(self, "stop_button"):
             try: self.stop_button.config(state=tk.DISABLED)
             except tk.TclError: pass
-        # Activer/Désactiver bouton Ouvrir Sortie basé sur can_open_output
         if hasattr(self, "open_output_button"):
             try: self.open_output_button.config(state=tk.NORMAL if can_open_output else tk.DISABLED)
             except tk.TclError: pass
@@ -2803,11 +2959,8 @@ class SeestarStackerGUI:
             try: self.remaining_time_var.set("00:00:00")
             except tk.TclError: pass
 
-        # GC final
         if 'gc' in globals() or 'gc' in locals(): gc.collect()
-        print("DEBUG: Exiting _processing_finished.") # Log sortie
-
-
+        print("DEBUG: Exiting _processing_finished.")
 
 
 ################################################################################################################################################
@@ -2869,21 +3022,20 @@ class SeestarStackerGUI:
 
 
 
-
-
-
 # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def start_processing(self):
         """
-        Démarre le traitement :
-        1. Valide les chemins d'entrée/sortie.
-        2. Affiche l'avertissement Drizzle si nécessaire.
-        3. Met à jour l'instance self.settings avec les valeurs actuelles de l'UI.
-        4. Valide les settings (ce qui peut les modifier).
-        5. Ré-applique les settings (potentiellement modifiés par la validation) à l'UI.
-        6. Prépare tous les arguments pour le backend en lisant depuis self.settings.
-        7. Lance le thread de traitement du backend (SeestarQueuedStacker).
+        Démarre le traitement. Ordre crucial pour la gestion des paramètres :
+        1. Valider chemins UI.
+        2. Avertissement Drizzle/Mosaïque si nécessaire.
+        3. Initialiser l'état de traitement du GUI (désactiver boutons, etc.).
+        4. (A) Lire l'état actuel de l'UI vers self.settings (capture les modifs utilisateur).
+        5. (B) Valider les settings dans self.settings (peut les corriger).
+        6. (C) Si validation a corrigé des settings, ré-appliquer à l'UI pour que l'utilisateur voie les valeurs finales.
+               Puis mettre à jour l'état des widgets dépendants (grisé/dégrisé).
+        7. Préparer les arguments pour le backend en lisant depuis self.settings (maintenant la source de vérité).
+        8. Lancer le thread de traitement du backend.
         """
         print("DEBUG (GUI start_processing): Début tentative démarrage du traitement...")
 
@@ -2898,11 +3050,11 @@ class SeestarStackerGUI:
 
         if not input_folder or not output_folder:
             messagebox.showerror(self.tr("error"), self.tr("select_folders"))
-            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(input_folder):
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
-            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(output_folder):
             try:
@@ -2910,134 +3062,141 @@ class SeestarStackerGUI:
                 self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
             except Exception as e:
                 messagebox.showerror(self.tr("error"), f"{self.tr('output_folder_invalid')}:\n{output_folder}\n{e}")
-                if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+                if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
                 return
         try:
             has_initial_fits = any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder))
-            has_additional = bool(self.additional_folders_to_process)
-            if not has_initial_fits and not has_additional:
+            has_additional_listed = bool(self.additional_folders_to_process)
+            if not has_initial_fits and not has_additional_listed:
                 if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
-                    if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+                    if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
                     return
         except Exception as e: 
             messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
-            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             return
         print("DEBUG (GUI start_processing): Phase 1 - Validation des chemins OK.")
 
-        # --- 2. Avertissement Drizzle (si Drizzle ou Mosaïque activé) ---
-        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle...")
-        drizzle_globally_enabled_ui = self.use_drizzle_var.get() # Drizzle simple champ
-        is_mosaic_mode_ui = getattr(self, 'mosaic_mode_active', False) # Mode Mosaïque
+        # --- 2. Avertissement Drizzle/Mosaïque (si activé) ---
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle/Mosaïque...")
+        drizzle_globally_enabled_ui = self.use_drizzle_var.get()
+        is_mosaic_mode_ui = getattr(self, 'mosaic_mode_active', False) 
 
         if drizzle_globally_enabled_ui or is_mosaic_mode_ui:
             warning_title = self.tr('drizzle_warning_title')
-            base_warning_text = self.tr('drizzle_warning_text')
+            base_text_tuple_or_str = self.tr('drizzle_warning_text')
+            base_warning_text = "".join(base_text_tuple_or_str) if isinstance(base_text_tuple_or_str, tuple) else base_text_tuple_or_str
             full_warning_text = base_warning_text
-            if is_mosaic_mode_ui and not drizzle_globally_enabled_ui: # Mosaïque active, Drizzle simple non -> Drizzle sera forcé
+            if is_mosaic_mode_ui and not drizzle_globally_enabled_ui:
                  full_warning_text += "\n\n" + self.tr("mosaic_requires_drizzle_note", default="(Note: Mosaic mode requires Drizzle for final combination.)")
             
-            print(f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire. Texte: \"{full_warning_text[:50]}...\"")
+            print(f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire.")
             continue_processing = messagebox.askyesno(warning_title, full_warning_text, parent=self.root)
             if not continue_processing:
-                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur après avertissement Drizzle/Mosaïque.", None)
-                if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur après avertissement.", None)
+                if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
                 return
-        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle OK (ou non applicable).")
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable).")
 
-        # --- 3. Initialisation de l'état de traitement ---
-        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement...")
+        # --- 3. Initialisation de l'état de traitement du GUI ---
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI...")
         self.processing = True
         self.time_per_image = 0
         self.global_start_time = time.monotonic()
-        self.batches_processed_for_preview_refresh = 0 # Réinitialiser compteur pour l'aperçu
-        
+        self.batches_processed_for_preview_refresh = 0
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var.set(default_aligned_fmt.format(count=0))
-        
-        folders_to_pass_to_backend = list(self.additional_folders_to_process) # Copie
-        self.additional_folders_to_process = [] # Vider la liste du GUI
-        self.update_additional_folders_display() # Mettre à jour l'affichage UI (devrait montrer 0)
-        
-        self._set_parameter_widgets_state(tk.DISABLED) # Désactiver les contrôles UI principaux
-        if hasattr(self, "stop_button"): self.stop_button.config(state=tk.NORMAL)
-        if hasattr(self, "open_output_button"): self.open_output_button.config(state=tk.DISABLED)
-        
-        if hasattr(self, "progress_manager"):
-            self.progress_manager.reset()
-            self.progress_manager.start_timer()
-        
-        if hasattr(self, "status_text"):
+        folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        self.additional_folders_to_process = []
+        self.update_additional_folders_display()
+        self._set_parameter_widgets_state(tk.DISABLED) # Désactive les contrôles principaux
+        if hasattr(self, "stop_button") and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
+        if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists(): self.open_output_button.config(state=tk.DISABLED)
+        if hasattr(self, "progress_manager"): self.progress_manager.reset(); self.progress_manager.start_timer()
+        if hasattr(self, "status_text") and self.status_text.winfo_exists():
             self.status_text.config(state=tk.NORMAL); self.status_text.delete(1.0, tk.END)
             self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n"); self.status_text.config(state=tk.DISABLED)
-        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement OK.")
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK.")
 
-        # --- 4. Mise à jour, Validation, et Ré-application des Settings ---
-        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")
-        print("  -> Appel self.settings.update_from_ui(self)...")
-        self.settings.update_from_ui(self) # Lit toutes les valeurs de l'UI -> self.settings
+        # --- 4. Synchronisation et Validation des Settings (ORDRE CORRIGÉ) ---
+        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings (ORDRE CORRIGÉ)...")
         
-        # Log de la valeur Photutils BN juste après lecture de l'UI
-        print(f"  DEBUG SETTINGS SYNC: Valeur self.settings.apply_photutils_bn APRES update_from_ui = {self.settings.apply_photutils_bn}")
+        # (4A) D'ABORD, lire l'état actuel de l'UI (ce que l'utilisateur a potentiellement modifié
+        #      depuis que les settings ont été chargés/appliqués à l'init ou lors du dernier run)
+        #      vers l'objet self.settings.
+        print("  -> (4A) Appel self.settings.update_from_ui(self) pour capturer les valeurs actuelles de l'UI...")
+        self.settings.update_from_ui(self) 
+        # Maintenant, self.settings contient les valeurs telles qu'elles sont dans l'UI juste avant ce clic "Start".
+        
+        print(f"  DEBUG GUI SETTINGS CHECK (Phase 4A - après update_from_ui initial):")
+        print(f"    self.settings.apply_feathering = {getattr(self.settings, 'apply_feathering', 'NonTrouve')}")
+        print(f"    self.settings.feather_blur_px = {getattr(self.settings, 'feather_blur_px', 'NonTrouve')}")
+        print(f"    self.settings.photutils_bn_filter_size = {getattr(self.settings, 'photutils_bn_filter_size', 'NonTrouve')}")
+        # ... (ajoutez d'autres logs pour les paramètres clés que vous suivez)
 
-        print("  -> Appel self.settings.validate_settings()...")
-        validation_messages = self.settings.validate_settings() # Valide les valeurs dans self.settings
-        print(f"DEBUG GUI Start: self.settings.apply_photutils_bn APRES VALIDATION = {self.settings.apply_photutils_bn}")
-
+        # (4B) ENSUITE, valider les settings qui sont maintenant dans self.settings.
+        #      La validation peut modifier/corriger des valeurs dans self.settings.
+        print("  -> (4B) Appel self.settings.validate_settings()...")
+        validation_messages = self.settings.validate_settings()
+        
+        print(f"  DEBUG GUI SETTINGS CHECK (Phase 4B - après validate_settings):")
+        print(f"    self.settings.apply_feathering = {getattr(self.settings, 'apply_feathering', 'NonTrouve')}") # Valeur potentiellement validée
+        print(f"    self.settings.feather_blur_px = {getattr(self.settings, 'feather_blur_px', 'NonTrouve')}")     # Valeur potentiellement validée
+        print(f"    self.settings.photutils_bn_filter_size = {getattr(self.settings, 'photutils_bn_filter_size', 'NonTrouve')}")
+        
         if validation_messages:
             self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
             for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None)
-            print("  -> Appel self.settings.apply_to_ui(self) pour refléter les settings validés...")
-            self.settings.apply_to_ui(self) # Ré-applique les settings (potentiellement corrigés) à l'UI
-        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
+            # (4C) Si la validation a modifié des valeurs dans self.settings, 
+            #      ré-appliquer à l'UI pour que l'utilisateur voie les valeurs finales corrigées.
+            #      Ceci met à jour les tk.StringVar etc. avec les valeurs finales de self.settings.
+            print("  -> (4C) Ré-appel self.settings.apply_to_ui(self) pour refléter les settings validés à l'UI...")
+            self.settings.apply_to_ui(self)
+            # Ré-appliquer aussi les états des widgets dépendants (grisé/dégrisé) pour être sûr.
+            self._update_weighting_options_state()
+            self._update_drizzle_options_state()
+            self._update_final_scnr_options_state()
+            self._update_photutils_bn_options_state()
+            self._update_feathering_options_state()
+        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés. self.settings est maintenant la source de vérité.")
 
         # --- 5. Préparation des arguments pour le backend EN LISANT DEPUIS self.settings ---
-        # self.settings est maintenant la source de vérité la plus à jour.
+        # L'objet self.settings contient maintenant les valeurs finales à utiliser.
         print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings...")
         
-        # Mosaïque
-        is_mosaic_mode_backend = self.settings.mosaic_mode_active
-        current_mosaic_settings_backend = self.settings.mosaic_settings # C'est déjà une copie
-        current_api_key_backend = self.settings.astrometry_api_key
-        
-        # Corrections de couleur
-        apply_chroma_val_backend = self.settings.apply_chroma_correction
-        apply_final_scnr_backend = self.settings.apply_final_scnr
-        final_scnr_target_channel_backend = self.settings.final_scnr_target_channel
-        final_scnr_amount_backend = self.settings.final_scnr_amount
-        final_scnr_preserve_lum_backend = self.settings.final_scnr_preserve_luminosity
-        
-        # Paramètres Expert - BN Globale
-        bn_grid_size_str_backend = self.settings.bn_grid_size_str
-        bn_perc_low_backend = self.settings.bn_perc_low
-        bn_perc_high_backend = self.settings.bn_perc_high
-        bn_std_factor_backend = self.settings.bn_std_factor
-        bn_min_gain_backend = self.settings.bn_min_gain
-        bn_max_gain_backend = self.settings.bn_max_gain
-        # Paramètres Expert - CB
-        cb_border_size_backend = self.settings.cb_border_size
-        cb_blur_radius_backend = self.settings.cb_blur_radius
-        cb_min_b_factor_backend = self.settings.cb_min_b_factor
-        cb_max_b_factor_backend = self.settings.cb_max_b_factor
-        # Paramètres Expert - Rognage
-        final_edge_crop_percent_backend = self.settings.final_edge_crop_percent # En %
-        # Paramètres Expert - Photutils BN
-        apply_photutils_bn_backend = self.settings.apply_photutils_bn
-        photutils_bn_box_size_backend = self.settings.photutils_bn_box_size
-        photutils_bn_filter_size_backend = self.settings.photutils_bn_filter_size
-        photutils_bn_sigma_clip_backend = self.settings.photutils_bn_sigma_clip
-        photutils_bn_exclude_percentile_backend = self.settings.photutils_bn_exclude_percentile
-
-        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): Mosaïque={is_mosaic_mode_backend}, APIKey Présente={'Oui' if current_api_key_backend else 'Non'} !!!!")
-        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): ApplyChroma={apply_chroma_val_backend}, ApplySCNR={apply_final_scnr_backend} !!!!")
-        print(f"!!!! DEBUG GUI Start (VALEURS POUR BACKEND): Expert -> BN Grid='{bn_grid_size_str_backend}', CB Border={cb_border_size_backend}, Crop%={final_edge_crop_percent_backend}, ApplyPhotutilsBN={apply_photutils_bn_backend} !!!!")
+        # ---- LOG DE TOUS LES PARAMETRES QUI SERONT PASSES AU BACKEND (lus depuis self.settings) ----
+        params_to_log_for_backend = [
+            'input_folder', 'output_folder', 'reference_image_path', 'stacking_mode', 'kappa', 
+            'batch_size', 'correct_hot_pixels', 'hot_pixel_threshold', 'neighborhood_size', 
+            'bayer_pattern', 'cleanup_temp', 'use_quality_weighting', 'weight_by_snr', 
+            'weight_by_stars', 'snr_exponent', 'stars_exponent', 'min_weight', 
+            'use_drizzle', 'drizzle_scale', 'drizzle_wht_threshold', 'drizzle_mode', 
+            'drizzle_kernel', 'drizzle_pixfrac', 'apply_chroma_correction', 'apply_final_scnr', 
+            'final_scnr_target_channel', 'final_scnr_amount', 'final_scnr_preserve_luminosity',
+            'bn_grid_size_str', 'bn_perc_low', 'bn_perc_high', 'bn_std_factor', 
+            'bn_min_gain', 'bn_max_gain', 'cb_border_size', 'cb_blur_radius', 
+            'cb_min_b_factor', 'cb_max_b_factor', 'final_edge_crop_percent', 
+            'apply_photutils_bn', 'photutils_bn_box_size', 'photutils_bn_filter_size', 
+            'photutils_bn_sigma_clip', 'photutils_bn_exclude_percentile', 
+            'apply_feathering', 'feather_blur_px', 
+            'mosaic_mode_active', 'astrometry_api_key', 'mosaic_settings'
+        ]
+        print("  --- VALEURS ENVOYÉES AU BACKEND (depuis self.settings) ---")
+        for param_name in params_to_log_for_backend:
+            value = getattr(self.settings, param_name, f"ERREUR_ATTR_{param_name}")
+            if param_name == 'astrometry_api_key': # Ne pas logger la clé complète
+                print(f"    {param_name}: {'Présente' if value else 'Absente'} (longueur: {len(str(value))})")
+            else:
+                print(f"    {param_name}: {value}")
+        print("  --- FIN VALEURS ENVOYÉES AU BACKEND ---")
+        # ---- FIN LOG ----
         print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée.")
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
         processing_started = self.queued_stacker.start_processing(
-            input_dir=input_folder,
-            output_dir=output_folder,
+            input_dir=self.settings.input_folder, # Toujours lire depuis self.settings ici
+            output_dir=self.settings.output_folder,
             reference_path_ui=self.settings.reference_image_path,
             initial_additional_folders=folders_to_pass_to_backend,
             stacking_mode=self.settings.stacking_mode,
@@ -3048,217 +3207,63 @@ class SeestarStackerGUI:
             neighborhood_size=self.settings.neighborhood_size,
             bayer_pattern=self.settings.bayer_pattern,
             perform_cleanup=self.settings.cleanup_temp,
-            use_weighting=self.settings.use_quality_weighting, # Rappel: forcé à False dans backend pour SUM/W initial
-            weight_snr=self.settings.weight_by_snr,
-            weight_stars=self.settings.weight_by_stars,
-            snr_exp=self.settings.snr_exponent,
-            stars_exp=self.settings.stars_exponent,
-            min_w=self.settings.min_weight,
+            use_weighting=self.settings.use_quality_weighting,
+            weight_by_snr=self.settings.weight_by_snr,        
+            weight_by_stars=self.settings.weight_by_stars,    
+            snr_exp=self.settings.snr_exponent,               
+            stars_exp=self.settings.stars_exponent,           
+            min_w=self.settings.min_weight,                   
             use_drizzle=self.settings.use_drizzle,
             drizzle_scale=float(self.settings.drizzle_scale),
             drizzle_wht_threshold=self.settings.drizzle_wht_threshold,
             drizzle_mode=self.settings.drizzle_mode,
             drizzle_kernel=self.settings.drizzle_kernel,
             drizzle_pixfrac=self.settings.drizzle_pixfrac,
-            apply_chroma_correction=apply_chroma_val_backend,
-            apply_final_scnr=apply_final_scnr_backend,
-            final_scnr_target_channel=final_scnr_target_channel_backend,
-            final_scnr_amount=final_scnr_amount_backend,
-            final_scnr_preserve_luminosity=final_scnr_preserve_lum_backend,
-            bn_grid_size_str=bn_grid_size_str_backend,
-            bn_perc_low=bn_perc_low_backend,
-            bn_perc_high=bn_perc_high_backend,
-            bn_std_factor=bn_std_factor_backend,
-            bn_min_gain=bn_min_gain_backend,
-            bn_max_gain=bn_max_gain_backend,
-            cb_border_size=cb_border_size_backend,
-            cb_blur_radius=cb_blur_radius_backend,
-            cb_min_b_factor=cb_min_b_factor_backend,
-            cb_max_b_factor=cb_max_b_factor_backend,
-            final_edge_crop_percent=final_edge_crop_percent_backend,
-            apply_photutils_bn=apply_photutils_bn_backend,
-            photutils_bn_box_size=photutils_bn_box_size_backend,
-            photutils_bn_filter_size=photutils_bn_filter_size_backend,
-            photutils_bn_sigma_clip=photutils_bn_sigma_clip_backend,
-            photutils_bn_exclude_percentile=photutils_bn_exclude_percentile_backend,
-            is_mosaic_run=is_mosaic_mode_backend,
-            api_key=current_api_key_backend,
-            mosaic_settings=current_mosaic_settings_backend
+            apply_chroma_correction=self.settings.apply_chroma_correction,
+            apply_final_scnr=self.settings.apply_final_scnr,
+            final_scnr_target_channel=self.settings.final_scnr_target_channel,
+            final_scnr_amount=self.settings.final_scnr_amount,
+            final_scnr_preserve_luminosity=self.settings.final_scnr_preserve_luminosity,
+            bn_grid_size_str=self.settings.bn_grid_size_str,
+            bn_perc_low=self.settings.bn_perc_low,
+            bn_perc_high=self.settings.bn_perc_high,
+            bn_std_factor=self.settings.bn_std_factor,
+            bn_min_gain=self.settings.bn_min_gain,
+            bn_max_gain=self.settings.bn_max_gain,
+            cb_border_size=self.settings.cb_border_size,
+            cb_blur_radius=self.settings.cb_blur_radius,
+            cb_min_b_factor=self.settings.cb_min_b_factor,
+            cb_max_b_factor=self.settings.cb_max_b_factor,
+            final_edge_crop_percent=self.settings.final_edge_crop_percent,
+            apply_photutils_bn=self.settings.apply_photutils_bn,
+            photutils_bn_box_size=self.settings.photutils_bn_box_size,
+            photutils_bn_filter_size=self.settings.photutils_bn_filter_size,
+            photutils_bn_sigma_clip=self.settings.photutils_bn_sigma_clip,
+            photutils_bn_exclude_percentile=self.settings.photutils_bn_exclude_percentile,
+            apply_feathering=self.settings.apply_feathering, 
+            feather_blur_px=self.settings.feather_blur_px,     
+            is_mosaic_run=self.settings.mosaic_mode_active,
+            api_key=self.settings.astrometry_api_key,
+            mosaic_settings=self.settings.mosaic_settings
         )
         print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
         # --- 7. Gérer résultat démarrage backend ---
         if processing_started:
-            if hasattr(self, 'stop_button'): self.stop_button.config(state=tk.NORMAL)
+            if hasattr(self, 'stop_button') and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
             self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
             self.thread.start()
-        else:
-            if hasattr(self, 'start_button'): self.start_button.config(state=tk.NORMAL)
+        else: 
+            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             self.processing = False
-            self.update_progress_gui("ⓘ Échec démarrage traitement (backend a refusé ou erreur de paramètre).", None)
-            self._set_parameter_widgets_state(tk.NORMAL) # Réactiver les contrôles si échec démarrage
+            self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
+            self._set_parameter_widgets_state(tk.NORMAL) 
         print("DEBUG (GUI start_processing): Fin de la méthode.")
 
 
 
+##############################################################################################################################################
 
 
-
-
-
-if __name__ == "__main__":
-    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---
-    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
-    parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
-    parser.add_argument(
-        "--input-dir",
-        type=str,
-        help="Optional: Pre-fill the input directory path."
-    )
-    # --- NOUVEL ARGUMENT AJOUTÉ ICI ---
-    parser.add_argument(
-        "--command-file", # <-- AJOUTÉ : Définition de l'argument
-        type=str,
-        metavar="CMD_FILE_PATH",
-        help="Internal: Path to the command file for communicating with the main stacker GUI."
-    )
-    # --- FIN NOUVEL ARGUMENT ---
-    args = parser.parse_args()
-    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
-    # --- FIN MODIFICATION ---
-
-    root = None # Initialiser la variable racine
-    try:
-        # Vérifier si les modules essentiels sont importables
-        # (Logique inchangée)
-        if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
-        if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
-
-        # Créer la fenêtre racine Tkinter mais la cacher initialement
-        root = tk.Tk(); root.withdraw()
-
-        # Vérifier les dépendances externes
-        check_dependencies()
-
-        # Afficher la fenêtre principale
-        root.deiconify()
-
-        # --- MODIFIÉ: Passer command_file_path au constructeur ---
-        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
-        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
-        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
-        # --- FIN MODIFICATION ---
-
-        # --- Pré-remplissage dossier d'entrée (Logique inchangée) ---
-        if args.input_dir:
-            input_path_from_arg = os.path.abspath(args.input_dir)
-            if os.path.isdir(input_path_from_arg):
-                print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
-                app.input_dir.set(input_path_from_arg)
-                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
-                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
-                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
-            else:
-                print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
-
-        # Lancer la boucle principale de Tkinter
-        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
-        root.mainloop()
-        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
-
-    # --- Gestion des Erreurs au Démarrage (Inchangée) ---
-    except ImportError as e:
-        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc()
-        try:
-            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
-    except SystemExit as e: # <-- AJOUTÉ: Gérer SystemExit de argparse
-        print(f"DEBUG (analyse_gui main): Argparse a quitté (probablement '-h' ou erreur argument). Code: {e.code}")
-        # Ne rien faire de plus, le message d'erreur d'argparse est déjà affiché.
-        pass
-    except tk.TclError as e:
-        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
-    except Exception as e_main:
-        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc()
-        try:
-            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
-    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---
-    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
-    parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
-    parser.add_argument(
-        "--input-dir",
-        type=str,
-        help="Optional: Pre-fill the input directory path."
-    )
-      
-# --- NOUVEL ARGUMENT AJOUTÉ ICI ---
-    parser.add_argument(
-        "--command-file", # <-- Vérifiez l'orthographe EXACTE et les DEUX tirets
-        type=str,
-        metavar="CMD_FILE_PATH",
-        help="Internal: Path to the command file for communicating with the main stacker GUI."
-    )
-    # --- FIN NOUVEL ARGUMENT ---
-    args = parser.parse_args() # <--- Cette ligne doit venir APRES l'ajout de l'argument
-
-    
-    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
-    # --- FIN MODIFICATION ---
-
-    root = None # Initialiser la variable racine
-    try:
-        # Vérifier si les modules essentiels sont importables
-        # (Logique inchangée)
-        if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
-        if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
-
-        # Créer la fenêtre racine Tkinter mais la cacher initialement
-        root = tk.Tk(); root.withdraw()
-
-        # Vérifier les dépendances externes
-        check_dependencies()
-
-        # Afficher la fenêtre principale
-        root.deiconify()
-
-        # --- MODIFIÉ: Passer command_file_path au constructeur ---
-        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
-        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
-        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
-        # --- FIN MODIFICATION ---
-
-        # --- Pré-remplissage dossier d'entrée (Logique inchangée) ---
-        if args.input_dir:
-            input_path_from_arg = os.path.abspath(args.input_dir)
-            if os.path.isdir(input_path_from_arg):
-                print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
-                app.input_dir.set(input_path_from_arg)
-                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
-                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
-                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
-            else:
-                print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
-
-        # Lancer la boucle principale de Tkinter
-        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
-        root.mainloop()
-        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
-
-    # --- Gestion des Erreurs au Démarrage (Inchangée) ---
-    except ImportError as e:
-        print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc()
-        try: 
-            if root is None: root = tk.Tk(); root.withdraw()
-            messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
-    except tk.TclError as e:
-        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
-    except Exception as e_main:
-        print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc()
-        try: 
-            if root is None: root = tk.Tk(); root.withdraw()
-            messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
 
         # ----Fin du Fichier main_window.py

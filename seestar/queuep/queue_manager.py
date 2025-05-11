@@ -83,6 +83,19 @@ try:
     print("DEBUG QM: Import ChromaticBalancer OK.")
 except ImportError as e: print(f"ERREUR QM: Échec import ChromaticBalancer: {e}"); raise
 
+try:
+    from ..enhancement.stack_enhancement import feather_by_weight_map # NOUVEL IMPORT
+    _FEATHERING_AVAILABLE = True
+    print("DEBUG QM: Import feather_by_weight_map depuis stack_enhancement OK.")
+except ImportError as e_feather:
+    _FEATHERING_AVAILABLE = False
+    print(f"ERREUR QM: Échec import feather_by_weight_map depuis stack_enhancement: {e_feather}")
+    # Définir une fonction factice pour que le code ne plante pas si l'import échoue
+    # lors des appels ultérieurs, bien qu'on vérifiera _FEATHERING_AVAILABLE.
+    def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
+        print("ERREUR: Fonction feather_by_weight_map non disponible (échec import).")
+        return img # Retourner l'image originale
+
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS ---
 # Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
 # pour éviter les dépendances circulaires au chargement initial.
@@ -92,11 +105,11 @@ from ..enhancement.astrometry_solver import solve_image_wcs # Déplacé vers _wo
 from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files # Déplacé vers _worker
 from ..enhancement.stack_enhancement import StackEnhancer # Importé tardivement si nécessaire dans _save_final_stack ou ailleurs
 
+
 # --- Configuration des Avertissements ---
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
 print("DEBUG QM: Configuration warnings OK.")
 # --- FIN Imports ---
-
 
 
 class SeestarQueuedStacker:
@@ -129,16 +142,27 @@ class SeestarQueuedStacker:
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
         
-        ### NOUVEAU : Attributs pour SUM / W (Memmap) ###
+        ### Attributs pour SUM / W (Memmap) ###
         self.sum_memmap_path = None # Sera défini dans initialize
         self.wht_memmap_path = None # Sera défini dans initialize
         self.cumulative_sum_memmap = None  # Référence à l'objet memmap SUM
         self.cumulative_wht_memmap = None  # Référence à l'objet memmap WHT
         self.memmap_shape = None           # Shape des tableaux (H, W, C ou H, W)
         self.memmap_dtype_sum = np.float32 # Type pour la somme (float32 devrait suffire)
-        self.memmap_dtype_wht = np.uint16  # Type pour les poids (uint16 = max 65535 images)
+        #self.memmap_dtype_wht = np.uint16  # Type pour les poids (uint16 = max 65535 images)
+        self.memmap_dtype_wht = np.float32 # NOUVEAU TEMPORAIRE POUR TEST FEATHERING
         print("  -> Attributs SUM/W (memmap) initialisés à None.")
-        ### FIN NOUVEAU ###
+        ###  ###
+        # ---AJOUTÉ : Paramètres de pondération initialisés ---
+        self.use_quality_weighting = False # Par défaut, la pondération peut être désactivée
+        self.weight_by_snr = True          # Valeur par défaut si la pondération est activée
+        self.weight_by_stars = True        # Valeur par défaut si la pondération est activée
+        self.snr_exponent = 1.0
+        self.stars_exponent = 0.5
+        self.min_weight = 0.01
+        self.apply_feathering = False
+        self.feather_blur_px = 256
+        # --- ---
 
         # --- SUPPRIMÉ : Anciens accumulateurs en mémoire ---
         # self.current_batch_data = [] # Sera toujours utilisé pour un lot TEMPORAIRE
@@ -158,13 +182,25 @@ class SeestarQueuedStacker:
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
         self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
-        self.snr_exponent = 1.0; self.stars_exponent = 0.5; self.min_weight = 0.1
+        self.snr_exponent = 1.0; self.stars_exponent = 0.5; self.min_weight = 0.01
         self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
         
         # Statistics
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
         self.stacked_batches_count = 0; self.total_batches_estimated = 0
         self.failed_align_count = 0; self.failed_stack_count = 0; self.skipped_files_count = 0
+        self.photutils_bn_applied_in_session = False
+        self.bn_globale_applied_in_session = False
+        self.cb_applied_in_session = False
+        self.scnr_applied_in_session = False
+        self.crop_applied_in_session = False
+        self.photutils_params_used_in_session = {}
+        self.photutils_bn_applied_in_session = False
+        self.bn_globale_applied_in_session = False
+        self.cb_applied_in_session = False
+        self.scnr_applied_in_session = False
+        self.crop_applied_in_session = False
+        self.photutils_params_used_in_session = {}
         print("  -> Attributs simples et paramètres par défaut initialisés.")
 
         # --- 2. Instanciations de Classes ---
@@ -362,131 +398,86 @@ class SeestarQueuedStacker:
 
 
 
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    # --- NOUVELLE MÉTHODE D'APERÇU POUR SUM/W ---
     def _update_preview_sum_w(self, downsample_factor=2):
-        """
-        Calcule l'image moyenne depuis SUM/W et appelle le callback preview GUI.
-        Peut réduire la taille de l'image envoyée pour la performance.
+        print("DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W...")
 
-        Args:
-            downsample_factor (int): Facteur de réduction de taille pour l'aperçu (ex: 4 pour diviser H et W par 4).
-                                     Mettre à 1 pour ne pas réduire.
-        """
-        print("DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W...") # Debug
-
-        if self.preview_callback is None:
-            print("DEBUG QM [_update_preview_sum_w]: Pas de callback preview défini.") # Debug
+        if self.preview_callback is None: # ...
             return
-        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None:
-            print("DEBUG QM [_update_preview_sum_w]: Accumulateurs SUM/WHT non disponibles.") # Debug
-            # Optionnel : Envoyer une image noire ou rien ? Pour l'instant on ne fait rien.
-            # self.preview_callback(None, None, "Error: Accumulators missing", 0, 0, 0, 0)
+        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None: #...
             return
 
         try:
-            # --- Lecture (partielle ou complète) depuis Memmap ---
-            # Pour la performance, surtout avec de grandes images, on pourrait
-            # ne lire qu'une version réduite directement depuis le memmap si
-            # l'aperçu n'a pas besoin de la pleine résolution.
-            # Exemple de lecture réduite (slicing):
-            # sum_data = self.cumulative_sum_memmap[::downsample_factor, ::downsample_factor, :]
-            # wht_data = self.cumulative_wht_memmap[::downsample_factor, ::downsample_factor]
+            print("DEBUG QM [_update_preview_sum_w]: Lecture des données depuis memmap...")
+            current_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64) # H, W, C
+            # On lit current_wht car il contient le nombre d'images accumulées,
+            # mais on ne l'utilisera PAS pour pondérer l'APERÇU pour ce test.
+            current_wht_map = np.array(self.cumulative_wht_memmap, dtype=np.float64) # H, W
+            print(f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht_map.shape}")
+
+            # --- MODIFICATION POUR APERÇU SIMPLE ---
+            # Pour l'aperçu, au lieu de diviser par la carte de poids simulée (qui cause des artefacts),
+            # nous allons diviser par le nombre d'images qui ont contribué au centre (ou une approximation).
+            # Cela donnera une sorte de "moyenne simple" pour l'aperçu.
             
-            # Pour l'instant, lisons tout et réduisons après la division
-            # Attention : lire tout le memmap en mémoire peut être lourd !
-            print("DEBUG QM [_update_preview_sum_w]: Lecture des données depuis memmap...") # Debug
-            # Utiliser np.array() pour charger en mémoire (peut être lourd !)
-            # On pourrait garder les refs memmap et faire la division dessus, mais
-            # l'envoi au GUI via le callback nécessite souvent une copie en mémoire.
-            current_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64) # float64 pour division précise
-            current_wht = np.array(self.cumulative_wht_memmap, dtype=np.float64) # float64 aussi
-            print(f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht.shape}") # Debug
-
-
-            # --- Calcul de l'Image Moyenne (SUM / WHT) ---
-            print("DEBUG QM [_update_preview_sum_w]: Calcul de l'image moyenne (division SUM/WHT)...") # Debug
-            # Ajouter WHT sur l'axe des canaux pour correspondre à SUM
-            # et éviter la division par zéro
-            epsilon = 1e-9 # Petite valeur pour éviter division par zéro
-            wht_broadcasted = np.maximum(current_wht, epsilon)[:, :, np.newaxis] # Ajoute l'axe C et évite zéro
-
-            with np.errstate(divide='ignore', invalid='ignore'): # Ignorer les avertissements de division
-                preview_data_fullres = (current_sum / wht_broadcasted)
+            # Prendre le poids maximum au centre de la carte WHT comme indicateur du "nombre d'expositions"
+            # pour cette moyenne simple d'aperçu.
+            h_wht, w_wht = current_wht_map.shape
+            center_y_wht, center_x_wht = h_wht // 2, w_wht // 2
+            # Prendre une petite zone centrale pour être plus robuste
+            center_box_size = 20 
+            c_y_start = max(0, center_y_wht - center_box_size // 2)
+            c_y_end = min(h_wht, center_y_wht + center_box_size // 2)
+            c_x_start = max(0, center_x_wht - center_box_size // 2)
+            c_x_end = min(w_wht, center_x_wht + center_box_size // 2)
             
-            # Remplacer les NaN/Inf résultants de la division par 0
-            preview_data_fullres = np.nan_to_num(preview_data_fullres, nan=0.0, posinf=0.0, neginf=0.0)
-            print(f"DEBUG QM [_update_preview_sum_w]: Image moyenne calculée. Shape={preview_data_fullres.shape}") # Debug
+            effective_exposure_count_for_preview = np.max(current_wht_map[c_y_start:c_y_end, c_x_start:c_x_end])
+            if effective_exposure_count_for_preview < 1: # S'il n'y a rien au centre ou si les poids sont nuls
+                effective_exposure_count_for_preview = np.max(current_wht_map) # Essayer le max global
+            if effective_exposure_count_for_preview < 1: # Si toujours rien
+                effective_exposure_count_for_preview = float(self.images_in_cumulative_stack) # Fallback au nombre d'images
+            if effective_exposure_count_for_preview < 1: # Ultime fallback
+                effective_exposure_count_for_preview = 1.0
 
+            print(f"DEBUG QM [_update_preview_sum_w]: Pour APERÇU - Nombre d'expositions effectif estimé: {effective_exposure_count_for_preview:.2f}")
 
-            # --- Normalisation 0-1 (Important pour l'affichage !) ---
-            # L'image SUM/W n'est pas garantie d'être entre 0 et 1
+            # Diviser current_sum par ce "nombre d'expositions" pour obtenir une moyenne simple pour l'aperçu
+            preview_data_fullres = current_sum / effective_exposure_count_for_preview
+            # --- FIN MODIFICATION POUR APERÇU SIMPLE ---
+            
+            print(f"DEBUG QM [_update_preview_sum_w]: Image moyenne (pour aperçu simple) calculée. Shape={preview_data_fullres.shape}")
+
+            # Normalisation 0-1 pour l'affichage
             min_val = np.nanmin(preview_data_fullres)
             max_val = np.nanmax(preview_data_fullres)
-            print(f"DEBUG QM [_update_preview_sum_w]: Range avant normalisation 0-1: [{min_val:.3f}, {max_val:.3f}]") # Debug
+            print(f"DEBUG QM [_update_preview_sum_w]: Range APERÇU avant normalisation 0-1: [{min_val:.4g}, {max_val:.4g}]")
             if max_val > min_val:
                  preview_data_normalized = (preview_data_fullres - min_val) / (max_val - min_val)
-            else: # Image constante
+            else: 
                  preview_data_normalized = np.zeros_like(preview_data_fullres)
             
             preview_data_normalized = np.clip(preview_data_normalized, 0.0, 1.0).astype(np.float32)
-            print(f"DEBUG QM [_update_preview_sum_w]: Image normalisée 0-1.") # Debug
+            print(f"DEBUG QM [_update_preview_sum_w]: Image APERÇU normalisée 0-1.")
 
+            # ... (le reste de la méthode : downsampling, préparation header, appel callback - INCHANGÉ) ...
+            preview_data_to_send = preview_data_normalized # ...
+            if downsample_factor > 1: # ...
+                 try: # ...
+                     h, w, _ = preview_data_normalized.shape; new_h, new_w = h // downsample_factor, w // downsample_factor
+                     if new_h > 10 and new_w > 10: preview_data_to_send = cv2.resize(preview_data_normalized, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                 except Exception as e_resize: print(f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille APERÇU: {e_resize}")
+            header_copy = self.current_stack_header.copy() if self.current_stack_header else fits.Header() # ...
+            # ... (infos pour stack_name) ...
+            img_count = self.images_in_cumulative_stack; total_imgs_est = self.files_in_queue; current_batch_num = self.stacked_batches_count; total_batches_est = self.total_batches_estimated
+            stack_name = f"Accum (SIMPLE PREVIEW) ({img_count}/{total_imgs_est} Img | Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
+            print(f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image APERÇU shape {preview_data_to_send.shape}...")
+            self.preview_callback(preview_data_to_send, header_copy, stack_name, img_count, total_imgs_est, current_batch_num, total_batches_est)
+            print("DEBUG QM [_update_preview_sum_w]: Callback preview terminé.")
 
-            # --- Réduction de Taille (Downsampling) Optionnelle ---
-            preview_data_to_send = preview_data_normalized
-            if downsample_factor > 1:
-                 print(f"DEBUG QM [_update_preview_sum_w]: Réduction taille par facteur {downsample_factor}...") # Debug
-                 try:
-                     h, w, _ = preview_data_normalized.shape
-                     new_h, new_w = h // downsample_factor, w // downsample_factor
-                     if new_h > 10 and new_w > 10: # Seulement si taille résultante est raisonnable
-                          preview_data_to_send = cv2.resize(preview_data_normalized, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                          print(f"DEBUG QM [_update_preview_sum_w]: Image réduite à {preview_data_to_send.shape}") # Debug
-                     else:
-                          print("DEBUG QM [_update_preview_sum_w]: Réduction taille annulée (résultat trop petit).") # Debug
-                 except Exception as e_resize:
-                      print(f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille: {e_resize}") # Debug
-                      # On envoie la version pleine résolution si le resize échoue
-
-            # --- Préparation Header et Infos ---
-            header_copy = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
-            # Ajouter/Mettre à jour NIMAGES/TOTEXP dans le header pour l'aperçu
-            header_copy['NIMAGES'] = (self.images_in_cumulative_stack, 'Images processed so far (SUM/W)')
-            header_copy['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx exposure accumulated (SUM/W)')
-
-            img_count = self.images_in_cumulative_stack
-            total_imgs_est = self.files_in_queue
-            current_batch_num = self.stacked_batches_count # Le dernier lot traité
-            total_batches_est = self.total_batches_estimated
-            stack_name = f"Accum (SUM/W) ({img_count}/{total_imgs_est} Img | Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
-
-            # --- Appel du Callback GUI ---
-            print(f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image shape {preview_data_to_send.shape}...") # Debug
-            self.preview_callback(
-                preview_data_to_send, # Envoyer la version potentiellement réduite
-                header_copy,
-                stack_name,
-                img_count,
-                total_imgs_est,
-                current_batch_num,
-                total_batches_est
-            )
-            print("DEBUG QM [_update_preview_sum_w]: Callback preview terminé.") # Debug
-
-        except MemoryError as mem_err:
-             print(f"ERREUR QM [_update_preview_sum_w]: ERREUR MÉMOIRE - {mem_err}") # Debug
-             self.update_progress(f"❌ ERREUR MÉMOIRE lors de la préparation de l'aperçu SUM/W.")
-             traceback.print_exc(limit=1)
-             # Ne pas envoyer d'aperçu si erreur mémoire
-        except Exception as e:
-            print(f"ERREUR QM [_update_preview_sum_w]: Exception inattendue - {e}") # Debug
-            self.update_progress(f"Error in preview callback (SUM/W): {e}")
-            traceback.print_exc(limit=2)
-
-# --- FIN de la nouvelle méthode _update_preview_sum_w ---
-
+        except MemoryError as mem_err: # ...
+             print(f"ERREUR QM [_update_preview_sum_w]: ERREUR MÉMOIRE - {mem_err}") # ...
+        except Exception as e: # ...
+            print(f"ERREUR QM [_update_preview_sum_w]: Exception inattendue - {e}") # ...
 
 
 
@@ -2005,15 +1996,19 @@ class SeestarQueuedStacker:
             gc.collect()
             return
 
-        # --- Appeler _stack_batch pour combiner les images de ce lot ---
+        # --- Appeler _stack_batch pour combiner les images de ce lot méthode simulée ---
         # _stack_batch gère maintenant la combinaison (mean, median, ccdproc) et les poids
-        stacked_batch_data_np, stack_info_header = self._stack_batch(
+        #stacked_batch_data_np, stack_info_header = self._stack_batch(
+        #    batch_images, batch_headers, batch_scores, current_batch_num, total_batches_est
+        #)
+        # NOUVEL APPEL carte de poids réélle :
+        stacked_batch_data_np, stack_info_header, sum_weights_batch = self._stack_batch(
             batch_images, batch_headers, batch_scores, current_batch_num, total_batches_est
         )
-
-        # --- Combiner le résultat du batch dans le stack cumulatif ---
+            # --- Combiner le résultat du batch dans le stack cumulatif ---
         if stacked_batch_data_np is not None:
-            self._combine_batch_result(stacked_batch_data_np, stack_info_header)
+            # Passer sum_weights_batch à _combine_batch_result
+            self._combine_batch_result(stacked_batch_data_np, stack_info_header, sum_weights_batch) 
             print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...") # Debug
             self._update_preview_sum_w()
             ### MODIFICATION : Supprimer ou commenter l'appel à la sauvegarde intermédiaire ###
@@ -2344,132 +2339,148 @@ class SeestarQueuedStacker:
 
 
 
+
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header):
+    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header, sum_of_weights_used_in_batch): # Argument sum_of_weights_used_in_batch est la sortie de _stack_batch
         """
         [MODE SUM/W - CLASSIQUE] Accumule le résultat numpy (float32, 0-1) d'un batch classique
         traité (par _stack_batch) dans les accumulateurs memmap SUM et WHT.
-
-        NOTE: Pour cette version, la pondération par qualité est ignorée.
-              Le poids accumulé est simplement le nombre d'images du batch.
+        MAJ: Utilise la VRAIE somme des poids (sum_of_weights_used_in_batch) retournée 
+             par _stack_batch si self.use_quality_weighting est True.
+             La simulation de poids est SUPPRIMÉE.
 
         Args:
-            stacked_batch_data_np (np.ndarray): Image MOYENNE (float32, 0-1) résultant du
-                                                traitement du batch par _stack_batch.
-            stack_info_header (fits.Header): En-tête contenant les informations
-                                             sur le traitement de ce batch (NIMAGES, etc.).
+            stacked_batch_data_np (np.ndarray): Image MOYENNE (pondérée ou simple) du lot (float32, 0-1).
+            stack_info_header (fits.Header): En-tête info du lot (contient NIMAGES physiques).
+            sum_of_weights_used_in_batch (float): Somme des poids réellement utilisés par _stack_batch
+                                                  pour ce lot (ou le nombre d'images si pas de pondération).
         """
-        print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation batch classique...") # Debug
+        print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation batch classique...")
+        print(f"  -> Reçu de _stack_batch -> sum_of_weights_used_in_batch: {sum_of_weights_used_in_batch:.2f}")
 
-        # --- Vérifications initiales ---
+        # --- Vérifications initiales (inchangées) ---
         if stacked_batch_data_np is None or stack_info_header is None:
             self.update_progress("⚠️ Erreur interne: Données batch invalides pour accumulation SUM/W.")
-            print("DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données invalides).") # Debug
+            print("DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données batch invalides).")
             return
         if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
              self.update_progress("❌ Erreur critique: Accumulateurs Memmap SUM/WHT non initialisés.")
-             print("ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé.") # Debug
-             # Marquer une erreur fatale ?
-             self.processing_error = "Memmap non initialisé"
-             self.stop_processing = True # Arrêter le traitement
+             print("ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé.")
+             self.processing_error = "Memmap non initialisé"; self.stop_processing = True
              return
         if stacked_batch_data_np.shape != self.memmap_shape:
              self.update_progress(f"❌ Incompatibilité shape batch: Attendu {self.memmap_shape}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
-             print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape batch.") # Debug
-             # Compter comme échec pour les images de ce batch ?
+             print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape batch.")
              try: batch_n_error = int(stack_info_header.get('NIMAGES', 1))
              except: batch_n_error = 1
              self.failed_stack_count += batch_n_error
              return
 
         try:
-            batch_n = int(stack_info_header.get('NIMAGES', 1))
+            num_physical_images_in_batch = int(stack_info_header.get('NIMAGES', 1)) 
             batch_exposure = float(stack_info_header.get('TOTEXP', 0.0))
 
-            if batch_n <= 0:
-                self.update_progress(f"⚠️ Batch avec {batch_n} images, ignoré pour accumulation.")
-                print(f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (batch_n <= 0).") # Debug
+            if num_physical_images_in_batch <= 0 and sum_of_weights_used_in_batch <= 1e-6 : # Si aucun poids et aucune image physique
+                self.update_progress(f"⚠️ Batch avec 0 images physiques et 0 poids effectif, ignoré.")
+                print(f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (0 images physiques et 0 poids).")
                 return
 
-            print(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation de {batch_n} images...") # Debug
+            signal_to_add_to_sum = None
+            weights_map_to_add_to_wht = None # Sera un array 2D (H,W) float32
 
-            # --- Accumulation SUM ---
-            # Puisque stacked_batch_data_np est la MOYENNE du lot,
-            # le SIGNAL TOTAL du lot est Moyenne * N.
-            # On utilise float64 pour l'accumulateur temporaire pour la précision.
-            signal_total_batch = stacked_batch_data_np.astype(np.float64) * float(batch_n)
+            # --- GESTION DE LA PONDÉRATION (RÉELLE OU UNIFORME) ---
+            # stacked_batch_data_np est l'image MOYENNE (déjà pondérée par _stack_batch si use_quality_weighting était True là-bas)
+            # Pour l'accumulateur SUM, on ajoute : ImageMoyennePondéréeDuLot * SommeTotaleDesPoidsDeCeLot
+            # Pour l'accumulateur WHT, on ajoute : SommeTotaleDesPoidsDeCeLot (sur chaque pixel)
+            
+            effective_weight_for_accumulation = 0.0
 
-            # Ajouter au memmap SUM (float32). L'assignation gère la conversion.
-            # On utilise += pour l'addition in-place sur le memmap.
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition à cumulative_sum_memmap...") # Debug
-            self.cumulative_sum_memmap[:] += signal_total_batch.astype(self.memmap_dtype_sum)
-            # Forcer l'écriture sur disque (important pour memmap !)
-            if hasattr(self.cumulative_sum_memmap, 'flush'):
-                 self.cumulative_sum_memmap.flush()
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM terminée et flushée.") # Debug
+            if self.use_quality_weighting and sum_of_weights_used_in_batch > 1e-6:
+                # La pondération qualité a été appliquée dans _stack_batch.
+                # sum_of_weights_used_in_batch est la somme des poids qualité pour ce lot.
+                print(f"DEBUG QM [_combine_batch_result SUM/W]: Pondération Qualité ACTIVE. Utilisation sum_of_weights_used_in_batch = {sum_of_weights_used_in_batch:.2f}")
+                effective_weight_for_accumulation = sum_of_weights_used_in_batch
+            else:
+                # Pas de pondération qualité, ou les poids étaient négligeables.
+                # On utilise le nombre d'images physiques comme poids.
+                if self.use_quality_weighting: # Log si on fallback
+                    print(f"DEBUG QM [_combine_batch_result SUM/W]: Pondération Qualité demandée mais sum_of_weights_used_in_batch ({sum_of_weights_used_in_batch:.2f}) faible/nul. Fallback poids uniforme basé sur {num_physical_images_in_batch} images.")
+                else:
+                    print(f"DEBUG QM [_combine_batch_result SUM/W]: Pondération Qualité INACTIVE. Utilisation poids uniforme basé sur {num_physical_images_in_batch} images.")
+                effective_weight_for_accumulation = float(num_physical_images_in_batch)
+            
+            if effective_weight_for_accumulation <= 1e-6 and num_physical_images_in_batch > 0:
+                # Cas étrange où on a des images physiques mais le poids effectif est nul (ex: toutes les images ont eu un score de 0)
+                self.update_progress(f"⚠️ Batch avec {num_physical_images_in_batch} images mais poids effectif nul. Ignoré pour accumulation.")
+                print(f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (poids effectif nul malgré images physiques).")
+                return
 
-            # --- Accumulation WHT ---
-            # Le poids ici est simplement le nombre d'images.
-            # On ajoute batch_n à chaque pixel du memmap WHT (uint16).
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition à cumulative_wht_memmap...") # Debug
-            self.cumulative_wht_memmap[:] += batch_n # L'addition gère le type uint16
-            # Forcer l'écriture sur disque
-            if hasattr(self.cumulative_wht_memmap, 'flush'):
-                 self.cumulative_wht_memmap.flush()
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition WHT terminée et flushée.") # Debug
+            # Calculer le signal total à ajouter (ImageMoyenne * PoidsTotalEffectif)
+            signal_to_add_to_sum = stacked_batch_data_np.astype(np.float64) * effective_weight_for_accumulation
+            
+            # Créer la carte de poids à ajouter (PoidsTotalEffectif appliqué à chaque pixel)
+            # Doit être de la forme (H,W) et du type de self.memmap_dtype_wht (float32)
+            weights_map_to_add_to_wht = np.full(self.memmap_shape[:2], float(effective_weight_for_accumulation), dtype=self.memmap_dtype_wht)
 
-            # --- Mise à jour des compteurs globaux ---
-            # Note: images_in_cumulative_stack représente maintenant le *poids total* accumulé
-            # Pour l'affichage UI, on veut peut-être toujours le nombre d'images *traitées*.
-            # Gardons self.images_in_cumulative_stack pour le nombre d'images,
-            # même si ce n'est plus directement le poids pour la moyenne finale.
-            # La moyenne finale sera SUM / WHT.
-            self.images_in_cumulative_stack += batch_n # Compte le nombre d'images traitées
+            print(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation pour {num_physical_images_in_batch} images physiques. Poids effectif total pour ce lot: {effective_weight_for_accumulation:.2f}")
+            print(f"  -> signal_to_add_to_sum range: [{np.min(signal_to_add_to_sum):.2f} - {np.max(signal_to_add_to_sum):.2f}]")
+            print(f"  -> weights_map_to_add_to_wht (valeur constante): {effective_weight_for_accumulation:.2f}")
+
+            # --- Accumulation dans les memmaps ---
+            self.cumulative_sum_memmap[:] += signal_to_add_to_sum.astype(self.memmap_dtype_sum)
+            if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM terminée et flushée.")
+
+            self.cumulative_wht_memmap[:] += weights_map_to_add_to_wht 
+            if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition WHT terminée et flushée.")
+            
+            # Mise à jour des compteurs globaux
+            self.images_in_cumulative_stack += num_physical_images_in_batch # Toujours le nombre d'images physiques
             self.total_exposure_seconds += batch_exposure
-            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images={self.images_in_cumulative_stack}, exp={self.total_exposure_seconds:.1f}") # Debug
+            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images_in_cumulative_stack={self.images_in_cumulative_stack}, total_exposure_seconds={self.total_exposure_seconds:.1f}")
 
-            # --- Mise à jour Header Cumulatif (Minimale ici) ---
-            # On garde le header pour les métadonnées globales, mais NIMAGES/TOTEXP finaux
-            # seront recalculés/vérifiés lors de la sauvegarde finale.
-            if self.current_stack_header is None: # Initialiser si premier lot
+            # --- Mise à jour Header Cumulatif ---
+            if self.current_stack_header is None: 
                 self.current_stack_header = fits.Header()
-                # Copier quelques infos de base une seule fois
-                first_header = stack_info_header # Ou récupérer header de la première image du lot si possible
+                first_header_from_batch = stack_info_header 
                 keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS', 'GAIN', 'OFFSET', 'CCD-TEMP', 'RA', 'DEC', 'SITELAT', 'SITELONG', 'FOCALLEN', 'BAYERPAT']
-                for key in keys_to_copy:
-                    if first_header and key in first_header:
-                        try: self.current_stack_header[key] = (first_header[key], first_header.comments[key] if key in first_header.comments else '')
-                        except Exception: self.current_stack_header[key] = first_header[key]
+                for key_iter in keys_to_copy:
+                    if first_header_from_batch and key_iter in first_header_from_batch:
+                        try: self.current_stack_header[key_iter] = (first_header_from_batch[key_iter], first_header_from_batch.comments[key_iter] if key_iter in first_header_from_batch.comments else '')
+                        except Exception: self.current_stack_header[key_iter] = first_header_from_batch[key_iter]
                 self.current_stack_header['STACKTYP'] = (f'Classic SUM/W ({self.stacking_mode})', 'Stacking method')
                 self.current_stack_header['CREATOR'] = ('SeestarStacker (SUM/W)', 'Processing Software')
                 if self.correct_hot_pixels: self.current_stack_header['HISTORY'] = 'Hot pixel correction applied'
+                # Mettre à jour l'historique de pondération basé sur self.use_quality_weighting
+                if self.use_quality_weighting: 
+                    self.current_stack_header['HISTORY'] = 'Quality weighting (SNR/Stars) intended for SUM/W'
+                else: 
+                    self.current_stack_header['HISTORY'] = 'Uniform weighting (by image count) applied for SUM/W'
                 self.current_stack_header['HISTORY'] = 'SUM/W Accumulation Initialized'
+            
+            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Physical images processed for stack')
+            self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time')
+            
+            # Mettre à jour SUMWGHTS avec la somme des poids max de WHT (approximation de l'exposition pondérée)
+            current_total_wht_center = np.max(self.cumulative_wht_memmap) # WHT est float32
+            self.current_stack_header['SUMWGHTS'] = (float(current_total_wht_center), 'Approx. max sum of weights in WHT map')
 
-            # Mettre à jour NIMAGES dans le header juste pour info (sera recalculé à la fin)
-            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images processed so far')
-            self.current_stack_header['TOTEXP'] = (round(self.total_exposure_seconds, 2), '[s] Approx exposure accumulated')
-
-
-            # Pas de clipping ici, on accumule les sommes. Le clipping se fera sur le résultat final.
-
-            print("DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée.") # Debug
+            print("DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée.")
 
         except MemoryError as mem_err:
-             print(f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}") # Debug
+             print(f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}")
              self.update_progress(f"❌ ERREUR MÉMOIRE lors de l'accumulation du batch classique.")
-             traceback.print_exc(limit=1)
-             self.processing_error = "Erreur Mémoire Accumulation"
-             self.stop_processing = True
+             traceback.print_exc(limit=1); self.processing_error = "Erreur Mémoire Accumulation"; self.stop_processing = True
         except Exception as e:
-            print(f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}") # Debug
+            print(f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}")
             self.update_progress(f"❌ Erreur pendant l'accumulation du résultat du batch: {e}")
             traceback.print_exc(limit=3)
-            # Ne pas arrêter le processus complet pour une erreur d'accumulation ? Ou si ?
-            # Pour l'instant, on continue mais on log l'erreur.
-            self.failed_stack_count += batch_n # Compter les images du lot comme échec d'accumulation
+            try: batch_n_error_acc = int(stack_info_header.get('NIMAGES', 1))
+            except: batch_n_error_acc = 1
+            self.failed_stack_count += batch_n_error_acc
 
-# --- FIN de _combine_batch_result MODIFIÉ ---
 
 
 
@@ -2494,180 +2505,253 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
 
+
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
     def _stack_batch(self, batch_images, batch_headers, batch_scores, current_batch_num=0, total_batches_est=0):
         """
-        Combine un lot d'images alignées (2D ou 3D) en utilisant ccdproc.
-        Traite les canaux couleur séparément si nécessaire.
-        Applique les poids qualité si activés.
+        Combine un lot d'images alignées (2D ou 3D) en utilisant ccdproc.combine.
+        MAJ: Calcule et applique les poids qualité si self.use_quality_weighting est True.
+             Assure que seuls les poids des images valides/utilisées sont passés.
+             Retourne (stacked_image_np, stack_info_header, sum_of_weights_actually_used).
 
         Args:
             batch_images (list): Liste d'arrays NumPy (float32, 0-1). Déjà alignées.
             batch_headers (list): Liste des en-têtes FITS originaux.
-            batch_scores (list): Liste des dicts de scores qualité {'snr', 'stars'}.
+            batch_scores (list): Liste des dicts de scores qualité {'snr', 'stars'} pour chaque image.
             current_batch_num (int): Numéro du lot pour les logs.
             total_batches_est (int): Estimation totale des lots pour les logs.
 
         Returns:
-            tuple: (stacked_image_np, stack_info_header) or (None, None) on failure.
+            tuple: (stacked_image_np, stack_info_header, sum_of_weights_actually_used) 
+                   ou (None, None, 0.0) en cas d'échec.
+                   sum_of_weights_actually_used est la somme des poids appliqués à ce lot
+                   (ou le nombre d'images physiques si pas de pondération ou échec du calcul des poids).
         """
         if not batch_images:
             self.update_progress(f"❌ Erreur interne: _stack_batch reçu un lot vide.")
-            return None, None
+            return None, None, 0.0
 
-        num_images = len(batch_images)
+        num_physical_images_in_batch_initial = len(batch_images)
         progress_info = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
-        self.update_progress(f"✨ Combinaison via ccdproc du batch {progress_info} ({num_images} images)...")
+        self.update_progress(f"✨ Combinaison ccdproc du batch {progress_info} ({num_physical_images_in_batch_initial} images physiques initiales)...")
 
-        # Déterminer si les images sont en couleur
-        ref_shape = batch_images[0].shape
-        is_color = len(ref_shape) == 3 and ref_shape[2] == 3
+        ref_shape_check = batch_images[0].shape if batch_images[0] is not None else None
+        if ref_shape_check is None and num_physical_images_in_batch_initial > 0 : # Essayer de trouver une shape de référence
+            for img_chk in batch_images:
+                if img_chk is not None: ref_shape_check = img_chk.shape; break
+        if ref_shape_check is None:
+            self.update_progress(f"❌ Erreur interne: Impossible de déterminer la shape de référence pour le lot {current_batch_num}. Lot ignoré.")
+            return None, None, 0.0
 
-        # --- Calculer les poids (une seule fois, applicable à tous les canaux) ---
-        weights = None
-        weighting_applied = False
-        if self.use_quality_weighting and batch_scores and len(batch_scores) == num_images:
+        is_color = len(ref_shape_check) == 3 and ref_shape_check[2] == 3
+
+        # --- 1. Filtrer les images valides et préparer les données pour le calcul des poids ---
+        # On ne garde que les images qui sont non None et qui ont des scores et headers valides.
+        
+        valid_items_for_processing = [] # Sera une liste de dictionnaires
+        original_indices_of_valid_items = [] # Pour mapper les poids plus tard
+
+        for idx, (img_np, hdr, score) in enumerate(zip(batch_images, batch_headers, batch_scores)):
+            if img_np is not None and hdr is not None and score is not None:
+                # Vérifier la cohérence des dimensions avec le mode (couleur/NB)
+                is_current_img_valid_shape = False
+                if is_color and img_np.ndim == 3 and img_np.shape == ref_shape_check:
+                    is_current_img_valid_shape = True
+                elif not is_color and img_np.ndim == 2 and img_np.shape == ref_shape_check:
+                    is_current_img_valid_shape = True
+                
+                if is_current_img_valid_shape:
+                    valid_items_for_processing.append({'image': img_np, 'header': hdr, 'scores': score, 'original_index': idx})
+                    original_indices_of_valid_items.append(idx) # Garder l'index original
+                else:
+                    self.update_progress(f"   -> Image {idx+1} du lot {current_batch_num} ignorée (shape {img_np.shape} incompatible avec réf {ref_shape_check} ou mode).")
+            else:
+                self.update_progress(f"   -> Image {idx+1} du lot {current_batch_num} ignorée (donnée, header ou score manquant).")
+        
+        num_valid_images_for_processing = len(valid_items_for_processing)
+        print(f"DEBUG QM [_stack_batch]: {num_valid_images_for_processing}/{num_physical_images_in_batch_initial} images valides pour traitement dans ce lot.")
+
+        if num_valid_images_for_processing == 0:
+            self.update_progress(f"❌ Aucune image valide trouvée dans le lot {current_batch_num} après filtrage. Lot ignoré.")
+            return None, None, 0.0
+
+        # --- 2. Calculer les poids qualité pour les images VALIDES ---
+        weights_for_valid_images = None # Sera un array NumPy pour les images valides
+        sum_of_weights_actually_used = float(num_valid_images_for_processing) # Défaut: poids de 1 par image valide
+        quality_weighting_was_effectively_applied = False
+
+        if self.use_quality_weighting:
+            valid_scores_list = [item['scores'] for item in valid_items_for_processing]
             try:
-                self.update_progress(f"   -> Calcul des poids qualité pour {num_images} images...")
-                weights = self._calculate_weights(batch_scores)
-                weighting_applied = True
-                self.update_progress(f"   -> Poids qualité calculés.")
+                self.update_progress(f"   -> Calcul des poids qualité pour {num_valid_images_for_processing} images valides...")
+                calculated_weights = self._calculate_weights(valid_scores_list) 
+                
+                if calculated_weights is not None and calculated_weights.size == num_valid_images_for_processing:
+                    weights_for_valid_images = calculated_weights
+                    sum_of_weights_actually_used = np.sum(weights_for_valid_images)
+                    quality_weighting_was_effectively_applied = True
+                    self.update_progress(f"   -> Poids qualité calculés. Somme des poids: {sum_of_weights_actually_used:.2f}. Range: [{np.min(weights_for_valid_images):.2f}-{np.max(weights_for_valid_images):.2f}]")
+                else:
+                    self.update_progress(f"   ⚠️ Erreur calcul poids. Utilisation poids uniformes (1.0 par image valide).")
+                    weights_for_valid_images = np.ones(num_valid_images_for_processing, dtype=np.float32)
+                    sum_of_weights_actually_used = float(num_valid_images_for_processing)
             except Exception as w_err:
-                self.update_progress(f"   ⚠️ Erreur calcul poids qualité: {w_err}. Utilisation poids uniformes.")
-                weights = None
-                weighting_applied = False
+                self.update_progress(f"   ⚠️ Erreur pendant calcul poids qualité: {w_err}. Utilisation poids uniformes (1.0 par image valide).")
+                weights_for_valid_images = np.ones(num_valid_images_for_processing, dtype=np.float32)
+                sum_of_weights_actually_used = float(num_valid_images_for_processing)
         else:
-            self.update_progress(f"   -> Utilisation de poids uniformes.")
-            weighting_applied = False
+            self.update_progress(f"   -> Pondération Qualité désactivée. Poids uniformes implicites (1.0 par image traitée).")
+            # sum_of_weights_actually_used reste num_valid_images_for_processing
 
-        # --- Stack images ---
+        # --- 3. Préparer les CCDData et les poids correspondants ---
+        ccd_list_all_channels = [] # [[chR_img1, chR_img2..], [chG_img1..], [chB_img1..]]
+        
+        if is_color:
+            for _ in range(3): ccd_list_all_channels.append([])
+            for i, item in enumerate(valid_items_for_processing):
+                img_np, hdr = item['image'], item['header']
+                exposure = float(hdr.get('EXPTIME', 1.0))
+                for c in range(3):
+                    channel_data_2d = img_np[..., c]
+                    channel_data_2d_clean = np.nan_to_num(channel_data_2d, nan=0.0, posinf=0.0, neginf=0.0)
+                    ccd = CCDData(channel_data_2d_clean, unit='adu', meta=hdr.copy())
+                    ccd.meta['EXPOSURE'] = exposure
+                    ccd_list_all_channels[c].append(ccd)
+        else: # Grayscale
+            ccd_list_grayscale = []
+            for item in valid_items_for_processing:
+                img_np, hdr = item['image'], item['header']
+                exposure = float(hdr.get('EXPTIME', 1.0))
+                img_np_clean = np.nan_to_num(img_np, nan=0.0, posinf=0.0, neginf=0.0)
+                ccd = CCDData(img_np_clean, unit='adu', meta=hdr.copy())
+                ccd.meta['EXPOSURE'] = exposure
+                ccd_list_grayscale.append(ccd)
+
+        # --- 4. Stack images avec ccdproc.combine ---
         stacked_batch_data_np = None
-        stack_method_used = self.stacking_mode
-        kappa_val = float(self.kappa)
+        stack_method_used_for_header = self.stacking_mode 
+        kappa_val_for_header = float(self.kappa)
 
         try:
             if is_color:
-                # --- Traitement Couleur (par canal) ---
-                self.update_progress("   -> Traitement couleur par canal...")
-                stacked_channels = []
-                final_stack_method_str = "" # Pour le header
+                self.update_progress("   -> Traitement couleur par canal avec ccdproc.combine...")
+                stacked_channels_list = []
+                final_stack_method_str_for_header = "" 
 
-                for c in range(3): # Boucle sur R, G, B
+                for c in range(3):
                     channel_name = ['R', 'G', 'B'][c]
-                    self.update_progress(f"      -> Combinaison Canal {channel_name}...")
-                    ccd_list_channel = []
+                    current_ccd_list_for_channel = ccd_list_all_channels[c]
+                    if not current_ccd_list_for_channel: # Ne devrait pas arriver si num_valid_images_for_processing > 0
+                        raise ValueError(f"Aucune CCDData valide pour le canal {channel_name} (incohérence interne).")
+                    
+                    self.update_progress(f"      -> Combinaison Canal {channel_name} ({len(current_ccd_list_for_channel)} images)...")
+                    
+                    combine_kwargs_for_channel = {} # Dictionnaire pour les arguments nommés
+                    current_stack_method_loc = self.stacking_mode
+                    if current_stack_method_loc == 'mean': combine_kwargs_for_channel['method'] = 'average'
+                    elif current_stack_method_loc == 'median': combine_kwargs_for_channel['method'] = 'median'
+                    elif current_stack_method_loc in ['kappa-sigma', 'winsorized-sigma']:
+                        combine_kwargs_for_channel['method'] = 'average'; combine_kwargs_for_channel['sigma_clip'] = True
+                        combine_kwargs_for_channel['sigma_clip_low_thresh'] = kappa_val_for_header 
+                        combine_kwargs_for_channel['sigma_clip_high_thresh'] = kappa_val_for_header
+                        current_stack_method_loc = f"kappa-sigma({kappa_val_for_header:.1f})"
+                    else: combine_kwargs_for_channel['method'] = 'average'; current_stack_method_loc = 'average (fallback)'
+                    
+                    if weights_for_valid_images is not None: # Si des poids ont été calculés
+                         combine_kwargs_for_channel['weights'] = weights_for_valid_images
+                         print(f"      -> Poids qualité (réels) appliqués au canal {channel_name}.")
+                    
+                    # Appel Corrigé
+                    combined_ccd_channel = ccdproc_combine(current_ccd_list_for_channel, **combine_kwargs_for_channel)
+                    stacked_channels_list.append(combined_ccd_channel.data.astype(np.float32))
+                    if c == 0: final_stack_method_str_for_header = current_stack_method_loc
+                
+                if len(stacked_channels_list) != 3: raise RuntimeError("Traitement couleur n'a pas produit 3 canaux.")
+                stacked_batch_data_np = np.stack(stacked_channels_list, axis=-1)
+                stack_method_used_for_header = final_stack_method_str_for_header
+            
+            else: # Grayscale
+                if not ccd_list_grayscale: raise ValueError("Aucune CCDData N&B valide à combiner.")
+                self.update_progress(f"   -> Traitement N&B avec ccdproc.combine ({len(ccd_list_grayscale)} images)...")
+                combine_kwargs_grayscale = {}
+                if stack_method_used_for_header == 'mean': combine_kwargs_grayscale['method'] = 'average'
+                # ... (logique pour method, sigma_clip comme avant)
+                elif stack_method_used_for_header in ['kappa-sigma', 'winsorized-sigma']:
+                    combine_kwargs_grayscale['method'] = 'average'; combine_kwargs_grayscale['sigma_clip'] = True
+                    combine_kwargs_grayscale['sigma_clip_low_thresh'] = kappa_val_for_header
+                    combine_kwargs_grayscale['sigma_clip_high_thresh'] = kappa_val_for_header
+                    if stack_method_used_for_header == 'winsorized-sigma': self.update_progress(f"   ℹ️ Mode 'winsorized' traité comme kappa-sigma ({kappa_val_for_header:.1f})")
+                    stack_method_used_for_header = f"kappa-sigma({kappa_val_for_header:.1f})"
+                else: combine_kwargs_grayscale['method'] = 'average'; stack_method_used_for_header = 'average (fallback)'
 
-                    # Créer la liste CCDData pour ce canal
-                    for img_np, hdr in zip(batch_images, batch_headers):
-                        if img_np is None or img_np.ndim != 3: continue # Skip invalides
-                        channel_data = img_np[..., c] # Extraire le canal 2D
-                        exposure = float(hdr.get('EXPTIME', 1.0)) if hdr else 1.0
-                        ccd = CCDData(channel_data, unit='adu', meta=hdr)
-                        ccd.meta['EXPOSURE'] = exposure
-                        ccd_list_channel.append(ccd)
+                if weights_for_valid_images is not None:
+                    combine_kwargs_grayscale['weights'] = weights_for_valid_images
+                    print(f"      -> Poids qualité (réels) appliqués aux images N&B.")
 
-                    if not ccd_list_channel:
-                        raise ValueError(f"Aucune image valide pour le canal {channel_name}.")
+                self.update_progress(f"   -> Combinaison ccdproc N&B (Méthode: {combine_kwargs_grayscale.get('method', '?')}, Poids: {'Oui' if 'weights' in combine_kwargs_grayscale else 'Non'})...")
+                # Appel Corrigé
+                combined_ccd_grayscale = ccdproc_combine(ccd_list_grayscale, **combine_kwargs_grayscale)
+                stacked_batch_data_np = combined_ccd_grayscale.data.astype(np.float32)
 
-                    # Configurer les args pour ce canal
-                    combine_args_ch = {'ccd_list': ccd_list_channel}
-                    ch_stack_method = self.stacking_mode # Utiliser la méthode globale
-                    if ch_stack_method == 'mean': combine_args_ch['method'] = 'average'
-                    elif ch_stack_method == 'median': combine_args_ch['method'] = 'median'
-                    elif ch_stack_method in ['kappa-sigma', 'winsorized-sigma']:
-                        combine_args_ch['method'] = 'average'; combine_args_ch['sigma_clip'] = True
-                        combine_args_ch['sigma_lower_thresh'] = kappa_val; combine_args_ch['sigma_upper_thresh'] = kappa_val
-                        ch_stack_method = f"kappa-sigma({kappa_val:.1f})" # Nom méthode pour header
-                    else: combine_args_ch['method'] = 'average'; ch_stack_method = 'average (fallback)'
-
-                    if weights is not None: combine_args_ch['weights'] = weights # Appliquer les mêmes poids
-
-                    # Combiner ce canal
-                    combined_ccd_ch = ccdproc_combine(ccd_list_channel, **combine_args_ch)
-                    stacked_channels.append(combined_ccd_ch.data.astype(np.float32))
-
-                    # Stocker la méthode utilisée (sera la même pour tous les canaux)
-                    if c == 0: final_stack_method_str = ch_stack_method
-
-                # Vérifier si tous les canaux ont été traités
-                if len(stacked_channels) != 3:
-                    raise RuntimeError("Le traitement couleur n'a pas produit 3 canaux.")
-
-                # Réassembler l'image couleur
-                stacked_batch_data_np = np.stack(stacked_channels, axis=-1)
-                stack_method_used = final_stack_method_str # Mettre à jour pour le header
-
-            else:
-                # --- Traitement N&B (comme avant) ---
-                self.update_progress("   -> Traitement N&B...")
-                ccd_list = []
-                for img_np, hdr in zip(batch_images, batch_headers):
-                    if img_np is None or img_np.ndim != 2: continue # Skip invalides
-                    exposure = float(hdr.get('EXPTIME', 1.0)) if hdr else 1.0
-                    ccd = CCDData(img_np, unit='adu', meta=hdr)
-                    ccd.meta['EXPOSURE'] = exposure
-                    ccd_list.append(ccd)
-
-                if not ccd_list:
-                    raise ValueError("Aucune image N&B valide à convertir en CCDData.")
-
-                combine_args = {'ccd_list': ccd_list}
-                if stack_method_used == 'mean': combine_args['method'] = 'average'
-                elif stack_method_used == 'median': combine_args['method'] = 'median'
-                elif stack_method_used in ['kappa-sigma', 'winsorized-sigma']:
-                    combine_args['method'] = 'average'; combine_args['sigma_clip'] = True
-                    combine_args['sigma_lower_thresh'] = kappa_val; combine_args['sigma_upper_thresh'] = kappa_val
-                    if stack_method_used == 'winsorized-sigma': self.update_progress(f"   ℹ️ Mode 'winsorized' traité comme kappa-sigma ({kappa_val:.1f}) dans ccdproc.")
-                    stack_method_used = f"kappa-sigma({kappa_val:.1f})"
-                else: combine_args['method'] = 'average'; stack_method_used = 'average (fallback)'
-
-                if weights is not None: combine_args['weights'] = weights
-
-                self.update_progress(f"   -> Combinaison ccdproc (Méthode: {combine_args.get('method', '?')}, SigmaClip: {combine_args.get('sigma_clip', False)})...")
-                combined_ccd = ccdproc_combine(ccd_list, **combine_args)
-                stacked_batch_data_np = combined_ccd.data.astype(np.float32)
-
-            # --- Création de l'en-tête d'information commun ---
+            # --- Création de l'en-tête d'information ---
             stack_info_header = fits.Header()
-            stack_info_header['NIMAGES'] = (num_images, 'Images combined in this batch')
-            stack_info_header['STACKMETH'] = (stack_method_used, 'Method used for this batch')
-            if 'kappa' in stack_method_used.lower(): # Vérifie si kappa-sigma a été utilisé
-                 stack_info_header['KAPPA'] = (kappa_val, 'Kappa value for clipping')
-            stack_info_header['WGHT_USED'] = (weighting_applied, 'Quality weights applied to this batch')
-            if weighting_applied:
-                w_metrics = []
-                if self.weight_by_snr: w_metrics.append(f"SNR^{self.snr_exponent:.1f}")
-                if self.weight_by_stars: w_metrics.append(f"Stars^{self.stars_exponent:.1f}")
-                stack_info_header['WGHT_MET'] = (",".join(w_metrics), 'Metrics used for weighting')
-            batch_exposure = sum(float(h.get('EXPTIME', 0.0)) for h in batch_headers if h is not None)
-            stack_info_header['TOTEXP'] = (round(batch_exposure, 2), '[s] Exposure time of this batch')
+            stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Images in batch effectively combined by ccdproc')
+            stack_info_header['STACKMETH'] = (stack_method_used_for_header, 'Method used for this batch')
+            if 'kappa' in stack_method_used_for_header.lower():
+                 stack_info_header['KAPPA'] = (kappa_val_for_header, 'Kappa value for clipping')
+            
+            stack_info_header['WGHT_APP'] = (quality_weighting_was_effectively_applied, 'Quality weights effectively used by ccdproc_combine')
+            if quality_weighting_was_effectively_applied:
+                w_metrics_str_list = []
+                if self.weight_by_snr: w_metrics_str_list.append(f"SNR^{self.snr_exponent:.1f}")
+                if self.weight_by_stars: w_metrics_str_list.append(f"Stars^{self.stars_exponent:.1f}")
+                stack_info_header['WGHT_MET'] = (",".join(w_metrics_str_list) if w_metrics_str_list else "None_Active", 'Metrics configured for weighting')
+                # sum_of_weights_actually_used est déjà calculé et sera retourné. On peut l'ajouter au header ici aussi.
+                stack_info_header['SUMWGHTS'] = (float(sum_of_weights_actually_used), 'Sum of quality weights applied in this batch')
+            else:
+                # Si pas de pondération, la somme des poids est le nombre d'images combinées
+                stack_info_header['SUMWGHTS'] = (float(num_valid_images_for_processing), 'Effective number of images (uniform weight=1)')
+            
+            batch_total_exposure = 0.0
+            # Calculer TOTEXP basé sur les images VALIDES qui ont été traitées
+            source_headers_for_exp = [item['header'] for item in valid_items_for_processing]
+            for h in source_headers_for_exp:
+                if h and 'EXPTIME' in h:
+                    try: batch_total_exposure += float(h['EXPTIME'])
+                    except (ValueError, TypeError): pass
+            stack_info_header['TOTEXP'] = (round(batch_total_exposure, 2), '[s] Sum of exposure times for images in this batch stack')
 
             # --- Normalisation 0-1 du résultat du batch ---
-            min_val, max_val = np.nanmin(stacked_batch_data_np), np.nanmax(stacked_batch_data_np)
-            if max_val > min_val:
-                stacked_batch_data_np = (stacked_batch_data_np - min_val) / (max_val - min_val)
-            else: # Image constante
+            min_val_batch, max_val_batch = np.nanmin(stacked_batch_data_np), np.nanmax(stacked_batch_data_np)
+            if np.isfinite(min_val_batch) and np.isfinite(max_val_batch) and max_val_batch > min_val_batch:
+                stacked_batch_data_np = (stacked_batch_data_np - min_val_batch) / (max_val_batch - min_val_batch)
+            elif np.isfinite(max_val_batch) and max_val_batch == min_val_batch and max_val_batch != 0:
+                 stacked_batch_data_np = np.ones_like(stacked_batch_data_np) * 0.5 
+            else: 
                 stacked_batch_data_np = np.zeros_like(stacked_batch_data_np)
-            stacked_batch_data_np = np.clip(stacked_batch_data_np, 0.0, 1.0)
+            
+            stacked_batch_data_np = np.clip(stacked_batch_data_np, 0.0, 1.0).astype(np.float32)
 
-            self.update_progress(f"✅ Combinaison lot {progress_info} terminée (Shape: {stacked_batch_data_np.shape}).")
+            self.update_progress(f"✅ Combinaison lot {progress_info} terminée (Shape: {stacked_batch_data_np.shape}). sum_of_weights_used: {sum_of_weights_actually_used:.2f}")
+            
+            # Retourner l'image stackée, le header d'info, et la somme des poids utilisés
+            return stacked_batch_data_np, stack_info_header, sum_of_weights_actually_used
 
-            return stacked_batch_data_np.astype(np.float32), stack_info_header # Assurer float32
-
-        # --- Gestion des erreurs ---
         except MemoryError as mem_err:
-            print(f"\n❌ ERREUR MÉMOIRE Combinaison Lot {progress_info}: {mem_err}")
-            traceback.print_exc(limit=1)
+            print(f"\n❌ ERREUR MÉMOIRE Combinaison Lot {progress_info}: {mem_err}"); traceback.print_exc(limit=1)
             self.update_progress(f"❌ ERREUR Mémoire Lot {progress_info}. Lot ignoré.")
-            ccd_list = []; ccd_list_channel = [] # Effacer listes
-            gc.collect()
-            return None, None
+            gc.collect(); return None, None, 0.0
         except Exception as stack_err:
-            print(f"\n❌ ERREUR Combinaison Lot {progress_info}: {stack_err}")
-            traceback.print_exc(limit=3)
+            print(f"\n❌ ERREUR Combinaison Lot {progress_info}: {stack_err}"); traceback.print_exc(limit=3)
             self.update_progress(f"❌ ERREUR Combinaison Lot {progress_info}. Lot ignoré.")
-            ccd_list = []; ccd_list_channel = []
-            gc.collect()
-            return None, None
+            gc.collect(); return None, None, 0.0
+
+
+
+
 
 #########################################################################################################################################
 
@@ -2822,49 +2906,35 @@ class SeestarQueuedStacker:
 ############################################################################################################################################
 
 
-
-
-
-
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False):
         """
-        [MODE SUM/W] Calcule l'image finale depuis SUM/W, applique les post‑traitements,
-        le rognage, sauvegarde le stack final et sa pré‑visualisation, puis libère les memmaps.
+        [MODE SUM/W] Calcule l'image finale depuis SUM/W, applique les post‑traitements
+        (y compris le nouveau FEATHERING), le rognage, sauvegarde le stack final et sa
+        pré‑visualisation, puis libère les memmaps.
+        MAJ: Ajout Feathering et flags/logs de session.
         """
         print(f"DEBUG QM [_save_final_stack SUM/W]: Début sauvegarde finale "
             f"(suffix: '{output_filename_suffix}', stopped_early: {stopped_early})")
+        self.update_progress(f"💾 Préparation de la sauvegarde finale du stack (Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early})...")
 
-        # ------------------------------------------------------------------ #
-        # 0)  Imports optionnels (BN, SCNR, Edge‑Crop)                       #
-        # ------------------------------------------------------------------ #
-        neutralize_background_func = None
-        apply_scnr_func            = None
-        apply_edge_crop_func       = None
+        # 0) Imports optionnels
+        neutralize_background_func = None; apply_scnr_func = None; apply_edge_crop_func = None
+        try: from ..tools.stretch import neutralize_background_automatic as neutralize_background_func
+        except ImportError: print("ERREUR QM [_save_final_stack SUM/W]: Échec import neutralize_background_automatic.")
+        try: from ..enhancement.color_correction import apply_scnr as apply_scnr_func
+        except ImportError: print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_scnr.")
+        try: from ..enhancement.stack_enhancement import apply_edge_crop as apply_edge_crop_func
+        except ImportError: print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_edge_crop.")
 
-        try:
-            from ..tools.stretch import neutralize_background_automatic as neutralize_background_func
-        except ImportError:
-            print("ERREUR QM [_save_final_stack SUM/W]: Échec import neutralize_background_automatic.")
-
-        try:
-            from ..enhancement.color_correction import apply_scnr as apply_scnr_func
-        except ImportError:
-            print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_scnr.")
-
-        try:
-            from ..enhancement.stack_enhancement import apply_edge_crop as apply_edge_crop_func
-        except ImportError:
-            print("ERREUR QM [_save_final_stack SUM/W]: Échec import apply_edge_crop.")
-
-        # ... (Section 1: Sécurité - inchangée) ...
+        # 1) Sécurité : accumulateurs et dossier de sortie définis ?
         if (self.cumulative_sum_memmap is None
                 or self.cumulative_wht_memmap is None
                 or self.output_folder is None):
             self.final_stacked_path = None
-            print("DEBUG QM [_save_final_stack SUM/W]: Sortie précoce "
-                "(memmap/output_folder non défini).")
-            self.update_progress("ⓘ Aucun stack final (accumulateurs/dossier sortie invalide).")
+            print("DEBUG QM [_save_final_stack SUM/W]: Sortie précoce (memmap/output_folder non défini).")
+            self.update_progress("❌ Erreur interne: Accumulateurs ou dossier de sortie non définis. Sauvegarde annulée.")
             self._close_memmaps()
             return
 
@@ -2872,218 +2942,282 @@ class SeestarQueuedStacker:
         if image_count <= 0 and not stopped_early:
             self.final_stacked_path = None
             print(f"DEBUG QM [_save_final_stack SUM/W]: Sortie précoce (image_count={image_count}).")
-            self.update_progress("ⓘ Aucun stack final (0 images accumulées).")
+            self.update_progress(f"ⓘ Aucun stack final (0 images accumulées). Sauvegarde annulée.")
             self._close_memmaps()
             return
-        print(f"DEBUG QM [_save_final_stack SUM/W]: Image count = {image_count}")
+        self.update_progress(f"Nombre d'images/poids total dans l'accumulateur: {image_count}")
 
-        # ... (Section 2: Lecture memmaps & calcul stack final - inchangée) ...
+        # 2) Lecture des memmaps & calcul du stack final (SUM/W)
+        final_image_after_sum_w = None # Renommé pour clarté
+        final_wht_map_for_feathering = None # Pour stocker la carte de poids complète pour feathering
         try:
-            print("DEBUG QM [_save_final_stack SUM/W]: Lecture finale memmaps SUM/WHT…")
+            self.update_progress("Lecture des données finales depuis les accumulateurs...")
+            # Lire le SUM en float64 pour la division, WHT peut être float32
             final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
-            final_wht = np.array(self.cumulative_wht_memmap, dtype=np.float64)
-            self._close_memmaps()
+            final_wht_map_for_feathering = np.array(self.cumulative_wht_memmap, dtype=np.float32) # H,W
+            self._close_memmaps() # Fermer dès que possible
+            
+            self.update_progress("Calcul de l'image moyenne (SUM / WHT)...")
+            epsilon = 1e-9 # Pour éviter division par zéro
+            # S'assurer que final_wht_map_for_feathering est positif pour la division
+            wht_for_division = np.maximum(final_wht_map_for_feathering, epsilon)
+            # Broadcaster wht_for_division (H,W) pour correspondre à final_sum (H,W,C)
+            wht_broadcasted = wht_for_division[..., np.newaxis]
 
-            print("DEBUG QM [_save_final_stack SUM/W]: Calcul image moyenne (SUM/WHT)…")
-            epsilon             = 1e-9
-            wht_broadcasted     = np.maximum(final_wht, epsilon)[:, :, np.newaxis]
             with np.errstate(divide='ignore', invalid='ignore'):
-                final_raw       = final_sum / wht_broadcasted
-            final_raw           = np.nan_to_num(final_raw, nan=0.0, posinf=0.0, neginf=0.0)
-            min_r, max_r        = np.nanmin(final_raw), np.nanmax(final_raw)
+                final_raw = final_sum / wht_broadcasted
+            final_raw = np.nan_to_num(final_raw, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Normalisation initiale 0-1
+            min_r, max_r = np.nanmin(final_raw), np.nanmax(final_raw)
             if max_r > min_r:
-                final_image     = (final_raw - min_r) / (max_r - min_r)
-            else:
-                final_image     = np.zeros_like(final_raw)
-            final_image         = np.clip(final_image, 0.0, 1.0).astype(np.float32)
-            del final_sum, final_wht, wht_broadcasted, final_raw
+                final_image_after_sum_w = (final_raw - min_r) / (max_r - min_r)
+            else: # Image constante ou vide
+                final_image_after_sum_w = np.zeros_like(final_raw)
+            
+            final_image_after_sum_w = np.clip(final_image_after_sum_w, 0.0, 1.0).astype(np.float32)
+            
+            del final_sum, wht_for_division, wht_broadcasted, final_raw # Libérer mémoire
             gc.collect()
+            self.update_progress(f"Image moyenne SUM/W calculée. Range initial: [{min_r:.4f}, {max_r:.4f}] -> Range normalisé: [{np.nanmin(final_image_after_sum_w):.2f}, {np.nanmax(final_image_after_sum_w):.2f}]")
         except Exception as e_calc:
             print(f"ERREUR QM [_save_final_stack SUM/W]: Erreur calcul final SUM/W - {e_calc}")
             traceback.print_exc(limit=2)
             self.update_progress(f"❌ Erreur lors du calcul final SUM/W: {e_calc}")
             self.processing_error = f"Erreur Calcul Final: {e_calc}"
-            self._close_memmaps() # Assurer la fermeture même si erreur
+            self._close_memmaps()
             return
-        if final_image is None:
+        
+        if final_image_after_sum_w is None:
             self.final_stacked_path = None
-            print("DEBUG QM [_save_final_stack SUM/W]: Échec calcul final SUM/W.")
+            print("DEBUG QM [_save_final_stack SUM/W]: Échec calcul final SUM/W (final_image_after_sum_w est None).")
             self.update_progress("ⓘ Aucun stack final (échec calcul SUM/W).")
             return
 
-        data_to_save = final_image
-        print("DEBUG QM [_save_final_stack SUM/W]: Données pour post‑traitement - "
-            f"Shape: {data_to_save.shape}, Min: {np.nanmin(data_to_save):.3f}, "
-            f"Max: {np.nanmax(data_to_save):.3f}")
-        background_model_photutils = None
+        # --- Initialiser data_to_save ---
+        # data_to_save sera modifiée par les étapes de post-traitement successives.
+        data_to_save = final_image_after_sum_w.copy() 
+        background_model_photutils = None # Pour stocker le modèle de fond si Photutils est utilisé
+
+        # Réinitialiser les flags de session avant de commencer les post-traitements
+        self.feathering_applied_in_session = False # NOUVEAU FLAG
+        self.photutils_bn_applied_in_session = False
+        self.bn_globale_applied_in_session = False
+        self.cb_applied_in_session = False
+        self.scnr_applied_in_session = False
+        self.crop_applied_in_session = False
+        self.photutils_params_used_in_session = {}
 
         # ------------------------------------------------------------------ #
-        # 3)  Post‑traitements (Photutils BN, BN couleur, CB, SCNR, etc.)    #
+        # 3)  Post‑traitements                                               #
         # ------------------------------------------------------------------ #
-        print(f"DEBUG QM _save_final_stack: CHECK Photutils -> apply_flag={getattr(self, 'apply_photutils_bn', 'FLAG_NON_DEFINI')}, lib_available={_PHOTOUTILS_BG_SUB_AVAILABLE}")
+        self.update_progress("--- Début Post-Traitements Finaux ---")
+
+        # --- NOUVEAU : Feathering (AVANT Photutils BN) ---
+        if getattr(self, 'apply_feathering', False): # Vérifier le nouvel attribut
+            if _FEATHERING_AVAILABLE: # Vérifier si la fonction a été importée
+                feather_blur_val = getattr(self, 'feather_blur_px', 256) # Lire le paramètre blur
+                self.update_progress(f"🖌️ Application Feathering (Lissage pondéré, Blur: {feather_blur_val}px)...")
+                try:
+                    if final_wht_map_for_feathering is not None:
+                        # feather_by_weight_map attend img(H,W,3) et wht(H,W)
+                        data_to_save = feather_by_weight_map(data_to_save, final_wht_map_for_feathering, blur_px=feather_blur_val)
+                        self.feathering_applied_in_session = True # MARQUER COMME APPLIQUÉ
+                        self.update_progress(f"   ✅ Feathering appliqué. Range après feather: [{np.nanmin(data_to_save):.3f}, {np.nanmax(data_to_save):.3f}]")
+                    else:
+                        self.update_progress("   ⚠️ Feathering ignoré (carte de poids finale non disponible).")
+                except Exception as feather_err:
+                    self.update_progress(f"   ❌ Erreur Feathering: {feather_err}. Étape ignorée.")
+                    print(f"ERREUR QM [_save_final_stack SUM/W]: Erreur pendant feather_by_weight_map: {feather_err}")
+                    traceback.print_exc(limit=2)
+            else:
+                self.update_progress("   ℹ️ ⚠️ Feathering activé mais fonction non disponible (problème d'import). Étape ignorée.")
+        else:
+            self.update_progress("   ℹ️ Feathering non activé.")
+        
+        # --- FIN Feathering ---
+
+        # --- Photutils BN (après Feathering) ---
         if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
-            print("DEBUG QM [_save_final_stack SUM/W]: Appel subtract_background_2d (Photutils)…")
-            self.update_progress("Soustraction de Fond 2D (Photutils)…", None)
+            # ... (logique Photutils BN identique à votre version précédente) ...
+            # (s'assure de mettre à jour self.photutils_bn_applied_in_session = True si appliqué)
+            photutils_params = {
+                'box_size': getattr(self, 'photutils_bn_box_size', 128),
+                'filter_size': getattr(self, 'photutils_bn_filter_size', 5),
+                'sigma_clip_val': getattr(self, 'photutils_bn_sigma_clip', 3.0),
+                'exclude_percentile': getattr(self, 'photutils_bn_exclude_percentile', 98.0)
+            }
+            self.photutils_params_used_in_session = photutils_params.copy()
+            self.update_progress(f"🔬 Application Soustraction Fond 2D (Photutils)...")
+            self.update_progress(f"   Params Photutils: Box={photutils_params['box_size']}, Filt={photutils_params['filter_size']}, Sig={photutils_params['sigma_clip_val']:.1f}, Excl%={photutils_params['exclude_percentile']:.1f}")
             try:
-                box   = getattr(self, 'photutils_bn_box_size', 128)
-                filt  = getattr(self, 'photutils_bn_filter_size', 5)
-                sigma = getattr(self, 'photutils_bn_sigma_clip', 3.0)
-                excl  = getattr(self, 'photutils_bn_exclude_percentile', 98.0)
-                data_corr, bkg_model = subtract_background_2d(data_to_save, box_size=box, filter_size=filt, sigma_clip_val=sigma, exclude_percentile=excl)
+                data_corr, bkg_model = subtract_background_2d(data_to_save, **photutils_params)
                 if data_corr is not None:
                     data_to_save = data_corr; background_model_photutils = bkg_model
+                    self.photutils_bn_applied_in_session = True
+                    # ... (log stats bkg_model) ...
                     mn, mx = np.nanmin(data_to_save), np.nanmax(data_to_save)
-                    print("DEBUG QM [_save_final_stack SUM/W]: Données après Photutils BN - Range avant re‑norm: [{mn:.3f}, {mx:.3f}]")
                     if mx > mn: data_to_save = (data_to_save - mn) / (mx - mn)
                     else: data_to_save = np.zeros_like(data_to_save)
                     data_to_save = np.clip(data_to_save, 0.0, 1.0).astype(np.float32)
-                    self.update_progress("   -> Soustraction de Fond 2D terminée.", None)
-                else: self.update_progress("⚠️ Échec Soustraction de Fond 2D, étape ignorée.", None)
+                    self.update_progress(f"   ✅ Soustraction Fond 2D (Photutils) terminée. Nouveau range: [{mn:.3f}, {mx:.3f}]")
+                else: self.update_progress("   ⚠️ Échec Soustraction Fond 2D (Photutils), étape ignorée.")
             except Exception as photutils_err:
-                print(f"ERREUR QM [_save_final_stack SUM/W]: Erreur pendant subtract_background_2d: {photutils_err}"); self.update_progress(f"⚠️ Erreur Soustraction Fond 2D: {photutils_err}. Étape ignorée.")
+                self.update_progress(f"   ❌ Erreur Soustraction Fond 2D (Photutils): {photutils_err}. Étape ignorée.")
         elif getattr(self, 'apply_photutils_bn', False) and not _PHOTOUTILS_BG_SUB_AVAILABLE:
-            self.update_progress("⚠️ Soustraction Fond 2D demandée mais Photutils indisponible.", None)
+            self.update_progress("   ⚠️ Soustraction Fond 2D (Photutils) demandée mais Photutils indisponible.")
+        else: self.update_progress("   ℹ️ Soustraction Fond 2D (Photutils) non activée.")
 
-        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
-            if neutralize_background_func:
-                print("DEBUG QM [_save_final_stack SUM/W]: Appel neutralize_background_automatic…")
-                try:
-                    rows, cols = (16, 16); parts = self.bn_grid_size_str.split('x')
-                    if len(parts) == 2: rows, cols = int(parts[0]), int(parts[1])
-                    data_to_save = neutralize_background_func(data_to_save, grid_size=(rows, cols), bg_percentile_low=self.bn_perc_low, bg_percentile_high=self.bn_perc_high, std_factor_threshold=self.bn_std_factor, min_applied_gain=self.bn_min_gain, max_applied_gain=self.bn_max_gain)
-                except Exception as bn_err: print(f"ERREUR QM: Erreur BN: {bn_err}"); self.update_progress(f"⚠️ Erreur neutralisation: {bn_err}.")
-            if self.apply_chroma_correction and hasattr(self, 'chroma_balancer'):
-                print("DEBUG QM [_save_final_stack SUM/W]: Appel chroma_balancer.normalize_stack…")
-                try:
-                    cb = self.chroma_balancer; cb.border_size = self.cb_border_size; cb.blur_radius = self.cb_blur_radius
-                    cb.r_factor_min = getattr(self, 'cb_min_r_factor', 0.7); cb.r_factor_max = getattr(self, 'cb_max_r_factor', 1.3)
-                    cb.b_factor_min = self.cb_min_b_factor; cb.b_factor_max = self.cb_max_b_factor
-                    data_to_save = cb.normalize_stack(data_to_save)
-                except Exception as cb_err: print(f"ERREUR QM: Erreur chroma balancer: {cb_err}"); self.update_progress(f"⚠️ Erreur correction chroma: {cb_err}.")
-            if self.apply_final_scnr and apply_scnr_func:
-                print(f"DEBUG QM [_save_final_stack SUM/W]: Appel apply_scnr (final) Amount={self.final_scnr_amount}…")
-                try: data_to_save = apply_scnr_func(data_to_save, target_channel=self.final_scnr_target_channel, amount=self.final_scnr_amount, preserve_luminosity=self.final_scnr_preserve_luminosity)
-                except Exception as scnr_err: print(f"ERREUR QM: Erreur SCNR: {scnr_err}"); self.update_progress(f"⚠️ Erreur SCNR final: {scnr_err}.")
+        # --- BN globale (neutralize_background_automatic) ---
+        # ... (logique BN globale identique, utilise self.bn_globale_applied_in_session) ...
+        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3 and neutralize_background_func:
+            bn_params_used = {
+                'grid_size': (16,16), 'bg_percentile_low': self.bn_perc_low, 
+                'bg_percentile_high': self.bn_perc_high, 'std_factor_threshold': self.bn_std_factor,
+                'min_pixels_per_zone': 50, # Valeur par défaut
+                'min_applied_gain': self.bn_min_gain, 'max_applied_gain': self.bn_max_gain
+            }
+            parts = self.bn_grid_size_str.split('x')
+            if len(parts) == 2: bn_params_used['grid_size'] = (int(parts[0]), int(parts[1]))
+            self.update_progress(f"🎨 Application Neutralisation Fond Auto (BN)...")
+            self.update_progress(f"   Params BN: Grille={bn_params_used['grid_size']}, PercLow={bn_params_used['bg_percentile_low']}, PercHigh={bn_params_used['bg_percentile_high']}, StdFact={bn_params_used['std_factor_threshold']:.1f}, GainMin={bn_params_used['min_applied_gain']:.2f}, GainMax={bn_params_used['max_applied_gain']:.1f}")
+            try:
+                data_to_save = neutralize_background_func(data_to_save, **bn_params_used)
+                self.bn_globale_applied_in_session = True
+                self.update_progress("   ✅ Neutralisation Fond Auto (BN) terminée.")
+            except Exception as bn_err: self.update_progress(f"   ❌ Erreur Neutralisation Fond Auto (BN): {bn_err}.")
+        # --- Chromatic Balancer (Edge Enhance) ---
+        # ... (logique CB identique, utilise self.cb_applied_in_session) ...
+        if self.apply_chroma_correction and hasattr(self, 'chroma_balancer') and data_to_save.ndim == 3:
+            cb_params_used = {
+                'border_size': self.cb_border_size, 'blur_radius': self.cb_blur_radius,
+                'r_factor_limits': (getattr(self, 'cb_min_r_factor', 0.7), getattr(self, 'cb_max_r_factor', 1.3)), # Pas d'UI pour R pour l'instant
+                'b_factor_limits': (self.cb_min_b_factor, self.cb_max_b_factor)
+            }
+            self.update_progress(f"🌈 Application Correction Bords/Chroma (CB)...")
+            self.update_progress(f"   Params CB: Bord={cb_params_used['border_size']}, Flou={cb_params_used['blur_radius']}, LimR=[{cb_params_used['r_factor_limits'][0]:.2f}-{cb_params_used['r_factor_limits'][1]:.2f}], LimB=[{cb_params_used['b_factor_limits'][0]:.2f}-{cb_params_used['b_factor_limits'][1]:.2f}]")
+            try:
+                self.chroma_balancer.border_size = cb_params_used['border_size']
+                self.chroma_balancer.blur_radius = cb_params_used['blur_radius']
+                self.chroma_balancer.r_factor_min, self.chroma_balancer.r_factor_max = cb_params_used['r_factor_limits']
+                self.chroma_balancer.b_factor_min, self.chroma_balancer.b_factor_max = cb_params_used['b_factor_limits']
+                data_to_save = self.chroma_balancer.normalize_stack(data_to_save)
+                self.cb_applied_in_session = True
+                self.update_progress("   ✅ Correction Bords/Chroma (CB) terminée.")
+            except Exception as cb_err: self.update_progress(f"   ❌ Erreur Correction Bords/Chroma (CB): {cb_err}.")
 
-        # ------------------------------------------------------------------ #
-        # 4)  Header FITS & éventuel rognage                                 #
-        # ------------------------------------------------------------------ #
+        # --- SCNR Final ---
+        # ... (logique SCNR identique, utilise self.scnr_applied_in_session) ...
+        if self.apply_final_scnr and apply_scnr_func and data_to_save.ndim == 3:
+            self.update_progress(f"🌿 Application SCNR Final (Cible: {self.final_scnr_target_channel}, Force: {self.final_scnr_amount:.2f}, Prés.Lum: {self.final_scnr_preserve_luminosity})...")
+            try:
+                data_to_save = apply_scnr_func(data_to_save, target_channel=self.final_scnr_target_channel, amount=self.final_scnr_amount, preserve_luminosity=self.final_scnr_preserve_luminosity)
+                self.scnr_applied_in_session = True
+                self.update_progress("   ✅ SCNR Final terminé.")
+            except Exception as scnr_err: self.update_progress(f"   ❌ Erreur SCNR Final: {scnr_err}.")
+        
+        self.update_progress("--- Fin Post-Traitements ---")
+
+        # 4) Header FITS
+        # ... (logique création/màj header identique) ...
+        # ... (s'assurer d'ajouter 'FEATHER' : (True/False, 'Feathering applied') et 'FTHR_BLR': (blur_px, 'Feathering blur radius (px)'))
         final_header = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
-        final_header['NIMAGES'] = (image_count, 'Images contributing to final stack (SUM/W)')
+        final_header['NIMAGES'] = (image_count, 'Images/Total Weight contributing to final stack (SUM/W)')
         final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure time (SUM/W)')
         stack_type_actual = final_header.get('STACKTYP', 'SUM_W_unknown')
         if 'SUM/W' not in stack_type_actual: stack_type_actual = f"{stack_type_actual} SUM/W"
         final_header['STACKTYP'] = (stack_type_actual, 'SUM/W based stacking method')
-
-        # --- AJOUT DES PARAMÈTRES EXPERT AU HEADER ---
-        #    (Doit être fait AVANT l'ajout du commentaire Photutils qui dépend de BN_GRID)
-        print("DEBUG QM [_save_final_stack SUM/W]: Ajout des paramètres Expert au header FITS...")
-        final_header.add_comment("--- Expert Settings ---")
-        # BN
-        final_header['BN_GRID'] = (str(self.bn_grid_size_str), "BN: Grid size (RxC)")
-        final_header['BN_PLOW'] = (int(self.bn_perc_low), "BN: Background Percentile Low")
-        final_header['BN_PHIGH'] = (int(self.bn_perc_high), "BN: Background Percentile High")
-        final_header['BN_STD_F'] = (float(self.bn_std_factor), "BN: Background StdDev Factor")
-        final_header['BN_MING'] = (float(self.bn_min_gain), "BN: Min Gain Applied")
-        final_header['BN_MAXG'] = (float(self.bn_max_gain), "BN: Max Gain Applied")
-        # CB
-        final_header['CB_BORD'] = (int(self.cb_border_size), "CB: Border size (px)")
-        final_header['CB_BLUR'] = (int(self.cb_blur_radius), "CB: Blur radius (px)")
-        final_header['CB_MINBF'] = (float(self.cb_min_b_factor), "CB: Min Blue Factor")
-        final_header['CB_MAXBF'] = (float(self.cb_max_b_factor), "CB: Max Blue Factor")
-        # Crop
-        final_header['CROP_PCT'] = (float(self.final_edge_crop_percent_decimal * 100.0), "Final Edge Crop (%)")
-        # --- FIN AJOUT PARAMÈTRES EXPERT ---
-
-        # --- AJOUT : Mots-clés Expert Photutils BN au Header ---
-        if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
-            # S'assurer que BN_GRID existe maintenant si on veut mettre le commentaire avant.
-            # Si BN_GRID n'a pas été ajouté (ex: si ce n'est pas une image couleur),
-            # on peut omettre `before` ou choisir un autre mot-clé de référence.
-            # Pour plus de robustesse, on vérifie si BN_GRID existe avant de l'utiliser dans `before`.
-            before_keyword_for_photutils_comment = 'BN_GRID' if 'BN_GRID' in final_header else None
-            final_header.add_comment("--- Photutils Background Subtraction ---", before=before_keyword_for_photutils_comment)
-            final_header['PB_APP'] = (True, "Photutils Background2D Applied")
-            final_header['PB_BOX'] = (getattr(self, 'photutils_bn_box_size', 128), "Photutils: Box Size (px)")
-            final_header['PB_FILT'] = (getattr(self, 'photutils_bn_filter_size', 5), "Photutils: Filter Size (px, odd)")
-            final_header['PB_SIG'] = (getattr(self, 'photutils_bn_sigma_clip', 3.0), "Photutils: Sigma Clip value")
-            final_header['PB_EXCP'] = (getattr(self, 'photutils_bn_exclude_percentile', 98.0), "Photutils: Exclude Brightest Percentile")
-
-        if self.apply_final_scnr:
-            final_header['SCNR_APP'] = (True, 'SCNR applied')
+        
+        final_header.add_comment("--- Post-Processing Applied ---")
+        final_header['FEATHER'] = (self.feathering_applied_in_session, "Feathering by weight map applied")
+        if self.feathering_applied_in_session:
+            final_header['FTHR_BLR'] = (getattr(self, 'feather_blur_px', 0), "Feathering blur radius (px)")
+        # ... (reste des clés header pour BN, CB, Photutils BN, SCNR, Crop) ...
+        final_header['BN_GLOB'] = (self.bn_globale_applied_in_session, "Global Background Neutralization applied")
+        if self.bn_globale_applied_in_session:
+            final_header['BN_GRID'] = (str(self.bn_grid_size_str), "BN: Grid size (RxC)")
+            final_header['BN_PLOW'] = (int(self.bn_perc_low), "BN: Background Percentile Low")
+            # ... autres params BN ...
+        final_header['CB_EDGE'] = (self.cb_applied_in_session, "Edge/Chroma Correction (CB) applied")
+        if self.cb_applied_in_session:
+            final_header['CB_BORD'] = (int(self.cb_border_size), "CB: Border size (px)")
+            # ... autres params CB ...
+        final_header['PB2D_APP'] = (self.photutils_bn_applied_in_session, "Photutils Background2D Applied")
+        if self.photutils_bn_applied_in_session:
+            final_header['PB_BOX'] = (self.photutils_params_used_in_session.get('box_size', 0), "Photutils: Box Size (px)")
+            # ... autres params Photutils ...
+        final_header['SCNR_APP'] = (self.scnr_applied_in_session, 'Final SCNR applied')
+        if self.scnr_applied_in_session:
             final_header['SCNR_TRG'] = (self.final_scnr_target_channel, 'SCNR target')
-            final_header['SCNR_AMT'] = (self.final_scnr_amount, 'SCNR amount')
-            final_header['SCNR_LUM'] = (self.final_scnr_preserve_luminosity, 'SCNR lum preserved')
+            # ... autres params SCNR ...
+        final_header['CROP_APP'] = (self.crop_applied_in_session, 'Final Edge Crop applied')
+        if self.crop_applied_in_session:
+             final_header['CROP_PCT'] = (float(self.final_edge_crop_percent_decimal * 100.0), "Final Edge Crop (%)")
 
+
+        # Rognage (edge crop)
+        # ... (logique rognage identique, utilise self.crop_applied_in_session) ...
         if (apply_edge_crop_func and getattr(self, 'final_edge_crop_percent_decimal', 0.0) > 0.0):
-            print("DEBUG QM [_save_final_stack SUM/W]: Rognage final demandé…")
-            self.update_progress("Rognage final des bords…", None)
+            crop_percent_val = self.final_edge_crop_percent_decimal * 100.0
+            self.update_progress(f"✂️ Application Rognage Final des Bords ({crop_percent_val:.1f}%)...")
             try:
-                before_shape = data_to_save.shape
+                shape_before_crop = data_to_save.shape
                 data_to_save = apply_edge_crop_func(data_to_save, self.final_edge_crop_percent_decimal)
-                if data_to_save is None: # Si apply_edge_crop retourne None en cas d'erreur
-                    self.update_progress("⚠️ Échec rognage, utilisation de l'image non rognée.", None)
-                    # Il faudrait récupérer data_to_save d'avant l'appel à apply_edge_crop
-                    # Pour l'instant, on ne fait rien, ce qui signifie que si crop échoue, on continue avec data_to_save=None
-                    # ce qui causera une erreur à la sauvegarde. Mieux:
-                    # data_to_save = final_image # Revenir à l'image avant tentative de crop
-                    # Le plus simple est de s'assurer que apply_edge_crop retourne l'original si erreur.
-                    # (Actuellement, il retourne l'original, donc data_to_save ne devrait pas être None ici)
-                    if data_to_save is None and final_image is not None : data_to_save = final_image.copy() # Sécurité
-                    else: self.update_progress("⚠️ Échec rognage, et image originale non disponible.", None); return # Ne pas sauvegarder si échec critique
-
+                if data_to_save is None and final_image_after_sum_w is not None: data_to_save = final_image_after_sum_w.copy() # Fallback
+                elif data_to_save is None: self.update_progress("   ❌ Erreur critique rognage et image originale perdue."); return
+                self.crop_applied_in_session = True # MARQUER COMME APPLIQUÉ
+                self.update_progress(f"   ✅ Rognage terminé. Shape: {shape_before_crop} -> {data_to_save.shape}")
             except Exception as crop_err:
-                print(f"ERREUR QM: Erreur rognage: {crop_err}"); self.update_progress(f"⚠️ Erreur rognage: {crop_err}.")
-                if final_image is not None : data_to_save = final_image.copy() # Revenir à l'original
-                else: self.update_progress("⚠️ Échec rognage, et image originale non disponible.", None); return
-
-
-        # ... (Sections 5, 6, 7: Nom de fichier, Sauvegarde FITS, Sauvegarde Preview - inchangées) ...
+                self.update_progress(f"   ❌ Erreur Rognage Final: {crop_err}.")
+                if final_image_after_sum_w is not None : data_to_save = final_image_after_sum_w.copy() # Fallback
+                else: self.update_progress("   ❌ Erreur critique rognage et image originale perdue."); return
+        else:
+            self.update_progress("   ℹ️ Rognage Final non activé ou non nécessaire.")
+        
+        # 5) Construction nom de fichier FITS + preview PNG
+        # ... (logique nom de fichier identique) ...
         stack_type_for_filename = "classic_sumw"
         if self.current_stack_header and 'STACKTYP' in self.current_stack_header:
             fn_part = str(final_header['STACKTYP']).split('(')[0].strip()
             fn_part = fn_part.replace(' ', '_').replace('/', '_').lower()
             stack_type_for_filename = f"{fn_part}_sumw"
-        base_name = "stack_final"
-        final_suffix_cleaned = f"{output_filename_suffix}".replace('_sumw', '')
+        base_name = "stack_final"; final_suffix_cleaned = f"{output_filename_suffix}".replace('_sumw', '')
         fits_path = os.path.join(self.output_folder, f"{base_name}_{stack_type_for_filename}{final_suffix_cleaned}.fit")
         preview_path  = os.path.splitext(fits_path)[0] + ".png"
         self.final_stacked_path = fits_path
-        print(f"DEBUG QM [_save_final_stack SUM/W]: Chemin FITS final: {fits_path}")
+        self.update_progress(f"Chemin FITS final: {os.path.basename(fits_path)}")
 
+        # 6) Sauvegarde FITS (+ modèle fond si demandé)
+        # ... (logique sauvegarde FITS identique) ...
         try:
-            if (getattr(self, 'apply_photutils_bn', False) and background_model_photutils is not None and _PHOTOUTILS_BG_SUB_AVAILABLE): # Vérifier _PHOTOUTILS_BG_SUB_AVAILABLE
+            if self.photutils_bn_applied_in_session and background_model_photutils is not None and _PHOTOUTILS_BG_SUB_AVAILABLE:
                 primary_hdu = fits.PrimaryHDU(data_to_save.astype(np.float32), header=final_header)
                 bkg_hdu_data = None
                 if background_model_photutils.ndim == 3 and background_model_photutils.shape[2] == 3:
                     bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32)
                 elif background_model_photutils.ndim == 2:
                     bkg_hdu_data = background_model_photutils.astype(np.float32)
-                
                 if bkg_hdu_data is not None:
                     bkg_hdu = fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL")
                     fits.HDUList([primary_hdu, bkg_hdu]).writeto(fits_path, overwrite=True, checksum=True)
-                else: # Fallback si bkg_model n'a pas pu être traité
-                    save_fits_image(data_to_save, fits_path, final_header, overwrite=True)
+                    self.update_progress("   HDU modèle de fond Photutils incluse dans le FITS.")
+                else: save_fits_image(data_to_save, fits_path, final_header, overwrite=True)
             else:
                 save_fits_image(data_to_save, fits_path, final_header, overwrite=True)
-            print("DEBUG QM [_save_final_stack SUM/W]: Sauvegarde FITS OK.")
+            self.update_progress("   ✅ Sauvegarde FITS terminée.")
         except Exception as save_err:
-            print(f"ERREUR QM: Échec sauvegarde FITS: {save_err}"); traceback.print_exc(limit=2)
-            self.update_progress(f"⚠️ Erreur sauvegarde FITS: {save_err}"); return
+            self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); return
 
+        # 7) Sauvegarde preview PNG
+        # ... (logique sauvegarde PNG identique) ...
         try:
-            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True)
-            print("DEBUG QM [_save_final_stack SUM/W]: Sauvegarde Preview PNG OK.")
-            self.update_progress(f"✅ Stack final SUM/W sauvegardé ({image_count} images)")
+            save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True) # enhanced_stretch=True pour un meilleur aperçu final
+            self.update_progress("   ✅ Sauvegarde Preview PNG terminée.")
+            self.update_progress(f"🎉 Stack final SUM/W sauvegardé ({image_count} images/poids total). Traitement complet.")
         except Exception as prev_err:
-            print(f"ERREUR QM: Échec sauvegarde PNG: {prev_err}"); self.update_progress(f"⚠️ Erreur sauvegarde preview: {prev_err}")
+            self.update_progress(f"   ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
 
         print("DEBUG QM [_save_final_stack SUM/W]: Fin méthode.")
-
-
-
-
 
 
 
@@ -3284,153 +3418,157 @@ class SeestarQueuedStacker:
 
 
 
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
                          initial_additional_folders=None,
-                         # ... (tous les autres paramètres comme avant, y compris SCNR) ...
                          stacking_mode="kappa-sigma", kappa=2.5,
                          batch_size=10, correct_hot_pixels=True, hot_pixel_threshold=3.0,
                          neighborhood_size=5, bayer_pattern="GRBG", perform_cleanup=True,
-                         use_weighting=False, weight_snr=True, weight_stars=True,
-                         snr_exp=1.0, stars_exp=0.5, min_w=0.1,
+                         use_weighting=False, 
+                         weight_by_snr=True, 
+                         weight_by_stars=True,
+                         snr_exp=1.0, 
+                         stars_exp=0.5, 
+                         min_w=0.1,
                          use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7,
                          drizzle_mode="Final", drizzle_kernel="square", drizzle_pixfrac=1.0,
                          apply_chroma_correction=True,
                          apply_final_scnr=False, final_scnr_target_channel='green',
                          final_scnr_amount=0.8, final_scnr_preserve_luminosity=True,
-                         ### Arguments pour Paramètres Expert ###
                          bn_grid_size_str="16x16", bn_perc_low=5, bn_perc_high=30,
                          bn_std_factor=1.0, bn_min_gain=0.2, bn_max_gain=7.0,
                          cb_border_size=25, cb_blur_radius=8,
                          cb_min_b_factor=0.4, cb_max_b_factor=1.5,
-                         final_edge_crop_percent=2.0, # En pourcentage
-                         ### Arguments pour Paramètres Photutils BN ###
+                         final_edge_crop_percent=2.0,
                          apply_photutils_bn=False,
                          photutils_bn_box_size=128,
                          photutils_bn_filter_size=5,
                          photutils_bn_sigma_clip=3.0,
                          photutils_bn_exclude_percentile=98.0,
-                         ### FIN NOUVEAU ###
-                         ### FIN expert ###
+                         apply_feathering=False,
+                         feather_blur_px=256,
                          is_mosaic_run=False, api_key=None, mosaic_settings=None):
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MAJ: Intègre l'initialisation pour SUM/W memmap.
+        Le bloc de forçage des paramètres de test est maintenant COMMENTÉ.
         """
         print("DEBUG (Backend start_processing SUM/W): Début tentative démarrage...")
-        # ... (log des args reçus comme avant) ...
-        print(f"   -> Args SCNR reçus: Apply={apply_final_scnr}, Target={final_scnr_target_channel}, Amount={final_scnr_amount}, PreserveLum={final_scnr_preserve_luminosity}")
+        
+        # ---- LOG DES ARGUMENTS REÇUS PAR LE BACKEND (CE QUE LE GUI A ENVOYÉ) ----
+        print("  --- BACKEND ARGS REÇUS (ORIGINAL DEPUIS GUI/SETTINGS) ---")
+        print(f"    input_dir='{input_dir}'")
+        # ... (gardez les autres logs des arguments reçus si vous le souhaitez) ...
+        print(f"    apply_feathering={apply_feathering}")
+        print(f"    feather_blur_px={feather_blur_px}")
+        print(f"    photutils_bn_filter_size={photutils_bn_filter_size}")
+        print(f"    bn_grid_size_str='{bn_grid_size_str}'")
+        print(f"    final_scnr_amount={final_scnr_amount}")
+        print(f"    use_weighting={use_weighting}")
+        print(f"  --- FIN BACKEND ARGS REÇUS ---")
+
+        # ----- !!!!! BLOC DE FORÇAGE TEMPORAIRE MAINTENANT COMMENTÉ !!!!! -----
+        # # print("!!! ATTENTION : FORÇAGE DES VALEURS DE TEST DANS SeestarQueuedStacker.start_processing !!!")
+        # # 
+        # # # Paramètres Photutils BN de test
+        # # apply_photutils_bn_test = False 
+        # # photutils_bn_filter_size_test = 11
+        # # photutils_bn_exclude_percentile_test = 95.0
+        # # print(f"  FORÇAGE TEST: apply_photutils_bn à {apply_photutils_bn_test}")
+        # # # ... (autres logs de forçage)
+        # #
+        # # # Paramètres BN Globale de test
+        # # bn_grid_size_str_test = "24x24"
+        # # # ...
+        # #
+        # # # Paramètres SCNR Final de test
+        # # apply_final_scnr_test = True
+        # # # ...
+        # #
+        # # # Paramètres Feathering de test
+        # # apply_feathering_test = True 
+        # # feather_blur_px_test = 128   
+        # # # ...
+        # #
+        # # # Pondération Qualité
+        # # use_weighting_test = use_weighting 
+        # #
+        # # # Appliquer les valeurs de test aux variables locales qui seront utilisées pour configurer 'self'
+        # # apply_photutils_bn = apply_photutils_bn_test
+        # # photutils_bn_filter_size = photutils_bn_filter_size_test
+        # # photutils_bn_exclude_percentile = photutils_bn_exclude_percentile_test
+        # # bn_grid_size_str = bn_grid_size_str_test
+        # # bn_perc_high = bn_perc_high_test
+        # # bn_std_factor = bn_std_factor_test
+        # # apply_final_scnr = apply_final_scnr_test
+        # # final_scnr_amount = final_scnr_amount_test
+        # # final_scnr_preserve_luminosity = final_scnr_preserve_luminosity_test
+        # # apply_feathering = apply_feathering_test
+        # # feather_blur_px = feather_blur_px_test
+        # # use_weighting = use_weighting_test
+        # ----- !!!!! FIN FORÇAGE TEMPORAIRE !!!!! -----
 
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
             return False
 
-        # 1. Reset flag stop et définir dossier courant (comme avant)
         self.stop_processing = False
+        if hasattr(self, 'aligner') and self.aligner is not None:
+            self.aligner.stop_processing = False
+            print("DEBUG (Backend start_processing SUM/W): self.aligner.stop_processing remis à False.")
+        else:
+            print("ERREUR (Backend start_processing SUM/W): self.aligner non initialisé.")
+            self.update_progress("❌ Erreur interne critique: Aligner non initialisé.")
+            return False
+
         self.current_folder = os.path.abspath(input_dir)
         
-        # --- 2. Préparation de la Référence et Obtention de la SHAPE ---
-        #    (On a besoin de la shape AVANT d'appeler initialize pour les memmaps)
         print("DEBUG (Backend start_processing SUM/W): Étape 2 - Préparation référence & shape...")
         reference_image_data_for_shape = None 
         reference_header_for_shape = None 
-        ref_shape_hwc = None                  # Shape finale (H,W,C) pour memmap
-
+        ref_shape_hwc = None
         try:
-            # Construire la liste des dossiers potentiels où trouver une image pour la shape
+            # ... (Logique de préparation de la référence et obtention de ref_shape_hwc - INCHANGÉE) ...
             potential_folders_for_shape = []
-            if self.current_folder and os.path.isdir(self.current_folder): # Dossier principal d'input
-                potential_folders_for_shape.append(self.current_folder)
-            
-            if initial_additional_folders: # Dossiers additionnels passés au démarrage
+            if self.current_folder and os.path.isdir(self.current_folder): potential_folders_for_shape.append(self.current_folder)
+            if initial_additional_folders:
                 for add_f in initial_additional_folders:
                     abs_add_f = os.path.abspath(add_f)
-                    if abs_add_f and os.path.isdir(abs_add_f) and abs_add_f not in potential_folders_for_shape:
-                        potential_folders_for_shape.append(abs_add_f)
-
-            if not potential_folders_for_shape:
-                raise RuntimeError("Aucun dossier d'entrée (principal ou additionnel) valide fourni pour trouver une image de référence.")
-
-            current_folder_to_scan_for_shape = None
-            files_in_folder_for_shape = []
-
-            for folder_path in potential_folders_for_shape:
-                print(f"DEBUG QM [start_processing SUM/W]: Scan pour FITS dans: {folder_path}")
-                temp_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.fit', '.fits'))])
-                if temp_files:
-                    files_in_folder_for_shape = temp_files
-                    current_folder_to_scan_for_shape = folder_path
-                    print(f"DEBUG QM [start_processing SUM/W]: Fichiers FITS trouvés dans '{os.path.basename(current_folder_to_scan_for_shape)}' pour déterminer la shape.")
-                    break # On a trouvé un dossier avec des fichiers
-
-            if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
-                # Si reference_path_ui est fourni ET valide, on pourrait essayer de l'utiliser directement pour la shape
-                # mais _get_reference_image a besoin d'un dossier et d'une liste de fichiers pour son mode auto fallback.
-                # Donc, si aucun fichier n'est trouvé dans les dossiers, on lève une erreur, même si reference_path_ui existe.
-                # L'utilisateur doit fournir au moins un dossier avec des images.
-                raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée spécifiés pour déterminer la shape de référence.")
-
-            # Configurer l'aligneur (celui de l'instance, pas un temporaire)
-            # car il sera utilisé ensuite dans _worker pour l'alignement réel.
-            # Les paramètres sont passés à start_processing.
+                    if abs_add_f and os.path.isdir(abs_add_f) and abs_add_f not in potential_folders_for_shape: potential_folders_for_shape.append(abs_add_f)
+            if not potential_folders_for_shape: raise RuntimeError("Aucun dossier valide pour shape.")
+            current_folder_to_scan_for_shape = None; files_in_folder_for_shape = []
+            for folder_path_iter in potential_folders_for_shape:
+                temp_files = sorted([f for f in os.listdir(folder_path_iter) if f.lower().endswith(('.fit', '.fits'))])
+                if temp_files: files_in_folder_for_shape = temp_files; current_folder_to_scan_for_shape = folder_path_iter; break
+            if not current_folder_to_scan_for_shape or not files_in_folder_for_shape: raise RuntimeError("Aucun FITS pour shape.")
             self.aligner.correct_hot_pixels = correct_hot_pixels
             self.aligner.hot_pixel_threshold = hot_pixel_threshold
             self.aligner.neighborhood_size = neighborhood_size
             self.aligner.bayer_pattern = bayer_pattern
-            self.aligner.reference_image_path = reference_path_ui or None # Valeur de l'UI
-
-            print(f"DEBUG QM [start_processing SUM/W]: Appel _get_reference_image sur dossier '{os.path.basename(current_folder_to_scan_for_shape)}' (Nombre de fichiers: {len(files_in_folder_for_shape)}). Réf UI: '{self.aligner.reference_image_path}'")
-            
-            reference_image_data_for_shape, reference_header_for_shape = self.aligner._get_reference_image(
-                current_folder_to_scan_for_shape, 
-                files_in_folder_for_shape
-            )
-
-            if reference_image_data_for_shape is None or reference_header_for_shape is None:
-                # _get_reference_image devrait déjà logguer la raison de l'échec
-                raise RuntimeError("Échec obtention image/header référence pour déterminer la shape (via _get_reference_image).")
-
-           
-            # --- Obtenir la Shape ---
-            # S'assurer qu'elle est bien (H, W, 3) même si l'image de référence est N&B
+            self.aligner.reference_image_path = reference_path_ui or None
+            reference_image_data_for_shape, reference_header_for_shape = self.aligner._get_reference_image(current_folder_to_scan_for_shape, files_in_folder_for_shape)
+            if reference_image_data_for_shape is None or reference_header_for_shape is None: raise RuntimeError("Échec _get_reference_image pour shape.")
             ref_shape_initial = reference_image_data_for_shape.shape
-            if len(ref_shape_initial) == 2: # Si N&B
-                ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3)
-                print(f"DEBUG (Backend start_processing SUM/W): Réf N&B, shape pour memmap sera {ref_shape_hwc}")
-            elif len(ref_shape_initial) == 3 and ref_shape_initial[2] == 3: # Si déjà couleur
-                ref_shape_hwc = ref_shape_initial
-                print(f"DEBUG (Backend start_processing SUM/W): Réf couleur, shape pour memmap est {ref_shape_hwc}")
-            else:
-                raise RuntimeError(f"Shape de l'image référence non supportée: {ref_shape_initial}")
-
-            # Stocker le header de référence pour plus tard (WCS, métadonnées)
+            if len(ref_shape_initial) == 2: ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3)
+            elif len(ref_shape_initial) == 3 and ref_shape_initial[2] == 3: ref_shape_hwc = ref_shape_initial
+            else: raise RuntimeError(f"Shape référence non supportée: {ref_shape_initial}")
             self.reference_header_for_wcs = reference_header_for_shape.copy()
-
-            # --- Nettoyer la mémoire de l'image de référence temporaire ---
-            del reference_image_data_for_shape, reference_header_for_shape
-            gc.collect()
-            print("DEBUG (Backend start_processing SUM/W): Shape obtenue et mémoire libérée.")
-
+            del reference_image_data_for_shape, reference_header_for_shape; gc.collect()
         except Exception as e_ref_shape:
             self.update_progress(f"❌ Erreur préparation référence/shape: {e_ref_shape}")
-            print(f"ERREUR QM [start_processing SUM/W]: Échec préparation référence/shape : {e_ref_shape}")
-            traceback.print_exc(limit=2)
-            # self.processing_active = False # Pas besoin ici, car initialize n'a pas été appelé
-            return False # Empêche de continuer si la shape n'est pas trouvée
-        # --- Fin Préparation Référence et Shape ---
+            print(f"ERREUR QM [start_processing SUM/W]: Échec préparation référence/shape : {e_ref_shape}"); traceback.print_exc(limit=2)
+            return False
 
-        # --- 3. Appel à initialize AVEC la shape ---
         print(f"DEBUG (Backend start_processing SUM/W): Appel à self.initialize() avec shape={ref_shape_hwc}...")
-        # L'appel à initialize() réinitialise les compteurs, flags, et crée les memmaps
         if not self.initialize(output_dir, ref_shape_hwc):
             self.processing_active = False
             print("ERREUR (Backend start_processing SUM/W): Échec de self.initialize() pour SUM/W.")
-            # initialize a déjà loggé l'erreur spécifique
             return False
         print("DEBUG (Backend start_processing SUM/W): self.initialize() terminé avec succès.")
 
-        # --- 4. Définir les paramètres spécifiques à CETTE session *APRES* initialize ---
-        #    (Cette partie est identique à la version précédente, assigne les arguments aux attributs self.)
-        print("DEBUG (Backend start_processing SUM/W): Configuration des paramètres de session...")
+        print("DEBUG (Backend start_processing SUM/W): Configuration des paramètres de session (maintenant depuis les args GUI)...")
+        # --- Stockage des paramètres reçus en argument (maintenant sans le bloc de forçage) ---
         self.is_mosaic_run = is_mosaic_run
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
         self.api_key = api_key
@@ -3442,112 +3580,92 @@ class SeestarQueuedStacker:
         self.perform_cleanup = perform_cleanup
         self.stacking_mode = stacking_mode
         self.kappa = float(kappa)
-        #self.use_quality_weighting = False  #Forcé à False pour le test SUM/W initial décommenter si besoin pour tests 
-        if use_weighting: print("INFO: Pondération qualité demandée mais DÉSACTIVÉE pour le test SUM/W.")
-        # self.weight_by_snr = weight_snr # Pas besoin si use_quality_weighting = False
-        # self.weight_by_stars = weight_stars # idem
-        # self.snr_exponent = snr_exp # idem
-        # self.stars_exponent = stars_exp # idem
-        # self.min_weight = max(0.01, min(1.0, min_w)) # idem
-        self.apply_final_scnr = apply_final_scnr
-        self.final_scnr_target_channel = final_scnr_target_channel
-        self.final_scnr_amount = final_scnr_amount
-        self.final_scnr_preserve_luminosity = final_scnr_preserve_luminosity
         
-        if self.drizzle_active_session:
-            if self.is_mosaic_run:
+        self.use_quality_weighting = use_weighting 
+        self.weight_by_snr = weight_by_snr
+        self.weight_by_stars = weight_by_stars
+        self.snr_exponent = snr_exp
+        self.stars_exponent = stars_exp
+        self.min_weight = max(0.01, min(1.0, min_w))
+        print(f"  BACKEND STOCKÉ: self.use_quality_weighting={self.use_quality_weighting}")
+        if self.use_quality_weighting:
+            print(f"    -> Pondération par SNR: {self.weight_by_snr}, Exp: {self.snr_exponent}") #... etc
+        
+        self.apply_final_scnr = apply_final_scnr 
+        self.final_scnr_target_channel = final_scnr_target_channel
+        self.final_scnr_amount = final_scnr_amount 
+        self.final_scnr_preserve_luminosity = final_scnr_preserve_luminosity
+        print(f"  BACKEND STOCKÉ: self.apply_final_scnr={self.apply_final_scnr}, Amount={self.final_scnr_amount}")
+        
+        if self.drizzle_active_session: # ... (logique inchangée)
+            if self.is_mosaic_run: # ...
                 current_mosaic_settings = mosaic_settings if isinstance(mosaic_settings, dict) else {}
-                self.drizzle_kernel = current_mosaic_settings.get('kernel', drizzle_kernel)
-                self.drizzle_pixfrac = current_mosaic_settings.get('pixfrac', drizzle_pixfrac)
-                try: self.drizzle_pixfrac = float(np.clip(float(self.drizzle_pixfrac), 0.01, 1.0))
-                except (ValueError, TypeError): self.drizzle_pixfrac = 1.0
-            else:
-                 self.drizzle_kernel = drizzle_kernel
-                 self.drizzle_pixfrac = drizzle_pixfrac
-            self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final"
-            self.drizzle_scale = float(drizzle_scale)
-            self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold)))
+                self.drizzle_kernel = current_mosaic_settings.get('kernel', drizzle_kernel) # ...
+            else: # ...
+                 self.drizzle_kernel = drizzle_kernel # ...
+            self.drizzle_mode = drizzle_mode if drizzle_mode in ["Final", "Incremental"] else "Final" # ...
+            self.drizzle_scale = float(drizzle_scale) # ...
+            self.drizzle_wht_threshold = max(0.01, min(1.0, float(drizzle_wht_threshold))) # ...
             print(f"   -> Params Drizzle Actifs -> Mode: {self.drizzle_mode}, Scale: {self.drizzle_scale:.1f}, WHT: {self.drizzle_wht_threshold:.2f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}")
-        else:
-             print("DEBUG (Backend start_processing SUM/W): Session Drizzle non active.")
+        else: print("DEBUG (Backend start_processing SUM/W): Session Drizzle non active.")
 
-        ### Stockage des paramètres Expert dans self ###
         print("DEBUG (Backend start_processing SUM/W): Stockage des paramètres Expert...")
-        # BN
         self.bn_grid_size_str = bn_grid_size_str
         self.bn_perc_low = bn_perc_low
         self.bn_perc_high = bn_perc_high
         self.bn_std_factor = bn_std_factor
         self.bn_min_gain = bn_min_gain
         self.bn_max_gain = bn_max_gain
-        # CB
         self.cb_border_size = cb_border_size
         self.cb_blur_radius = cb_blur_radius
-        self.cb_min_b_factor = cb_min_b_factor # Nom pour correspondre à SettingsManager
-        self.cb_max_b_factor = cb_max_b_factor # Nom pour correspondre à SettingsManager
-        # Rognage (convertir % en décimal pour usage interne)
-
+        self.cb_min_b_factor = cb_min_b_factor
+        self.cb_max_b_factor = cb_max_b_factor
         self.final_edge_crop_percent_decimal = float(final_edge_crop_percent) / 100.0
-        ### Stockage des paramètres Photutils BN dans self ###
+        print(f"  BACKEND STOCKÉ: self.bn_grid_size_str='{self.bn_grid_size_str}', self.bn_perc_high={self.bn_perc_high}, self.bn_std_factor={self.bn_std_factor}")
+        
         print("DEBUG (Backend start_processing SUM/W): Stockage des paramètres Photutils BN...")
         self.apply_photutils_bn = apply_photutils_bn
-        print(f"DEBUG (Backend start_processing SUM/W): self.apply_photutils_bn MIS À = {self.apply_photutils_bn}")
         self.photutils_bn_box_size = photutils_bn_box_size
         self.photutils_bn_filter_size = photutils_bn_filter_size
         self.photutils_bn_sigma_clip = photutils_bn_sigma_clip
         self.photutils_bn_exclude_percentile = photutils_bn_exclude_percentile
-        print(f"   -> self.apply_photutils_bn = {self.apply_photutils_bn}")
-        ### FIN Stockage des paramètres Photutils BN###
-        print(f"   -> BN Grid='{self.bn_grid_size_str}', CB Border={self.cb_border_size}, CropDecimal={self.final_edge_crop_percent_decimal:.3f}")
-        ### FIN ###
-
-        # --- 5. Logs et Vérification Batch Size ---
-        #    (Identique à la version précédente)
-        if self.is_mosaic_run: self.update_progress("🖼️ Mode Mosaïque ACTIVÉ pour cette session.")
-        elif self.drizzle_active_session: self.update_progress(f"💧 Mode Drizzle (Simple Champ) Activé ({self.drizzle_mode})...")
-        else: self.update_progress("⚙️ Mode Stack Classique (SUM/W) Activé...")
-
-        requested_batch_size = batch_size
-        if requested_batch_size <= 0:
-             # ... (estimation auto) ...
-             self.update_progress("🧠 Estimation taille lot auto (reçu <= 0)...", None)
-             sample_img_path = None
-             if input_dir and os.path.isdir(input_dir): fits_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.fit', '.fits'))]; sample_img_path = os.path.join(input_dir, fits_files[0]) if fits_files else None
-             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); self.batch_size = estimated_size; self.update_progress(f"✅ Taille lot auto estimée: {estimated_size}", None)
-             except Exception as est_err: self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); self.batch_size = 10
-        else: self.batch_size = requested_batch_size
-        if self.batch_size < 3: self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None); self.batch_size = 3
-        self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
-        if self.apply_final_scnr: self.update_progress(f"🎨 SCNR Final (Vert, {self.final_scnr_amount*100:.0f}%) sera appliqué.")
-        # Pas de log pour pondération qualité car désactivée pour ce test
-
-
-        # --- 6. Gérer dossiers initiaux ---
-        #    (Identique à la version précédente)
-        initial_folders_to_add_count = 0
-        with self.folders_lock:
-            self.additional_folders = []
-            if initial_additional_folders:
-                for folder in initial_additional_folders:
-                    abs_folder = os.path.abspath(folder)
-                    if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders:
-                        self.additional_folders.append(abs_folder); initial_folders_to_add_count += 1
-        if initial_folders_to_add_count > 0: self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente."); self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
-
-        # --- 7. Ajouter fichiers initiaux ---
-        #    (Identique à la version précédente)
-        initial_files_added = self._add_files_to_queue(self.current_folder)
-        if initial_files_added > 0: self._recalculate_total_batches(); self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders: self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.")
+        print(f"  BACKEND STOCKÉ: self.apply_photutils_bn={self.apply_photutils_bn}")
+        print(f"  BACKEND STOCKÉ: self.photutils_bn_filter_size={self.photutils_bn_filter_size}")
         
-        # --- 8. Configurer référence pour l'aligneur ---
-        #    (Identique à la version précédente)
-        #    Note: self.aligner.reference_image_path est utilisé par _get_reference_image SI fourni.
-        #    Mais l'image de référence pour l'alignement dans la boucle _worker est passée explicitement.
-        self.aligner.reference_image_path = reference_path_ui or None
+        self.apply_feathering = apply_feathering 
+        self.feather_blur_px = feather_blur_px   
+        print(f"  BACKEND STOCKÉ (valeur reçue): self.apply_feathering={self.apply_feathering}")
+        print(f"  BACKEND STOCKÉ (valeur reçue): self.feather_blur_px={self.feather_blur_px}")
+        
+        requested_batch_size = batch_size # ... (logique estimation batch_size identique) ...
+        if requested_batch_size <= 0: # ...
+             sample_img_path = None # ...
+             if input_dir and os.path.isdir(input_dir): fits_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.fit', '.fits'))]; sample_img_path = os.path.join(input_dir, fits_files[0]) if fits_files else None # ...
+             try: estimated_size = estimate_batch_size(sample_image_path=sample_img_path); self.batch_size = estimated_size; self.update_progress(f"✅ Taille lot auto estimée: {estimated_size}", None) # ...
+             except Exception as est_err: self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).", None); self.batch_size = 10 # ...
+        else: self.batch_size = requested_batch_size # ...
+        if self.batch_size < 3: self.update_progress(f"⚠️ Taille de lot ({self.batch_size}) trop petite, ajustée à 3.", None); self.batch_size = 3 # ...
+        self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}") # ...
+        if self.apply_final_scnr: self.update_progress(f"🎨 SCNR Final (Cible: {self.final_scnr_target_channel}, {self.final_scnr_amount*100:.0f}%) sera appliqué.") # ...
+        if self.apply_feathering: self.update_progress(f"🖌️ Feathering (Flou: {self.feather_blur_px}px) sera appliqué.")
+        if self.use_quality_weighting: self.update_progress(f"⚖️ Pondération Qualité Activée (SNR^{self.snr_exponent:.1f}, Stars^{self.stars_exponent:.1f}, MinW={self.min_weight:.2f}).") # ...
+        
+        initial_folders_to_add_count = 0 # ... (logique gestion folders identique)
+        with self.folders_lock: # ...
+            self.additional_folders = [] # ...
+            if initial_additional_folders: # ...
+                for folder_iter in initial_additional_folders: # ...
+                    abs_folder = os.path.abspath(folder_iter) # ...
+                    if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders: # ...
+                        self.additional_folders.append(abs_folder); initial_folders_to_add_count += 1 # ...
+        if initial_folders_to_add_count > 0: self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente."); self.update_progress(f"folder_count_update:{len(self.additional_folders)}") # ...
 
-        # --- 9. Démarrer worker ---
-        #    (Identique à la version précédente)
+        initial_files_added = self._add_files_to_queue(self.current_folder) # ...
+        if initial_files_added > 0: self._recalculate_total_batches(); self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}") # ...
+        elif not self.additional_folders: self.update_progress("⚠️ Aucun fichier initial trouvé ou dossier supplémentaire en attente.") # ...
+        
+        self.aligner.reference_image_path = reference_path_ui or None # ...
+
         print("DEBUG (Backend start_processing SUM/W): Démarrage du thread worker...")
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker"); self.processing_thread.daemon = True
         self.processing_thread.start(); self.processing_active = True
@@ -3555,7 +3673,6 @@ class SeestarQueuedStacker:
         print("DEBUG (Backend start_processing SUM/W): Fin.")
         return True
 
-# --- FIN de start_processing MODIFIÉ ---
 
 
 
