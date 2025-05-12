@@ -145,6 +145,7 @@ class HistogramWidget(ttk.Frame):
             traceback.print_exc(limit=2)
             return None
 
+
     def plot_histogram(self, hist_data):
         """Affiche les données d'histogramme calculées."""
         # Store current view limits to restore after replotting
@@ -162,7 +163,7 @@ class HistogramWidget(ttk.Frame):
 
         # Handle case where no data is provided
         if hist_data is None or not hist_data['hists'] or hist_data['bins'] is None:
-            self.ax.set_xlim(0, 1)
+            self.ax.set_xlim(0, 1) # Histogramme vide initial sur toute la plage
             self.ax.set_ylim(1, 10) # Default y range for log scale
             self.ax.set_yscale('log')
             self.ax.set_xlabel("Niveau (0-1)"); self.ax.set_ylabel("Nbre Pixels (log)")
@@ -209,27 +210,34 @@ class HistogramWidget(ttk.Frame):
 
             self.ax.set_xlabel("Niveau (0-1)"); self.ax.set_ylabel("Nbre Pixels (log)")
 
-            # Restore X Limits if they were valid, otherwise set default
+            # Restore X and Y Limits if they were valid, otherwise set default
             if restore_lim:
+                print(f"DEBUG HistogramWidget: Restauration des limites X={current_xlim}, Y={current_ylim}")
                 self.ax.set_xlim(current_xlim)
-                # Also restore Y limits if restoring X? Or always recalculate Y? Recalculating Y is safer.
-                # self.ax.set_ylim(current_ylim)
+                # Restaurer Y seulement si le nouveau top_y calculé n'est pas drastiquement différent
+                # Cela évite de restaurer un Y trop écrasé si les nouvelles données ont une dynamique différente
+                if abs(current_ylim[1] - top_y) / top_y < 2.0: # Si la différence est < 200% (arbitraire)
+                    self.ax.set_ylim(current_ylim)
+                # else: on garde le top_y recalculé
             else:
-                self.ax.set_xlim(0, 1)
+                # NOUVELLES LIMITES PAR DÉFAUT POUR X LORS DU PREMIER AFFICHAGE OU MISE À JOUR DES DONNÉES
+                print("DEBUG HistogramWidget: Application des limites X par défaut (0.0, 0.4)")
+                self.ax.set_xlim(0.0, 0.4)
+                # L'axe Y a déjà été défini avec set_ylim(bottom=0.8, top=top_y)
 
-            # self.figure.tight_layout(pad=0.1) # May interfere with fixed margins
             self.canvas.draw_idle()
 
         except Exception as e:
             print(f"Erreur affichage histogramme: {e}")
             traceback.print_exc(limit=2)
-            # Attempt to draw a clear error state
             try:
                 self._configure_plot_style()
                 self.ax.set_xlim(0, 1); self.ax.set_ylim(1, 10); self.ax.set_yscale('log')
                 self.ax.text(0.5, 0.5, "Erreur Histogramme", color="red", ha='center', va='center', transform=self.ax.transAxes)
                 self.canvas.draw_idle()
-            except Exception: pass # Ignore errors during error display
+            except Exception: pass
+
+
 
     def set_range(self, min_val, max_val):
         """Met à jour la position des lignes BP/WP depuis l'extérieur."""
@@ -378,38 +386,53 @@ class HistogramWidget(ttk.Frame):
             self.ax.set_xlim(new_min, new_max)
             self.canvas.draw_idle()
 
+
+
     def reset_zoom(self):
         """Réinitialise le zoom et le pan de l'histogramme."""
-        xlim = self.ax.get_xlim()
-        ylim = self.ax.get_ylim()
+        # print("DEBUG HistogramWidget: reset_zoom() appelé") # Décommenter pour le débogage
+        xlim_current = self.ax.get_xlim()
+        ylim_current = self.ax.get_ylim()
         needs_redraw = False
 
-        # Reset X axis to full range
-        if abs(xlim[0] - 0.0) > 1e-6 or abs(xlim[1] - 1.0) > 1e-6:
-            self.ax.set_xlim(0, 1)
+        # --- Réinitialiser l'axe X à la plage complète (0.0 à 1.0) ---
+        # On vérifie si les limites actuelles sont différentes de [0,1] pour éviter un redessin inutile
+        # si c'est déjà la vue par défaut.
+        if abs(xlim_current[0] - 0.0) > 1e-6 or abs(xlim_current[1] - 1.0) > 1e-6:
+            self.ax.set_xlim(0.0, 1.0)
             needs_redraw = True
+            # print("  DEBUG HistogramWidget: Limites X réinitialisées à (0.0, 1.0)")
 
-        # Reset Y axis limits based on current data
+        # --- Réinitialiser l'axe Y basé sur les données actuelles (logique existante) ---
+        # Cela assure que si les données ont changé, l'axe Y s'ajuste correctement.
         if self._current_hist_data and self._current_hist_data['hists']:
-             all_valid_counts = []
-             for hist_channel in self._current_hist_data['hists']:
-                 all_valid_counts.extend(hist_channel[hist_channel > 0])
-             if all_valid_counts:
-                 p995_max = np.percentile(all_valid_counts, 99.5)
-                 target_top_y = max(10, p995_max * 1.5)
-             else: target_top_y = 100
-             target_ylim = (0.8, target_top_y) # Match Y limits from plot_histogram
+            all_valid_counts = []
+            for hist_channel in self._current_hist_data['hists']:
+                # S'assurer que hist_channel est un array et contient des éléments
+                if isinstance(hist_channel, np.ndarray) and hist_channel.size > 0:
+                    all_valid_counts.extend(hist_channel[hist_channel > 0])
 
-             # Check if Y limits significantly differ from target
-             if abs(ylim[0] - target_ylim[0]) > 1e-1 or abs(ylim[1] - target_ylim[1]) > 1e-1:
-                 self.ax.set_ylim(target_ylim)
-                 needs_redraw = True
-        elif abs(ylim[0]-0.8)>1e-6 or abs(ylim[1]-100)>1e-6: # Reset to default if no data
-             self.ax.set_ylim(0.8, 100)
-             needs_redraw = True
+            target_top_y = 100 # Fallback si pas de comptes valides
+            if all_valid_counts: # S'il y a des comptes valides
+                p995_max = np.percentile(all_valid_counts, 99.5)
+                target_top_y = max(10, p995_max * 1.5) # Assurer une hauteur minimale
+            
+            target_ylim = (0.8, target_top_y) # Limites Y cibles
 
+            # Vérifier si les limites Y actuelles diffèrent significativement des cibles
+            if abs(ylim_current[0] - target_ylim[0]) > 1e-1 or abs(ylim_current[1] - target_ylim[1]) > 1e-1:
+                self.ax.set_ylim(target_ylim)
+                needs_redraw = True
+                # print(f"  DEBUG HistogramWidget: Limites Y réinitialisées à {target_ylim}")
+        elif abs(ylim_current[0] - 0.8) > 1e-6 or abs(ylim_current[1] - 100) > 1e-6:
+            # Si pas de données actuelles, réinitialiser aux limites Y par défaut pour un graphe vide
+            self.ax.set_ylim(0.8, 100)
+            needs_redraw = True
+            # print("  DEBUG HistogramWidget: Limites Y réinitialisées aux valeurs par défaut (pas de données)")
 
+        # --- Redessiner si nécessaire ---
         if needs_redraw:
-             print("Histogram zoom/pan reset.")
-             self.canvas.draw_idle()
-# --- END OF FILE seestar/gui/histogram_widget.py ---
+            # print("  DEBUG HistogramWidget: Redessin du canvas demandé.")
+            self.canvas.draw_idle()
+        # else:
+            # print("  DEBUG HistogramWidget: Pas de redessin nécessaire (limites déjà par défaut).")

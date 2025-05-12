@@ -2,6 +2,7 @@
 
 # === Imports Standard ===
 import os
+import sys  # Nécessaire pour sys.path
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
@@ -13,55 +14,110 @@ import numpy as np
 import datetime
 import platform
 import subprocess
-import sys
+# import sys # Déjà importé plus haut
 import traceback
 import time
 import gc
 import argparse # Pour gérer les arguments de ligne de commande
 from PIL import Image, ImageTk
+# L'import de ToolTip est déplacé APRES l'ajustement de sys.path
 
-
-# === Imports Locaux (Logique Métier et Traductions) ===
+# --- AJUSTEMENT DE SYS.PATH POUR PERMETTRE LES IMPORTS DEPUIS LA RACINE DU PROJET ---
+# Ceci est crucial lorsque ce script (analyse_gui.py) est exécuté directement
+# ou via subprocess, car Python a besoin de savoir où se trouve le package 'seestar'.
+print("DEBUG (analyse_gui.py): Début de l'ajustement de sys.path...")
 try:
-    # Importe le module contenant la logique d'analyse principale
+    # Chemin absolu du script actuel (analyse_gui.py)
+    current_script_path = os.path.abspath(__file__)
+    print(f"  DEBUG (analyse_gui.py): Chemin du script actuel: {current_script_path}")
+
+    # Remonter pour trouver le dossier 'beforehand'
+    beforehand_dir = os.path.dirname(current_script_path)
+    print(f"  DEBUG (analyse_gui.py): Dossier 'beforehand': {beforehand_dir}")
+
+    # Remonter encore pour trouver le dossier du package 'seestar'
+    seestar_package_dir = os.path.dirname(beforehand_dir)
+    print(f"  DEBUG (analyse_gui.py): Dossier du package 'seestar': {seestar_package_dir}")
+
+    # Remonter une dernière fois pour trouver la racine du projet
+    # (le dossier qui CONTIENT le dossier 'seestar')
+    project_root_dir = os.path.dirname(seestar_package_dir)
+    print(f"  DEBUG (analyse_gui.py): Racine du projet calculée: {project_root_dir}")
+
+    # Ajouter la racine du projet au début de sys.path si elle n'y est pas déjà.
+    # sys.path.insert(0, ...) la met en priorité pour la recherche de modules.
+    if project_root_dir not in sys.path:
+        sys.path.insert(0, project_root_dir)
+        print(f"  DEBUG (analyse_gui.py): '{project_root_dir}' ajouté à sys.path.")
+    else:
+        print(f"  DEBUG (analyse_gui.py): '{project_root_dir}' était déjà dans sys.path.")
+    
+    # print(f"  DEBUG (analyse_gui.py): sys.path actuel: {sys.path}") # Optionnel, peut être très long
+    print("DEBUG (analyse_gui.py): Ajustement de sys.path terminé.")
+
+except Exception as e_path_setup:
+    # Gérer les erreurs potentielles lors de la manipulation des chemins
+    print(f"ERREUR CRITIQUE (analyse_gui.py): Impossible d'ajuster sys.path correctement: {e_path_setup}")
+    # Afficher une boîte de dialogue d'erreur si Tkinter est déjà initialisable
+    try:
+        root_err_path = tk.Tk(); root_err_path.withdraw()
+        messagebox.showerror("Erreur Configuration Chemin", f"Erreur critique lors de la configuration des chemins Python:\n{e_path_setup}\nL'application ne peut pas continuer.")
+        root_err_path.destroy()
+    except Exception: pass
+    sys.exit(1) # Quitter car les imports suivants vont probablement échouer
+# --- FIN DE L'AJUSTEMENT SYS.PATH ---
+
+
+# === Imports Locaux (MAINTENANT APRÈS L'AJUSTEMENT DE SYS.PATH) ===
+
+# Importer ToolTip en utilisant le chemin absolu du package depuis la racine du projet
+try:
+    from seestar.gui.ui_utils import ToolTip 
+    print("DEBUG (analyse_gui.py): Import de 'seestar.gui.ui_utils.ToolTip' réussi.")
+except ImportError as e_tooltip:
+    print(f"ERREUR CRITIQUE (analyse_gui.py): Impossible d'importer ToolTip depuis seestar.gui.ui_utils. Erreur: {e_tooltip}")
+    print(f"  Vérifiez que le chemin ajouté à sys.path ('{project_root_dir if 'project_root_dir' in locals() else 'NON_CALCULE'}') est correct et que le fichier seestar/gui/ui_utils.py existe et est accessible.")
+    traceback.print_exc() # Afficher la trace complète de l'ImportError
+    try:
+        root_err_tooltip = tk.Tk(); root_err_tooltip.withdraw()
+        messagebox.showerror("Erreur Module Manquant", f"Impossible d'importer un composant UI essentiel (ToolTip).\nErreur: {e_tooltip}\nL'application va se fermer.")
+        root_err_tooltip.destroy()
+    except Exception: pass
+    sys.exit(1)
+
+# Importe le module contenant la logique d'analyse principale
+# Cet import devrait fonctionner car analyse_logic.py est dans le même dossier 'beforehand'
+try:
     import analyse_logic
-    # Récupère les informations sur la disponibilité de la détection de satellites
     SATDET_AVAILABLE = analyse_logic.SATDET_AVAILABLE
     SATDET_USES_SEARCHPATTERN = analyse_logic.SATDET_USES_SEARCHPATTERN
-except ImportError as e:
-    # Erreur critique si le fichier logique est introuvable
-    print(f"ERREUR CRITIQUE: Fichier logique manquant (analyse_logic.py introuvable). Erreur: {e}")
+    print("DEBUG (analyse_gui.py): Import de 'analyse_logic' réussi.")
+except ImportError as e_logic:
+    print(f"ERREUR CRITIQUE (analyse_gui.py): Fichier logique manquant (analyse_logic.py introuvable). Erreur: {e_logic}")
     try:
-        # Tenter d'afficher une boîte de dialogue d'erreur
-        root_err = tk.Tk(); root_err.withdraw()
-        messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger analyse_logic.py:\n{e}")
-        root_err.destroy()
-    except Exception: pass # Ignorer si même la boîte d'erreur échoue
-    sys.exit(1) # Quitter l'application
+        root_err_logic = tk.Tk(); root_err_logic.withdraw()
+        messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger analyse_logic.py:\n{e_logic}")
+        root_err_logic.destroy()
+    except Exception: pass
+    sys.exit(1)
 
+# Importe le module contenant les textes traduits
+# Cet import devrait fonctionner car zone.py est dans le même dossier 'beforehand'
 try:
-    # Importe le module contenant les textes traduits
     from zone import translations
-except ImportError as e:
-    # Erreur critique si le fichier de langue est introuvable
-    print(f"ERREUR CRITIQUE: Fichier de langue zone.py introuvable. Erreur: {e}")
-    # Utiliser des textes par défaut en anglais si zone.py est manquant
-    translations = {
-        'en': {'window_title': 'Analyzer - Error', 'msg_missing_zone': 'Language file zone.py is missing.',
-               'msg_error': 'Error', 'msg_warning': 'Warning', 'msg_info': 'Information', 'status_ready': 'Ready',
-               'analyse_button': 'Analyze Images', 'visualize_button': 'Visualize Results',
-               'open_log_button': 'Open Log File', 'quit_button': 'Quit', 'return_button_text': 'Return',
-               'browse_button': 'Browse', 'include_subfolders_label': 'Include Subfolders',
-               'manage_markers_button': 'Manage Markers'},
-        'fr': {'include_subfolders_label': 'Inclure Sous-dossiers', 'manage_markers_button': 'Gérer Marqueurs'}
+    print("DEBUG (analyse_gui.py): Import de 'zone.translations' réussi.")
+except ImportError as e_zone:
+    print(f"ERREUR CRITIQUE (analyse_gui.py): Fichier de langue zone.py introuvable. Erreur: {e_zone}")
+    translations = { # Fallback minimal pour les messages d'erreur
+        'en': {'window_title': 'Analyzer - Error', 'msg_missing_zone': 'Language file zone.py is missing.'},
     }
     try:
-        # Tenter d'afficher une boîte de dialogue d'erreur
-        root_err = tk.Tk(); root_err.withdraw()
-        messagebox.showerror("Erreur Fichier Langue", f"Impossible de charger zone.py:\n{e}")
-        root_err.destroy()
+        root_err_zone = tk.Tk(); root_err_zone.withdraw()
+        messagebox.showerror("Erreur Fichier Langue", f"Impossible de charger zone.py:\n{e_zone}")
+        root_err_zone.destroy()
     except Exception: pass
-    print("AVERTISSEMENT: zone.py manquant, utilisation de textes anglais par défaut.")
+    print("AVERTISSEMENT (analyse_gui.py): zone.py manquant, utilisation de textes anglais par défaut très limités.")
+
 
 
 # === Classe Utilitaire pour les Infobulles (Tooltips) ===

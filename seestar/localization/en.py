@@ -59,7 +59,71 @@ EN_TRANSLATIONS = {
     'final_scnr_amount_label': "SCNR Amount:",
     'final_scnr_preserve_lum_label': "Preserve Luminosity (SCNR)",
     
+    ### Expert Tab Translations ###
+    'tab_expert_title': "Expert",
+    'expert_warning_text': "Abandon all hope, ye who enter here! (Advanced Settings)",
 
+    # Auto Background Neutralization (BN) Section
+    'bn_frame_title': "Auto Background Neutralization (BN)",
+    'bn_grid_size_label': "BN Grid Size:",
+    'bn_perc_low_label': "BG Perc. Low:",
+    'bn_perc_high_label': "BG Perc. High:",
+    'bn_std_factor_label': "BG Std Factor:",
+    'bn_min_gain_label': "BN Min Gain:",
+    'bn_max_gain_label': "BN Max Gain:",
+
+    # ChromaticBalancer (CB) / Edge Enhance Section
+    'cb_frame_title': "Edge/Chroma Correction (CB)",
+    'cb_border_size_label': "CB Border Size (px):",
+    'cb_blur_radius_label': "CB Blur Radius (px):",
+    'cb_min_b_factor_label': "CB Min Blue Factor:", # Assuming exposing Blue factor
+    'cb_max_b_factor_label': "CB Max Blue Factor:", # and potentially R too
+    # 'cb_intensity_label': "Edge Correction Intensity:", # If you add this slider
+
+    # Final Cropping Section
+    'crop_frame_title': "Final Cropping",
+    'final_edge_crop_label': "Edge Crop (%):",
+
+    # Reset Expert Button
+    'reset_expert_button': "Reset Expert Settings",
+    
+    ### Translations for Photutils Background Subtraction (Expert Tab) ###
+    'photutils_bn_frame_title': "2D Background Subtraction (Photutils)",
+    'apply_photutils_bn_label': "Enable Photutils 2D Background Subtraction",
+    'photutils_bn_box_size_label': "Box Size (px):",
+    'photutils_bn_filter_size_label': "Filter Size (px, odd):",
+    'photutils_bn_sigma_clip_label': "Sigma Clip:",
+    'photutils_bn_exclude_percentile_label': "Exclude Brightest (%):",
+    ### END expert tab ###
+
+    ### NEW: Tooltips for Expert Tab ###
+    'tooltip_bn_grid_size': "BN: RxC grid for background analysis. More zones (32x32) = finer local analysis, noise sensitive. Fewer (8x8) = robust stats, worse for complex gradients. Default: 16x16.",
+    'tooltip_bn_perc_low': "BN: Lower percentile for background zone luminance. Zones with median luminance BELOW this overall percentile are less considered pure background. Range: 0-40. Default: 5.",
+    'tooltip_bn_perc_high': "BN: Upper percentile for background zone luminance. Zones with median luminance ABOVE this are excluded from background. Range: (PercLow+1)-95. Default: 30.",
+    'tooltip_bn_std_factor': "BN: Factor for standard deviation. Background zones if their std_dev < (median_std_of_all_zones * factor). Lower = stricter. Higher = looser (riskier). Range: 0.5-5. Default: 1.0.",
+    'tooltip_bn_min_gain': "BN: Minimum gain applied to R/B channels to match G. Limits correction. Range: 0.1-2. Default: 0.2.",
+    'tooltip_bn_max_gain': "BN: Maximum gain applied to R/B channels. Limits correction. Range: 1-10. Default: 7.0.",
+    'tooltip_cb_border_size': "Edge Correct: Width (px) of border region analyzed for local color shifts. Smaller = targets finer fringes. Larger = broader correction. Range: 5-150. Default: 25.",
+    'tooltip_cb_blur_radius': "Edge Correct: Radius (px) to blur the edge mask. Softens correction transition. Smaller = sharper transition. Range: 0-50. Default: 8.",
+    'tooltip_cb_min_b_factor': "Edge Correct: Minimum gain factor applied to Blue channel in border regions to match local G. Limits reduction. Range: 0.1-1.0. Default: 0.4.",
+    'tooltip_cb_max_b_factor': "Edge Correct: Maximum gain factor applied to Blue channel. Limits amplification. Range: 1.0-3.0. Default: 1.5.",
+    'tooltip_final_edge_crop_percent': "Final Crop: Percentage of image to crop from EACH side (L,R,T,B) before final save. Ex: 2.0 for 2%. Range: 0-25. Default: 2.0.",
+    'tooltip_apply_final_scnr': "SCNR: Applies Subtle Color Noise Reduction to the final stack, targeting Green by default to reduce green/magenta casts.", # Existing
+    'tooltip_final_scnr_amount': "SCNR Amount: Strength of Green reduction (0.0=none, 1.0=full replacement by R/B reference). Typical: 0.6-0.9. Default: 0.8.", # Existing
+    'tooltip_final_scnr_preserve_lum': "SCNR Preserve Luminosity: If checked, attempts to restore original pixel luminance after color correction, preventing excessive darkening.", # Existing
+    # Tooltips for Photutils BN
+    'tooltip_apply_photutils_bn': "PB2D: Enables subtraction of a 2D background model computed by Photutils. Acts before global Background Neutralization. Useful for complex gradients.",
+    'tooltip_photutils_bn_box_size': "PB2D: Size of the boxes (px) for local background estimation. Should be large enough to avoid stars, but small enough to follow the gradient. Default: 128.",
+    'tooltip_photutils_bn_filter_size': "PB2D: Size of the median filter (px, odd) applied to the map of local background estimates to smooth it. Default: 5.",
+    'tooltip_photutils_bn_sigma_clip': "PB2D: Sigma value for iterative pixel rejection (stars) within each box during background estimation. Default: 3.0.",
+    'tooltip_photutils_bn_exclude_percentile': "PB2D: Percentage (0-100) of the brightest pixels to ignore within each box before background estimation. Helps reject stars without a full mask. Default: 98.0.",
+    # Tooltips for Low WHT Mask
+    'tooltip_apply_low_wht_mask': "Low WHT Mask: Attenuates image areas where the weight map (WHT) is very low (typically edges with little signal). Helps reduce banding and color casts in these zones. Applied after Feathering and before Photutils background subtraction.",
+    'tooltip_low_wht_percentile': "Low WHT Percentile: Defines the threshold for considering a weight as 'low'. E.g., 5% means the bottom 5% of non-zero pixel weights will be targeted. Range: 1-20. Default: 5.",
+    'tooltip_low_wht_soften_px': "Soften Low WHT Mask (px): Radius of Gaussian blur applied to the binary mask of low-weight areas. Allows for a smoother transition of the correction. Range: 32-512. Default: 128.",
+
+    # ... end expert tab ...
+    
     # --- Preview Tab ---
     'white_balance': "White Balance (Preview)",
     'wb_r': "R Gain:",
@@ -208,6 +272,29 @@ EN_TRANSLATIONS = {
     'mosaic_api_key_help': "Get your key from nova.astrometry.net (free account)",
     'mosaic_api_key_required': "Astrometry.net API Key is required when Mosaic Mode is enabled.",
    
+    # final log popup 
+    'Post-Processing Applied': "Post-Processing Applied",
+    'Photutils 2D Background': "Photutils 2D Background",
+    'Global Background Neutralization (BN)': "Global Background Neutralization (BN)",
+    'Edge/Chroma Correction (CB)': "Edge/Chroma Correction (CB)",
+    'Final SCNR': "Final SCNR",
+    'Final Edge Crop': "Final Edge Crop",
+    'Yes': "Yes",
+    'No': "No",
+    'Not Found!': "Not Found!", # Pour le cas où final_stack_path existe mais pas le fichier
+    # --- Section Feathering ---
+    'feathering_frame_title': "Feathering (Weight Map Smoothing)",
+    'apply_feathering_label': "Enable Feathering by Weight Map",
+    'feather_blur_px_label': "Feather Blur Radius (px):",
+    # ---  ---
+    # --- Expert Tab - Feathering / Low WHT Mask Section ---
+    'feathering_frame_title': "Feathering / Low WHT Mask", # Title for the combined frame
+    'apply_feathering_label': "Enable Feathering (Weighted Smoothing)", # Existing text, maybe adjust
+    'feather_blur_px_label': "Feather Blur (px):",        # Existing text
+
+    'apply_low_wht_mask_label': "Apply Low WHT Mask (Anti-Banding)",
+    'low_wht_percentile_label': "Low WHT Percentile:",
+    'low_wht_soften_px_label': "Soften Mask (px):",
 
 
 }
