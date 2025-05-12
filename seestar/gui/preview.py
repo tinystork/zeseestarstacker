@@ -206,7 +206,11 @@ class PreviewManager:
 
         try:
             processing_data = self.image_data_raw.copy() # Utiliser la dernière version de raw_image_data
-            
+            # <---  LOGS D'INSPECTION ICI --->
+            print(f"  [PM update_preview] Avant WB - self.image_data_raw - Shape: {self.image_data_raw.shape if self.image_data_raw is not None else 'None'}, Type: {self.image_data_raw.dtype if self.image_data_raw is not None else 'None'}")
+            if self.image_data_raw is not None:
+                print(f"    Range raw: [{np.nanmin(self.image_data_raw):.6g} - {np.nanmax(self.image_data_raw):.6g}]")
+            # <--- FIN LOGS D'INSPECTION --->
             # --- Pipeline Steps (1-5) ---
             # 1. White Balance
             if processing_data.ndim == 3 and processing_data.shape[2] == 3:

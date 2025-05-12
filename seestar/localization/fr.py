@@ -114,9 +114,17 @@ FR_TRANSLATIONS = {
     'photutils_bn_filter_size_label': "Taille Filtre (px, impair) :",
     'photutils_bn_sigma_clip_label': "Sigma Clip :",
     'photutils_bn_exclude_percentile_label': "Exclure Plus Brillants (%) :",
-    ### FIN onglet expert ###
+    
+    # ---  Section Feathering / Low WHT Mask ---
+    'feathering_frame_title': "Feathering / Masque Bas WHT", # Titre du cadre regroupant les deux
+    'apply_feathering_label': "Activer Feathering (Lissage Pondéré)", # Texte existant, peut-être à ajuster
+    'feather_blur_px_label': "Flou Feathering (px) :",      # Texte existant
 
-  
+    'apply_low_wht_mask_label': "Appliquer Masque Bas WHT (Anti-Bandes)",
+    'low_wht_percentile_label': "Percentile Bas WHT :",
+    'low_wht_soften_px_label': "Adoucir Masque (px) :",
+    ### FIN onglet expert ###
+    
     ### Tooltips pour Onglet Expert ###
     'tooltip_bn_grid_size': "BN: Grille RxC pour analyse du fond. Plus de zones (32x32) = analyse locale fine, sensible au bruit. Moins (8x8) = stats robustes, moins bon pour gradients complexes. Défaut: 16x16.",
     'tooltip_bn_perc_low': "BN: Percentile bas pour luminance des zones de fond. Les zones SOUS ce percentile global sont moins considérées comme fond. Plage: 0-40. Défaut: 5.",
@@ -139,6 +147,14 @@ FR_TRANSLATIONS = {
     'tooltip_photutils_bn_sigma_clip': "PB2D: Valeur Sigma pour le rejet itératif des pixels (étoiles) dans chaque boîte lors de l'estimation du fond. Défaut: 3.0.",
     'tooltip_photutils_bn_exclude_percentile': "PB2D: Pourcentage (0-100) des pixels les plus brillants à ignorer dans chaque boîte avant l'estimation du fond. Aide à rejeter les étoiles sans masque. Défaut: 98.0.",
     ### FIN Tooltips Photo utils ###
+    # Tooltips pour Low WHT Mask
+    'tooltip_apply_low_wht_mask': "Masque Bas WHT: Atténue les zones de l'image où la carte de poids (WHT) est très faible (typiquement les bords avec peu de signal). Aide à réduire les bandes et les dérives de couleur dans ces zones. Agit après le Feathering et avant la soustraction de fond Photutils.",
+    'tooltip_low_wht_percentile': "Percentile Bas WHT: Définit le seuil pour considérer un poids comme 'faible'. Par exemple, 5% signifie que les 5% de pixels ayant les plus faibles poids (non-nuls) seront ciblés. Plage: 1-20. Défaut: 5.",
+    'tooltip_low_wht_soften_px': "Adoucir Masque Bas WHT (px): Rayon de flou gaussien appliqué au masque binaire des zones de faible poids. Permet une transition plus douce de la correction. Plage: 32-512. Défaut: 128.",
+    # --- FIN NOUVEAU ---
+
+    
+    
     ### FIN tooltips expert ###
 
 

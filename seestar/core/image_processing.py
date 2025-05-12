@@ -9,7 +9,7 @@ import cv2
 import warnings
 from astropy.io.fits.verify import VerifyWarning
 from PIL import Image, ImageEnhance, ImageFilter # Added PIL imports for enhanced stretch
-
+import sys
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
@@ -42,9 +42,12 @@ def load_and_validate_fits(path):
                 return None
 
             data = hdu.data
-            # Handle potential byte order issues for non-native endianness
             if data is not None and not data.dtype.isnative:
-                 data = data.byteswap().newbyteorder()
+                # Correction pour NumPy 2.0+
+                # Déterminer l'ordre natif du système
+                native_byte_order = '<' if sys.byteorder == 'little' else '>'
+                if data.dtype.byteorder != native_byte_order:
+                    data = data.view(data.dtype.newbyteorder(native_byte_order))
 
             # Convert to float32 for processing
             data = data.astype(np.float32)
@@ -84,24 +87,43 @@ def load_and_validate_fits(path):
                  print(f"Error: Image must be 2D (HxW) or 3D (HxWx3). Final shape after processing: {data.shape}")
                  return None
 
-            # Normalize data to 0.0 - 1.0 range, handling NaNs/Infs
-            min_val = np.nanmin(data)
+            min_val = np.nanmin(data) 
             max_val = np.nanmax(data)
 
-            if max_val > min_val:
-                 data = (data - min_val) / (max_val - min_val)
-                 data = np.clip(data, 0.0, 1.0) # Ensure data is within [0, 1]
-                 data = np.nan_to_num(data, nan=0.0) # Replace any remaining NaNs with 0
-            elif max_val == min_val: # Handle constant image
-                 # Return a constant image scaled 0-1 if possible, else 0
-                 constant_value = min_val / 65535.0 if min_val >=0 else 0.0 # Simple scaling guess
-                 data = np.full_like(data, constant_value, dtype=np.float32)
-                 data = np.clip(data, 0.0, 1.0)
-            else: # Handle all NaN/Inf image
-                 print(f"Warning: Image data in {path} seems to be all NaN or Inf.")
-                 data = np.zeros_like(data, dtype=np.float32) # Return black image
+            # S'assurer que min_val et max_val sont finis avant de continuer
+            if not (np.isfinite(min_val) and np.isfinite(max_val)):
+                print(f"Warning (load_and_validate_fits): Données FITS contiennent seulement NaN/Inf après conversion float. Retourne image noire.")
+                return np.zeros_like(data.astype(np.float32)) # Retourner une image de zéros du bon type
 
-            return data.astype(np.float32) # Ensure float32 output
+            if max_val > min_val:
+                 # Pour éviter les RuntimeWarning si (max_val - min_val) est minuscule
+                 denominator = max_val - min_val
+                 if denominator < 1e-9: # Si la plage est quasi nulle
+                     # Si toutes les valeurs sont proches de 0, retourner 0.
+                     # Si elles sont proches d'une autre valeur, normaliser à cette valeur (ex: 0.5 si tout est ~32768 sur 65535)
+                     # Pour simplifier, si la plage est minuscule, on peut considérer l'image comme constante.
+                     # On va la traiter dans le bloc 'elif max_val == min_val:' en s'assurant que min_val est utilisé.
+                     # Cette approche évite la division par un nombre minuscule.
+                     data = np.full_like(data, np.clip(min_val / 65535.0 if min_val > 0 else 0.0, 0.0, 1.0), dtype=np.float32)
+                 else:
+                     data = (data - min_val) / denominator
+                 data = np.clip(data, 0.0, 1.0) 
+                 data = np.nan_to_num(data, nan=0.0, posinf=1.0, neginf=0.0) # Clip Inf à 1 ou 0 aussi
+            elif max_val == min_val: 
+                 # L'image est constante. Normaliser cette constante à la plage 0-1 si possible.
+                 # min_val (qui est égal à max_val) peut être n'importe quelle valeur float lue du FITS (ex: 0.0 à 65535.0)
+                 if min_val <= 0: constant_norm = 0.0
+                 elif min_val >= 65535.0: constant_norm = 1.0
+                 else: constant_norm = min_val / 65535.0 # Normalise par rapport à la plage uint16 typique
+                 
+                 data = np.full_like(data, constant_norm, dtype=np.float32)
+                 # Clip est redondant ici si constant_norm est déjà 0-1, mais ne nuit pas.
+                 # data = np.clip(data, 0.0, 1.0) 
+            else: # Cas où min_val > max_val (ne devrait pas arriver avec nanmin/nanmax, mais sécurité)
+                 print(f"Warning (load_and_validate_fits): min_val > max_val après lecture FITS. Retourne image noire.")
+                 data = np.zeros_like(data.astype(np.float32))
+
+            return data.astype(np.float32) # Assurer le type final
 
     except FileNotFoundError: # Specific catch
          print(f"Error: File not found at: {path}")
@@ -265,7 +287,7 @@ def save_preview_image(image, output_path, apply_stretch=False, enhanced_stretch
     if preview.ndim == 3 and preview.shape[-1] == 3:
         try:
             # Import within function to potentially resolve circular dependency issues
-            from seestar.tools.stretch import ColorCorrection
+            from ..tools.stretch import ColorCorrection
             preview = ColorCorrection.white_balance(preview, *color_balance)
         except ImportError:
              print("Warning: Could not import ColorCorrection for preview balance.")
@@ -278,11 +300,11 @@ def save_preview_image(image, output_path, apply_stretch=False, enhanced_stretch
         try:
             # Determine which stretch function to use
             if enhanced_stretch:
-                from seestar.tools.stretch import apply_enhanced_stretch
+                from ..tools.stretch import apply_enhanced_stretch
                 preview = apply_enhanced_stretch(preview) # Returns 0-1 float
             else:
                 # Use a simple linear stretch based on percentiles for basic preview
-                from seestar.tools.stretch import apply_auto_stretch, StretchPresets
+                from ..tools.stretch import apply_auto_stretch, StretchPresets
                 bp, wp = apply_auto_stretch(preview)
                 preview = StretchPresets.linear(preview, bp, wp)
 

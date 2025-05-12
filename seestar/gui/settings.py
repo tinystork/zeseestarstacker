@@ -144,7 +144,12 @@ class SettingsManager:
             self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=self.feather_blur_px)).get()
             print(f"DEBUG (Settings update_from_ui): Feathering lu -> Apply: {self.apply_feathering}, BlurPx: {self.feather_blur_px}")
             # --- FIN ---
-
+            # --- NOUVEAU : Lecture Low WHT Mask depuis l'UI ---
+            self.apply_low_wht_mask = getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar(value=self.apply_low_wht_mask)).get()
+            self.low_wht_percentile = getattr(gui_instance, 'low_wht_pct_var', tk.IntVar(value=self.low_wht_percentile)).get() # Assurez-vous que low_wht_pct_var existe dans gui_instance
+            self.low_wht_soften_px = getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar(value=self.low_wht_soften_px)).get() # Assurez-vous que low_wht_soften_px_var existe dans gui_instance (sera créé à l'étape UI)
+            print(f"DEBUG (Settings update_from_ui): LowWHT Mask lu -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
+            # --- FIN NOUVEAU ---
             # --- Preview Settings ---
             # ... (inchangé) ...
             self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=self.preview_stretch_method)).get()
@@ -292,6 +297,15 @@ class SettingsManager:
             if hasattr(gui_instance, 'feather_blur_px_var'):
                 getattr(gui_instance, 'feather_blur_px_var', tk.IntVar()).set(self.feather_blur_px)
                 print(f"DEBUG (Settings apply_to_ui): Feather Blur Px appliqué à UI: {self.feather_blur_px}")
+                # --- NOUVEAU : Application Low WHT Mask à l'UI ---
+            if hasattr(gui_instance, 'apply_low_wht_mask_var'):
+                getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar()).set(self.apply_low_wht_mask)
+            if hasattr(gui_instance, 'low_wht_pct_var'):
+                getattr(gui_instance, 'low_wht_pct_var', tk.IntVar()).set(self.low_wht_percentile)
+            if hasattr(gui_instance, 'low_wht_soften_px_var'): # Sera ajouté à l'étape UI
+                getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar()).set(self.low_wht_soften_px)
+                print(f"DEBUG (Settings apply_to_ui): LowWHT Mask appliqué à UI -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
+            # --- FIN NOUVEAU ---
             else:
                 print("DEBUG (Settings apply_to_ui): gui_instance n'a pas feather_blur_px_var")
             
@@ -317,12 +331,15 @@ class SettingsManager:
                 try: gui_instance.root.geometry(self.window_geometry)
                 except tk.TclError: print(f"Warning: Could not apply window geometry '{self.window_geometry}'.")
 
-            # --- Mettre à jour l'état des widgets dépendants ---
-            # (inchangé)
+            # Mettre à jour l'état des widgets dépendants
             if hasattr(gui_instance, '_update_weighting_options_state'): gui_instance._update_weighting_options_state()
             if hasattr(gui_instance, '_update_drizzle_options_state'): gui_instance._update_drizzle_options_state()
-            # Note: L'appel à _update_spinbox_from_float n'est plus nécessaire ici car on le gère directement
-
+            if hasattr(gui_instance, '_update_final_scnr_options_state'): gui_instance._update_final_scnr_options_state()
+            if hasattr(gui_instance, '_update_photutils_bn_options_state'): gui_instance._update_photutils_bn_options_state()
+            if hasattr(gui_instance, '_update_feathering_options_state'): gui_instance._update_feathering_options_state()
+            # NOUVEAU: Mettre à jour l'état des options Low WHT Mask (si une telle méthode est créée)
+            if hasattr(gui_instance, '_update_low_wht_mask_options_state'): # Sera créé à l'étape UI
+                gui_instance._update_low_wht_mask_options_state()
             print("DEBUG (Settings apply_to_ui): Fin application paramètres UI.") # <-- AJOUTÉ DEBUG
 
         # ... (gestion erreurs inchangée) ...
@@ -330,90 +347,96 @@ class SettingsManager:
         except tk.TclError as te: print(f"Error applying settings to UI (TclError - widget likely destroyed?): {te}")
         except Exception as e: print(f"Unexpected error applying settings to UI: {e}"); traceback.print_exc(limit=2)
 
+#################################################################################################################################
+
+
+
+
 
 # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
-    def get_default_values(self): # MÉTHODE COMPLÈTE
+    def get_default_values(self):
         """ 
         Retourne un dictionnaire des valeurs par défaut de tous les paramètres.
-        Ces valeurs sont utilisées lors de la première initialisation, de la réinitialisation,
-        ou comme fallback si le fichier de settings est corrompu ou manquant.
-        MODIFIÉ POUR CETTE SESSION DE TEST afin d'inclure les paramètres de feathering
-        et les valeurs spécifiques pour les tests de post-traitement.
+        MAJ: Ajout des paramètres pour Low WHT Mask.
         """
-        print("DEBUG (SettingsManager get_default_values): Récupération des valeurs par défaut (incluant valeurs de TEST).")
+        print("DEBUG (SettingsManager get_default_values): Récupération des valeurs par défaut (incluant Low WHT Mask).")
         defaults_dict = {}
         
         # --- Paramètres de Traitement de Base ---
         defaults_dict['input_folder'] = ""
         defaults_dict['output_folder'] = ""
         defaults_dict['reference_image_path'] = ""
-        defaults_dict['bayer_pattern'] = "GRBG" # Ou la valeur la plus courante pour vos images
-        defaults_dict['batch_size'] = 0 # 0 signifie estimation automatique par le backend
-        defaults_dict['stacking_mode'] = "kappa-sigma" # Méthode d'empilement
-        defaults_dict['kappa'] = 2.5 # Valeur Kappa pour sigma-clipping
-        defaults_dict['correct_hot_pixels'] = True # Correction des pixels chauds
-        defaults_dict['hot_pixel_threshold'] = 3.0 # Seuil pour pixels chauds
-        defaults_dict['neighborhood_size'] = 5 # Voisinage pour correction pixels chauds (doit être impair)
-        defaults_dict['cleanup_temp'] = True # Nettoyer fichiers temporaires
+        defaults_dict['bayer_pattern'] = "GRBG" 
+        defaults_dict['batch_size'] = 0 
+        defaults_dict['stacking_mode'] = "kappa-sigma" 
+        defaults_dict['kappa'] = 2.5 
+        defaults_dict['correct_hot_pixels'] = True 
+        defaults_dict['hot_pixel_threshold'] = 3.0 
+        defaults_dict['neighborhood_size'] = 5 
+        defaults_dict['cleanup_temp'] = True 
 
         # --- Paramètres de Pondération par Qualité ---
-        defaults_dict['use_quality_weighting'] = True # Désactivé par défaut (sera activé pour test feathering plus tard)
+        defaults_dict['use_quality_weighting'] = True 
         defaults_dict['weight_by_snr'] = True
         defaults_dict['weight_by_stars'] = True
-        defaults_dict['snr_exponent'] = 1.5     # VALEUR DE TEST
-        defaults_dict['stars_exponent'] = 0.5
-        defaults_dict['min_weight'] = 0.01       # VALEUR DE TEST
+        defaults_dict['snr_exponent'] = 1.8     
+        defaults_dict['stars_exponent'] = 0.5   
+        defaults_dict['min_weight'] = 0.01      
 
         # --- Paramètres Drizzle ---
         defaults_dict['use_drizzle'] = False
         defaults_dict['drizzle_scale'] = 2
-        defaults_dict['drizzle_wht_threshold'] = 0.7 # Seuil pour la carte de poids Drizzle (0.0-1.0)
-        defaults_dict['drizzle_mode'] = "Final" # "Final" ou "Incremental"
-        defaults_dict['drizzle_kernel'] = "square" # ex: 'square', 'turbo', 'point', 'gaussian', 'lanczos3'
+        defaults_dict['drizzle_wht_threshold'] = 0.7 
+        defaults_dict['drizzle_mode'] = "Final" 
+        defaults_dict['drizzle_kernel'] = "square" 
         defaults_dict['drizzle_pixfrac'] = 1.0
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
-        defaults_dict['apply_chroma_correction'] = True # Correction Chromatique des bords (CB)
-        defaults_dict['apply_final_scnr'] = True        # SCNR Final (VALEUR DE TEST : Activé)
+        defaults_dict['apply_chroma_correction'] = True 
+        defaults_dict['apply_final_scnr'] = True        
         defaults_dict['final_scnr_target_channel'] = 'green'
-        defaults_dict['final_scnr_amount'] = 0.6        # VALEUR DE TEST
-        defaults_dict['final_scnr_preserve_luminosity'] = True # VALEUR DE TEST
+        defaults_dict['final_scnr_amount'] = 0.6        
+        defaults_dict['final_scnr_preserve_luminosity'] = True 
 
         # --- Paramètres "Expert" - Neutralisation du Fond (BN) Globale ---
-        defaults_dict['bn_grid_size_str'] = "24x24"     # VALEUR DE TEST
+        defaults_dict['bn_grid_size_str'] = "24x24"     
         defaults_dict['bn_perc_low'] = 5
-        defaults_dict['bn_perc_high'] = 40              # VALEUR DE TEST
-        defaults_dict['bn_std_factor'] = 1.5            # VALEUR DE TEST
+        defaults_dict['bn_perc_high'] = 40              
+        defaults_dict['bn_std_factor'] = 1.5            
         defaults_dict['bn_min_gain'] = 0.2
         defaults_dict['bn_max_gain'] = 7.0
 
         # --- Paramètres "Expert" - ChromaticBalancer (CB) pour les bords ---
-        # (Ces valeurs sont les défauts standards, pas spécifiquement modifiées pour ce test immédiat)
         defaults_dict['cb_border_size'] = 25
         defaults_dict['cb_blur_radius'] = 8
-        defaults_dict['cb_min_b_factor'] = 0.4 # Facteur Bleu Min
-        defaults_dict['cb_max_b_factor'] = 1.5 # Facteur Bleu Max
+        defaults_dict['cb_min_b_factor'] = 0.4 
+        defaults_dict['cb_max_b_factor'] = 1.5 
 
         # --- Paramètres "Expert" - Rognage Final ---
-        defaults_dict['final_edge_crop_percent'] = 2.0 # En pourcentage
+        defaults_dict['final_edge_crop_percent'] = 2.0 
 
         # --- Paramètres "Expert" - Photutils Background Subtraction (BN 2D) ---
-        defaults_dict['apply_photutils_bn'] = False      # VALEUR DE TEST : Désactivé pour l'instant
+        defaults_dict['apply_photutils_bn'] = False      
         defaults_dict['photutils_bn_box_size'] = 128
-        defaults_dict['photutils_bn_filter_size'] = 11  # VALEUR DE TEST
+        defaults_dict['photutils_bn_filter_size'] = 11  
         defaults_dict['photutils_bn_sigma_clip'] = 3.0
-        defaults_dict['photutils_bn_exclude_percentile'] = 95.0 # VALEUR DE TEST
+        defaults_dict['photutils_bn_exclude_percentile'] = 95.0 
         
-        # --- NOUVEAUX PARAMÈTRES : Feathering ---
-        defaults_dict['apply_feathering'] = True # VALEUR DE TEST : Activé pour ce test
-        defaults_dict['feather_blur_px'] = 128   # VALEUR DE TEST : Valeur de départ
-        # --- FIN NOUVEAUX PARAMÈTRES ---
+        # --- Paramètres Feathering ---
+        defaults_dict['apply_feathering'] = True 
+        defaults_dict['feather_blur_px'] = 256   
+
+        # --- NOUVEAU : Feathering / Low WHT Mask ---
+        defaults_dict['apply_low_wht_mask'] = False   # Masque OFF par défaut
+        defaults_dict['low_wht_percentile'] = 5       # Seuil : % le plus bas des poids
+        defaults_dict['low_wht_soften_px'] = 128      # Rayon de flou (px) pour lisser
+        # --- FIN NOUVEAU ---
 
         # --- Paramètres Mosaïque & Astrometry.net ---
         defaults_dict['mosaic_mode_active'] = False
-        defaults_dict['mosaic_settings'] = {"kernel": "square", "pixfrac": 1.0} # Réglages Drizzle spécifiques mosaïque
-        defaults_dict['astrometry_api_key'] = "" # Clé API pour Astrometry.net
+        defaults_dict['mosaic_settings'] = {"kernel": "square", "pixfrac": 1.0} 
+        defaults_dict['astrometry_api_key'] = "" 
 
         # --- Paramètres de Prévisualisation ---
         defaults_dict['preview_stretch_method'] = "Asinh"
@@ -423,18 +446,16 @@ class SettingsManager:
         defaults_dict['preview_r_gain'] = 1.0
         defaults_dict['preview_g_gain'] = 1.0
         defaults_dict['preview_b_gain'] = 1.0
-        # (preview_brightness, contrast, saturation sont gérés par l'UI et non sauvegardés ici directement)
-
+        
         # --- Paramètres de l'Interface Utilisateur ---
-        defaults_dict['language'] = 'en' # Langue par défaut
-        defaults_dict['window_geometry'] = "1200x750" # Géométrie fenêtre par défaut
+        defaults_dict['language'] = 'en' 
+        defaults_dict['window_geometry'] = "1200x750" 
 
-        print(f"DEBUG (SettingsManager get_default_values): Dictionnaire de défauts créé. Exemple feathering: apply={defaults_dict['apply_feathering']}, blur={defaults_dict['feather_blur_px']}")
+        print(f"DEBUG (SettingsManager get_default_values): Dictionnaire de défauts créé. LowWHT Apply={defaults_dict['apply_low_wht_mask']}, Pct={defaults_dict['low_wht_percentile']}")
         return defaults_dict
 
 
-
-# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
+###################################################################################################################################
 
     def validate_settings(self):
         """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
@@ -587,7 +608,32 @@ class SettingsManager:
                     self.feather_blur_px = defaults_fallback['feather_blur_px']
                     messages.append(f"Feather Blur Px ('{original_blur}') invalide, réinitialisé à {self.feather_blur_px}.")
                 print(f"DEBUG (Settings validate_settings): Feathering validé -> Apply: {self.apply_feathering}, BlurPx: {self.feather_blur_px}")
-                # --- FIN NOUVEAU ---
+                
+                # --- NOUVEAU : Validation Low WHT Mask ---
+                self.apply_low_wht_mask = bool(self.apply_low_wht_mask)
+                try:
+                    self.low_wht_percentile = int(self.low_wht_percentile)
+                    min_pct = 1; max_pct = 100
+                    if not (min_pct <= self.low_wht_percentile <= max_pct):
+                        original_pct = self.low_wht_percentile
+                        self.low_wht_percentile = int(np.clip(self.low_wht_percentile, min_pct, max_pct))
+                        messages.append(f"Low WHT Percentile ({original_pct}) hors limites [{min_pct}-{max_pct}], ajusté à {self.low_wht_percentile}.")
+                except (ValueError, TypeError):
+                    original_pct = self.low_wht_percentile; self.low_wht_percentile = defaults_fallback['low_wht_percentile']
+                    messages.append(f"Low WHT Percentile ('{original_pct}') invalide, réinitialisé à {self.low_wht_percentile}.")
+                
+                try:
+                    self.low_wht_soften_px = int(self.low_wht_soften_px)
+                    min_soften = 32; max_soften = 512
+                    if not (min_soften <= self.low_wht_soften_px <= max_soften):
+                        original_soften = self.low_wht_soften_px
+                        self.low_wht_soften_px = int(np.clip(self.low_wht_soften_px, min_soften, max_soften))
+                        messages.append(f"Low WHT Soften Px ({original_soften}) hors limites [{min_soften}-{max_soften}], ajusté à {self.low_wht_soften_px}.")
+                except (ValueError, TypeError):
+                    original_soften = self.low_wht_soften_px; self.low_wht_soften_px = defaults_fallback['low_wht_soften_px']
+                    messages.append(f"Low WHT Soften Px ('{original_soften}') invalide, réinitialisé à {self.low_wht_soften_px}.")
+                print(f"DEBUG (Settings validate_settings): Low WHT Mask validé -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
+                # --- FIN NOUVEAU -
 
              # --- Drizzle Kernel and Pixfrac Validation ---
              valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
@@ -646,7 +692,7 @@ class SettingsManager:
         """ Sauvegarde les paramètres actuels dans le fichier JSON. """
         # S'assurer que les types sont corrects pour JSON
         settings_data = {
-            'version': "1.8.0", # Incrémenter la version si la structure change significativement
+            'version': "1.8.1", # Incrémenter la version si la structure change significativement
             # Processing
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
@@ -724,7 +770,13 @@ class SettingsManager:
             # --- Sauvegarder les paramètres de feathering ---
             'apply_feathering': bool(self.apply_feathering),
             'feather_blur_px': int(self.feather_blur_px),
-            # --- FIN NOUVEAU ---
+            # --- NOUVEAU : Sauvegarde Low WHT Mask ---
+            'apply_low_wht_mask': bool(self.apply_low_wht_mask),
+            'low_wht_percentile': int(self.low_wht_percentile),
+            'low_wht_soften_px': int(self.low_wht_soften_px),
+            # --- FIN NOUVEAU --
+
+
         }
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
@@ -733,97 +785,115 @@ class SettingsManager:
         except IOError as ioe: print(f"Error saving settings: I/O error writing to {self.settings_file} - {ioe}")
         except Exception as e: print(f"Unexpected error saving settings: {e}")
 
+###################################################################################################################################
+
+
 
 
 # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
-    def load_settings(self): # MÉTHODE COMPLÈTE - VERSION NORMALE
+    def load_settings(self):
         """ 
         Charge les paramètres depuis le fichier JSON.
         Si le fichier n'existe pas ou est corrompu, les valeurs par défaut sont utilisées
         et un nouveau fichier de settings est créé.
+        MAJ: Assure une gestion robuste des clés manquantes et des types.
         """
+        print(f"DEBUG (SettingsManager load_settings): Tentative chargement depuis {self.settings_file}...")
         
-        # --- DÉBUT SECTION DE TEST (À commenter pour fonctionnement normal) ---
-        # print(f"DEBUG (SettingsManager load_settings): CHARGEMENT FORCÉ DES PARAMÈTRES DE TEST (le fichier '{self.settings_file}' sera ignoré pour cette session).")
-        # self.reset_to_defaults() 
-        # self.apply_feathering = True # Forcer pour test
-        # self.feather_blur_px = 128   # Forcer pour test
-        # print(f"DEBUG (SettingsManager load_settings): Valeurs de TEST appliquées (FORCÉES) à l'instance SettingsManager.")
-        # print(f"  Exemple - Valeurs de test actives DANS self (après forçage explicite) :")
-        # print(f"    self.apply_feathering = {getattr(self, 'apply_feathering', 'ERREUR_ATTR')}")
-        # # ... (autres logs d'exemple)
-        # --- FIN SECTION DE TEST ---
-
-        # --- SECTION NORMALE DE CHARGEMENT (Maintenant active) ---
-        print(f"DEBUG (SettingsManager load_settings): Tentative chargement normal depuis {self.settings_file}...")
-        default_values_dict = self.get_default_values() # Contient les VRAIS défauts de l'application
+        # Obtenir d'abord un dictionnaire de valeurs par défaut propres et complètes
+        default_values_dict = self.get_default_values()
         
         if not os.path.exists(self.settings_file):
             print(f"DEBUG (SettingsManager load_settings): Fichier '{self.settings_file}' non trouvé. Application des valeurs par défaut normales.")
-            self.reset_to_defaults() # Applique les valeurs de get_default_values() à self
+            # Appliquer tous les défauts à l'instance 'self'
+            for key, value in default_values_dict.items():
+                setattr(self, key, value)
+            
             print(f"DEBUG (SettingsManager load_settings): Tentative de sauvegarde du fichier settings avec les valeurs par défaut normales...")
             self.save_settings() # Crée le fichier avec les valeurs par défaut actuelles de self
+            # Logguer la valeur de la clé API après reset et avant de retourner
+            print(f"DEBUG (SettingsManager load_settings): Valeur astrometry_api_key après reset (fichier non trouvé): '{getattr(self, 'astrometry_api_key', 'ERREUR_ATTR')}'")
+            # La validation n'est pas strictement nécessaire ici car ce sont les défauts, mais ne nuit pas.
+            _ = self.validate_settings() # Valider et ignorer les messages pour ce cas
             return False # Indiquer qu'on a utilisé les défauts car fichier absent
         
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                  settings_data = json.load(f)
         
-            # Boucle pour assigner les valeurs chargées, avec fallback sur les défauts.
-            # Ceci assure que si de nouvelles clés sont ajoutées dans get_default_values
-            # et ne sont pas dans un ancien fichier JSON, elles auront leur valeur par défaut.
             print("DEBUG (SettingsManager load_settings): Application des valeurs du JSON (avec fallback sur défauts)...")
+            # Boucle sur TOUTES les clés attendues (celles de default_values_dict)
             for key, default_value_from_dict in default_values_dict.items():
+                # Obtenir la valeur du JSON, si la clé n'y est pas, utiliser la valeur par défaut de notre dict
                 loaded_value_from_json = settings_data.get(key, default_value_from_dict)
                 
-                # Conserver la valeur par défaut si la clé n'est pas dans le JSON
-                # ou si la valeur chargée est None et que le défaut ne l'est pas (sauf si le défaut est aussi None)
-                final_value_to_set = loaded_value_from_json
-                if key not in settings_data: # Si la clé n'existe pas du tout dans le JSON
+                final_value_to_set = loaded_value_from_json # Valeur par défaut si la clé n'est pas dans JSON
+
+                if key not in settings_data:
+                    print(f"  INFO (SettingsManager load_settings): Clé '{key}' non trouvée dans JSON. Utilisation de la valeur par défaut du code: {default_value_from_dict}")
                     final_value_to_set = default_value_from_dict
-                    print(f"  INFO (SettingsManager load_settings): Clé '{key}' non trouvée dans JSON. Utilisation de la valeur par défaut: {default_value_from_dict}")
-                
-                # Tentative de conversion de type pour correspondre au type de la valeur par défaut
-                try:
-                    if isinstance(default_value_from_dict, bool):
-                        final_value_to_set = bool(final_value_to_set)
-                    elif isinstance(default_value_from_dict, int) and not isinstance(final_value_to_set, bool):
-                        final_value_to_set = int(final_value_to_set)
-                    elif isinstance(default_value_from_dict, float) and not isinstance(final_value_to_set, bool):
-                        final_value_to_set = float(final_value_to_set)
-                    elif isinstance(default_value_from_dict, dict) and isinstance(final_value_to_set, dict):
-                        # Pour les dictionnaires (ex: mosaic_settings), fusionner prudemment
-                        merged_dict = default_value_from_dict.copy() # Commencer avec les clés par défaut
-                        merged_dict.update(final_value_to_set)     # Écraser/ajouter avec les clés du JSON
-                        final_value_to_set = merged_dict
-                    elif isinstance(default_value_from_dict, str): # Assurer que c'est une chaîne si c'est le défaut
-                         final_value_to_set = str(final_value_to_set)
-                    # Si le type par défaut est None, on accepte ce qui est chargé (pourrait être None)
-                    elif default_value_from_dict is None:
-                        pass # final_value_to_set est déjà correct
-                except (ValueError, TypeError) as e_cast:
-                    print(f"  WARN (SettingsManager load_settings): Impossible de caster la valeur JSON '{loaded_value_from_json}' pour la clé '{key}' vers le type de '{default_value_from_dict}'. Erreur: {e_cast}. Utilisation de la valeur par défaut.")
-                    final_value_to_set = default_value_from_dict # Revenir au défaut si le cast échoue
+                else:
+                    # La clé existe dans le JSON, on utilise loaded_value_from_json.
+                    # Essayons maintenant de caster cette valeur vers le type de la valeur par défaut.
+                    try:
+                        type_of_default = type(default_value_from_dict)
+                        if type_of_default == bool:
+                            # Gérer les chaînes "true"/"false" du JSON pour les booléens
+                            if isinstance(loaded_value_from_json, str):
+                                if loaded_value_from_json.lower() == 'true': final_value_to_set = True
+                                elif loaded_value_from_json.lower() == 'false': final_value_to_set = False
+                                else: final_value_to_set = bool(loaded_value_from_json) # Tentative de cast direct
+                            else:
+                                final_value_to_set = bool(loaded_value_from_json)
+                        elif type_of_default == int and not isinstance(loaded_value_from_json, bool): # Éviter True/False -> 1/0 si défaut est int
+                            final_value_to_set = int(loaded_value_from_json)
+                        elif type_of_default == float and not isinstance(loaded_value_from_json, bool):
+                            final_value_to_set = float(loaded_value_from_json)
+                        elif type_of_default == str:
+                            final_value_to_set = str(loaded_value_from_json)
+                        elif type_of_default == dict and isinstance(loaded_value_from_json, dict):
+                            # Pour les dictionnaires (ex: mosaic_settings), fusionner prudemment
+                            merged_dict = default_value_from_dict.copy() # Commencer avec les clés par défaut du code
+                            merged_dict.update(loaded_value_from_json)   # Écraser/ajouter avec les clés du JSON
+                            final_value_to_set = merged_dict
+                        # Si le type par défaut est None, on accepte ce qui est chargé (pourrait être None ou autre chose)
+                        elif default_value_from_dict is None:
+                            pass # final_value_to_set est déjà correct (la valeur du JSON)
+                        # Si le type n'est pas géré ci-dessus mais correspond, on le garde.
+                        elif type(loaded_value_from_json) == type_of_default:
+                            pass # Déjà du bon type
+                        else: # Tentative de cast générique si les types diffèrent et non explicitement gérés
+                            print(f"  WARN (SettingsManager load_settings): Tentative de cast générique pour la clé '{key}' du type {type(loaded_value_from_json)} vers {type_of_default}.")
+                            final_value_to_set = type_of_default(loaded_value_from_json)
+
+                    except (ValueError, TypeError) as e_cast:
+                        print(f"  WARN (SettingsManager load_settings): Impossible de caster la valeur JSON '{loaded_value_from_json}' pour la clé '{key}' vers le type de '{default_value_from_dict}'. Erreur: {e_cast}. Utilisation de la valeur par défaut du code: {default_value_from_dict}")
+                        final_value_to_set = default_value_from_dict # Revenir au défaut du code si le cast échoue
                 
                 setattr(self, key, final_value_to_set)
         
             print(f"DEBUG (SettingsManager load_settings): Paramètres chargés et fusionnés depuis '{self.settings_file}'. Validation en cours...")
-            print(f"  Exemple après chargement JSON - self.apply_feathering: {getattr(self, 'apply_feathering', 'NonTrouve')}, self.feather_blur_px: {getattr(self, 'feather_blur_px', 'NonTrouve')}")
-            print(f"  Exemple après chargement JSON - self.photutils_bn_filter_size: {getattr(self, 'photutils_bn_filter_size', 'NonTrouve')}")
+            # Exemple de log après chargement (ajoutez d'autres clés si besoin pour déboguer)
+            print(f"  Exemple après chargement JSON - self.apply_low_wht_mask: {getattr(self, 'apply_low_wht_mask', 'NonTrouve')}, Pct: {getattr(self, 'low_wht_percentile', 'NonTrouve')}")
 
         except json.JSONDecodeError as e:
-            print(f"Error decoding settings file {self.settings_file}: {e}. Using defaults and resetting file.")
-            self.reset_to_defaults() # Utilise get_default_values()
+            print(f"Error decoding settings file {self.settings_file}: {e}. Using defaults from code and resetting file.")
+            # Appliquer tous les défauts à l'instance 'self'
+            for key, value in default_values_dict.items():
+                setattr(self, key, value)
             self.save_settings()     # Écrase le fichier corrompu avec les valeurs par défaut actuelles
+            _ = self.validate_settings()
             return False
-        except Exception as e:
-            print(f"Error loading settings from {self.settings_file}: {e}. Using defaults and resetting file.")
+        except Exception as e: 
+            print(f"Error loading settings from {self.settings_file}: {e}. Using defaults from code and resetting file.")
             traceback.print_exc(limit=2)
-            self.reset_to_defaults() # Utilise get_default_values()
+            # Appliquer tous les défauts à l'instance 'self'
+            for key, value in default_values_dict.items():
+                setattr(self, key, value)
             self.save_settings()     # Écrase le fichier avec les valeurs par défaut actuelles
+            _ = self.validate_settings()
             return False
-        # --- FIN SECTION NORMALE DE CHARGEMENT ---
 
         # La validation est TOUJOURS exécutée après le chargement (ou l'application des défauts)
         validation_messages = self.validate_settings() 
@@ -836,3 +906,8 @@ class SettingsManager:
         
         print("DEBUG (SettingsManager load_settings): Fin de la méthode load_settings (mode lecture JSON).")
         return True
+
+
+
+
+    #Fin settings.py

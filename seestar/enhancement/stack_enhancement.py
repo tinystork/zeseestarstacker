@@ -5,6 +5,9 @@ from skimage import exposure
 import time
 import traceback # Garder pour les logs d'erreur
 
+
+# ... (autres fonctions comme feather_by_weight_map, StackEnhancer, etc.) ...
+
 # Import ccdproc SEULEMENT si on décide de garder une fonction de combine ici
 # Pour l'instant, on suppose que ccdproc est utilisé dans queue_manager
 # try:
@@ -221,7 +224,7 @@ def apply_edge_crop(img_data, crop_percent_decimal):
          traceback.print_exc(limit=1)
          return img_data # Retourner l'original en cas d'erreur
 
-# DANS stack_enhancement.py (ou où vous l'avez mise)
+######################################################################################################################################################
 
 def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
     print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")
@@ -256,10 +259,121 @@ def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gai
         print(f"ERREUR [feather_by_weight_map]: {e}"); traceback.print_exc(limit=2)
         return img
 
+##################################################################################################################################################################
+
+def apply_low_wht_mask(
+    img: np.ndarray,
+    wht: np.ndarray,
+    *,
+    percentile: float = 10.0,
+    soften_px: int = 128,
+    # seuil absolu en‑dessous duquel on considère qu'un poids est nul
+    min_threshold: float = 1e-5,
+    # fraction maximale de l'image qu'on autorise à masquer (0‑1)
+    max_mask_fraction: float = 0.50,
+    progress_callback=None,
+) -> np.ndarray:
+    """Masque les bords à faible WHT de façon robuste.
+
+    Paramètres
+    ----------
+    img : ndarray (H,W,3 | H,W) float32
+        Image normalisée 0‑1.
+    wht : ndarray (H,W) float32
+        Carte de poids normalisée (0‑max_images empilées).
+    percentile : float, optionnel (1‑20)
+        Percentile servant de point de coupure *initial*.
+    soften_px : int, optionnel
+        Rayon (px) du flou gaussien appliqué sur le masque binaire.
+    min_threshold : float, optionnel
+        Valeur plancher pour le *threshold* afin d'éviter un masque total.
+    max_mask_fraction : float, optionnel
+        Sécurité : si le masque couvrirait > *max_mask_fraction* de l'image
+        le traitement est ignoré.
+    progress_callback : callable | None
+        Fonction de log.
+
+    Retour
+    ------
+    ndarray float32
+        Image 0‑1 après masquage (ou intacte si opération annulée).
+    """
+
+    def _log(msg: str):
+        if callable(progress_callback):
+            progress_callback(f"   [LowWHTMask] {msg}", None)
+        else:
+            print(f"DEBUG [LowWHTMask]: {msg}")
+
+    # --- Vérifs ---------------------------------------------------------------
+    if img is None or wht is None:
+        _log("Image ou WHT manquant – masque ignoré.")
+        return img
+    if img.shape[:2] != wht.shape:
+        _log("Dimensions img / WHT incompatibles – masque ignoré.")
+        return img
+    if img.ndim not in (2, 3):
+        _log("Image doit être 2D (mono) ou 3D (RGB).")
+        return img
+
+    img_f32 = img.astype(np.float32, copy=True)
+    wht_f32 = wht.astype(np.float32, copy=False)
+
+    # --- 1. Seuil adaptatif ----------------------------------------------------
+    positive = wht_f32[wht_f32 > min_threshold]
+    if positive.size == 0:
+        _log("Tous les poids sont nuls → on n'applique rien.")
+        return img
+
+    # seuil initial basé sur le percentile demandé
+    thresh_initial = np.percentile(positive, percentile)
+    # on ne permet pas que le seuil dépasse la médiane -> masque max 50 %
+    thresh_wht = min(thresh_initial, np.median(positive))
+    thresh_wht = max(thresh_wht, min_threshold)
+    _log(f"Percentile : {percentile:.1f} → seuil brut {thresh_initial:.5f}, appliqué {thresh_wht:.5f}")
+
+    # --- 2. Création / adoucissement du masque --------------------------------
+    binary_mask = (wht_f32 > thresh_wht).astype(np.float32)
+    masked_fraction = 1.0 - binary_mask.mean()
+    _log(f"Part de l'image qui serait masquée : {masked_fraction*100:.1f}%")
+    if masked_fraction > max_mask_fraction:
+        _log("Masque > max_mask_fraction – opération annulée.")
+        return img
+
+    k = max(1, soften_px // 2) * 2 + 1  # noyau impair obligatoire pour cv2
+    soft_mask = cv2.GaussianBlur(binary_mask, (k, k), 0)
+    _log(f"Masque adouci : min={soft_mask.min():.3f} max={soft_mask.max():.3f}")
+
+    # --- 3. Couleur de remplissage -------------------------------------------
+    if img_f32.ndim == 3:
+        # médiane → moins sensible aux valeurs extrêmes très chaudes
+        fill_color = np.median(img_f32, axis=(0, 1)).astype(np.float32)
+    else:
+        fill_color = np.median(img_f32).astype(np.float32)
+
+    _log(f"Couleur de remplissage : {fill_color}")
+
+    # --- 4. Application -------------------------------------------------------
+    if img_f32.ndim == 3:
+        img_out = img_f32 * soft_mask[..., None] + fill_color[None, None, :] * (1 - soft_mask[..., None])
+    else:
+        img_out = img_f32 * soft_mask + fill_color * (1 - soft_mask)
+
+    img_out = np.clip(img_out, 0.0, 1.0).astype(np.float32)
+
+    # --- 5. Vérification dynamique -------------------------------------------
+    dyn = img_out.max() - img_out.min()
+    _log(f"Dynamique finale : {dyn:.4f}")
+    if dyn < 0.05:
+        _log("Dynamique < 0.05 → masque très destructif, on revient à l'image d'origine.")
+        return img
+
+    return img_out
 
 
 
-# DANS stack_enhancement.py (ou où vous l'avez mise)
+
+
 
 def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
     print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")

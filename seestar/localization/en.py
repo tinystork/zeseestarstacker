@@ -117,9 +117,13 @@ EN_TRANSLATIONS = {
     'tooltip_photutils_bn_filter_size': "PB2D: Size of the median filter (px, odd) applied to the map of local background estimates to smooth it. Default: 5.",
     'tooltip_photutils_bn_sigma_clip': "PB2D: Sigma value for iterative pixel rejection (stars) within each box during background estimation. Default: 3.0.",
     'tooltip_photutils_bn_exclude_percentile': "PB2D: Percentage (0-100) of the brightest pixels to ignore within each box before background estimation. Helps reject stars without a full mask. Default: 98.0.",
-    ### END tooltpis expert ###
+    # Tooltips for Low WHT Mask
+    'tooltip_apply_low_wht_mask': "Low WHT Mask: Attenuates image areas where the weight map (WHT) is very low (typically edges with little signal). Helps reduce banding and color casts in these zones. Applied after Feathering and before Photutils background subtraction.",
+    'tooltip_low_wht_percentile': "Low WHT Percentile: Defines the threshold for considering a weight as 'low'. E.g., 5% means the bottom 5% of non-zero pixel weights will be targeted. Range: 1-20. Default: 5.",
+    'tooltip_low_wht_soften_px': "Soften Low WHT Mask (px): Radius of Gaussian blur applied to the binary mask of low-weight areas. Allows for a smoother transition of the correction. Range: 32-512. Default: 128.",
 
     # ... end expert tab ...
+    
     # --- Preview Tab ---
     'white_balance': "White Balance (Preview)",
     'wb_r': "R Gain:",
@@ -283,6 +287,14 @@ EN_TRANSLATIONS = {
     'apply_feathering_label': "Enable Feathering by Weight Map",
     'feather_blur_px_label': "Feather Blur Radius (px):",
     # ---  ---
+    # --- Expert Tab - Feathering / Low WHT Mask Section ---
+    'feathering_frame_title': "Feathering / Low WHT Mask", # Title for the combined frame
+    'apply_feathering_label': "Enable Feathering (Weighted Smoothing)", # Existing text, maybe adjust
+    'feather_blur_px_label': "Feather Blur (px):",        # Existing text
+
+    'apply_low_wht_mask_label': "Apply Low WHT Mask (Anti-Banding)",
+    'low_wht_percentile_label': "Low WHT Percentile:",
+    'low_wht_soften_px_label': "Soften Mask (px):",
 
 
 }
