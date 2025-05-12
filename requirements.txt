@@ -12,7 +12,7 @@ astropy                  # Core astronomy package (includes ccdproc)
 
 # --- Image Processing & Alignment ---
 opencv-python==4.8.1.78  # OpenCV for image operations (cv2)
-Pillow==10.1.0           # Image handling (PIL fork)
+Pillow>==10.1.0           # Image handling (PIL fork)
 scikit-image==0.21.0     # Image algorithms (skimage)
 colour-demosaicing==0.1.0 # Debayering algorithms
 astroalign==3.0.1        # Image alignment
