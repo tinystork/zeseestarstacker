@@ -120,422 +120,590 @@ def _save_panel_stack_temp(panel_stack_data, solved_wcs, panel_index, output_fol
             except Exception: pass
         return None
 
-def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list, drizzle_scale):
+
+
+
+
+# --- DANS seestar/enhancement/mosaic_processor.py ---
+# (Assurez-vous que les imports nécessaires sont présents en haut du fichier :
+#  import numpy as np, from astropy.wcs import WCS, from astropy.coordinates import SkyCoord,
+#  from astropy import units as u, import traceback)
+
+def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list, drizzle_scale_factor):
     """
-    Calcule le WCS et la Shape (H, W) optimaux pour la mosaïque finale.
-    (Version complète de l'étape 7/22)
+    Calcule le WCS et la Shape (H, W) optimaux pour la mosaïque finale,
+    en se basant sur l'étendue combinée de tous les panneaux fournis.
+
+    Args:
+        panel_wcs_list (list): Liste des objets astropy.wcs.WCS pour chaque panneau stacké.
+                               Chaque WCS doit avoir .pixel_shape défini.
+        panel_shapes_hw_list (list): Liste des tuples (H, W) pour chaque panneau stacké,
+                                     correspondant à panel_wcs_list.
+        drizzle_scale_factor (float): Facteur d'échelle à appliquer pour la grille Drizzle finale
+                                      par rapport à l'échelle moyenne des panneaux d'entrée.
+
+    Returns:
+        tuple: (output_wcs, output_shape_hw) ou (None, None) si échec.
+               output_shape_hw est au format (Hauteur, Largeur).
     """
     num_panels = len(panel_wcs_list)
-    print(f"DEBUG [MosaicGridOptim]: Calcul grille pour {num_panels} panneaux...")
-    if num_panels == 0 or len(panel_shapes_hw_list) != num_panels or None in panel_shapes_hw_list:
-        print("ERREUR [MosaicGridOptim]: Listes WCS/Shapes panneaux invalides.")
-        return None, None
+    print(f"DEBUG [MosaicGridOptim]: Début calcul grille mosaïque pour {num_panels} panneaux.")
+    print(f"  -> Échelle Drizzle demandée: {drizzle_scale_factor}x")
 
-    valid_wcs_list=panel_wcs_list; valid_shapes_hw=panel_shapes_hw_list
-    print(f"   -> {len(valid_wcs_list)} panneaux valides reçus pour calcul grille.")
+    # --- 1. Validation des Entrées ---
+    if num_panels == 0:
+        print("ERREUR [MosaicGridOptim]: Aucune information WCS de panneau fournie.")
+        return None, None
+    if len(panel_shapes_hw_list) != num_panels:
+        print("ERREUR [MosaicGridOptim]: Nombre de WCS et de shapes de panneaux incohérent.")
+        return None, None
+    if None in panel_shapes_hw_list or not all(isinstance(s, tuple) and len(s) == 2 and s[0] > 0 and s[1] > 0 for s in panel_shapes_hw_list):
+        print("ERREUR [MosaicGridOptim]: Certaines shapes de panneaux sont invalides (None, non-tuple, ou dimensions <= 0).")
+        return None, None
+    if None in panel_wcs_list or not all(isinstance(w, WCS) and w.is_celestial for w in panel_wcs_list):
+        print("ERREUR [MosaicGridOptim]: Certains WCS de panneaux sont invalides (None ou non-célestes).")
+        return None, None
+        
+    print(f"  -> {num_panels} panneaux valides avec WCS et shapes pour calcul de la grille.")
 
     try:
-        # --- Calcul Footprints Panneaux ---
-        all_footprints_sky = []
-        print("   -> Calcul footprints panneaux...")
-        for i, (wcs_p, shape_hw) in enumerate(zip(valid_wcs_list, valid_shapes_hw)):
-             # Vérifier si shape_hw est valide
-             if not shape_hw or len(shape_hw) != 2 or shape_hw[0] <= 0 or shape_hw[1] <= 0:
-                 print(f"      - WARNING: Shape invalide pour panneau {i+1}: {shape_hw}. Ignoré.")
-                 continue
-             # Vérifier si wcs_p a pixel_shape et le définir si besoin
-             if wcs_p.pixel_shape is None or wcs_p.pixel_shape != (shape_hw[1], shape_hw[0]):
-                  print(f"      - Ajustement pixel_shape WCS panneau {i+1} à ({shape_hw[1]}, {shape_hw[0]})")
-                  wcs_p.pixel_shape = (shape_hw[1], shape_hw[0]) # W, H
-             nx, ny = shape_hw[1], shape_hw[0] # W, H
-             pixel_corners = np.array([[0,0],[nx-1,0],[nx-1,ny-1],[0,ny-1]], dtype=np.float64)
-             try: sky_corners = wcs_p.pixel_to_world(pixel_corners[:,0], pixel_corners[:,1]); all_footprints_sky.append(sky_corners)
-             except Exception as fp_err: print(f"      - ERREUR footprint panneau {i+1}: {fp_err}. Ignoré.")
+        # --- 2. Calcul des "Footprints" (Empreintes Célestes) pour chaque Panneau ---
+        #    Le footprint est la projection des 4 coins de chaque panneau sur le ciel.
+        all_panel_footprints_sky = []
+        print("   -> Calcul des footprints célestes des panneaux...")
+        for i, (wcs_panel, shape_hw_panel) in enumerate(zip(panel_wcs_list, panel_shapes_hw_list)):
+            panel_h, panel_w = shape_hw_panel # Hauteur, Largeur du panneau i
 
-        if not all_footprints_sky: print("ERREUR: Aucun footprint panneau calculé."); return None, None
+            # S'assurer que le WCS du panneau a la bonne pixel_shape (W,H pour Astropy)
+            # C'est crucial pour que wcs_panel.pixel_to_world fonctionne correctement avec les coins.
+            if wcs_panel.pixel_shape is None or wcs_panel.pixel_shape != (panel_w, panel_h):
+                print(f"      - Ajustement pixel_shape pour WCS panneau {i+1} à ({panel_w}, {panel_h})")
+                wcs_panel.pixel_shape = (panel_w, panel_h) # (nx, ny) pour Astropy
 
-        # --- Calcul Étendue et Centre ---
-        print("   -> Calcul étendue totale..."); all_corners_flat = SkyCoord(ra=np.concatenate([fp.ra.deg for fp in all_footprints_sky]), dec=np.concatenate([fp.dec.deg for fp in all_footprints_sky]), unit='deg', frame='icrs')
-        central_ra_deg=np.median(all_corners_flat.ra.wrap_at(180*u.deg).deg); central_dec_deg=np.median(all_corners_flat.dec.deg); print(f"      - Centre Médian: ({central_ra_deg:.5f}, {central_dec_deg:.5f}) deg")
-
-        # --- Définition WCS Sortie ---
-        print("   -> Création WCS sortie..."); ref_wcs = valid_wcs_list[0]; output_wcs = WCS(naxis=2); output_wcs.wcs.ctype = getattr(ref_wcs.wcs, 'ctype', ["RA---TAN", "DEC--TAN"]); output_wcs.wcs.crval = [central_ra_deg, central_dec_deg]; output_wcs.wcs.cunit = getattr(ref_wcs.wcs, 'cunit', ['deg', 'deg'])
-        try: # Calcul échelle sortie
-            ref_scale_matrix = ref_wcs.pixel_scale_matrix; avg_input_scale = np.mean(np.abs(np.diag(ref_scale_matrix))); output_pixel_scale = avg_input_scale / drizzle_scale; output_wcs.wcs.cd = np.array([[-output_pixel_scale, 0.0], [0.0, output_pixel_scale]]); print(f"      - Échelle Sortie: {output_pixel_scale*3600:.3f} arcsec/pix")
-        except Exception as scale_err: raise ValueError("Échec calcul échelle WCS sortie.") from scale_err
-
-
-        # --- Calcul Shape Sortie ---
-        print("   -> Calcul shape sortie...")
-        all_output_pixels_x_valid = [] # Nouvelle liste pour les X valides
-        all_output_pixels_y_valid = [] # Nouvelle liste pour les Y valides
-        projection_errors = 0
-
-        for i, footprint_sky in enumerate(all_footprints_sky):
+            # Coins en coordonnées pixel (0-based pour Astropy)
+            # Ordre: (0,0), (W-1,0), (W-1,H-1), (0,H-1)
+            pixel_corners = np.array([
+                [0, 0], [panel_w - 1, 0], [panel_w - 1, panel_h - 1], [0, panel_h - 1]
+            ], dtype=np.float64)
+            
             try:
-                # Tenter la projection
-                pixels_out_x, pixels_out_y = output_wcs.world_to_pixel(footprint_sky)
-                
-                # --- AJOUT : Vérification et Filtrage NaN/Inf ---
-                # Créer des masques booléens pour les valeurs finies
-                valid_x_mask = np.isfinite(pixels_out_x)
-                valid_y_mask = np.isfinite(pixels_out_y)
-                # Conserver seulement les coordonnées où X ET Y sont finis
-                valid_mask_combined = valid_x_mask & valid_y_mask
-                
-                # Ajouter les coordonnées valides aux listes
-                all_output_pixels_x_valid.extend(pixels_out_x[valid_mask_combined])
-                all_output_pixels_y_valid.extend(pixels_out_y[valid_mask_combined])
-                
-                # Compter si des points ont été invalidés pour ce footprint
-                if not np.all(valid_mask_combined):
-                    num_invalid = len(pixels_out_x) - np.sum(valid_mask_combined)
-                    print(f"      - WARNING: Footprint {i+1}: {num_invalid} coin(s) projeté(s) hors limites (NaN/Inf).")
-                    projection_errors += 1
-                # --- FIN AJOUT ---
+                # Projeter les coins pixel sur le ciel
+                sky_corners_panel = wcs_panel.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
+                all_panel_footprints_sky.append(sky_corners_panel)
+                # print(f"      - Footprint Panneau {i+1} (RA): {sky_corners_panel.ra.deg}") # Debug
+            except Exception as fp_err:
+                print(f"      - ERREUR calcul footprint pour panneau {i+1}: {fp_err}. Panneau ignoré.")
+                # Continuer si un footprint échoue, mais cela peut affecter la grille finale
 
+        if not all_panel_footprints_sky:
+            print("ERREUR [MosaicGridOptim]: Aucun footprint de panneau n'a pu être calculé.")
+            return None, None
+        print(f"   -> {len(all_panel_footprints_sky)} footprints de panneaux calculés.")
+
+        # --- 3. Détermination de l'Étendue Globale et du Centre de la Mosaïque ---
+        print("   -> Calcul de l'étendue globale et du centre de la mosaïque...")
+        # Concaténer tous les coins de tous les footprints en une seule liste de SkyCoord
+        all_sky_corners_flat = SkyCoord(
+            ra=np.concatenate([fp.ra.deg for fp in all_panel_footprints_sky]),
+            dec=np.concatenate([fp.dec.deg for fp in all_panel_footprints_sky]),
+            unit='deg', frame='icrs' # Assumer ICRS pour tous
+        )
+
+        # Centre approximatif (médiane pour robustesse)
+        # Gérer le "wrap" du RA autour de 0h/360deg en utilisant wrap_at(180deg)
+        median_ra_deg = np.median(all_sky_corners_flat.ra.wrap_at(180 * u.deg).deg)
+        median_dec_deg = np.median(all_sky_corners_flat.dec.deg)
+        print(f"      - Centre Médian Mosaïque (RA, Dec): ({median_ra_deg:.5f}, {median_dec_deg:.5f}) deg")
+
+        # --- 4. Création du WCS de Sortie pour la Mosaïque ---
+        print("   -> Création du WCS de sortie pour la mosaïque...")
+        # Utiliser le WCS du premier panneau valide comme référence pour CTYPE, CUNIT
+        ref_wcs_for_output_params = panel_wcs_list[0] 
+        
+        output_wcs = WCS(naxis=2)
+        output_wcs.wcs.ctype = getattr(ref_wcs_for_output_params.wcs, 'ctype', ["RA---TAN", "DEC--TAN"])
+        output_wcs.wcs.crval = [median_ra_deg, median_dec_deg] # Centrer sur la médiane
+        output_wcs.wcs.cunit = getattr(ref_wcs_for_output_params.wcs, 'cunit', ['deg', 'deg'])
+
+        # Calculer l'échelle de pixel de sortie
+        # Prendre l'échelle moyenne des panneaux d'entrée (en degrés/pixel)
+        avg_panel_pixel_scale_deg = 0.0
+        valid_scales_count = 0
+        for wcs_p in panel_wcs_list:
+            try:
+                # pixel_scale_matrix est en unités de wcs.cunit par pixel
+                # On s'attend à ce que cunit soit 'deg'
+                scale_matrix_p = wcs_p.pixel_scale_matrix 
+                # Prendre la moyenne des valeurs absolues diagonales comme échelle approx.
+                current_panel_scale = np.mean(np.abs(np.diag(scale_matrix_p)))
+                if np.isfinite(current_panel_scale) and current_panel_scale > 1e-10:
+                    avg_panel_pixel_scale_deg += current_panel_scale
+                    valid_scales_count += 1
+            except Exception as scale_err_loop:
+                print(f"      - Warning: Échec lecture échelle pixel panneau: {scale_err_loop}")
+        
+        if valid_scales_count > 0:
+            avg_panel_pixel_scale_deg /= valid_scales_count
+        elif hasattr(ref_wcs_for_output_params, 'pixel_scale_matrix'): # Fallback sur le premier
+             avg_panel_pixel_scale_deg = np.mean(np.abs(np.diag(ref_wcs_for_output_params.pixel_scale_matrix)))
+        else: # Fallback ultime très grossier (ex: 1 arcsec/pix)
+            print("      - ERREUR: Impossible de déterminer l'échelle des panneaux. Utilisation d'une valeur par défaut grossière.")
+            avg_panel_pixel_scale_deg = 1.0 / 3600.0 # 1 arcsec en degrés
+
+        output_pixel_scale_deg = avg_panel_pixel_scale_deg / drizzle_scale_factor
+        print(f"      - Échelle Pixel Moyenne Panneaux: {avg_panel_pixel_scale_deg * 3600:.3f} arcsec/pix")
+        print(f"      - Échelle Pixel Sortie Mosaïque: {output_pixel_scale_deg * 3600:.3f} arcsec/pix (Facteur Drizzle: {drizzle_scale_factor}x)")
+        
+        # Définir la matrice CD pour l'échelle et l'orientation (pas de rotation/skew assumé ici)
+        # Le signe négatif pour CD1_1 car RA augmente vers la gauche en convention image
+        output_wcs.wcs.cd = np.array([[-output_pixel_scale_deg, 0.0],
+                                      [0.0, output_pixel_scale_deg]])
+
+        # --- 5. Calcul de la Shape de Sortie (Dimensions en Pixels) ---
+        #    Projeter tous les coins de tous les panneaux sur la nouvelle grille WCS de sortie
+        #    pour trouver les étendues min/max en pixels.
+        print("   -> Calcul de la shape de sortie (dimensions en pixels)...")
+        all_output_pixels_x_valid = []
+        all_output_pixels_y_valid = []
+        projection_errors_count = 0
+
+        for i_fp, panel_footprint_sky in enumerate(all_panel_footprints_sky):
+            try:
+                # Projeter les coins du footprint céleste sur la grille WCS de sortie
+                pixels_out_x_panel, pixels_out_y_panel = output_wcs.world_to_pixel(panel_footprint_sky)
+                
+                # Filtrer les NaN/Inf qui peuvent résulter de projections hors du domaine du WCS
+                valid_x_mask_panel = np.isfinite(pixels_out_x_panel)
+                valid_y_mask_panel = np.isfinite(pixels_out_y_panel)
+                valid_mask_combined_panel = valid_x_mask_panel & valid_y_mask_panel
+                
+                all_output_pixels_x_valid.extend(pixels_out_x_panel[valid_mask_combined_panel])
+                all_output_pixels_y_valid.extend(pixels_out_y_panel[valid_mask_combined_panel])
+                
+                if not np.all(valid_mask_combined_panel):
+                    num_invalid_corners = len(pixels_out_x_panel) - np.sum(valid_mask_combined_panel)
+                    print(f"      - WARNING: Footprint Panneau {i_fp+1}: {num_invalid_corners} coin(s) projeté(s) hors limites (NaN/Inf).")
+                    projection_errors_count += 1
             except Exception as proj_err:
-                 print(f"      - WARNING: Échec projection coins footprint {i+1}: {proj_err}.")
-                 projection_errors += 1 # Compter aussi les erreurs de projection générales
+                 print(f"      - WARNING: Échec projection coins footprint panneau {i_fp+1}: {proj_err}.")
+                 projection_errors_count += 1
+        
+        if not all_output_pixels_x_valid or not all_output_pixels_y_valid:
+            print("ERREUR [MosaicGridOptim]: Aucun coin de panneau valide projeté sur la grille de sortie après filtrage NaN/Inf.")
+            return None, None
+        if projection_errors_count > 0:
+             print(f"   -> INFO: Erreurs de projection ou points hors limites rencontrés pour {projection_errors_count} footprints de panneaux.")
 
-        # Vérifier s'il reste des points valides après filtrage
-        if not all_output_pixels_x_valid or not all_output_pixels_y_valid: # Vérifier si les listes valides sont vides
-            print("ERREUR: Aucun coin valide projeté après filtrage NaN/Inf.")
+        # Coordonnées pixel min/max dans le système de la grille de sortie
+        x_min_output_grid = np.min(all_output_pixels_x_valid)
+        x_max_output_grid = np.max(all_output_pixels_x_valid)
+        y_min_output_grid = np.min(all_output_pixels_y_valid)
+        y_max_output_grid = np.max(all_output_pixels_y_valid)
+
+        # Vérifier si les limites sont finies (sécurité)
+        if not all(np.isfinite([x_min_output_grid, x_max_output_grid, y_min_output_grid, y_max_output_grid])):
+            print("ERREUR [MosaicGridOptim]: Les limites min/max calculées pour la grille de sortie ne sont pas finies.")
             return None, None
 
-        if projection_errors > 0:
-             print(f"   -> INFO: Erreurs de projection ou points hors limites rencontrés pour {projection_errors} footprints.")
+        # Calculer la largeur et la hauteur en pixels (ajouter 1 car indices 0-based)
+        # Utiliser np.ceil pour s'assurer que tous les pixels extrêmes sont inclus.
+        output_width_pixels = int(np.ceil(x_max_output_grid - x_min_output_grid + 1))
+        output_height_pixels = int(np.ceil(y_max_output_grid - y_min_output_grid + 1))
+        
+        # Assurer une taille minimale pour la grille de sortie
+        output_width_pixels = max(10, output_width_pixels)
+        output_height_pixels = max(10, output_height_pixels)
+        output_shape_hw = (output_height_pixels, output_width_pixels) # Ordre (H, W) pour NumPy
+        print(f"      - Dimensions Finales Mosaïque (Largeur, Hauteur) en pixels: ({output_width_pixels}, {output_height_pixels})")
 
-        # Calculer min/max sur les listes VALIDES
-        x_min_out = np.min(all_output_pixels_x_valid)
-        x_max_out = np.max(all_output_pixels_x_valid)
-        y_min_out = np.min(all_output_pixels_y_valid)
-        y_max_out = np.max(all_output_pixels_y_valid)
+        # --- 6. Finalisation du WCS de Sortie ---
+        #    Ajuster CRPIX pour qu'il corresponde au centre de la mosaïque (median_ra_deg, median_dec_deg)
+        #    dans le système de coordonnées de la grille de sortie (0-based index).
+        #    Le pixel (0,0) de la grille de sortie correspond à (x_min_output_grid, y_min_output_grid)
+        #    dans le système intermédiaire calculé par world_to_pixel().
+        #    CRPIX (1-based FITS) = (coord_centre_interm - coord_min_interm + 1.0)
+        try:
+            center_x_intermediate, center_y_intermediate = output_wcs.world_to_pixel(
+                SkyCoord(ra=median_ra_deg * u.deg, dec=median_dec_deg * u.deg)
+            )
+            output_wcs.wcs.crpix = [
+                center_x_intermediate - x_min_output_grid + 1.0, # CRPIX1 (X)
+                center_y_intermediate - y_min_output_grid + 1.0  # CRPIX2 (Y)
+            ]
+        except Exception as crpix_err:
+            print(f"      - WARNING: Échec ajustement CRPIX du WCS de sortie: {crpix_err}. Utilisation du centre de la grille.")
+            output_wcs.wcs.crpix = [output_width_pixels / 2.0 + 0.5, output_height_pixels / 2.0 + 0.5]
+        
+        # Définir la shape pour l'objet WCS Astropy (W,H)
+        output_wcs.pixel_shape = (output_width_pixels, output_height_pixels)
+        # Mettre à jour les attributs NAXIS internes si possible (bonne pratique pour certaines versions d'Astropy)
+        try:
+            output_wcs._naxis1 = output_width_pixels
+            output_wcs._naxis2 = output_height_pixels
+        except AttributeError:
+            pass # Ignorer si les attributs n'existent pas
 
-        # S'assurer que min/max sont finis après np.min/np.max (sécurité)
-        if not all(np.isfinite([x_min_out, x_max_out, y_min_out, y_max_out])):
-            print("ERREUR: Les limites min/max calculées ne sont pas finies (problème interne ?).")
-            return None, None
+        print(f"      - WCS de Sortie Finalisé: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
+        print(f"DEBUG [MosaicGridOptim]: Calcul de la grille mosaïque terminé avec succès.")
+        return output_wcs, output_shape_hw # Retourne WCS et shape (H, W)
 
-        # Le reste du calcul de out_width/out_height devrait maintenant fonctionner
-        out_width=int(np.ceil(x_max_out-x_min_out+1)); out_height=int(np.ceil(y_max_out-y_min_out+1))
-        out_width=max(10, out_width); out_height=max(10, out_height);
-        output_shape_hw=(out_height, out_width);
-        print(f"      - Dimensions Finales (W, H): ({out_width}, {out_height})")
-
-
-
-        # --- Finalisation WCS Sortie ---
-        try: center_x_out, center_y_out = output_wcs.world_to_pixel(SkyCoord(ra=central_ra_deg*u.deg, dec=central_dec_deg*u.deg)); output_wcs.wcs.crpix = [center_x_out-x_min_out+1.0, center_y_out-y_min_out+1.0]
-        except Exception as crpix_err: print(f"      - WARNING: Échec ajustement CRPIX: {crpix_err}"); output_wcs.wcs.crpix = [out_width/2.0+0.5, out_height/2.0+0.5]
-        output_wcs.pixel_shape = (out_width, out_height) # W, H
-        try: output_wcs._naxis1=out_width; output_wcs._naxis2=out_height
-        except AttributeError: pass
-        print(f"      - WCS Finalisé: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
-
-        print(f"DEBUG [MosaicGridOptim]: Calcul grille OK.")
-        return output_wcs, output_shape_hw
-
-    except Exception as e: print(f"ERREUR [MosaicGridOptim]: Échec global: {e}"); traceback.print_exc(limit=3); return None, None
-
-# --- Fonction principale ---
-def process_mosaic_from_aligned_files(
-        all_aligned_files_with_info, # Liste [(data, hdr, scores, wcs_final), ...]
-        q_manager_instance: SeestarQueuedStacker,
-        progress_callback):
-    """ Orchestre le traitement de mosaïque optimisé. """
-    # ... (définition _progress, vérifications initiales - inchangées) ...
-    def _progress(msg): # Helper interne
-        if progress_callback: 
-            progress_callback(f"   [MosaicProc] {msg}", None)
-        else: 
-            print(f"   [MosaicProc] {msg}")
-    
-    num_aligned = len(all_aligned_files_with_info)
-    _progress(f"Début {num_aligned} images...")
-    if num_aligned < 2: 
-        _progress("⚠️ Pas assez d'images.")
+    except Exception as e_grid_calc:
+        print(f"ERREUR [MosaicGridOptim]: Échec global lors du calcul de la grille mosaïque: {e_grid_calc}")
+        traceback.print_exc(limit=3)
         return None, None
+
+
+
+
+
+# --- DANS seestar/enhancement/mosaic_processor.py ---
+# (Assurez-vous que les imports nécessaires sont présents en haut du fichier :
+#  import os, numpy as np, time, traceback, gc
+#  from astropy.io import fits
+#  from astropy.wcs import WCS # Pas besoin de FITSFixedWarning ici si déjà géré globalement
+#  from astropy.coordinates import SkyCoord
+#  from astropy import units as u
+#  et vos imports locaux comme solve_image_wcs, _save_panel_stack_temp,
+#  _calculate_final_mosaic_grid_optimized, DrizzleProcessor, _DRIZZLE_PROC_AVAILABLE,
+#  SeestarQueuedStacker, PANEL_GROUPING_THRESHOLD_DEG, calculate_angular_distance)
+
+def process_mosaic_from_aligned_files(
+        all_aligned_files_with_info, # Liste de tuples (data, hdr, scores, wcs_obj, valid_pixel_mask)
+        q_manager_instance: SeestarQueuedStacker, # Type hint pour clarté
+        progress_callback): # progress_callback est celui du q_manager, mais nous utiliserons q_manager_instance.update_progress
+    """ 
+    Orchestre le traitement de mosaïque.
+    CORRECTIONS: Utilise q_manager_instance.stop_processing et initialise filename_for_log.
+                 Appelle _stack_batch correctement.
+    """
     
-    # ... (récupération config et fonctions depuis q_manager_instance - inchangé) ...
+    # Fonction helper interne pour les messages de progression
+    def _progress(msg):
+        if hasattr(q_manager_instance, 'update_progress') and callable(q_manager_instance.update_progress):
+            q_manager_instance.update_progress(f"   [MosaicProc] {msg}", None) 
+        else: 
+            print(f"   [MosaicProc FallbackLog] {msg}") # Fallback
+    
+    num_aligned_at_start = len(all_aligned_files_with_info)
+    _progress(f"Début assemblage mosaïque pour {num_aligned_at_start} images alignées fournies...")
+    if num_aligned_at_start < 1:
+        _progress("⚠️ Pas assez d'images pour créer une mosaïque. Traitement annulé.")
+        if hasattr(q_manager_instance, 'processing_error'): # Informer le QM de l'erreur
+            q_manager_instance.processing_error = "Mosaïque: Pas assez d'images"
+        return None, None 
+    
+    # Récupérer la configuration et les fonctions nécessaires
     api_key = getattr(q_manager_instance, 'api_key', None)
     ref_pixel_scale = getattr(q_manager_instance, 'reference_pixel_scale_arcsec', None)
     output_folder = getattr(q_manager_instance, 'output_folder', None)
-    _stack_batch_func = getattr(q_manager_instance, '_stack_batch', None)
+    
     _save_panel_stack_temp_func = _save_panel_stack_temp
     _calculate_final_mosaic_grid_func = _calculate_final_mosaic_grid_optimized
-    drizzle_processor_class = DrizzleProcessor
-    drizzle_params = {
-        'scale_factor': q_manager_instance.drizzle_scale, 
-        'pixfrac': q_manager_instance.drizzle_pixfrac, 
-        'kernel': q_manager_instance.drizzle_kernel
-    }
     
-    if not all([_stack_batch_func, _save_panel_stack_temp_func, _calculate_final_mosaic_grid_func, drizzle_processor_class, output_folder, api_key]): 
-        _progress("❌ ERREUR: Dépendances orchestration manquantes.")
+    if not _DRIZZLE_PROC_AVAILABLE:
+        _progress("❌ ERREUR CRITIQUE: DrizzleProcessor (classe Drizzle) n'est pas disponible. Mosaïque impossible.")
+        if hasattr(q_manager_instance, 'processing_error'):
+            q_manager_instance.processing_error = "Mosaïque: DrizzleProcessor manquant"
+        return None, None
+    drizzle_processor_class = DrizzleProcessor 
+    
+    mosaic_drizzle_params_from_qm = getattr(q_manager_instance, 'mosaic_settings', {})
+    drizzle_params_final_assembly = {
+        'scale_factor': getattr(q_manager_instance, 'drizzle_scale', 2.0), 
+        'pixfrac': mosaic_drizzle_params_from_qm.get('pixfrac', getattr(q_manager_instance, 'drizzle_pixfrac', 1.0)),
+        'kernel': mosaic_drizzle_params_from_qm.get('kernel', getattr(q_manager_instance, 'drizzle_kernel', 'square'))
+    }
+    _progress(f"Paramètres Drizzle pour assemblage final mosaïque: Scale={drizzle_params_final_assembly['scale_factor']}, "
+              f"Kernel='{drizzle_params_final_assembly['kernel']}', Pixfrac={drizzle_params_final_assembly['pixfrac']:.2f}")
+
+    if not all([output_folder, api_key]): 
+        _progress("❌ ERREUR: Dossier de sortie ou clé API Astrometry.net manquant pour la mosaïque.")
+        if hasattr(q_manager_instance, 'processing_error'):
+            q_manager_instance.processing_error = "Mosaïque: Dossier sortie/Clé API manquant"
         return None, None
     
-    # --- Initialisation ---
-    stacked_panels_info = []
-    current_panel_aligned_info = []
+    # Initialisation
+    stacked_panels_info = [] 
+    current_panel_aligned_info = [] 
     last_panel_center_ra = None
     last_panel_center_dec = None
     panel_count = 0
-    total_processed = 0
+    total_images_processed_in_loop = 0
 
     try:
-        # ========================================================
-        # --- 1. Groupement et Traitement par Panneau ---
-        # ========================================================
-        _progress("1. Groupement et traitement par panneau (Stack + Solve)...")
-        num_total_images = len(all_aligned_files_with_info)
-
+        _progress("1. Groupement et traitement par panneau...")
+        
         for i, file_info_tuple in enumerate(all_aligned_files_with_info):
-            # Utiliser un try/except pour chaque image pour plus de robustesse
+            filename_for_log = f"Item_{i+1}_in_list" # Valeur par défaut
+            panel_stack_np = None # S'assurer qu'ils sont définis pour le del dans finally
+            panel_stack_header = None
+            aligned_data = None; header = None; scores = None; wcs_obj = None; valid_pixel_mask = None
+
             try:
-                aligned_data, header, scores, wcs_obj = file_info_tuple
-                if q_manager_instance.stop_processing: 
-                    _progress("🛑 Arrêt demandé.")
-                    return None, None # Vérifier arrêt
+                aligned_data, header, scores, wcs_obj, valid_pixel_mask = file_info_tuple
                 
-                total_processed += 1
-                current_progress = (total_processed / num_total_images) * 50
-                progress_callback(f"   [MosaicProc] Analyse panneau image {total_processed}/{num_total_images}...", current_progress)
+                if header and 'FILENAME' in header:
+                    filename_for_log = header.get('FILENAME', f"Image_{i+1}_hdr_no_fname")
+                elif header:
+                    filename_for_log = f"Image_{i+1}_hdr_exists"
+                
+                # Utiliser l'attribut correct du q_manager pour vérifier l'arrêt
+                if q_manager_instance.stop_processing: 
+                    _progress("🛑 Arrêt demandé par l'utilisateur.")
+                    # Pas besoin de 'return None, None' ici, laisser le finally du _worker gérer
+                    # Il faut juste sortir de cette boucle et laisser le _worker se terminer.
+                    # On peut lever une exception spécifique pour signaler l'arrêt au _worker.
+                    raise InterruptedError("Arrêt utilisateur pendant traitement mosaïque")
+
+                total_images_processed_in_loop += 1
+                current_progress_phase1 = (total_images_processed_in_loop / num_aligned_at_start) * 50 
+                if hasattr(q_manager_instance, 'update_progress') and callable(q_manager_instance.update_progress):
+                     q_manager_instance.update_progress(f"   [MosaicProc] Analyse image {total_images_processed_in_loop}/{num_aligned_at_start} ('{filename_for_log}') pour groupement panneau...", current_progress_phase1)
 
                 if not wcs_obj or not wcs_obj.is_celestial or not hasattr(wcs_obj.wcs, 'crval'):
-                    _progress(f"   - WARNING: WCS invalide image {i+1}. Ignorée.")
-                    continue # Passer à l'image suivante
+                    _progress(f"   - WARNING: WCS invalide pour '{filename_for_log}'. Ignorée pour groupement.")
+                    continue
 
                 img_center_ra = wcs_obj.wcs.crval[0]
                 img_center_dec = wcs_obj.wcs.crval[1]
                 
-                # --- CORRECTION LOGIQUE is_new_panel ---
-                is_new_panel = False # Initialiser à False
+                is_new_panel = False
                 if last_panel_center_ra is None:
-                    # Cas 1: C'est la toute première image valide rencontrée
                     is_new_panel = True
-                    print(f"DEBUG [MosaicProc]: Détection Premier Panneau (Centre WCS: {img_center_ra:.4f}, {img_center_dec:.4f})")
+                    print(f"DEBUG [MosaicProc]: Détection Premier Panneau (Fichier: '{filename_for_log}'). Centre WCS: ({img_center_ra:.4f}, {img_center_dec:.4f})")
                 else:
-                    # Cas 2: Comparer avec le centre du panneau précédent
                     distance = calculate_angular_distance(img_center_ra, img_center_dec, last_panel_center_ra, last_panel_center_dec)
-                    print(f"DEBUG [MosaicProc]: Image {i+1}, Dist au panneau précédent: {distance:.4f} deg") # Log distance
+                    print(f"DEBUG [MosaicProc]: Image '{filename_for_log}', Dist au panneau précédent: {distance:.4f} deg (Seuil: {PANEL_GROUPING_THRESHOLD_DEG:.2f})")
                     if distance > PANEL_GROUPING_THRESHOLD_DEG:
                         is_new_panel = True
-                        print(f"DEBUG [MosaicProc]: Détection Nouveau Panneau (Dist > Seuil). Centre WCS: {img_center_ra:.4f}, {img_center_dec:.4f}")
-                # --- FIN CORRECTION LOGIQUE ---
-
-                # --- Traitement Panneau Précédent ---
+                        print(f"DEBUG [MosaicProc]: Détection Nouveau Panneau (Dist > Seuil). Fichier: '{filename_for_log}'. Centre WCS: ({img_center_ra:.4f}, {img_center_dec:.4f})")
+                
                 if is_new_panel and current_panel_aligned_info:
                     panel_count += 1
-                    _progress(f"Traitement Panneau #{panel_count} ({len(current_panel_aligned_info)} images)...")
-                    panel_images = [info[0] for info in current_panel_aligned_info]
-                    panel_headers = [info[1] for info in current_panel_aligned_info]
-                    panel_scores = [info[2] for info in current_panel_aligned_info]
-                    
-                    if panel_images:
+                    _progress(f"Traitement Panneau Précédent #{panel_count} ({len(current_panel_aligned_info)} images)...")
+                    if current_panel_aligned_info:
                         _progress(f"   -> Stacking Panneau #{panel_count}...")
-                        panel_stack_np, _ = q_manager_instance._stack_batch(panel_images, panel_headers, panel_scores, panel_count)
-                        
+                        panel_stack_np, panel_stack_header, _ = q_manager_instance._stack_batch(
+                            current_panel_aligned_info, panel_count, 0
+                        )
                         if panel_stack_np is not None:
                             _progress(f"   -> Plate-Solving Panneau #{panel_count}...")
-                            fallback_header = panel_headers[0] if panel_headers else fits.Header()
-                            solved_wcs_panel = solve_image_wcs(panel_stack_np, fallback_header, api_key, ref_pixel_scale, progress_callback=progress_callback)
-                            
+                            fallback_header_for_solve = current_panel_aligned_info[0][1] if current_panel_aligned_info else fits.Header()
+                            solved_wcs_panel = solve_image_wcs(panel_stack_np, fallback_header_for_solve, api_key, ref_pixel_scale, progress_callback=q_manager_instance.update_progress)
                             if solved_wcs_panel:
                                 _progress(f"   -> Sauvegarde Stack Panneau #{panel_count}...")
                                 temp_panel_path = _save_panel_stack_temp_func(panel_stack_np, solved_wcs_panel, panel_count, output_folder)
-                                
                                 if temp_panel_path: 
                                     stacked_panels_info.append((temp_panel_path, solved_wcs_panel))
-                                    print(f"DEBUG [MosaicProc]: Panneau {panel_count} traité et ajouté.")
+                                    print(f"DEBUG [MosaicProc]: Panneau #{panel_count} traité et ajouté.")
                                 else: 
                                     _progress(f"   - ERREUR sauvegarde temp panneau #{panel_count}.")
+                                    print(f"ERREUR [MosaicProc]: Échec _save_panel_stack_temp_func pour panneau {panel_count}")
                             else: 
-                                _progress(f"   - WARNING: Plate-solving échoué panneau #{panel_count}.")
+                                _progress(f"   - WARNING: Plate-solving échoué pour panneau #{panel_count}.")
+                                print(f"WARN [MosaicProc]: Échec solve_image_wcs pour panneau {panel_count}")
                         else: 
-                            _progress(f"   - WARNING: Stacking échoué panneau #{panel_count}.")
-                    else: 
-                        _progress(f"   - WARNING: Aucune donnée pour panneau #{panel_count}.")
-                    
-                    # Nettoyer mémoire
-                    del panel_images, panel_headers, panel_scores, panel_stack_np
-                    gc.collect()
-                    current_panel_aligned_info = [] # Réinitialiser
+                            _progress(f"   - WARNING: Stacking (_stack_batch) échoué pour panneau #{panel_count}.")
+                            print(f"WARN [MosaicProc]: Échec _stack_batch pour panneau {panel_count}")
+                    current_panel_aligned_info = []
 
-                # --- Fin Traitement Panneau Précédent ---
-
-                # Ajouter l'info courante au panneau courant
-                current_panel_aligned_info.append((aligned_data, header, scores, wcs_obj))
-                # Mettre à jour le centre de référence si nouveau panneau
+                current_panel_aligned_info.append(file_info_tuple)
                 if is_new_panel: 
                     last_panel_center_ra = img_center_ra
                     last_panel_center_dec = img_center_dec
 
-            except Exception as loop_err: # Gérer erreur dans la boucle pour une image
-                _progress(f"   - ERREUR traitement image {i+1}: {loop_err}")
+            except Exception as loop_err:
+                _progress(f"   - ERREUR traitement '{filename_for_log}' (item {i+1}) dans boucle principale panneaux: {loop_err}")
+                print(f"ERREUR [MosaicProc loop_err] pour '{filename_for_log}': {loop_err}")
                 traceback.print_exc(limit=1)
-                # Essayer de nettoyer la mémoire pour cette image ratée
-                try: 
-                    del aligned_data, header, scores, wcs_obj
-                    gc.collect()
-                except NameError: 
-                    pass
-        # --- Fin Boucle Principale ---
-
+            finally: # Nettoyer les variables de l'itération
+                try: del aligned_data, header, scores, wcs_obj, valid_pixel_mask
+                except NameError: pass
+                if panel_stack_np is not None: del panel_stack_np
+                if panel_stack_header is not None: del panel_stack_header
+                if (i + 1) % 10 == 0: gc.collect() # GC occasionnel
+        
         # --- Traiter le TOUT dernier panneau ---
         if current_panel_aligned_info:
             panel_count += 1
-            _progress(f"Traitement Dernier Panneau #{panel_count} ({len(current_panel_aligned_info)} images)...")
-            # --- Copier/Coller logique Stack, Solve, Save ---
-            panel_images = [info[0] for info in current_panel_aligned_info]
-            panel_headers = [info[1] for info in current_panel_aligned_info]
-            panel_scores = [info[2] for info in current_panel_aligned_info]
-            
-            if panel_images:
-                _progress(f"   -> Stacking Dernier Panneau #{panel_count}...")
-                panel_stack_np, _ = q_manager_instance._stack_batch(panel_images, panel_headers, panel_scores, panel_count)
-                del panel_images, panel_headers, panel_scores
-                gc.collect()
-                
-                if panel_stack_np is not None:
-                    _progress(f"   -> Plate-Solving Dernier Panneau #{panel_count}...")
-                    fallback_header = current_panel_aligned_info[0][1] if current_panel_aligned_info else fits.Header()
-                    solved_wcs_panel = solve_image_wcs(panel_stack_np, fallback_header, api_key, ref_pixel_scale, progress_callback=progress_callback)
-                    
-                    if solved_wcs_panel:
-                        _progress(f"   -> Sauvegarde Dernier Stack Panneau #{panel_count}...")
-                        temp_panel_path = _save_panel_stack_temp_func(panel_stack_np, solved_wcs_panel, panel_count, output_folder)
-                        
-                        if temp_panel_path: 
-                            stacked_panels_info.append((temp_panel_path, solved_wcs_panel))
-                            print(f"DEBUG [MosaicProc]: Dernier panneau ajouté.")
+            _progress(f"Traitement du Dernier Panneau #{panel_count} ({len(current_panel_aligned_info)} images)...")
+            panel_stack_np = None # Initialiser pour le finally
+            panel_stack_header = None
+            try:
+                if current_panel_aligned_info:
+                    _progress(f"   -> Stacking Dernier Panneau #{panel_count}...")
+                    panel_stack_np, panel_stack_header, _ = q_manager_instance._stack_batch(
+                        current_panel_aligned_info, panel_count, 0
+                    )
+                    if panel_stack_np is not None:
+                        _progress(f"   -> Plate-Solving Dernier Panneau #{panel_count}...")
+                        fallback_header_for_solve = current_panel_aligned_info[0][1] if current_panel_aligned_info else fits.Header()
+                        solved_wcs_panel = solve_image_wcs(panel_stack_np, fallback_header_for_solve, api_key, ref_pixel_scale, progress_callback=q_manager_instance.update_progress)
+                        if solved_wcs_panel:
+                            _progress(f"   -> Sauvegarde Dernier Stack Panneau #{panel_count}...")
+                            temp_panel_path = _save_panel_stack_temp_func(panel_stack_np, solved_wcs_panel, panel_count, output_folder)
+                            if temp_panel_path: 
+                                stacked_panels_info.append((temp_panel_path, solved_wcs_panel))
+                                print(f"DEBUG [MosaicProc]: Dernier panneau traité et ajouté.")
+                            else: 
+                                _progress(f"   - ERREUR sauvegarde temp dernier panneau.")
                         else: 
-                            _progress(f"   - ERREUR sauvegarde temp dernier panneau.")
+                            _progress(f"   - WARNING: Plate-solving échoué pour dernier panneau.")
                     else: 
-                        _progress(f"   - WARNING: Plate-solving échoué dernier panneau.")
-                else: 
-                    _progress(f"   - WARNING: Stacking échoué dernier panneau.")
-            else: 
-                _progress(f"   - WARNING: Aucune donnée lue pour dernier panneau.")
-            
-            del current_panel_aligned_info
-            gc.collect()
-        # --- Fin traitement dernier panneau ---
-
-        # --- Vider la liste originale (contient données mémoire) ---
-        del all_aligned_files_with_info
+                        _progress(f"   - WARNING: Stacking (_stack_batch) échoué pour dernier panneau.")
+            except Exception as last_panel_err:
+                 _progress(f"   - ERREUR traitement dernier panneau: {last_panel_err}")
+                 print(f"ERREUR [MosaicProc last_panel_err]: {last_panel_err}")
+                 traceback.print_exc(limit=1)
+            finally:
+                if panel_stack_np is not None: del panel_stack_np
+                if panel_stack_header is not None: del panel_stack_header
+                del current_panel_aligned_info 
+                gc.collect()
+        
+        del all_aligned_files_with_info 
         gc.collect()
-        _progress("Traitement de tous les panneaux terminé.")
-
+        _progress("Traitement de tous les panneaux (stack+solve) terminé.")
+        print(f"DEBUG [MosaicProc]: Nombre total de panneaux stackés et résolus prêts pour assemblage: {len(stacked_panels_info)}")
 
         # ========================================================
         # --- 2. Calcul Grille Finale & Assemblage Drizzle ---
         # ========================================================
-
-        # --- 2. Calcul Grille Finale & Assemblage Drizzle ---
-        if not stacked_panels_info:
-            _progress("❌ ERREUR: Aucun panneau stacké/résolu produit. Impossible d'assembler.")
+        # ... (Cette partie reste identique à la version de ma réponse précédente)
+        if not stacked_panels_info: 
+            _progress("❌ ERREUR: Aucun panneau stacké/résolu produit. Impossible d'assembler la mosaïque.")
+            if hasattr(q_manager_instance, 'processing_error'): q_manager_instance.processing_error = "Mosaïque: Aucun panneau valide"
             return None, None
 
         _progress("Calcul de la grille de sortie finale pour la mosaïque...")
-        panel_wcs_list = [info[1] for info in stacked_panels_info]
-        panel_shapes_hw = []
-        
-        for fpath, _wcs in stacked_panels_info:
-            shape = None
-            try: # Lire la shape H,W depuis le fichier FITS temporaire du panneau
-                with fits.open(fpath, memmap=False) as hdul: 
-                    shape = hdul[0].shape[1:] # H,W depuis CxHxW
-            except Exception as e: 
-                print(f"WARN: Err lecture shape {os.path.basename(fpath)}: {e}")
-            panel_shapes_hw.append(shape if shape and len(shape)==2 else None)
+        if hasattr(q_manager_instance, 'update_progress') and callable(q_manager_instance.update_progress):
+             q_manager_instance.update_progress("   [MosaicProc] Calcul grille finale...", 60)
 
-        if None in panel_shapes_hw:
-            _progress("❌ ERREUR: Impossible lire shape de tous les panneaux temp.")
+        panel_wcs_list_for_grid = []
+        panel_shapes_hw_list_for_grid = []
+        temp_panel_paths_for_final_drizzle = []
+
+        for fpath, wcs_panel_obj in stacked_panels_info:
+            shape_hw_panel = None
+            try:
+                with fits.open(fpath, memmap=False) as hdul: 
+                    if hdul[0].data is not None and hdul[0].data.ndim == 3: shape_hw_panel = hdul[0].shape[1:]
+            except Exception as e_shape: 
+                _progress(f"   - WARNING: Erreur lecture shape panneau {os.path.basename(fpath)}: {e_shape}. Ignoré.")
+            
+            if shape_hw_panel and len(shape_hw_panel)==2 and wcs_panel_obj:
+                panel_wcs_list_for_grid.append(wcs_panel_obj); panel_shapes_hw_list_for_grid.append(shape_hw_panel)
+                temp_panel_paths_for_final_drizzle.append(fpath)
+            else: _progress(f"   - WARNING: Panneau {os.path.basename(fpath)} shape/WCS invalide. Ignoré pour grille/drizzle.")
+
+        if not panel_wcs_list_for_grid or not temp_panel_paths_for_final_drizzle:
+            _progress("❌ ERREUR: Pas assez de panneaux valides pour grille/assemblage."); 
+            if hasattr(q_manager_instance, 'processing_error'): q_manager_instance.processing_error = "Mosaïque: Panneaux invalides pour grille/assemblage"
             return None, None
 
-        # Appeler la fonction de calcul de grille (locale/importée)
         final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid_func(
-            panel_wcs_list, panel_shapes_hw, drizzle_params['scale_factor']
+            panel_wcs_list_for_grid, panel_shapes_hw_list_for_grid, drizzle_params_final_assembly['scale_factor']
         )
 
         if final_output_wcs is None or final_output_shape_hw is None:
-            _progress("❌ ERREUR: Échec calcul grille de sortie mosaïque finale.")
+            _progress("❌ ERREUR: Échec calcul grille sortie mosaïque finale."); 
+            if hasattr(q_manager_instance, 'processing_error'): q_manager_instance.processing_error = "Mosaïque: Échec calcul grille finale"
             return None, None
+        
+        _progress(f"Assemblage final Drizzle sur grille {final_output_shape_hw} (H,W)...")
+        if hasattr(q_manager_instance, 'update_progress') and callable(q_manager_instance.update_progress):
+            q_manager_instance.update_progress("   [MosaicProc] Assemblage Drizzle final...", 85)
 
-        _progress(f"Assemblage final Drizzle sur grille {final_output_shape_hw}...")
-        if not _DRIZZLE_PROC_AVAILABLE: 
-            _progress("❌ ERREUR: DrizzleProcessor non disponible.")
-            return None, None # Re-vérifier
-
-        # Instancier DrizzleProcessor
-        mosaic_drizzler = drizzle_processor_class(**drizzle_params) # Utilise kernel/pixfrac passés
-        panel_stack_paths = [info[0] for info in stacked_panels_info] # Chemins des stacks panneaux
-
-        # Appel à l'assemblage final Drizzle
-        final_mosaic_sci, final_mosaic_wht = mosaic_drizzler.apply_drizzle(
-            temp_filepath_list=panel_stack_paths,
-            output_wcs=final_output_wcs,           # <<<--- Utiliser la variable correcte
-            output_shape_2d_hw=final_output_shape_hw # <<<--- Utiliser la variable correcte
+        mosaic_drizzler = drizzle_processor_class(**drizzle_params_final_assembly)
+        
+        final_mosaic_sci, final_mosaic_wht = mosaic_drizzler.apply_drizzle( # Appel de la méthode corrigée
+            temp_filepath_list=temp_panel_paths_for_final_drizzle, 
+            output_wcs=final_output_wcs, 
+            output_shape_2d_hw=final_output_shape_hw
         )
-        print(f"DEBUG [MosaicProc result]: Reçu de apply_drizzle -> SCI is None? {final_mosaic_sci is None}, WHT is None? {final_mosaic_wht is None}")
+        
         if final_mosaic_sci is None:
-            _progress("❌ ERREUR: Échec de l'assemblage final Drizzle.")
+            _progress("❌ ERREUR: Échec assemblage final Drizzle mosaïque."); 
+            if hasattr(q_manager_instance, 'processing_error'): q_manager_instance.processing_error = "Mosaïque: Échec assemblage Drizzle final"
             return None, None
 
-        _progress("✅ Assemblage mosaïque terminé.")
-        if final_mosaic_wht is not None: 
-            del final_mosaic_wht
-            gc.collect() # Nettoyer WHT
+        _progress("✅ Assemblage Drizzle mosaïque terminé.")
+        if final_mosaic_wht is not None: del final_mosaic_wht; gc.collect()
 
         # ========================================================
         # --- 3. Création Header Final et Retour ---
         # ========================================================
-        _progress("Création header final et màj compteur...")
+        # ... (Cette partie reste identique à ma réponse précédente, avec la création du header final)
+        _progress("Création du header final pour la mosaïque...")
+        if hasattr(q_manager_instance, 'update_progress') and callable(q_manager_instance.update_progress):
+            q_manager_instance.update_progress("   [MosaicProc] Création header final...", 98)
+
         final_header = fits.Header()
         if final_output_wcs: final_header.update(final_output_wcs.to_header(relax=True))
-        ref_hdr = getattr(q_manager_instance, 'reference_header_for_wcs', None)
-        if ref_hdr: # ... (copie métadonnées) ...
+        
+        ref_hdr_global = getattr(q_manager_instance, 'reference_header_for_wcs', None)
+        if ref_hdr_global:
             keys_to_copy=['INSTRUME','TELESCOP','OBJECT','FILTER','DATE-OBS','GAIN','OFFSET','CCD-TEMP','SITELAT','SITELONG','FOCALLEN','APERTURE']
-            # Utiliser set pour éviter KeyError si commentaire manque
             for k in keys_to_copy:
-                if k in ref_hdr: final_header.set(k, ref_hdr[k], ref_hdr.comments[k] if k in ref_hdr.comments else None)
+                if k in ref_hdr_global: 
+                    try: final_header.set(k, ref_hdr_global[k], ref_hdr_global.comments[k] if k in ref_hdr_global.comments else None)
+                    except Exception: final_header.set(k, ref_hdr_global[k])
 
-        final_header['STACKTYP'] = (f'Mosaic Drizzle Panel ({drizzle_params["scale_factor"]:.1f}x)', 'Mosaic from solved panels')
-        final_header['DRZSCALE'] = (drizzle_params['scale_factor']); final_header['DRZKERNEL'] = (drizzle_params['kernel']); final_header['DRZPIXFR'] = (drizzle_params['pixfrac'])
-        final_header['DRZKERNEL'] = (drizzle_params['kernel'], 'Drizzle kernel')
-        final_header['DRZPIXFR'] = (drizzle_params['pixfrac'], 'Drizzle pixfrac')
-        final_header['NPANELS'] = (panel_count, 'Number of panels processed')
-        # --- MISE A JOUR COMPTEUR PARENT ---
-        # Utiliser processed_count de la boucle d'assemblage Drizzle
-        # ou num_aligned si on veut le nombre total d'images alignées initialement ?
-        # Utilisons processed_count pour le header NIMAGES, mais mettons à jour
-        # le compteur global du QM avec num_aligned pour la cohérence du rapport final.
-        # images_in_final_mosaic = processed_count # Nombre réellement drizzlé
-        final_header['NIMAGES'] = (num_aligned, 'Images combined in final mosaic')
-        # Mettre à jour le compteur principal du QueueManager pour le rapport final
-        # Utiliser num_aligned (nombre total d'images alignées passées)
-        setattr(q_manager_instance, 'images_in_cumulative_stack', num_aligned)
-        print(f"DEBUG [MosaicProc]: Mise à jour q_manager.images_in_cumulative_stack = {num_aligned}")
-        # --- FIN MISE A JOUR ---
-        approx_tot_exp = 0.0; # ... (calcul TOTEXP comme avant) ...
-        if ref_hdr and 'EXPTIME' in ref_hdr: 
-            try: approx_tot_exp = float(ref_hdr['EXPTIME']) * num_aligned
-            except: pass
-        final_header['TOTEXP'] = (round(approx_tot_exp, 2), '[s] Approx total exposure processed')
-        final_header['ALIGNED'] = (getattr(q_manager_instance,'aligned_files_count',0))
-        final_header['FAILALIGN'] = (getattr(q_manager_instance, 'failed_align_count', 0), 'Failed alignments (initial)')
-        final_header['FAILSTACK'] = (getattr(q_manager_instance, 'failed_stack_count', 0), 'Images failed in panel stack/solve/drizzle')
-        final_header['SKIPPED'] = (getattr(q_manager_instance, 'skipped_files_count', 0), 'Other skipped/error files')
+        final_header['STACKTYP'] = (f'Mosaic Drizzle ({drizzle_params_final_assembly["scale_factor"]:.1f}x)', 'Mosaic from solved & stacked panels')
+        final_header['DRZSCALE'] = (drizzle_params_final_assembly['scale_factor'], 'Mosaic Drizzle scale factor')
+        final_header['DRZKERNEL'] = (drizzle_params_final_assembly['kernel'], 'Mosaic Drizzle kernel')
+        final_header['DRZPIXFR'] = (drizzle_params_final_assembly['pixfrac'], 'Mosaic Drizzle pixfrac')
+        final_header['NPANELS'] = (panel_count, 'Number of panels identified and processed')
+        final_header['NIMAGES'] = (num_aligned_at_start, 'Total source aligned images for mosaic process')
+
+        if hasattr(q_manager_instance, 'images_in_cumulative_stack'):
+            q_manager_instance.images_in_cumulative_stack = num_aligned_at_start
+        print(f"DEBUG [MosaicProc]: Compteur images QM mis à jour pour rapport final: {num_aligned_at_start}")
+        
+        approx_tot_exp = 0.0
+        if ref_hdr_global and 'EXPTIME' in ref_hdr_global: 
+            try: approx_tot_exp = float(ref_hdr_global['EXPTIME']) * num_aligned_at_start
+            except (ValueError, TypeError): pass
+        final_header['TOTEXP'] = (round(approx_tot_exp, 2), '[s] Approx total exposure of source images')
+
+        final_header['ALIGNED'] = (num_aligned_at_start, 'Source images initially passed to mosaic process')
+        final_header['FAILALIGN'] = (getattr(q_manager_instance, 'failed_align_count', 0), 'Failed alignments (initial pre-mosaic stage)')
+        num_successfully_stacked_panels = len(stacked_panels_info)
+        failed_panel_processing_count = panel_count - num_successfully_stacked_panels
+        final_header['FAILSTACK'] = (failed_panel_processing_count, 'Panels that failed stacking or solving')
+        final_header['SKIPPED'] = (getattr(q_manager_instance, 'skipped_files_count', 0), 'Other skipped/error files (initial pre-mosaic stage)')
 
         _progress("Orchestration mosaïque terminée avec succès.")
-        # Retourner l'image HxWxC float32 et le header
         return final_mosaic_sci.astype(np.float32), final_header
-    except Exception as e:
-        _progress(f"❌ ERREUR dans le traitement de la mosaïque: {e}")
-        traceback.print_exc()
+
+    except InterruptedError: # Gérer l'arrêt utilisateur
+        _progress("🛑 Traitement mosaïque interrompu par l'utilisateur (depuis InterruptedError).")
+        if hasattr(q_manager_instance, 'processing_error'):
+            q_manager_instance.processing_error = "Mosaïque: Arrêt utilisateur"
         return None, None
-    
+    except Exception as e_mosaic_main:
+        _progress(f"❌ ERREUR CRITIQUE dans le traitement de la mosaïque: {e_mosaic_main}")
+        print(f"ERREUR MAJEURE [MosaicProc]: {e_mosaic_main}")
+        traceback.print_exc()
+        if hasattr(q_manager_instance, 'processing_error'):
+            q_manager_instance.processing_error = f"Mosaïque: {e_mosaic_main}"
+        return None, None
+    finally:
+        print("DEBUG [MosaicProc]: Fin de process_mosaic_from_aligned_files (dans le bloc finally).")
+        # Assurer le nettoyage des listes volumineuses
+        try: del all_aligned_files_with_info
+        except NameError: pass
+        try: del current_panel_aligned_info
+        except NameError: pass
+        try: del stacked_panels_info
+        except NameError: pass
+        gc.collect()
+
+
+
+
+
+
 def _save_panel_stack_temp(panel_stack_data, solved_wcs, panel_index, output_folder):
      # ... (Code complet comme à l'étape 22) ...
      # ... (S'assurer qu'elle retourne bien le chemin ou None) ...
