@@ -153,5 +153,5 @@ tqdm             # Progress bars (used by backend?)
 #      ou "CUDA runtime error" au démarrage ou pendant le traitement signifient que
 #      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
 #
-# cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
+# cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré..
 # ---------------------------------------------------------------------------
