@@ -22,7 +22,7 @@ ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
 photoutils #stack enhancement
-
+photutils
 # --- GUI & Utilities ---
 matplotlib        # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
