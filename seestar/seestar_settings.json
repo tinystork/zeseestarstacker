@@ -1,7 +1,8 @@
 {
     "version": "1.8.1",
-    "input_folder": "F:\\astro photos\\seestar s 50\\M 81\\M 81_mosaic_sub",
-    "output_folder": "F:\\astro photos\\seestar s 50\\M 51\\out",
+
+    "input_folder": "",
+    "output_folder": "",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
     "stacking_mode": "winsorized-sigma",

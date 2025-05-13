@@ -15,9 +15,6 @@ opencv-python  # OpenCV for image operations (cv2)
 Pillow           # Image handling (PIL fork)
 scikit-image     # Image algorithms (skimage)
 colour-demosaicing # Debayering algorithms
-<<<<<<< HEAD
-astroalign==3.0.1        # Image alignment
-=======
 astroalign       # Image alignment
 >>>>>>> graphic-Beta
 ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
@@ -26,14 +23,8 @@ ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
 photoutils #stack enhancement
-<<<<<<< HEAD
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
-=======
-photutils
-# --- GUI & Utilities ---
-matplotlib        # Plotting (Histogram)
->>>>>>> graphic-Beta
 tqdm             # Progress bars (used by backend?)
 
 # --- Optional Dependencies ---
@@ -162,9 +153,5 @@ tqdm             # Progress bars (used by backend?)
 #      ou "CUDA runtime error" au démarrage ou pendant le traitement signifient que
 #      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
 #
-<<<<<<< HEAD
 # cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
 # ---------------------------------------------------------------------------
-=======
-# cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
->>>>>>> graphic-Beta
