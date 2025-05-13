@@ -11,24 +11,25 @@ scipy                    # Scientific library (dependency for skimage, maybe acs
 astropy                  # Core astronomy package (includes ccdproc)
 
 # --- Image Processing & Alignment ---
-opencv-python==4.8.1.78  # OpenCV for image operations (cv2)
-Pillow==10.1.0           # Image handling (PIL fork)
-scikit-image==0.21.0     # Image algorithms (skimage)
-colour-demosaicing==0.1.0 # Debayering algorithms
-astroalign==3.0.1        # Image alignment
+opencv-python  # OpenCV for image operations (cv2)
+Pillow           # Image handling (PIL fork)
+scikit-image     # Image algorithms (skimage)
+colour-demosaicing # Debayering algorithms
+astroalign       # Image alignment
 ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 
 # --- Drizzle & Related (STScI) ---
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
-
+photoutils #stack enhancement
+photutils
 # --- GUI & Utilities ---
-matplotlib==3.7.3        # Plotting (Histogram)
-tqdm==4.66.1             # Progress bars (used by backend?)
+matplotlib        # Plotting (Histogram)
+tqdm             # Progress bars (used by backend?)
 
 # --- Optional Dependencies ---
- psutil==5.9.6            # For automatic batch size estimation (Uncomment if needed)
- acstools==3.6.0          # For satellite trail detection (Uncomment if needed)
+ psutil            # For automatic batch size estimation (Uncomment if needed)
+ acstools          # For satellite trail detection (Uncomment if needed)
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
                            # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
@@ -153,4 +154,3 @@ tqdm==4.66.1             # Progress bars (used by backend?)
 #      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
 #
 # cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
-# ---------------------------------------------------------------------------
