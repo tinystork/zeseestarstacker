@@ -667,85 +667,88 @@ class SeestarQueuedStacker:
 
 
 
+
     def _create_drizzle_output_wcs(self, ref_wcs, ref_shape_2d, scale_factor):
         """
         Crée le WCS et la shape (H,W) pour l'image Drizzle de sortie.
-        Adapté de full_drizzle.py.
+        Inspiré de full_drizzle.py corrigé pour conserver le même centre ciel.
 
-        Args:
-            ref_wcs (astropy.wcs.WCS): Objet WCS de référence (validé, avec pixel_shape).
-            ref_shape_2d (tuple): Shape (H, W) de l'image de référence.
-            scale_factor (float): Facteur d'échelle Drizzle.
+        Args
+        ----
+        ref_wcs : astropy.wcs.WCS
+            WCS de référence (doit être céleste et avoir pixel_shape).
+        ref_shape_2d : tuple(int, int)
+            (H, W) de l'image de référence.
+        scale_factor : float
+            Facteur d'échantillonnage Drizzle (>1 = sur-échantillonner).
 
-        Returns:
-            tuple: (output_wcs, output_shape_2d_hw) ou lève une erreur.
-                   output_shape_2d_hw est au format (H, W).
+        Returns
+        -------
+        (output_wcs, output_shape_hw)  où output_shape_hw = (H, W)
         """
+        # ------------------ 0. Vérifications ------------------
         if not ref_wcs or not ref_wcs.is_celestial:
             raise ValueError("Référence WCS invalide ou non céleste pour Drizzle.")
         if ref_wcs.pixel_shape is None:
             raise ValueError("Référence WCS n'a pas de pixel_shape défini.")
         if len(ref_shape_2d) != 2:
-             raise ValueError(f"Référence shape 2D (H,W) attendue, reçu {ref_shape_2d}")
+            raise ValueError(f"Référence shape 2D (H,W) attendu, reçu {ref_shape_2d}")
 
-        h_in, w_in = ref_shape_2d
-        # Utiliser round() pour obtenir des dimensions entières plus proches
+        # ------------------ 1. Dimensions de sortie ------------------
+        h_in,  w_in  = ref_shape_2d          # entrée (H,W)
         out_h = int(round(h_in * scale_factor))
         out_w = int(round(w_in * scale_factor))
-        # Assurer des dimensions minimales
-        out_h = max(1, out_h); out_w = max(1, out_w)
-        out_shape_2d_hw = (out_h, out_w) # Ordre (H, W) pour NumPy
+        out_h = max(1, out_h); out_w = max(1, out_w)  # sécurité
+        out_shape_hw = (out_h, out_w)        # (H,W) pour NumPy
 
-        # Copier le WCS d'entrée et ajuster
+        print(f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}")
+
+        # ------------------ 2. Copier le WCS ------------------
         out_wcs = ref_wcs.deepcopy()
 
-        # Ajuster échelle via CDELT ou CD matrix
-        scale_adjusted = False
+        # ------------------ 3. Ajuster l'échelle pixel ------------------
+        scale_done = False
         try:
-            # Prioriser la matrice CD si elle existe et est valide
+            # a) Matrice CD prioritaire
             if hasattr(out_wcs.wcs, 'cd') and out_wcs.wcs.cd is not None and np.any(out_wcs.wcs.cd):
-                # print("   DEBUG WCS Out: Adjusting scale via CD matrix.") # Debug
-                # Division simple de la matrice par le facteur d'échelle
                 out_wcs.wcs.cd = ref_wcs.wcs.cd / scale_factor
-                scale_adjusted = True
-            # Sinon, utiliser CDELT (et s'assurer que PC existe)
+                scale_done = True
+                print("[DrizzleWCS] CD matrix divisée par", scale_factor)
+            # b) Sinon CDELT (+ PC identité si absent)
             elif hasattr(out_wcs.wcs, 'cdelt') and out_wcs.wcs.cdelt is not None and np.any(out_wcs.wcs.cdelt):
-                # print("   DEBUG WCS Out: Adjusting scale via CDELT vector.") # Debug
                 out_wcs.wcs.cdelt = ref_wcs.wcs.cdelt / scale_factor
-                # S'assurer que la matrice PC existe (même si identité)
-                if not hasattr(out_wcs.wcs, 'pc') or out_wcs.wcs.pc is None:
-                     out_wcs.wcs.pc = np.identity(2)
-                     # print("   DEBUG WCS Out: Ensuring PC matrix is identity.") # Debug
-                elif not np.allclose(out_wcs.wcs.pc, np.identity(2)):
-                     print("     - Warning WCS Out: PC matrix exists and is not identity.") # Garder cet avertissement
-                scale_adjusted = True
+                if not getattr(out_wcs.wcs, 'pc', None) is not None:
+                    out_wcs.wcs.pc = np.identity(2)
+                scale_done = True
+                print("[DrizzleWCS] CDELT vector divisé par", scale_factor)
             else:
                 raise ValueError("Input WCS lacks valid CD matrix and CDELT vector.")
         except Exception as e:
             raise ValueError(f"Failed to adjust pixel scale in output WCS: {e}")
 
-        if not scale_adjusted: # Double vérification
-             raise ValueError("Could not adjust WCS scale.")
+        if not scale_done:
+            raise ValueError("Could not adjust WCS scale.")
 
-        # Centrer CRPIX sur la nouvelle image de sortie
-        # Le centre pixel est (N/2 + 0.5) en convention FITS 1-based index
-        # Pour WCS Astropy (0-based), le centre est (N-1)/2.
-        # Cependant, crpix est 1-based. Donc on utilise N/2 + 0.5
-        new_crpix_x = out_w / 2.0 + 0.5
-        new_crpix_y = out_h / 2.0 + 0.5
-        out_wcs.wcs.crpix = [new_crpix_x, new_crpix_y]
+        # ------------------ 4. Recaler CRPIX ------------------
+        # → garder le même point du ciel au même pixel relatif :
+        #    CRPIX_out = CRPIX_in * scale_factor  (1‑based convention FITS)
+        new_crpix = np.round(np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor, 6)
+        out_wcs.wcs.crpix = new_crpix.tolist()
+        print(f"[DrizzleWCS] CRPIX in={ref_wcs.wcs.crpix}  ->  out={out_wcs.wcs.crpix}")
 
-        # Définir la taille pixel de sortie pour Astropy (W, H)
-        out_wcs.pixel_shape = (out_w, out_h)
-        # Mettre à jour aussi les attributs NAXIS internes si possible (bonne pratique)
-        try:
+        # ------------------ 5. Mettre à jour la taille interne ------------------
+        out_wcs.pixel_shape = (out_w, out_h)   # (W,H) pour Astropy
+        try:                                   # certains attributs privés selon versions
             out_wcs._naxis1 = out_w
             out_wcs._naxis2 = out_h
         except AttributeError:
-            pass # Ignorer si les attributs n'existent pas (versions WCS plus anciennes?)
+            pass
 
-        print(f"   - Output WCS créé: Shape={out_shape_2d_hw} (H,W), CRPIX={out_wcs.wcs.crpix}")
-        return out_wcs, out_shape_2d_hw # Retourne WCS et shape (H, W)
+        print(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
+        return out_wcs, out_shape_hw
+
+
+
 
 
 ###########################################################################################################################################################
@@ -1931,11 +1934,30 @@ class SeestarQueuedStacker:
             # --- FIN NOUVEAU ---
 
 
+
             # 7. Calcul des scores de qualité (sur image alignée)
             print(f"  -> [7/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting:
                 quality_scores = self._calculate_quality_metrics(aligned_img) # Log interne
                 print(f"     - Scores Qualité: SNR={quality_scores.get('snr',0):.2f}, Stars={quality_scores.get('stars',0):.3f}")
+
+                # ========================= NOUVELLE SECTION AJOUTÉE =========================
+                # Définir un seuil pour le score "stars". 
+                # Un score de 0.05 correspondrait à 10 étoiles si max_stars_for_score = 200.
+                # Ajustez cette valeur si nécessaire.
+                min_star_score_threshold = 0.025 # Exemple: au moins 5 étoiles si max_stars_for_score=200
+                                                 # (0.025 * 200 = 5)
+
+                current_star_score = quality_scores.get('stars', 0.0)
+                if current_star_score < min_star_score_threshold:
+                    # Si le score d'étoiles est trop bas, lever une ValueError
+                    # pour que l'image soit traitée par le bloc except plus bas
+                    # (et donc potentiellement déplacée vers unaligned_files).
+                    error_message = (f"Score d'étoiles ({current_star_score:.3f}) trop bas "
+                                     f"(seuil: {min_star_score_threshold:.3f}). Image considérée comme inalignable/vide.")
+                    print(f"     - REJET (Qualité): {error_message}") # Log spécifique
+                    raise ValueError(error_message)
+                # ======================= FIN DE LA NOUVELLE SECTION =======================
             else:
                 print(f"     - Pondération qualité désactivée, scores non calculés (par défaut).")
 
@@ -4274,37 +4296,74 @@ class SeestarQueuedStacker:
             print(f"ERREUR QM [_process_and_save_drizzle_batch V2_CORRECTED]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
             return None, []
 
+
         # --- Boucle sur les images VALIDES du lot ---
         processed_in_batch_count = 0
         for i, (input_data_hxwx3, input_header, wcs_input_image) in enumerate(valid_batch_items): # Utiliser wcs_input_image
             if self.stop_processing: self.update_progress("🛑 Arrêt pendant traitement lot Drizzle."); break
-            print(f"DEBUG QM [_process_and_save_drizzle_batch V2_CORRECTED]: Traitement image {i+1}/{num_valid_images} du lot #{batch_num}...")
+            # Nom de fichier pour les logs
+            current_filename_for_log = input_header.get('FILENAME', f'Img_{i+1}_du_lot') if input_header else f'Img_{i+1}_du_lot'
+            print(f"DEBUG QM [_process_and_save_drizzle_batch V2_CORRECTED]: Traitement image {i+1}/{num_valid_images} ('{current_filename_for_log}') du lot #{batch_num}...")
 
             pixmap = None
             try:
                 current_input_shape_hw = input_data_hxwx3.shape[:2]
                 y_in, x_in = np.indices(current_input_shape_hw)
+                
                 # Utiliser le WCS de l'image d'ENTRÉE pour convertir vers le ciel
-                world_coords = wcs_input_image.all_pix2world(x_in.flatten(), y_in.flatten(), 0)
+                print(f"          Pour '{current_filename_for_log}': WCS Entrée CRVAL=({wcs_input_image.wcs.crval[0]:.4f}, {wcs_input_image.wcs.crval[1]:.4f}), PixelShape={wcs_input_image.pixel_shape}") # LOG WCS Entrée
+                world_coords_ra, world_coords_dec = wcs_input_image.all_pix2world(x_in.flatten(), y_in.flatten(), 0)
+                print(f"          Pour '{current_filename_for_log}': Pixels Entrée -> Ciel OK. Nb points: {world_coords_ra.size}")
+                
                 # Projeter depuis le ciel vers les pixels de la grille de SORTIE Drizzle
-                x_out, y_out = output_wcs.all_world2pix(world_coords[0], world_coords[1], 0)
-                pixmap = np.dstack((x_out.reshape(current_input_shape_hw), y_out.reshape(current_input_shape_hw))).astype(np.float32)
-            except Exception as map_err:
-                self.update_progress(f"      -> ERREUR création pixmap image {i+1}: {map_err}. Ignorée.")
-                print(f"ERREUR QM [_process_and_save_drizzle_batch V2_CORRECTED]: Échec pixmap img {i+1}: {map_err}")
-                continue
+                # output_wcs est le WCS de la grille Drizzle cible (grand format)
+                print(f"          Pour '{current_filename_for_log}': WCS Sortie (cible Drizzle) CRVAL=({output_wcs.wcs.crval[0]:.4f}, {output_wcs.wcs.crval[1]:.4f}), PixelShape={output_wcs.pixel_shape}, OutputShapeHW={output_shape_2d_hw}") # LOG WCS Sortie
+                x_out, y_out = output_wcs.all_world2pix(world_coords_ra, world_coords_dec, 0)
+                print(f"          Pour '{current_filename_for_log}': Ciel -> Pixels Sortie OK.")
 
-            if pixmap is not None:
+                pixmap = np.dstack((x_out.reshape(current_input_shape_hw), y_out.reshape(current_input_shape_hw))).astype(np.float32)
+                
+                # ===== AJOUT DE LOGS POUR PIXMAP (identique à ma proposition précédente) =====
+                print(f"        - Pixmap calculé pour '{current_filename_for_log}'. Shape: {pixmap.shape}")
+                if pixmap.size > 0: 
+                    finite_x_out = pixmap[...,0][np.isfinite(pixmap[...,0])]
+                    finite_y_out = pixmap[...,1][np.isfinite(pixmap[...,1])]
+                    if finite_x_out.size > 0 :
+                        print(f"          Range X_out (valides): [{np.min(finite_x_out):.1f}, {np.max(finite_x_out):.1f}] (Shape Sortie W: {output_shape_2d_hw[1]})")
+                    else:
+                        print(f"          Range X_out (valides): Aucun pixel X valide après filtrage NaN/Inf.")
+                    if finite_y_out.size > 0:
+                        print(f"          Range Y_out (valides): [{np.min(finite_y_out):.1f}, {np.max(finite_y_out):.1f}] (Shape Sortie H: {output_shape_2d_hw[0]})")
+                    else:
+                        print(f"          Range Y_out (valides): Aucun pixel Y valide après filtrage NaN/Inf.")
+                    if np.any(~np.isfinite(pixmap[...,0])): print(f"          WARNING: Pixmap X pour '{current_filename_for_log}' contient des non-finis !")
+                    if np.any(~np.isfinite(pixmap[...,1])): print(f"          WARNING: Pixmap Y pour '{current_filename_for_log}' contient des non-finis !")
+                else:
+                    print(f"          WARNING: Pixmap pour '{current_filename_for_log}' est vide !")
+                # ================================================================================
+
+            except Exception as map_err:
+                self.update_progress(f"      -> ERREUR création pixmap image {i+1} ('{current_filename_for_log}'): {map_err}. Ignorée.")
+                print(f"ERREUR QM [_process_and_save_drizzle_batch V2_CORRECTED]: Échec pixmap img {i+1} ('{current_filename_for_log}'): {map_err}")
+                traceback.print_exc(limit=1) # Ajout du traceback pour l'erreur de pixmap
+                continue # Passer à l'image suivante du lot
+
+            if pixmap is not None: # Ce check est important, si pixmap a échoué, on ne continue pas
                 try:
                     base_exptime = 1.0
                     if input_header and 'EXPTIME' in input_header:
                         try: base_exptime = max(1e-6, float(input_header['EXPTIME']))
                         except (ValueError, TypeError): pass
                     
+                    print(f"        - Appel add_image pour les 3 canaux de '{current_filename_for_log}'...") # Log avant add_image
                     for ch_index in range(num_output_channels):
                         channel_data_2d = input_data_hxwx3[..., ch_index].astype(np.float32)
                         finite_mask = np.isfinite(channel_data_2d)
                         if not np.all(finite_mask): channel_data_2d[~finite_mask] = 0.0
+                        
+                        # ===== LOG AVANT CHAQUE ADD_IMAGE (optionnel, mais peut être utile si ça plante ici) =====
+                        # print(f"          Canal {ch_index}: data range [{np.min(channel_data_2d):.3f}, {np.max(channel_data_2d):.3f}], exptime={base_exptime:.2f}, pixfrac={self.drizzle_pixfrac}")
+                        # =====================================================================================
                         
                         drizzlers_batch[ch_index].add_image(
                             data=channel_data_2d,
@@ -4314,21 +4373,24 @@ class SeestarQueuedStacker:
                             in_units='counts' 
                         )
                     processed_in_batch_count += 1
-                    print(f"  DEBUG QM [_process_and_save_drizzle_batch V2_CORRECTED]: Image {i+1} ajoutée au Drizzle du lot.")
+                    print(f"  DEBUG QM [_process_and_save_drizzle_batch V2_CORRECTED]: Image {i+1} ('{current_filename_for_log}') ajoutée au Drizzle du lot.")
                 except Exception as drizzle_add_err:
-                    self.update_progress(f"      -> ERREUR add_image {i+1}: {drizzle_add_err}")
-                    print(f"ERREUR QM [_process_and_save_drizzle_batch V2_CORRECTED]: Échec add_image {i+1}: {drizzle_add_err}"); traceback.print_exc(limit=1)
-                finally:
-                    del pixmap, channel_data_2d; gc.collect()
+                    self.update_progress(f"      -> ERREUR add_image {i+1} ('{current_filename_for_log}'): {drizzle_add_err}")
+                    print(f"ERREUR QM [_process_and_save_drizzle_batch V2_CORRECTED]: Échec add_image {i+1} ('{current_filename_for_log}'): {drizzle_add_err}"); traceback.print_exc(limit=1)
+                # Le 'finally' pour del pixmap, channel_data_2d est retiré ici pour être sûr
+                # que pixmap n'est pas supprimé avant d'être utilisé par tous les canaux.
+                # Il sera nettoyé à la fin de l'itération de la boucle principale for.
 
-        batch_end_time = time.time()
-        self.update_progress(f"   -> Fin traitement Drizzle lot #{batch_num} ({processed_in_batch_count}/{num_valid_images} images ajoutées en {batch_end_time - batch_start_time:.2f}s).")
+            # Nettoyage pour cette itération de la boucle principale for
+            if pixmap is not None: del pixmap # Supprimer pixmap s'il a été créé
+            # channel_data_2d est déjà dans une portée plus limitée, mais on peut être explicite si on veut
+            # if 'channel_data_2d' in locals(): del channel_data_2d
+            # gc.collect() n'est pas nécessaire à chaque image, peut ralentir. Mettre à la fin du lot.
 
-        if processed_in_batch_count == 0:
-            self.update_progress(f"   - Warning: Aucune image traitée avec succès dans lot Drizzle #{batch_num}. Pas de sauvegarde.")
-            del drizzlers_batch, output_images_batch, output_weights_batch; gc.collect()
-            return None, []
-
+        # Fin de la boucle `for i, (input_data_hxwx3, input_header, wcs_input_image) in enumerate(valid_batch_items):`
+        # gc.collect() peut être appelé ici, après que toutes les images du lot ont été traitées.
+        gc.collect() 
+        # ----- Le reste de la méthode _process_and_save_drizzle_batch continue ici -----
         # --- Sauvegarde des résultats intermédiaires de CE lot ---
         batch_output_dir = self.drizzle_batch_output_dir
         os.makedirs(batch_output_dir, exist_ok=True)
