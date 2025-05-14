@@ -15,34 +15,18 @@ opencv-python  # OpenCV for image operations (cv2)
 Pillow           # Image handling (PIL fork)
 scikit-image     # Image algorithms (skimage)
 colour-demosaicing # Debayering algorithms
-<<<<<<< HEAD
-<<<<<<< HEAD
-astroalign==3.0.1        # Image alignment
-=======
 astroalign       # Image alignment
 >>>>>>> graphic-Beta
-=======
-astroalign==3.0.1        # Image alignment
->>>>>>> 4a6b8b287f9a2ab07a92204bf40470a3aa82e7cd
 ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 
 # --- Drizzle & Related (STScI) ---
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
 photoutils #stack enhancement
-<<<<<<< HEAD
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
-=======
-photutils
-# --- GUI & Utilities ---
-<<<<<<< HEAD
-matplotlib        # Plotting (Histogram)
->>>>>>> graphic-Beta
-=======
-matplotlib       # Plotting (Histogram)
->>>>>>> 4a6b8b287f9a2ab07a92204bf40470a3aa82e7cd
 tqdm             # Progress bars (used by backend?)
+
 # --- Optional Dependencies ---
  psutil            # For automatic batch size estimation (Uncomment if needed)
  acstools          # For satellite trail detection (Uncomment if needed)
@@ -104,15 +88,18 @@ tqdm             # Progress bars (used by backend?)
 # ===========================================================================
 # DEPENDENCIES FOR STANDALONE TOOLS (Not required for Seestar Stacker GUI)
 # ===========================================================================
+
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for sat_trail.py (Satellite Trail Analyzer Tool)
 # ---------------------------------------------------------------------------
 # acstools                # For satellite trail detection (satdet.detsat using Hough)
 # scipy                   # Dependency for acstools/skimage/other scientific tasks
+
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
 # PyQt5                   # GUI framework for the standalone visu.py viewer
+
 # ===========================================================================
 # FIN DES NOTES (Version Française)
 # ===========================================================================
