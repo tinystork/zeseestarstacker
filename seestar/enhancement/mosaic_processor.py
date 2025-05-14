@@ -360,154 +360,190 @@ def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
 
 
 
+# --- DANS seestar/enhancement/mosaic_processor.py ---
+
 def process_mosaic_from_aligned_files(
         aligned_files_info_list: list,
-        queued_stacker_instance, # Doit être une instance de SeestarQueuedStacker ou avoir les attributs nécessaires
+        queued_stacker_instance, # Type SeestarQueuedStacker
         progress_callback: callable):
     """
     Assemble une mosaïque à partir d'une liste d'informations sur les panneaux.
-    Gère soit l'alignement local (panneau réf + M) soit Astrometry.net pour chaque panneau.
-    Appelle DrizzleProcessor avec les bons arguments.
+    MODIFIÉ: Utilise la grille Drizzle pré-calculée si disponible (mosaïque locale),
+             sinon la calcule (mosaïque Astrometry).
 
     Args:
-        aligned_files_info_list (list): Liste de tuples. Le format du tuple dépend du mode:
-            - Mosaïque Locale: (img_data_orig_HWC, header_orig, wcs_ref_panel_absolu, matrix_M_vers_ref, valid_mask_orig)
-            - Mosaïque Astrometry: (img_data_aligned_astroalign, header_orig, scores, wcs_indiv_absolu, valid_mask_aligned)
-        queued_stacker_instance: Instance de SeestarQueuedStacker pour accéder aux paramètres 
-                                 (drizzle_scale, mosaic_settings, mosaic_ref_panel_wcs_absolute, etc.)
-                                 et aux méthodes de calcul de grille.
+        aligned_files_info_list (list): Liste des informations des panneaux.
+        queued_stacker_instance (SeestarQueuedStacker): Instance du gestionnaire de file.
         progress_callback (callable): Fonction pour les messages de progression.
 
     Returns:
         tuple: (final_mosaic_data_HWC_normalized_0_1, final_mosaic_header) ou (None, None)
     """
-    print(f"DEBUG [MosaicProc]: Début process_mosaic_from_aligned_files avec {len(aligned_files_info_list)} items.")
-    if not progress_callback: 
-        progress_callback = lambda msg, prog=None: print(f"MOSAIC_PROC_LOG: {msg}" + (f" ({prog}%)" if prog is not None else ""))
-
+    print(f"DEBUG [MosaicProc V2]: Début process_mosaic_from_aligned_files avec {len(aligned_files_info_list)} items.")
+    # ... (vérifications initiales inchangées) ...
+    if not progress_callback: progress_callback = lambda msg, prog=None: print(f"MOSAIC_PROC_LOG: {msg}")
     if not aligned_files_info_list:
-        progress_callback("Mosaïque: Aucune information de panneau fournie.", 0)
+        progress_callback("Mosaïque V2: Aucune information de panneau fournie.", 0)
+        return None, None
+    if not _DRIZZLE_PROC_AVAILABLE:
+        progress_callback("Mosaïque V2 ERREUR: DrizzleProcessor non disponible.", 0)
+        return None, None
+    if SeestarQueuedStacker is not None and not isinstance(queued_stacker_instance, SeestarQueuedStacker): # Vérifier type
+        progress_callback("Mosaïque V2 ERREUR: Instance de QueuedStacker invalide.", 0)
+        print("ERREUR [MosaicProc V2]: queued_stacker_instance n'est pas du type SeestarQueuedStacker attendu.")
         return None, None
 
-    # Vérifier si queued_stacker_instance est valide (pourrait être un mock pour tests)
-    if SeestarQueuedStacker is not None and not isinstance(queued_stacker_instance, SeestarQueuedStacker):
-        progress_callback("Mosaïque ERREUR: Instance de QueuedStacker invalide.", 0)
-        print("ERREUR [MosaicProc]: queued_stacker_instance n'est pas du type SeestarQueuedStacker attendu.")
+    # --- Déterminer si on est en mode alignement local (pour savoir si la grille est pré-calculée) ---
+    # Cette information est implicitement contenue dans queued_stacker_instance.drizzle_output_wcs
+    # Si non-None, elle a été calculée par _worker (cas local OMBB).
+    # Si None, on est en mode Astrometry et il faut la calculer ici.
+    is_grid_precalculated = (
+        hasattr(queued_stacker_instance, 'drizzle_output_wcs') and
+        queued_stacker_instance.drizzle_output_wcs is not None and
+        hasattr(queued_stacker_instance, 'drizzle_output_shape_hw') and
+        queued_stacker_instance.drizzle_output_shape_hw is not None
+    )
+    print(f"DEBUG [MosaicProc V2]: Grille Drizzle pré-calculée (locale OMBB)? {'Oui' if is_grid_precalculated else 'Non (Astrometry, à calculer)'}")
+
+    # --- 1. Obtenir/Calculer la grille Drizzle de sortie ---
+    output_wcs_mosaic = None
+    output_shape_mosaic_hw = None
+
+    if is_grid_precalculated:
+        progress_callback("Mosaïque V2: Utilisation de la grille de sortie pré-calculée (OMBB)...", 15)
+        output_wcs_mosaic = queued_stacker_instance.drizzle_output_wcs
+        output_shape_mosaic_hw = queued_stacker_instance.drizzle_output_shape_hw
+        print(f"DEBUG [MosaicProc V2]: Grille pré-calculée (OMBB) utilisée. Shape WCS: {output_wcs_mosaic.pixel_shape if output_wcs_mosaic else 'None'}, Shape HW: {output_shape_mosaic_hw}")
+    else: # Mosaïque Astrometry, calculer la grille ici
+        progress_callback("Mosaïque V2: Calcul de la grille de sortie (Astrometry par panneau)...", 10)
+        # `aligned_files_info_list` contient (img_data_aligned_astroalign, header_orig, scores, wcs_indiv_absolu, valid_mask_aligned)
+        input_wcs_list_astrometry = []
+        panel_shapes_hw_list_astrometry = [] # Pour la version _optimized
+        
+        for item_tuple in aligned_files_info_list:
+            img_data = item_tuple[0] # image (alignée ou originale)
+            wcs_indiv = item_tuple[3]  # wcs_indiv_absolu ou M_matrix
+            
+            # On s'attend à ce que pour le mode Astrometry, item_tuple[3] soit un WCS
+            if img_data is not None and wcs_indiv is not None and isinstance(wcs_indiv, WCS):
+                input_wcs_list_astrometry.append(wcs_indiv)
+                panel_shapes_hw_list_astrometry.append(img_data.shape[:2]) # (H,W)
+            else:
+                panel_name_for_log = item_tuple[1].get('FILENAME', f'Panneau Inconnu #{len(input_wcs_list_astrometry)}') if len(item_tuple)>1 and item_tuple[1] else f'Panneau Inconnu #{len(input_wcs_list_astrometry)}'
+                print(f"WARN [MosaicProc V2]: Item pour grille Astrometry sans image ou WCS valide : {panel_name_for_log}. Ignoré pour calcul grille.")
+
+        if not input_wcs_list_astrometry:
+            progress_callback("Mosaïque V2 ERREUR: Aucun WCS individuel valide trouvé pour le mode Astrometry.", 0)
+            print("ERREUR [MosaicProc V2]: input_wcs_list_astrometry (Astrometry) est vide.")
+            return None, None
+        
+        # Utiliser la méthode _calculate_final_mosaic_grid_optimized qui est sur queued_stacker_instance
+        # Elle prend `panel_wcs_list`, `panel_shapes_hw_list`, `drizzle_scale_factor`
+        drizzle_scale_factor_for_grid_calc = getattr(queued_stacker_instance, 'drizzle_scale', 2.0)
+        if hasattr(queued_stacker_instance, '_calculate_final_mosaic_grid_optimized'):
+            output_wcs_mosaic, output_shape_mosaic_hw = queued_stacker_instance._calculate_final_mosaic_grid_optimized(
+                input_wcs_list_astrometry,
+                panel_shapes_hw_list_astrometry,
+                drizzle_scale_factor_for_grid_calc
+            )
+        else: # Fallback sur l'ancienne _calculate_final_mosaic_grid si la nouvelle n'est pas là
+            print("WARN [MosaicProc V2]: _calculate_final_mosaic_grid_optimized non trouvée. Utilisation de _calculate_final_mosaic_grid.")
+            output_wcs_mosaic, output_shape_mosaic_hw = queued_stacker_instance._calculate_final_mosaic_grid(
+                input_wcs_list_astrometry 
+            )
+        progress_callback("Mosaïque V2: Grille de sortie (Astrometry) calculée.", 20)
+        print(f"DEBUG [MosaicProc V2]: Grille Drizzle (Astrometry) -> WCS: {'OK' if output_wcs_mosaic else 'None'}, Shape HW: {output_shape_mosaic_hw}")
+
+    if output_wcs_mosaic is None or output_shape_mosaic_hw is None:
+        progress_callback("Mosaïque V2 ERREUR: Échec du calcul/obtention de la grille Drizzle de sortie.", 0)
+        print("ERREUR [MosaicProc V2]: output_wcs_mosaic ou output_shape_mosaic_hw est None après calcul/récupération grille.")
         return None, None
 
-    # --- Déterminer le mode d'alignement utilisé (basé sur les attributs du QueuedStacker) ---
-    use_local_aligner = (
+    # --- 2. Préparer les fichiers temporaires pour DrizzleProcessor ---
+    #    (Cette logique reste globalement la même, mais il faut s'assurer
+    #     que `use_local_aligner` est correctement déterminé ici pour les logs et la gestion des headers)
+    use_local_aligner_for_temp_files = ( # Déterminer à nouveau si on est en mode local pour la logique des fichiers temp
         hasattr(queued_stacker_instance, 'is_local_alignment_preferred_for_mosaic') and
         queued_stacker_instance.is_local_alignment_preferred_for_mosaic and
         hasattr(queued_stacker_instance, 'local_aligner_instance') and
         queued_stacker_instance.local_aligner_instance is not None
     )
-    print(f"DEBUG [MosaicProc]: Mode d'alignement mosaïque utilisé: {'Local (FastAligner)' if use_local_aligner else 'Astrometry.net pour chaque panneau'}")
-
-    # --- 1. Calculer la grille Drizzle de sortie (output_wcs, output_shape_hw) ---
-    progress_callback("Mosaïque: Calcul de la grille de sortie Drizzle...", 10)
+    print(f"DEBUG [MosaicProc V2]: Préparation fichiers temporaires, mode local utilisé: {use_local_aligner_for_temp_files}")
     
-    output_wcs_mosaic = None
-    output_shape_mosaic_hw = None
-
-    if use_local_aligner:
-        print("DEBUG [MosaicProc]: Utilisation de la logique pour alignement local pour calculer la grille.")
-        if not hasattr(queued_stacker_instance, 'mosaic_ref_panel_wcs_absolute') or \
-           queued_stacker_instance.mosaic_ref_panel_wcs_absolute is None:
-            progress_callback("Mosaïque ERREUR: WCS du panneau de référence absolu manquant pour l'alignement local.", 0)
-            print("ERREUR [MosaicProc]: WCS ancre manquant dans queued_stacker_instance pour grille locale.")
-            return None, None
-        
-        # `aligned_files_info_list` contient les tuples (img_data_orig, header, wcs_anchor, M, mask)
-        output_wcs_mosaic, output_shape_mosaic_hw = queued_stacker_instance._calculate_local_mosaic_output_grid(
-            aligned_files_info_list, 
-            queued_stacker_instance.mosaic_ref_panel_wcs_absolute 
-        )
-        progress_callback("Mosaïque: Grille de sortie (locale) calculée.", 20)
-        print(f"DEBUG [MosaicProc]: Grille Drizzle (locale) -> WCS: {'OK' if output_wcs_mosaic else 'None'}, Shape HxW: {output_shape_mosaic_hw}")
-
-    else: # Mosaïque avec Astrometry.net pour chaque panneau
-        print("DEBUG [MosaicProc]: Utilisation de la logique Astrometry.net pour calculer la grille.")
-        # aligned_files_info_list contient (img_data_aligned_astroalign, header, scores, wcs_indiv, mask)
-        # On a besoin d'une liste de WCS individuels pour _calculate_final_mosaic_grid
-        input_wcs_list_astrometry = []
-        for item_tuple in aligned_files_info_list:
-            if len(item_tuple) >= 4 and item_tuple[3] is not None and isinstance(item_tuple[3], WCS):
-                input_wcs_list_astrometry.append(item_tuple[3]) # item[3] est wcs_object_indiv_item
-            else:
-                print(f"WARN [MosaicProc]: Item dans aligned_files_info_list n'a pas de WCS valide pour mode Astrometry: {item_tuple[1].get('FILENAME', 'Unknown file') if len(item_tuple)>1 and item_tuple[1] else 'Unknown'}")
-
-        if not input_wcs_list_astrometry:
-            progress_callback("Mosaïque ERREUR: Aucun WCS individuel valide trouvé pour le mode Astrometry.", 0)
-            print("ERREUR [MosaicProc]: input_wcs_list_astrometry est vide.")
-            return None, None
-            
-        output_wcs_mosaic, output_shape_mosaic_hw = queued_stacker_instance._calculate_final_mosaic_grid(
-            input_wcs_list_astrometry 
-        )
-        progress_callback("Mosaïque: Grille de sortie (Astrometry) calculée.", 20)
-        print(f"DEBUG [MosaicProc]: Grille Drizzle (Astrometry) -> WCS: {'OK' if output_wcs_mosaic else 'None'}, Shape HxW: {output_shape_mosaic_hw}")
-
-    if output_wcs_mosaic is None or output_shape_mosaic_hw is None:
-        progress_callback("Mosaïque ERREUR: Échec du calcul de la grille Drizzle de sortie.", 0)
-        print("ERREUR [MosaicProc]: output_wcs_mosaic ou output_shape_mosaic_hw est None après calcul grille.")
-        return None, None
-
-    # --- 2. Préparer les fichiers temporaires pour DrizzleProcessor ---
-    progress_callback("Mosaïque: Préparation des fichiers temporaires pour Drizzle...", 30)
+    progress_callback("Mosaïque V2: Préparation des fichiers temporaires pour Drizzle...", 30)
     temp_drizzle_input_files = []
     temp_dir_for_mosaic_drizzle = os.path.join(queued_stacker_instance.output_folder, "temp_mosaic_drizzle_inputs")
     try:
         os.makedirs(temp_dir_for_mosaic_drizzle, exist_ok=True)
     except OSError as e_mkdir:
-        progress_callback(f"Mosaïque ERREUR: Impossible de créer le dossier temporaire Drizzle: {e_mkdir}", 0)
-        print(f"ERREUR [MosaicProc]: mkdir {temp_dir_for_mosaic_drizzle} échoué: {e_mkdir}")
+        progress_callback(f"Mosaïque V2 ERREUR: Impossible de créer le dossier temporaire Drizzle: {e_mkdir}", 0)
+        print(f"ERREUR [MosaicProc V2]: mkdir {temp_dir_for_mosaic_drizzle} échoué: {e_mkdir}")
         return None, None
 
     for i, item_tuple in enumerate(aligned_files_info_list):
-        panel_image_data_hwc = item_tuple[0] # Toujours l'image (originale pour local, alignée pour astrometry)
-        panel_header_orig = item_tuple[1]    # Header original
-        panel_wcs_for_drizzle_file = None      # WCS à écrire dans le FITS temporaire
-        
-        # Préparer le header temporaire. Il contiendra le WCS pertinent et la matrice M si locale.
-        temp_header_for_file = panel_header_orig.copy()
-        # Nettoyer ancien WCS du header original pour éviter conflits
-        for key_wcs_clean in list(temp_header_for_file['CRVAL*'])+list(temp_header_for_file['CRPIX*'])+list(temp_header_for_file['CTYPE*'])+list(temp_header_for_file['CD*'])+list(temp_header_for_file['PC*']):
-            if key_wcs_clean in temp_header_for_file: del temp_header_for_file[key_wcs_clean]
+        panel_image_data_hwc = item_tuple[0] 
+        panel_header_orig = item_tuple[1]    
+        # --- Créer un header temporaire MINIMAL ---
+        temp_header_for_file = fits.Header()
+        # Ajouter EXPTIME si disponible (Drizzle l'utilise)
+        if panel_header_orig and 'EXPTIME' in panel_header_orig:
+            try:
+                temp_header_for_file['EXPTIME'] = (float(panel_header_orig['EXPTIME']), "Exposure time")
+            except (ValueError, TypeError):
+                temp_header_for_file['EXPTIME'] = (1.0, "Exposure time (default)")
+        else:
+            temp_header_for_file['EXPTIME'] = (1.0, "Exposure time (default)")
 
-        if use_local_aligner:
-            # item: (img_data_orig_HWC, header_orig, wcs_ref_panel_absolu, matrix_M_vers_ref, valid_mask_orig)
-            # Pour le fichier temporaire, on sauvegarde l'image originale.
-            # Le WCS de référence et la matrice M seront utilisés par DrizzleProcessor.
-            # On met le WCS de référence dans le header du fichier temp pour que DrizzleProcessor puisse le lire.
-            panel_wcs_for_drizzle_file = item_tuple[2] # C'est queued_stacker_instance.mosaic_ref_panel_wcs_absolute
+        # Ajouter le WCS et la matrice M
+        if use_local_aligner_for_temp_files:
+            wcs_ancre_pour_ce_panneau = item_tuple[2] 
             matrix_m = item_tuple[3]
             
-            if panel_wcs_for_drizzle_file:
-                temp_header_for_file.update(panel_wcs_for_drizzle_file.to_header(relax=True))
-            if matrix_m is not None:
-                try:
-                    temp_header_for_file['M11'] = matrix_m[0,0]; temp_header_for_file['M12'] = matrix_m[0,1]; temp_header_for_file['M13'] = matrix_m[0,2]
-                    temp_header_for_file['M21'] = matrix_m[1,0]; temp_header_for_file['M22'] = matrix_m[1,1]; temp_header_for_file['M23'] = matrix_m[1,2]
-                    temp_header_for_file['COMMENT'] = "Local alignment matrix M to ref panel stored."
-                except Exception as e_hdr_m: print(f"WARN [MosaicProc]: Erreur écriture Matrice M dans header temp: {e_hdr_m}")
-        else: # Astrometry.net pour chaque panneau
+            if wcs_ancre_pour_ce_panneau is None or matrix_m is None:
+                continue
+        
+        # Nettoyer ancien WCS du header original
+        wcs_keys_to_clean = WCS().to_header(relax=True).keys() # Obtenir une liste de clés WCS typiques
+        for key_wcs_clean in wcs_keys_to_clean:
+            if key_wcs_clean in temp_header_for_file: del temp_header_for_file[key_wcs_clean]
+
+        if use_local_aligner_for_temp_files:
+            # item: (img_data_orig_HWC, header_orig, wcs_ref_panel_absolu_pour_ce_panneau, matrix_M_vers_ref, valid_mask_orig)
+            # Le wcs_ref_panel_absolu_pour_ce_panneau EST self.reference_wcs_object (l'ancre)
+            # La matrice M est item_tuple[3]
+            wcs_ancre_pour_ce_panneau = item_tuple[2] # Devrait être queued_stacker_instance.reference_wcs_object
+            matrix_m = item_tuple[3]
+            
+            if wcs_ancre_pour_ce_panneau is None:
+                progress_callback(f"Mosaïque V2 (Local): WCS d'ancre manquant pour panneau {i}, ignoré pour Drizzle.", None)
+                continue
+            if matrix_m is None: # Ne devrait pas arriver si FastAligner a réussi
+                progress_callback(f"Mosaïque V2 (Local): Matrice M manquante pour panneau {i}, ignoré pour Drizzle.", None)
+                continue
+
+            temp_header_for_file.update(wcs_ancre_pour_ce_panneau.to_header(relax=True))
+            try:
+                temp_header_for_file['M11'] = matrix_m[0,0]
+                temp_header_for_file['M12'] = matrix_m[0,1]
+                temp_header_for_file['M13'] = matrix_m[0,2]
+                temp_header_for_file['M21'] = matrix_m[1,0]
+                temp_header_for_file['M22'] = matrix_m[1,1]
+                temp_header_for_file['M23'] = matrix_m[1,2]
+                #temp_header_for_file['HISTORY'] = "Local alignment matrix M to ref panel stored."
+            except Exception as e_hdr_m: print(f"WARN [MosaicProc V2]: Erreur écriture Matrice M dans header temp: {e_hdr_m}")
+        
+        else: # Mosaïque Astrometry.net pour chaque panneau
             # item: (img_data_aligned_astroalign, header_orig, scores, wcs_indiv_absolu, valid_mask_aligned)
-            panel_wcs_for_drizzle_file = item_tuple[3] # C'est le wcs_indiv_absolu
-            if panel_wcs_for_drizzle_file:
-                temp_header_for_file.update(panel_wcs_for_drizzle_file.to_header(relax=True))
+            wcs_indiv_absolu_pour_ce_panneau = item_tuple[3] # C'est le wcs_indiv_absolu
+            if wcs_indiv_absolu_pour_ce_panneau is None:
+                progress_callback(f"Mosaïque V2 (Astrometry): WCS individuel manquant pour panneau {i}, ignoré pour Drizzle.", None)
+                continue
+            temp_header_for_file.update(wcs_indiv_absolu_pour_ce_panneau.to_header(relax=True))
 
         if panel_image_data_hwc is None:
-            progress_callback(f"Mosaïque: Données image manquantes pour panneau {i}, ignoré.", None)
+            progress_callback(f"Mosaïque V2: Données image manquantes pour panneau {i}, ignoré.", None)
             continue
-        if use_local_aligner and panel_wcs_for_drizzle_file is None : # En mode local, on a besoin du WCS ancre pour le pixmap
-            progress_callback(f"Mosaïque (Local): WCS d'ancre manquant pour panneau {i}, ignoré pour Drizzle.", None)
-            continue
-        if not use_local_aligner and panel_wcs_for_drizzle_file is None : # En mode Astrometry, on a besoin du WCS individuel
-            progress_callback(f"Mosaïque (Astrometry): WCS individuel manquant pour panneau {i}, ignoré pour Drizzle.", None)
-            continue
-
-
+        
         temp_fits_path = os.path.join(temp_dir_for_mosaic_drizzle, f"panel_temp_driz_in_{i:03d}.fits")
         try:
             data_to_save_cxhxw = np.moveaxis(panel_image_data_hwc, -1, 0).astype(np.float32)
@@ -516,55 +552,56 @@ def process_mosaic_from_aligned_files(
             
             fits.writeto(temp_fits_path, data_to_save_cxhxw, header=temp_header_for_file, overwrite=True, output_verify='ignore')
             temp_drizzle_input_files.append(temp_fits_path)
-            print(f"  DEBUG [MosaicProc]: Fichier temporaire sauvegardé: {os.path.basename(temp_fits_path)}")
+            # print(f"  DEBUG [MosaicProc V2]: Fichier temporaire sauvegardé: {os.path.basename(temp_fits_path)}")
         except Exception as e_write_temp:
-            progress_callback(f"Mosaïque ERREUR: Écriture fichier temp {temp_fits_path} échouée: {e_write_temp}", None)
+            progress_callback(f"Mosaïque V2 ERREUR: Écriture fichier temp {temp_fits_path} échouée: {e_write_temp}", None)
             traceback.print_exc(limit=1)
     
     if not temp_drizzle_input_files:
-        progress_callback("Mosaïque ERREUR: Aucun fichier temporaire n'a pu être préparé pour Drizzle.", 0)
+        progress_callback("Mosaïque V2 ERREUR: Aucun fichier temporaire n'a pu être préparé pour Drizzle.", 0)
         return None, None
     
-    progress_callback(f"Mosaïque: {len(temp_drizzle_input_files)} fichiers temporaires prêts pour Drizzle.", 40)
+    progress_callback(f"Mosaïque V2: {len(temp_drizzle_input_files)} fichiers temporaires prêts pour Drizzle.", 40)
 
     # --- 3. Lancer DrizzleProcessor ---
-    progress_callback("Mosaïque: Lancement du processeur Drizzle...", 50)
+    progress_callback("Mosaïque V2: Lancement du processeur Drizzle...", 50)
+    # Lire les mosaic_settings depuis l'instance queued_stacker
+    mosaic_settings_from_qs = getattr(queued_stacker_instance, 'mosaic_settings', {})
+    
     drizzle_processor = DrizzleProcessor(
-        scale_factor=queued_stacker_instance.drizzle_scale,
-        pixfrac=queued_stacker_instance.mosaic_settings.get('pixfrac', 0.8),
-        kernel=queued_stacker_instance.mosaic_settings.get('kernel', 'square'),
-        fillval= str(queued_stacker_instance.mosaic_settings.get('fillval', "0.0")), # S'assurer que c'est une string
-        final_wht_threshold=float(queued_stacker_instance.mosaic_settings.get('wht_threshold', 0.01)) # S'assurer que c'est un float
+        scale_factor=getattr(queued_stacker_instance, 'drizzle_scale', 2.0), # Valeur par défaut si non trouvé
+        pixfrac=mosaic_settings_from_qs.get('pixfrac', 0.8),
+        kernel=mosaic_settings_from_qs.get('kernel', 'square'),
+        fillval=str(mosaic_settings_from_qs.get('fillval', "0.0")), 
+        final_wht_threshold=float(mosaic_settings_from_qs.get('wht_threshold', 0.01)) 
     )
 
     final_mosaic_sci_hxwxc = None
     final_mosaic_wht_hxwxc = None
 
     try:
-        # L'appel à apply_drizzle est maintenant conditionnel
-        if use_local_aligner:
-            progress_callback("Mosaïque: Drizzle en mode alignement local (construction pixmaps par DrizzleProcessor)...", 60)
-            final_mosaic_sci_hxwxc, final_mosaic_wht_hxwxc = drizzle_processor.apply_drizzle(
-                input_file_paths=temp_drizzle_input_files,    # Contient img_orig + wcs_ref_panel + M dans header
-                output_wcs=output_wcs_mosaic,
-                output_shape_2d_hw=output_shape_mosaic_hw,
-                use_local_alignment_logic=True, 
-                anchor_wcs_for_local=queued_stacker_instance.mosaic_ref_panel_wcs_absolute, 
-                progress_callback=progress_callback
-            )
+        anchor_wcs_to_pass = None
+        if use_local_aligner_for_temp_files: # C'est bien le flag local, pas is_grid_precalculated
+            anchor_wcs_to_pass = getattr(queued_stacker_instance, 'reference_wcs_object', None)
+            if anchor_wcs_to_pass is None:
+                 progress_callback("Mosaïque V2 ERREUR (Local): WCS d'ancrage manquant pour DrizzleProcessor.apply_drizzle.", 0)
+                 raise ValueError("WCS d'ancrage manquant pour DrizzleProcessor en mode local.")
+            progress_callback("Mosaïque V2: Drizzle en mode alignement local (construction pixmaps par DrizzleProcessor)...", 60)
         else: # Mosaïque Astrometry.net pour chaque
-            progress_callback("Mosaïque: Drizzle en mode Astrometry (WCS individuels)...", 60)
-            final_mosaic_sci_hxwxc, final_mosaic_wht_hxwxc = drizzle_processor.apply_drizzle(
-                input_file_paths=temp_drizzle_input_files, # Contient img_alignée_astroalign + wcs_indiv_absolu
-                output_wcs=output_wcs_mosaic,
-                output_shape_2d_hw=output_shape_mosaic_hw,
-                use_local_alignment_logic=False, 
-                anchor_wcs_for_local=None,     
-                progress_callback=progress_callback
-            )
+            progress_callback("Mosaïque V2: Drizzle en mode Astrometry (WCS individuels)...", 60)
 
+        final_mosaic_sci_hxwxc, final_mosaic_wht_hxwxc = drizzle_processor.apply_drizzle(
+            input_file_paths=temp_drizzle_input_files,
+            output_wcs=output_wcs_mosaic,
+            output_shape_2d_hw=output_shape_mosaic_hw,
+            use_local_alignment_logic=use_local_aligner_for_temp_files, 
+            anchor_wcs_for_local=anchor_wcs_to_pass, 
+            progress_callback=progress_callback
+        )
+
+    # ... (Reste de la fonction : nettoyage, création header final, normalisation - inchangé par rapport à votre version précédente) ...
     except Exception as e_driz:
-        progress_callback(f"Mosaïque ERREUR: Échec du processeur Drizzle: {e_driz}", 0)
+        progress_callback(f"Mosaïque V2 ERREUR: Échec du processeur Drizzle: {e_driz}", 0)
         traceback.print_exc(limit=2)
         # Assurer le nettoyage même en cas d'erreur Drizzle
         for f_path_clean in temp_drizzle_input_files:
@@ -575,68 +612,107 @@ def process_mosaic_from_aligned_files(
             try: os.rmdir(temp_dir_for_mosaic_drizzle)
             except Exception: pass
         return None, None
-    # finally: # Le finally original a été déplacé après le try/except de Drizzle
-    #          # pour s'assurer qu'il s'exécute même si DrizzleProcessor lève une exception.
-    #    pass
 
-    # Nettoyage des fichiers temporaires créés pour DrizzleProcessor (déplacé ici)
-    progress_callback("Mosaïque: Nettoyage des fichiers temporaires Drizzle...", 95)
+    progress_callback("Mosaïque V2: Nettoyage des fichiers temporaires Drizzle...", 95)
     for f_path in temp_drizzle_input_files:
         try:
             if os.path.exists(f_path): os.remove(f_path)
-        except Exception as e_clean: print(f"WARN [MosaicProc]: Erreur nettoyage fichier temp {f_path}: {e_clean}")
+        except Exception as e_clean: print(f"WARN [MosaicProc V2]: Erreur nettoyage fichier temp {f_path}: {e_clean}")
     try:
         if os.path.exists(temp_dir_for_mosaic_drizzle) and not os.listdir(temp_dir_for_mosaic_drizzle):
             os.rmdir(temp_dir_for_mosaic_drizzle)
-            print(f"DEBUG [MosaicProc]: Dossier temporaire {temp_dir_for_mosaic_drizzle} supprimé.")
+            print(f"DEBUG [MosaicProc V2]: Dossier temporaire {temp_dir_for_mosaic_drizzle} supprimé.")
     except Exception as e_rmdir:
-         print(f"WARN [MosaicProc]: Erreur suppression dossier temporaire {temp_dir_for_mosaic_drizzle}: {e_rmdir}")
-
+         print(f"WARN [MosaicProc V2]: Erreur suppression dossier temporaire {temp_dir_for_mosaic_drizzle}: {e_rmdir}")
 
     if final_mosaic_sci_hxwxc is None:
-        progress_callback("Mosaïque ERREUR: Le processeur Drizzle n'a pas retourné d'image science.", 0)
+        progress_callback("Mosaïque V2 ERREUR: Le processeur Drizzle n'a pas retourné d'image science.", 0)
         return None, None
 
-    progress_callback("Mosaïque: Assemblage Drizzle terminé.", 100)
-    print(f"DEBUG [MosaicProc]: Drizzle terminé. Shape SCI: {final_mosaic_sci_hxwxc.shape if final_mosaic_sci_hxwxc is not None else 'None'}")
+    progress_callback("Mosaïque V2: Assemblage Drizzle terminé.", 100)
+    print(f"DEBUG [MosaicProc V2]: Drizzle terminé. Shape SCI: {final_mosaic_sci_hxwxc.shape if final_mosaic_sci_hxwxc is not None else 'None'}")
 
     # --- 4. Créer le header final pour la mosaïque ---
     final_header_mosaic = fits.Header()
     if output_wcs_mosaic:
-        try: final_header_mosaic.update(output_wcs_mosaic.to_header(relax=True))
-        except Exception as e_hdr_wcs: print(f"WARN [MosaicProc]: Erreur ajout WCS au header final: {e_hdr_wcs}")
+        try: 
+            # S'assurer que les CTYPE sont bien des strings avant de les mettre à jour
+            # Cela peut arriver si le WCS original avait des CTYPE non-standards que WCS() a tenté de corriger
+            # mais qui ne sont pas des strings pures.
+            if hasattr(output_wcs_mosaic.wcs, 'ctype'):
+                output_wcs_mosaic.wcs.ctype = [str(ct) for ct in output_wcs_mosaic.wcs.ctype]
             
-    ref_header_for_meta = aligned_files_info_list[0][1] 
+            final_header_mosaic.update(output_wcs_mosaic.to_header(relax=True))
+        except Exception as e_hdr_wcs: 
+            print(f"WARN [MosaicProc V2_HeaderFix]: Erreur ajout WCS au header final: {e_hdr_wcs}")
+            traceback.print_exc(limit=1) # Pour plus de détails sur l'erreur WCS si elle se produit
+            
+    # S'assurer que ref_header_for_meta est bien un Header Astropy
+    ref_header_for_meta = None
+    if aligned_files_info_list and len(aligned_files_info_list[0]) > 1 and \
+       isinstance(aligned_files_info_list[0][1], fits.Header):
+        ref_header_for_meta = aligned_files_info_list[0][1] 
+    
     if ref_header_for_meta:
+        print(f"DEBUG [MosaicProc V2_HeaderFix]: Utilisation de ref_header_for_meta pour les métadonnées.")
         keys_to_copy = ['INSTRUME', 'TELESCOP', 'OBJECT', 'FILTER', 'DATE-OBS', 'EXPTIME']
         for key in keys_to_copy:
             if key in ref_header_for_meta:
-                final_header_mosaic[key] = (ref_header_for_meta[key], ref_header_for_meta.comments.get(key, "")) # Utiliser .get pour commentaire
+                comment_value = "" 
+                try:
+                    # Tenter d'obtenir le commentaire. Si la clé existe mais n'a pas de commentaire,
+                    # header.comments[key] peut lever une erreur ou retourner une valeur non-string.
+                    if key in ref_header_for_meta.comments: # Vérifier d'abord si la clé a un commentaire
+                         comment_value = ref_header_for_meta.comments[key]
+                except (KeyError, IndexError): 
+                    pass 
+                
+                try:
+                    final_header_mosaic[key] = (ref_header_for_meta[key], str(comment_value))
+                except Exception as e_set_key:
+                    print(f"WARN [MosaicProc V2_HeaderFix]: Erreur lors de la copie de la clé '{key}' du header: {e_set_key}")
+                    # Tenter d'ajouter juste la valeur si le commentaire pose problème
+                    try:
+                        final_header_mosaic[key] = ref_header_for_meta[key]
+                    except Exception:
+                        print(f"WARN [MosaicProc V2_HeaderFix]: Échec copie valeur pour clé '{key}' également.")
 
-    actual_num_inputs = len(aligned_files_info_list) # Nombre de panneaux
+
+    actual_num_inputs_for_header = len(aligned_files_info_list) 
+    comment_ninputs = 'Number of panels (or images) in mosaic' 
+
     if hasattr(queued_stacker_instance, 'total_physical_images_in_mosaic_panels') and \
+       isinstance(queued_stacker_instance.total_physical_images_in_mosaic_panels, int) and \
        queued_stacker_instance.total_physical_images_in_mosaic_panels > 0 :
-        # Si on a un compte plus précis du nombre total d'images sources des panneaux (si chaque panneau est un stack)
-        actual_num_inputs = queued_stacker_instance.total_physical_images_in_mosaic_panels
-        final_header_mosaic['NINPUTS'] = (actual_num_inputs, 'Nombre total dimages sources des panneaux')
-        final_header_mosaic['NPANELS'] = (len(aligned_files_info_list), 'Nombre de panneaux dans la mosaïque')
+        
+        # Mettre à jour actual_num_inputs_for_header si un compte plus précis est disponible
+        actual_num_inputs_for_header = queued_stacker_instance.total_physical_images_in_mosaic_panels
+        
+        final_header_mosaic['NPANELS'] = (len(aligned_files_info_list), 'Number of panels in the mosaic') 
+        comment_ninputs = 'Total source images from all panels' 
+        print(f"DEBUG [MosaicProc V2_HeaderFix_Unbound]: Utilisation de total_physical_images_in_mosaic_panels: {actual_num_inputs_for_header}")
     else:
-        final_header_mosaic['NINPUTS'] = (actual_num_inputs, 'Nombre de panneaux (ou images) dans la mosaïque')
-
+        print(f"DEBUG [MosaicProc V2_HeaderFix_Unbound]: Utilisation du nombre de panneaux pour NINPUTS: {actual_num_inputs_for_header}")
+    
+    # Utiliser TOUJOURS actual_num_inputs_for_header ici
+    final_header_mosaic['NINPUTS'] = (actual_num_inputs_for_header, comment_ninputs)
 
     final_header_mosaic['STACKTYP'] = (f'Mosaic Drizzle ({queued_stacker_instance.drizzle_scale:.1f}x)', 'Stacking method')
+    # ... (autres clés du header comme DRZSCALE, DRZKERNEL, etc. - inchangées) ...
     final_header_mosaic['DRZSCALE'] = (queued_stacker_instance.drizzle_scale, 'Drizzle scale factor')
-    # Utiliser getattr pour les mosaic_settings pour éviter AttributeError si non défini
-    final_header_mosaic['DRZKERNEL'] = (getattr(queued_stacker_instance, 'mosaic_settings', {}).get('kernel', 'N/A'), 'Drizzle kernel')
-    final_header_mosaic['DRZPIXFR'] = (getattr(queued_stacker_instance, 'mosaic_settings', {}).get('pixfrac', 'N/A'), 'Drizzle pixfrac')
+    final_header_mosaic['DRZKERNEL'] = (mosaic_settings_from_qs.get('kernel', 'N/A'), 'Drizzle kernel')
+    final_header_mosaic['DRZPIXFR'] = (mosaic_settings_from_qs.get('pixfrac', 'N/A'), 'Drizzle pixfrac')
     final_header_mosaic['CREATOR'] = ('SeestarStacker (Mosaic)', 'Processing Software')
-    final_header_mosaic['HISTORY'] = 'Mosaic created by SeestarStacker using Drizzle'
-    if use_local_aligner:
-        final_header_mosaic['HISTORY'] = 'Panel align: Local FastAligner + 1 ref panel Astrometry.net'
+    final_header_mosaic['HISTORY'] = 'Mosaic created by SeestarStacker using Drizzle' 
+    if use_local_aligner_for_temp_files: 
+        final_header_mosaic['HISTORY'] = 'Panel align: Local FastAligner + 1 ref panel Astrometry.net/Fallback' 
     else:
         final_header_mosaic['HISTORY'] = 'Panel align: Astrometry.net for each panel'
     
-    print(f"DEBUG [MosaicProc]: Range SCI avant normalisation finale: Min={np.nanmin(final_mosaic_sci_hxwxc):.3g}, Max={np.nanmax(final_mosaic_sci_hxwxc):.3g}")
+    
+    # Normalisation finale (inchangée)
+    # ...
+    print(f"DEBUG [MosaicProc V2_HeaderFix]: Range SCI avant normalisation finale: Min={np.nanmin(final_mosaic_sci_hxwxc):.3g}, Max={np.nanmax(final_mosaic_sci_hxwxc):.3g}")
     min_val, max_val = np.nanmin(final_mosaic_sci_hxwxc), np.nanmax(final_mosaic_sci_hxwxc)
     if max_val > min_val:
         final_mosaic_data_normalized = (final_mosaic_sci_hxwxc - min_val) / (max_val - min_val)
@@ -646,32 +722,17 @@ def process_mosaic_from_aligned_files(
         final_mosaic_data_normalized = np.zeros_like(final_mosaic_sci_hxwxc)
 
     final_mosaic_data_normalized = np.clip(final_mosaic_data_normalized, 0.0, 1.0).astype(np.float32)
-    print(f"DEBUG [MosaicProc]: Range SCI après normalisation finale 0-1: Min={np.min(final_mosaic_data_normalized):.3f}, Max={np.max(final_mosaic_data_normalized):.3f}")
+    # print(f"DEBUG [MosaicProc V2_HeaderFix]: Range SCI après normalisation finale 0-1: Min={np.min(final_mosaic_data_normalized):.3f}, Max={np.max(final_mosaic_data_normalized):.3f}")
     
     if hasattr(queued_stacker_instance, 'images_in_cumulative_stack'):
-        queued_stacker_instance.images_in_cumulative_stack = actual_num_inputs # Mettre à jour avec le bon compte
-        print(f"DEBUG [MosaicProc]: Compteur images QM mis à jour pour rapport final: {queued_stacker_instance.images_in_cumulative_stack}")
+        # Utiliser le nombre d'images sources réelles si disponible (via NINPUTS), sinon le nombre de panneaux.
+        num_for_counter = actual_num_inputs_from_panels if 'actual_num_inputs_from_panels' in locals() and actual_num_inputs_from_panels > 0 else len(aligned_files_info_list)
+        queued_stacker_instance.images_in_cumulative_stack = num_for_counter
+        print(f"DEBUG [MosaicProc V2_HeaderFix]: Compteur images QM mis à jour pour rapport final: {queued_stacker_instance.images_in_cumulative_stack}")
 
-    gc.collect() # Un petit nettoyage avant de retourner
-    print("DEBUG [MosaicProc]: Fin de process_mosaic_from_aligned_files.")
+    gc.collect() 
+    print("DEBUG [MosaicProc V2_HeaderFix]: Fin de process_mosaic_from_aligned_files.")
     return final_mosaic_data_normalized, final_header_mosaic
-
-# --- FIN DU FICHIER seestar/enhancement/mosaic_processor.py (pour cette fonction) ---
-
-def _save_panel_stack_temp(panel_stack_data, solved_wcs, panel_index, output_folder):
-     # ... (Code complet comme à l'étape 22) ...
-     # ... (S'assurer qu'elle retourne bien le chemin ou None) ...
-     if panel_stack_data is None or solved_wcs is None: return None
-     temp_dir = os.path.join(output_folder, "mosaic_panel_stacks_temp"); os.makedirs(temp_dir, exist_ok=True)
-     temp_filename = f"panel_stack_{panel_index:03d}_solved.fits"; temp_filepath = os.path.join(temp_dir, temp_filename)
-     try:
-         print(f"      -> Sauvegarde stack panneau temp: {temp_filename}")
-         data_to_save = np.moveaxis(panel_stack_data, -1, 0).astype(np.float32) # CxHxW
-         header_to_save = solved_wcs.to_header(relax=True); header_to_save['HISTORY'] = f"Stacked Panel {panel_index}"; header_to_save['NAXIS'] = 3
-         header_to_save['NAXIS1'] = data_to_save.shape[2]; header_to_save['NAXIS2'] = data_to_save.shape[1]; header_to_save['NAXIS3'] = data_to_save.shape[0]; header_to_save['CTYPE3'] = 'CHANNEL'
-         fits.writeto(temp_filepath, data_to_save, header=header_to_save, overwrite=True, output_verify='ignore')
-         return temp_filepath
-     except Exception as e: print(f"      -> ERREUR sauvegarde stack panneau temp {temp_filename}: {e}"); return None
 
 
 # --- FIN DU FICHIER seestar/enhancement/mosaic_processor.py ---

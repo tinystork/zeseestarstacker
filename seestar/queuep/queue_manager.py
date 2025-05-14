@@ -24,13 +24,15 @@ from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _
 import astroalign as aa
 import cv2
 import numpy as np
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate
 from astropy import units as u
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 from astropy.wcs import WCS, FITSFixedWarning
 from ccdproc import CCDData, combine as ccdproc_combine
 from ..enhancement.stack_enhancement import apply_edge_crop
+from astropy.wcs.utils import proj_plane_pixel_scales
+from scipy.spatial import ConvexHull
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -490,323 +492,593 @@ class SeestarQueuedStacker:
     def _worker(self):
         """
         Thread principal pour le traitement des images.
-        MODIFIÉ (V4 - Mosaïque Locale): Stocke l'image originale du panneau et la matrice M
-                                      pour l'alignement local.
+        MODIFIÉ (V5.1 - Debug PlateSolve & Fallback): Ajout de logs détaillés pour le plate-solving
+                                                     et implémentation d'un fallback WCS.
         """
-        print("\n" + "=" * 10 + " DEBUG QM [_worker V4 - Mosaïque Locale M]: Initialisation du worker " + "=" * 10)
+        print("\n" + "=" * 10 + " DEBUG QM [_worker V5.1 - Debug PlateSolve]: Initialisation du worker " + "=" * 10)
 
-        # --- Initialisation des variables (identique à V3) ---
+        # --- Initialisation des variables ---
         self.processing_active = True; self.processing_error = None; start_time_session = time.monotonic()
         reference_image_data_for_global_alignment = None; reference_header_for_global_alignment = None
         mosaic_ref_panel_image_data = None; mosaic_ref_panel_header = None; mosaic_ref_panel_wcs_absolute = None
         current_batch_items_with_masks_for_stack_batch = []
-        self.intermediate_drizzle_batch_files = []
-        all_aligned_files_with_info_for_mosaic = []
+        self.intermediate_drizzle_batch_files = [] 
+        all_aligned_files_with_info_for_mosaic = [] 
+        
         use_local_aligner_for_this_mosaic_run = (
             self.is_mosaic_run and 
             self.is_local_alignment_preferred_for_mosaic and 
             _LOCAL_ALIGNER_AVAILABLE and 
             self.local_aligner_instance is not None
         )
-        print(f"DEBUG QM [_worker V4]: Mode -> is_mosaic_run={self.is_mosaic_run} "
-              f"(Utilisation Aligneur Local: {use_local_aligner_for_this_mosaic_run}), "
+        print(f"DEBUG QM [_worker V5.1]: Mode -> is_mosaic_run={self.is_mosaic_run} "
+              f"(Utilisation Aligneur Local pour Mosaïque: {use_local_aligner_for_this_mosaic_run}), "
               f"drizzle_active_session={self.drizzle_active_session}, drizzle_mode='{self.drizzle_mode}'")
+        if use_local_aligner_for_this_mosaic_run:
+            print(f"  -> Détails Aligneur Local: Préféré={self.is_local_alignment_preferred_for_mosaic}, "
+                  f"Module Dispo={_LOCAL_ALIGNER_AVAILABLE}, Instance OK={self.local_aligner_instance is not None}")
 
         try:
-            # --- 3.A Préparation de l’image de référence (Logique identique à V3) ---
             self.update_progress("⭐ Préparation de l'image de référence principale et/ou du premier panneau mosaïque...")
-            if not self.current_folder or not os.path.isdir(self.current_folder): raise RuntimeError(f"Dossier d'entrée initial invalide : {self.current_folder}")
+            if not self.current_folder or not os.path.isdir(self.current_folder): 
+                raise RuntimeError(f"Dossier d'entrée initial invalide : {self.current_folder}")
+            
             initial_files_in_first_folder = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith((".fit", ".fits"))])
-            if not initial_files_in_first_folder and not self.additional_folders: raise RuntimeError("Aucun fichier FITS initial pour référence principale/premier panneau.")
-            self.aligner.correct_hot_pixels = self.correct_hot_pixels; self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
-            self.aligner.neighborhood_size = self.neighborhood_size; self.aligner.bayer_pattern = self.bayer_pattern
-            print(f"DEBUG QM [_worker V4]: Appel _get_reference_image pour référence alignement général (astroalign)...")
-            reference_image_data_for_global_alignment, reference_header_for_global_alignment = self.aligner._get_reference_image(self.current_folder, initial_files_in_first_folder)
-            if reference_image_data_for_global_alignment is None or reference_header_for_global_alignment is None: raise RuntimeError("Échec obtention référence pour alignement général (astroalign).")
+            if not initial_files_in_first_folder and not self.additional_folders: 
+                raise RuntimeError("Aucun fichier FITS initial trouvé pour référence principale ou premier panneau.")
+
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels
+            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
+            self.aligner.neighborhood_size = self.neighborhood_size
+            self.aligner.bayer_pattern = self.bayer_pattern
+            
+            print(f"DEBUG QM [_worker V5.1]: Appel _get_reference_image (astroalign) pour référence alignement général...")
+            reference_image_data_for_global_alignment, reference_header_for_global_alignment = self.aligner._get_reference_image(
+                self.current_folder, initial_files_in_first_folder
+            )
+            if reference_image_data_for_global_alignment is None or reference_header_for_global_alignment is None:
+                raise RuntimeError("Échec obtention image/header de référence pour alignement général (astroalign).")
+            
             self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
-            # Sauvegarder le header original du fichier qui a servi de référence globale
-            if reference_header_for_global_alignment.get('_SOURCE_PATH'): # Si _get_reference_image a stocké le chemin source
-                 self.reference_header_for_wcs['_REFSRCPTH'] = (reference_header_for_global_alignment.get('_SOURCE_PATH'), "Source file for global reference")
+            # Remplacer _SOURCE_PATH par _REFSRCFN pour éviter erreur longueur FITS, si besoin
+            if reference_header_for_global_alignment.get('_SOURCE_PATH'):
+                 # self.reference_header_for_wcs['_SOURCE_PATH'] = (reference_header_for_global_alignment.get('_SOURCE_PATH'), "Source file for global reference")
+                 self.reference_header_for_wcs['_REFSRCFN'] = (os.path.basename(str(reference_header_for_global_alignment.get('_SOURCE_PATH',''))), "Base name of global ref source")
+
+
             self.aligner._save_reference_image(reference_image_data_for_global_alignment, reference_header_for_global_alignment, self.output_folder)
-            print("DEBUG QM [_worker V4]: Image de référence pour alignement général (astroalign) prête et sauvegardée.")
+            print("DEBUG QM [_worker V5.1]: Image de référence pour alignement général (astroalign) prête et sauvegardée.")
 
             if use_local_aligner_for_this_mosaic_run:
-                self.update_progress("⭐ Mosaïque Locale: Traitement du panneau de référence...")
+                self.update_progress("⭐ Mosaïque Locale: Traitement du panneau de référence (ancrage)...")
                 mosaic_ref_panel_image_data = reference_image_data_for_global_alignment 
-                mosaic_ref_panel_header = reference_header_for_global_alignment.copy() # Utiliser une copie
-                # Stocker le chemin source du panneau de référence dans son propre header
+                mosaic_ref_panel_header = reference_header_for_global_alignment.copy()
+                
                 if reference_header_for_global_alignment.get('_SOURCE_PATH'):
-                    mosaic_ref_panel_header['_PANEL_REF_SRC'] = (reference_header_for_global_alignment.get('_SOURCE_PATH'), "Source file of this mosaic reference panel")
+                    # mosaic_ref_panel_header['_PANEL_REF_SRC'] = (reference_header_for_global_alignment.get('_SOURCE_PATH'), "Source file of this mosaic reference panel")
+                    mosaic_ref_panel_header['_PANREF_FN'] = (os.path.basename(str(reference_header_for_global_alignment.get('_SOURCE_PATH',''))), "Base name of this mosaic ref panel source")
+
 
                 self.update_progress("   -> Mosaïque Locale: Résolution astrométrique du panneau de référence...")
-                try: from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_func
-                except ImportError: solve_image_wcs_func = None
-                if solve_image_wcs_func:
-                    mosaic_ref_panel_wcs_absolute = solve_image_wcs_func(mosaic_ref_panel_image_data, mosaic_ref_panel_header, self.api_key,scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,progress_callback=self.update_progress)
-                else: self.update_progress("   -> ERREUR: solve_image_wcs non disponible."); mosaic_ref_panel_wcs_absolute = None
-                if mosaic_ref_panel_wcs_absolute is None: raise RuntimeError("Mosaïque Locale: Échec plate-solving du panneau de référence.")
-                print(f"DEBUG QM [_worker V4]: Mosaïque Locale: Panneau de référence résolu. WCS Absolu prêt.")
-                self.reference_wcs_object = mosaic_ref_panel_wcs_absolute
+                
+                # --- Section d'import et d'appel de solve_image_wcs avec logs et fallback ---
+                solve_image_wcs_func = None 
+                try: 
+                    from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_imported
+                    solve_image_wcs_func = solve_image_wcs_imported
+                    print(f"DEBUG QM [_worker V5.1]: Import de 'solve_image_wcs' depuis astrometry_solver REUSSI. Type: {type(solve_image_wcs_func)}")
+                except ImportError as e_imp_solve: 
+                    print(f"DEBUG QM [_worker V5.1]: Import de 'solve_image_wcs' depuis astrometry_solver ECHOUE: {e_imp_solve}")
+                except Exception as e_other_imp_solve:
+                    print(f"DEBUG QM [_worker V5.1]: ERREUR INATTENDUE import solve_image_wcs: {e_other_imp_solve}")
+                    traceback.print_exc(limit=1)
+                
+                print(f"DEBUG QM [_worker V5.1]: Valeur de solve_image_wcs_func AVANT appel: {solve_image_wcs_func}")
+                print(f"DEBUG QM [_worker V5.1]: Valeurs pour Astrometry -> API Key Présente: {'Oui' if self.api_key and len(self.api_key)>10 else 'Non/Courte'} (Type: {type(self.api_key)})")
+                print(f"DEBUG QM [_worker V5.1]: Valeurs pour Astrometry -> Ref Scale (arcsec/pix): {self.reference_pixel_scale_arcsec} (Type: {type(self.reference_pixel_scale_arcsec)})")
+
+                mosaic_ref_panel_wcs_absolute = None 
+                if solve_image_wcs_func: 
+                    print(f"DEBUG QM [_worker V5.1]: APPEL de solve_image_wcs_func (Astrometry.net)...")
+                    mosaic_ref_panel_wcs_absolute = solve_image_wcs_func(
+                        mosaic_ref_panel_image_data, 
+                        mosaic_ref_panel_header, 
+                        self.api_key,
+                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
+                        progress_callback=self.update_progress 
+                    )
+                    print(f"DEBUG QM [_worker V5.1]: RETOUR de solve_image_wcs_func. WCS obtenu: {'Oui' if mosaic_ref_panel_wcs_absolute else 'Non'}")
+                else:
+                     print(f"DEBUG QM [_worker V5.1]: solve_image_wcs_func est None, Astrometry.net ne sera pas appelé.")
+                
+                if mosaic_ref_panel_wcs_absolute is None:
+                    self.update_progress("   ⚠️ Échec plate-solving Astrometry.net pour panneau de référence. Tentative de WCS approximatif...", None)
+                    print("WARN QM [_worker V5.1]: Plate-solve Astrometry.net a échoué ou n'a pas été tenté. Tentative de fallback avec WCS approximatif.")
+                    
+                    _create_wcs_from_header_func = None
+                    try:
+                        from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_func
+                        _create_wcs_from_header_func = _cwfh_func
+                        print(f"DEBUG QM [_worker V5.1]: Import de _create_wcs_from_header pour fallback REUSSI.")
+                    except ImportError:
+                        print(f"ERREUR QM [_worker V5.1]: Import de _create_wcs_from_header pour fallback ECHOUE.")
+                    
+                    if _create_wcs_from_header_func:
+                        try:
+                            mosaic_ref_panel_wcs_absolute = _create_wcs_from_header_func(mosaic_ref_panel_header)
+                            if mosaic_ref_panel_wcs_absolute and mosaic_ref_panel_wcs_absolute.is_celestial:
+                                self.update_progress("   -> WCS approximatif créé avec succès à partir du header du panneau de référence.", None)
+                                print("INFO QM [_worker V5.1]: Fallback WCS approximatif créé.")
+                                nx_fb = mosaic_ref_panel_header.get('NAXIS1')
+                                ny_fb = mosaic_ref_panel_header.get('NAXIS2')
+                                if nx_fb and ny_fb:
+                                    try:
+                                        mosaic_ref_panel_wcs_absolute.pixel_shape = (int(nx_fb), int(ny_fb))
+                                        print(f"DEBUG QM: pixel_shape ({nx_fb},{ny_fb}) attaché au WCS de fallback.")
+                                    except ValueError:
+                                        print(f"WARN QM: NAXIS1/2 non entiers pour WCS fallback ('{nx_fb}','{ny_fb}').")
+                                elif hasattr(mosaic_ref_panel_image_data, 'shape'):
+                                    mosaic_ref_panel_wcs_absolute.pixel_shape = (mosaic_ref_panel_image_data.shape[1], mosaic_ref_panel_image_data.shape[0])
+                                    print(f"DEBUG QM: pixel_shape depuis image_data ({mosaic_ref_panel_wcs_absolute.pixel_shape}) attaché au WCS de fallback.")
+                                else:
+                                     print(f"WARN QM: Impossible d'attacher pixel_shape au WCS de fallback (NAXIS ou shape image manquants).")
+                            else:
+                                self.update_progress("   -> ERREUR: Échec création WCS approximatif pour panneau de référence (non céleste ou None).", None)
+                                print("ERREUR QM [_worker V5.1]: Échec création WCS de fallback (non céleste ou None).")
+                                mosaic_ref_panel_wcs_absolute = None 
+                        except Exception as e_fallback:
+                            self.update_progress(f"   -> ERREUR lors de la tentative de création WCS de fallback: {e_fallback}", None)
+                            print(f"ERREUR QM [_worker V5.1]: Exception pendant fallback WCS: {e_fallback}")
+                            traceback.print_exc(limit=1)
+                            mosaic_ref_panel_wcs_absolute = None
+                    else: 
+                        self.update_progress("   -> ERREUR CRITIQUE: Fonction _create_wcs_from_header non disponible pour fallback.", None)
+                        mosaic_ref_panel_wcs_absolute = None
+                
+                if mosaic_ref_panel_wcs_absolute is None:
+                    raise RuntimeError("Mosaïque Locale: Échec plate-solving (Astrometry ET fallback) du panneau de référence. Impossible de continuer.")
+                
+                print(f"DEBUG QM [_worker V5.1]: Panneau de référence traité (Astrometry ou Fallback). WCS Absolu prêt.")
+                self.reference_wcs_object = mosaic_ref_panel_wcs_absolute 
+                
                 mat_identite = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
-                valid_mask_ref_panel = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool)
+                valid_mask_ref_panel = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool) 
+                
                 all_aligned_files_with_info_for_mosaic.append(
                     (mosaic_ref_panel_image_data.copy(),      
-                     mosaic_ref_panel_header.copy(),   
-                     mosaic_ref_panel_wcs_absolute,    
-                     mat_identite,                     
-                     valid_mask_ref_panel)             
+                     mosaic_ref_panel_header.copy(),          
+                     self.reference_wcs_object,               
+                     mat_identite,                            
+                     valid_mask_ref_panel)                    
                 )
-                self.aligned_files_count += 1 # Compter le panneau de référence
-                print(f"DEBUG QM [_worker V4]: Mosaïque Locale: Panneau de référence (original pré-traité) ajouté à la liste.")
+                self.aligned_files_count += 1 
+                print(f"DEBUG QM [_worker V5.1]: Mosaïque Locale: Panneau de référence ajouté à la liste (total: {self.aligned_files_count}).")
             
             elif self.drizzle_active_session or (self.is_mosaic_run and not use_local_aligner_for_this_mosaic_run):
+                # ... (logique inchangée pour Drizzle standard / Mosaïque Astrometry) ...
                 self.update_progress("   -> Résolution astrométrique de la référence principale (pour Drizzle standard / Mosaïque Astrometry)...")
-                try: from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_func
-                except ImportError: solve_image_wcs_func = None
-                if solve_image_wcs_func: self.reference_wcs_object = solve_image_wcs_func(reference_image_data_for_global_alignment, self.reference_header_for_wcs, self.api_key, scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec, progress_callback=self.update_progress)
-                else: self.update_progress("   -> ERREUR: Fonction solve_image_wcs non disponible."); self.reference_wcs_object = None
-                if self.reference_wcs_object is None: raise RuntimeError("Échec plate-solving de la référence principale (Drizzle/Mosaïque Astrometry).")
-                print(f"DEBUG QM [_worker V4]: WCS de référence principale obtenu (Astrometry).")
+                solve_image_wcs_func = None
+                try: 
+                    from ..enhancement.astrometry_solver import solve_image_wcs as solve_image_wcs_imported
+                    solve_image_wcs_func = solve_image_wcs_imported
+                except ImportError: pass # Géré par la condition suivante
 
-            self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
-            self.update_progress(f"▶️ Démarrage boucle (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})")
+                if solve_image_wcs_func:
+                    self.reference_wcs_object = solve_image_wcs_func(
+                        reference_image_data_for_global_alignment, 
+                        self.reference_header_for_wcs, 
+                        self.api_key, 
+                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec, 
+                        progress_callback=self.update_progress
+                    )
+                else: 
+                    self.update_progress("   -> ERREUR CRITIQUE: solve_image_wcs non disponible."); self.reference_wcs_object = None
+                
+                if self.reference_wcs_object is None:
+                    raise RuntimeError("Échec plate-solving de la référence principale (requis pour Drizzle/Mosaïque Astrometry).")
+                print(f"DEBUG QM [_worker V5.1]: WCS de référence principale (Astrometry) obtenu pour Drizzle/Mosaïque Astrometry.")
 
-            # --- 3.B Boucle principale de traitement de la file d'attente ---
-            # is_first_panel_for_local_align_skipped = not use_local_aligner_for_this_mosaic_run
-            # Remplacé par une logique plus robuste de vérification du chemin
-            path_of_processed_ref_panel = mosaic_ref_panel_header.get('_SOURCE_PATH', None) if use_local_aligner_for_this_mosaic_run and mosaic_ref_panel_header else None
+
+            self.update_progress("⭐ Référence(s) prête(s).", 5)
+            self._recalculate_total_batches() 
+            self.update_progress(f"▶️ Démarrage boucle de traitement (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})")
+
+            path_of_processed_ref_panel = None
+            if use_local_aligner_for_this_mosaic_run and mosaic_ref_panel_header and '_PANREF_FN' in mosaic_ref_panel_header: # Utiliser la clé courte
+                # On doit reconstruire le chemin complet si on ne stocke que le basename
+                # Pour l'instant, on suppose que le premier dossier (self.current_folder) contient le panneau réf.
+                # C'est une approximation, mais devrait fonctionner si le panneau réf est bien du premier dossier.
+                # Une solution plus robuste serait de stocker le chemin complet dans une variable au lieu du header.
+                # Pour ce debug, on va essayer de matcher juste le basename.
+                path_of_processed_ref_panel = mosaic_ref_panel_header['_PANREF_FN'] # Juste le nom de base
+                print(f"DEBUG QM [_worker V5.1]: Nom de base du panneau de référence traité (à skipper): {path_of_processed_ref_panel}")
 
 
             while not self.stop_processing:
-                file_path = None; 
+                file_path = None 
                 aligned_data_item = None; header_item = None; quality_scores_item = None
                 wcs_object_indiv_item = None; valid_pixel_mask_item = None
                 
                 try:
-                    file_path = self.queue.get(timeout=1.0)
+                    file_path = self.queue.get(timeout=1.0) 
                     file_name_for_log = os.path.basename(file_path)
                     
                     if use_local_aligner_for_this_mosaic_run:
-                        print(f"DEBUG QM [_worker V4]: Traitement Mosaïque Locale pour fichier: {file_name_for_log}")
+                        # print(f"DEBUG QM [_worker V5.1]: Traitement Mosaïque Locale pour fichier: {file_name_for_log}")
                         
-                        # Vérifier si le fichier courant est le panneau de référence déjà traité
-                        if path_of_processed_ref_panel and os.path.normpath(file_path) == os.path.normpath(path_of_processed_ref_panel):
-                            print(f"DEBUG QM [_worker V4]: Fichier {file_name_for_log} EST le panneau de référence (déjà ajouté). Consommé de la queue.")
-                            self.processed_files_count += 1 # Déjà compté comme aligned lors de l'ajout initial
+                        if path_of_processed_ref_panel and file_name_for_log == path_of_processed_ref_panel:
+                            print(f"DEBUG QM [_worker V5.1]: Fichier {file_name_for_log} EST le panneau de référence (déjà ajouté et WCS résolu). Consommé de la queue.")
+                            self.processed_files_count += 1 
                             self.queue.task_done()
-                            path_of_processed_ref_panel = None # Ne skipper qu'une fois
+                            path_of_processed_ref_panel = None 
                             continue 
 
-                        self.update_progress(f"   -> Mosaïque Locale: Alignement local de {file_name_for_log} sur panneau de référence...")
+                        self.update_progress(f"   -> Mosaïque Locale: Alignement local de '{file_name_for_log}' sur panneau de référence...")
+                        
                         current_panel_data_loaded = load_and_validate_fits(file_path)
-                        if current_panel_data_loaded is None: raise ValueError(f"Échec chargement {file_name_for_log} pour align. local.")
+                        if current_panel_data_loaded is None: 
+                            raise ValueError(f"Échec chargement FITS {file_name_for_log} pour alignement local.")
                         current_panel_header = fits.getheader(file_path)
-                        current_panel_header['_SOURCE_PATH'] = file_path 
+                        # current_panel_header['_SOURCE_PATH'] = file_path # Commenté pour éviter erreur longueur FITS
+                        current_panel_header['_SRCFILE'] = (os.path.basename(file_path), "Original source file name")
+
 
                         current_panel_data_processed = current_panel_data_loaded.astype(np.float32)
                         if current_panel_data_processed.ndim == 2:
-                            bayer_pat = current_panel_header.get('BAYERPAT', self.bayer_pattern if hasattr(self, 'bayer_pattern') else None)
-                            if bayer_pat and isinstance(bayer_pat, str) and bayer_pat.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
-                                try: current_panel_data_processed = debayer_image(current_panel_data_processed, bayer_pat.upper())
-                                except Exception as e_deb: print(f"WARN QM: Debayering échoué pour panneau local {file_name_for_log}: {e_deb}")
+                            bayer_pat = current_panel_header.get('BAYERPAT', self.bayer_pattern)
+                            pattern_upper = bayer_pat.upper() if isinstance(bayer_pat, str) else self.bayer_pattern.upper()
+                            if pattern_upper in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                                try: 
+                                    current_panel_data_processed = debayer_image(current_panel_data_processed, pattern_upper)
+                                except Exception as e_deb: 
+                                    print(f"WARN QM: Debayering échoué pour panneau local {file_name_for_log}: {e_deb}. Utilisation N&B.")
                         if self.correct_hot_pixels:
-                            try: current_panel_data_processed = detect_and_correct_hot_pixels(current_panel_data_processed, self.hot_pixel_threshold, self.neighborhood_size)
-                            except Exception as e_hp: print(f"WARN QM: Correction HP échouée pour panneau local {file_name_for_log}: {e_hp}")
-
-                        if hasattr(self.local_aligner_instance, 'set_progress_callback') and callable(self.progress_callback) : # Vérifier si l'attribut existe et est callable
-                             self.local_aligner_instance.set_progress_callback(self.progress_callback)
+                            try: 
+                                current_panel_data_processed = detect_and_correct_hot_pixels(current_panel_data_processed, self.hot_pixel_threshold, self.neighborhood_size)
+                            except Exception as e_hp: 
+                                print(f"WARN QM: Correction HP échouée pour panneau local {file_name_for_log}: {e_hp}")
+                        
+                        if hasattr(self.local_aligner_instance, 'set_progress_callback') and callable(self.progress_callback) :
+                             self.local_aligner_instance.set_progress_callback(self.update_progress) # S'assurer de passer le bon callback
                         
                         _aligned_img_temp, M_transform, align_success = self.local_aligner_instance._align_image(
-                            current_panel_data_processed, mosaic_ref_panel_image_data, file_name_for_log
+                            current_panel_data_processed,  
+                            mosaic_ref_panel_image_data,   
+                            file_name_for_log
                         )
                         
-                        self.processed_files_count += 1
+                        self.processed_files_count += 1 
                         if align_success and M_transform is not None:
                             self.aligned_files_count += 1
                             valid_mask_this_panel = np.ones(current_panel_data_processed.shape[:2], dtype=bool)
+                            
                             all_aligned_files_with_info_for_mosaic.append(
                                 (current_panel_data_processed.copy(), 
-                                 current_panel_header.copy(),   
-                                 mosaic_ref_panel_wcs_absolute, 
-                                 M_transform.copy(),            
-                                 valid_mask_this_panel)      
+                                 current_panel_header.copy(),         
+                                 self.reference_wcs_object,          
+                                 M_transform.copy(),                  
+                                 valid_mask_this_panel)               
                             )
-                            print(f"DEBUG QM [_worker V4]: Mosaïque Locale: Panneau {file_name_for_log} aligné (M stockée) et ajouté.")
+                            # print(f"DEBUG QM [_worker V5.1]: Mosaïque Locale: Panneau '{file_name_for_log}' aligné. " # Trop verbeux
+                            #       f"Total alignés: {self.aligned_files_count}. Liste mosaïque: {len(all_aligned_files_with_info_for_mosaic)}")
                         else:
-                            self.update_progress(f"   -> Mosaïque Locale: Échec alignement local (M non trouvée) pour {file_name_for_log}. Ignoré.")
+                            self.update_progress(f"   -> Mosaïque Locale: Échec alignement local pour {file_name_for_log}. Ignoré.")
                             self.failed_align_count +=1
                         
                         del current_panel_data_loaded, current_panel_header, current_panel_data_processed, _aligned_img_temp, M_transform
                     
-                    else: # Cas NON-Mosaïque Locale
+                    else: 
+                        # print(f"DEBUG QM [_worker V5.1]: Traitement NON-Mosaïque Locale pour '{file_name_for_log}'...") # Trop verbeux
                         aligned_data_item, header_item, quality_scores_item, wcs_object_indiv_item, valid_pixel_mask_item = (
                             self._process_file(file_path, reference_image_data_for_global_alignment)
                         )
                         self.processed_files_count += 1
                         if aligned_data_item is not None and valid_pixel_mask_item is not None:
-                            self.aligned_files_count += 1; current_item_tuple = (aligned_data_item, header_item, quality_scores_item, wcs_object_indiv_item, valid_pixel_mask_item)
-                            if self.is_mosaic_run: all_aligned_files_with_info_for_mosaic.append(current_item_tuple); print(f"DEBUG QM [_worker V4]: Item {self.aligned_files_count} ajouté pour MOSAÏQUE (Astrometry).")
+                            self.aligned_files_count += 1
+                            current_item_tuple = (aligned_data_item, header_item, quality_scores_item, wcs_object_indiv_item, valid_pixel_mask_item)
+                            
+                            if self.is_mosaic_run: 
+                                all_aligned_files_with_info_for_mosaic.append(current_item_tuple)
+                                # print(f"DEBUG QM [_worker V5.1]: Item {self.aligned_files_count} ajouté pour MOSAÏQUE (Astrometry). Liste: {len(all_aligned_files_with_info_for_mosaic)}")
+                            
                             else:
-                                current_batch_items_with_masks_for_stack_batch.append(current_item_tuple); print(f"DEBUG QM [_worker V4]: Item {self.aligned_files_count} ajouté au lot source (taille: {len(current_batch_items_with_masks_for_stack_batch)}).")
+                                current_batch_items_with_masks_for_stack_batch.append(current_item_tuple)
+                                # print(f"DEBUG QM [_worker V5.1]: Item {self.aligned_files_count} ajouté au lot source (taille: {len(current_batch_items_with_masks_for_stack_batch)}).")
+                                
                                 if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size: 
-                                    print(f"DEBUG QM [_worker V4]: Lot source plein ({len(current_batch_items_with_masks_for_stack_batch)}). Traitement...")
-                                    if self.drizzle_active_session:
-                                        print(f"DEBUG QM [_worker V4]: Traitement Drizzle lot source (Mode: {self.drizzle_mode})."); batch_data_for_drizzle_processing = []
+                                    # print(f"DEBUG QM [_worker V5.1]: Lot source plein ({len(current_batch_items_with_masks_for_stack_batch)}). Traitement du lot...")
+                                    
+                                    if self.drizzle_active_session: 
+                                        # print(f"DEBUG QM [_worker V5.1]: Traitement Drizzle standard du lot (Mode: {self.drizzle_mode}).")
+                                        batch_data_for_drizzle_processing = []
                                         for item_driz in current_batch_items_with_masks_for_stack_batch:
-                                            if item_driz[0] is not None and self.reference_wcs_object is not None: batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], self.reference_wcs_object) )
-                                            elif item_driz[0] is not None and self.reference_wcs_object is None: print(f"WARN QM [_worker V4]: WCS réf global absent pour Drizzle."); batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], item_driz[3]) )
+                                            wcs_to_use_for_driz_input = self.reference_wcs_object if self.reference_wcs_object else item_driz[3] 
+                                            if item_driz[0] is not None and wcs_to_use_for_driz_input is not None:
+                                                batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], wcs_to_use_for_driz_input) )
+                                            else:
+                                                print(f"WARN QM [_worker V5.1]: Données ou WCS manquant pour Drizzle standard sur item. Ignoré.")
+
                                         if batch_data_for_drizzle_processing:
                                             if self.drizzle_output_wcs is None: 
                                                 ref_shape_hw_driz = self.memmap_shape[:2] if self.memmap_shape else reference_image_data_for_global_alignment.shape[:2]
-                                                if self.reference_wcs_object: (self.drizzle_output_wcs, self.drizzle_output_shape_hw) = self._create_drizzle_output_wcs(self.reference_wcs_object, ref_shape_hw_driz, self.drizzle_scale)
-                                                else: self.processing_error = "WCS Ref Drizzle absent"; self.stop_processing = True; break
-                                            if self.drizzle_output_wcs:
-                                                self.stacked_batches_count += 1; print(f"DEBUG QM [_worker V4]: Appel _process_and_save_drizzle_batch lot Drizzle #{self.stacked_batches_count}")
-                                                sci_p, wht_ps_list = self._process_and_save_drizzle_batch(batch_data_for_drizzle_processing, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
-                                                if sci_p and wht_ps_list: self.intermediate_drizzle_batch_files.append((sci_p, wht_ps_list)); print(f"DEBUG QM [_worker V4]: Lot Drizzle #{self.stacked_batches_count} sauvegardé.")
-                                                else: self.failed_stack_count += len(batch_data_for_drizzle_processing); print(f"WARN QM [_worker V4]: Échec _process_and_save_drizzle_batch lot Drizzle #{self.stacked_batches_count}")
-                                        else: print(f"WARN QM [_worker V4]: Aucune donnée valide pour _process_and_save_drizzle_batch lot Drizzle.")
+                                                if self.reference_wcs_object: 
+                                                    (self.drizzle_output_wcs, self.drizzle_output_shape_hw) = self._create_drizzle_output_wcs(
+                                                        self.reference_wcs_object, ref_shape_hw_driz, self.drizzle_scale
+                                                    )
+                                                else: 
+                                                    self.processing_error = "WCS Ref Global Drizzle absent (milieu de lot)"; self.stop_processing = True; break
+                                            
+                                            if self.drizzle_output_wcs: 
+                                                self.stacked_batches_count += 1
+                                                # print(f"DEBUG QM [_worker V5.1]: Appel _process_and_save_drizzle_batch (standard) lot Drizzle #{self.stacked_batches_count}")
+                                                sci_p, wht_ps_list = self._process_and_save_drizzle_batch(
+                                                    batch_data_for_drizzle_processing, 
+                                                    self.drizzle_output_wcs, 
+                                                    self.drizzle_output_shape_hw, 
+                                                    self.stacked_batches_count
+                                                )
+                                                if sci_p and wht_ps_list: 
+                                                    self.intermediate_drizzle_batch_files.append((sci_p, wht_ps_list))
+                                                    # print(f"DEBUG QM [_worker V5.1]: Lot Drizzle (standard) #{self.stacked_batches_count} sauvegardé.")
+                                                else: 
+                                                    self.failed_stack_count += len(batch_data_for_drizzle_processing)
+                                                    print(f"WARN QM [_worker V5.1]: Échec _process_and_save_drizzle_batch lot Drizzle (standard) #{self.stacked_batches_count}")
+                                        else: 
+                                            print(f"WARN QM [_worker V5.1]: Aucune donnée valide pour _process_and_save_drizzle_batch lot Drizzle (standard).")
+                                    
                                     elif not self.drizzle_active_session: 
-                                        print(f"DEBUG QM [_worker V4]: Traitement Classique (SUM/W) lot source."); self.stacked_batches_count += 1
+                                        # print(f"DEBUG QM [_worker V5.1]: Traitement Classique (SUM/W) du lot source.")
+                                        self.stacked_batches_count += 1
                                         self._process_completed_batch(current_batch_items_with_masks_for_stack_batch, self.stacked_batches_count, self.total_batches_estimated)
-                                    current_batch_items_with_masks_for_stack_batch = []
-                        else: print(f"DEBUG QM [_worker V4]: Fichier {file_name_for_log} skippé (_process_file retourné None).")
+                                    
+                                    current_batch_items_with_masks_for_stack_batch = [] 
+                        else: 
+                            print(f"DEBUG QM [_worker V5.1]: Fichier {file_name_for_log} skippé ou erreur (_process_file retourné None).")
+                    
                     self.queue.task_done()
                 
                 except Empty: 
                     self.update_progress("ⓘ File d'attente vide. Vérification dernier lot et dossiers supplémentaires...")
+                    
                     if not (self.is_mosaic_run and not use_local_aligner_for_this_mosaic_run) and current_batch_items_with_masks_for_stack_batch:
-                        print(f"DEBUG QM [_worker V4/Empty]: Traitement dernier lot source partiel ({len(current_batch_items_with_masks_for_stack_batch)}).")
+                        # print(f"DEBUG QM [_worker V5.1/Empty]: Traitement dernier lot source partiel ({len(current_batch_items_with_masks_for_stack_batch)}).")
                         if self.drizzle_active_session: 
-                            print(f"DEBUG QM [_worker V4/Empty]: Traitement Drizzle DERNIER lot source (Mode: {self.drizzle_mode})."); batch_data_for_drizzle_processing = []
+                            batch_data_for_drizzle_processing = [] 
                             for item_driz in current_batch_items_with_masks_for_stack_batch:
-                                if item_driz[0] is not None and self.reference_wcs_object is not None: batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], self.reference_wcs_object) )
-                                elif item_driz[0] is not None and self.reference_wcs_object is None : print(f"WARN QM [_worker V4/Empty]: WCS réf global absent pour Drizzle (dernier lot)."); batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], item_driz[3]) )
+                                wcs_to_use_for_driz_input = self.reference_wcs_object if self.reference_wcs_object else item_driz[3]
+                                if item_driz[0] is not None and wcs_to_use_for_driz_input is not None: batch_data_for_drizzle_processing.append( (item_driz[0], item_driz[1], wcs_to_use_for_driz_input) )
+                                else: print(f"WARN QM [_worker V5.1/Empty]: Données/WCS manquant Drizzle standard (dernier lot).")
                             if batch_data_for_drizzle_processing:
                                 if self.drizzle_output_wcs is None: 
                                     ref_shape_hw_driz = self.memmap_shape[:2] if self.memmap_shape else reference_image_data_for_global_alignment.shape[:2]
                                     if self.reference_wcs_object: (self.drizzle_output_wcs, self.drizzle_output_shape_hw) = self._create_drizzle_output_wcs(self.reference_wcs_object, ref_shape_hw_driz, self.drizzle_scale)
-                                    else: self.processing_error = "WCS Ref Drizzle absent (Empty/Final)"; self.stop_processing = True; break
+                                    else: self.processing_error = "WCS Ref Drizzle Global absent (Empty/Final)"; self.stop_processing = True; break
                                 if self.drizzle_output_wcs:
-                                    self.stacked_batches_count += 1; print(f"DEBUG QM [_worker V4/Empty]: Appel _process_and_save_drizzle_batch DERNIER lot Drizzle #{self.stacked_batches_count}")
+                                    self.stacked_batches_count += 1
                                     sci_p, wht_ps_list = self._process_and_save_drizzle_batch(batch_data_for_drizzle_processing, self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count)
-                                    if sci_p and wht_ps_list: self.intermediate_drizzle_batch_files.append((sci_p, wht_ps_list)); print(f"DEBUG QM [_worker V4/Empty]: DERNIER Lot Drizzle #{self.stacked_batches_count} sauvegardé.")
-                                    else: self.failed_stack_count += len(batch_data_for_drizzle_processing); print(f"WARN QM [_worker V4/Empty]: Échec _process_and_save_drizzle_batch DERNIER lot Drizzle.")
-                            else: print(f"WARN QM [_worker V4/Empty]: Aucune donnée valide pour _process_and_save_drizzle_batch DERNIER lot Drizzle.")
+                                    if sci_p and wht_ps_list: self.intermediate_drizzle_batch_files.append((sci_p, wht_ps_list))
+                                    else: self.failed_stack_count += len(batch_data_for_drizzle_processing)
+                            # else: print(f"WARN QM [_worker V5.1/Empty]: Aucune donnée valide pour _process_and_save_drizzle_batch DERNIER lot Drizzle (standard).")
                         elif not self.drizzle_active_session: 
-                            print(f"DEBUG QM [_worker V4/Empty]: Traitement Classique (SUM/W) DERNIER lot source."); self.stacked_batches_count += 1
+                            self.stacked_batches_count += 1
                             self._process_completed_batch(current_batch_items_with_masks_for_stack_batch, self.stacked_batches_count, self.total_batches_estimated)
-                        current_batch_items_with_masks_for_stack_batch = []
+                        current_batch_items_with_masks_for_stack_batch = [] 
+                    
                     folder_to_process_next = None 
                     with self.folders_lock:
-                        if self.additional_folders: folder_to_process_next = self.additional_folders.pop(0); self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
-                    if folder_to_process_next:
-                        self.current_folder = folder_to_process_next; self.update_progress(f"📂 Passage au dossier supplémentaire : {os.path.basename(folder_to_process_next)}")
-                        self._add_files_to_queue(folder_to_process_next); self._recalculate_total_batches()
-                    else: self.update_progress("✅ Fin de la file d'attente et des dossiers supplémentaires."); break 
+                        if self.additional_folders: 
+                            folder_to_process_next = self.additional_folders.pop(0)
+                            self.update_progress(f"folder_count_update:{len(self.additional_folders)}") 
+                    
+                    if folder_to_process_next: 
+                        self.current_folder = folder_to_process_next
+                        self.update_progress(f"📂 Passage au dossier supplémentaire : {os.path.basename(folder_to_process_next)}")
+                        self._add_files_to_queue(folder_to_process_next) 
+                        self._recalculate_total_batches() 
+                    else: 
+                        self.update_progress("✅ Fin de la file d'attente et des dossiers supplémentaires. Finalisation...")
+                        break 
                 
                 except Exception as e_inner_loop: 
-                    error_msg_loop = f"Erreur boucle worker: {type(e_inner_loop).__name__}: {e_inner_loop}"; print(f"ERREUR QM [_worker V4]: {error_msg_loop}"); traceback.print_exc(limit=2)
-                    self.update_progress(f"⚠️ {error_msg_loop}"); self.failed_stack_count += 1
-                    if self.queue.unfinished_tasks > 0: self.queue.task_done()
+                    error_msg_loop = f"Erreur boucle worker: {type(e_inner_loop).__name__}: {e_inner_loop}"
+                    print(f"ERREUR QM [_worker V5.1]: {error_msg_loop}"); traceback.print_exc(limit=2)
+                    self.update_progress(f"⚠️ {error_msg_loop}")
+                    self.failed_stack_count += 1 
+                    if self.queue.unfinished_tasks > 0: self.queue.task_done() 
+                
                 finally: 
                     del aligned_data_item, header_item, quality_scores_item, wcs_object_indiv_item, valid_pixel_mask_item
-                    if self.processed_files_count % 10 == 0: gc.collect()
+                    if self.processed_files_count > 0 and self.processed_files_count % 20 == 0: # Moins fréquent
+                        gc.collect() 
+            
             # --- Fin de la boucle while principale ---
 
-            # --- 3.C Traitement final après la boucle ---
-            print("DEBUG QM [_worker V4]: Sortie de la boucle principale. Début logique de finalisation...")
+            print("DEBUG QM [_worker V5.1]: Sortie de la boucle principale. Début logique de finalisation...")
             print(f"  ÉTAT FINAL AVANT BLOC if/elif/else: stop_processing={self.stop_processing}, "
-                  f"is_mosaic_run={self.is_mosaic_run} (Local Pref: {self.is_local_alignment_preferred_for_mosaic}, Local Avail: {use_local_aligner_for_this_mosaic_run}), "
+                  f"is_mosaic_run={self.is_mosaic_run} (Local Utilisé: {use_local_aligner_for_this_mosaic_run}), "
                   f"drizzle_active_session={self.drizzle_active_session}, drizzle_mode='{self.drizzle_mode}'")
-            print(f"  Nombre d'items pour mosaïque collectés: {len(all_aligned_files_with_info_for_mosaic)}")
-            print(f"  Nombre de fichiers intermédiaires Drizzle (non-mosaïque) collectés: {len(self.intermediate_drizzle_batch_files)}")
+            print(f"  Nombre d'items collectés pour mosaïque: {len(all_aligned_files_with_info_for_mosaic)}")
+            print(f"  Nombre de fichiers Drizzle intermédiaires (non-mosaïque) collectés: {len(self.intermediate_drizzle_batch_files)}")
 
             if self.stop_processing: 
-                print("DEBUG QM [_worker V4]: Entrée dans branche 'self.stop_processing == True'")
+                # ... (logique inchangée)
+                print("DEBUG QM [_worker V5.1]: Entrée dans branche 'self.stop_processing == True'")
                 self.update_progress("🛑 Traitement interrompu avant sauvegarde finale.")
                 if not self.is_mosaic_run and self.images_in_cumulative_stack > 0 and not (self.drizzle_active_session and self.drizzle_mode == "Incremental"): 
                     self.update_progress("   -> Tentative sauvegarde stack partiel (SUM/W Classique)...")
                     self._save_final_stack(output_filename_suffix="_sumw_stopped_partial", stopped_early=True)
                 elif self.drizzle_active_session and self.intermediate_drizzle_batch_files and self.drizzle_mode in ["Final", "Incremental"]:
                      self.update_progress("   -> Drizzle interrompu. Pas de combinaison des lots intermédiaires.")
-                     self.final_stacked_path = None
-                else: self.final_stacked_path = None
+                     self.final_stacked_path = None 
+                else: 
+                    self.final_stacked_path = None
             
             elif self.is_mosaic_run:
-                print("DEBUG QM [_worker V4]: Entrée dans branche 'self.is_mosaic_run == True'")
-                print(f"DEBUG QM [_worker V4]: Préparation pour finalisation Mosaïque avec {len(all_aligned_files_with_info_for_mosaic)} items.")
+                # ... (logique pour is_mosaic_run avec appel à _calculate_local_mosaic_output_grid comme avant)
+                print("DEBUG QM [_worker V5.1]: Entrée dans branche 'self.is_mosaic_run == True'")
+                print(f"DEBUG QM [_worker V5.1]: Préparation pour finalisation Mosaïque avec {len(all_aligned_files_with_info_for_mosaic)} items.")
                 if not all_aligned_files_with_info_for_mosaic:
-                    self.update_progress("   -> ERREUR Mosaïque: Aucun panneau (aligné localement ou via Astrometry) à assembler.")
+                    self.update_progress("   -> ERREUR Mosaïque: Aucun panneau à assembler.")
                     self.processing_error = "Aucun panneau pour mosaïque"
                 else:
                     self.update_progress("🏁 Finalisation du traitement Mosaïque...")
-                    try: from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files
-                    except ImportError: process_mosaic_from_aligned_files = None
-                    if process_mosaic_from_aligned_files:
-                        final_mosaic_data, final_mosaic_header = process_mosaic_from_aligned_files(all_aligned_files_with_info_for_mosaic, self, self.update_progress)
-                        if final_mosaic_data is not None and final_mosaic_header is not None:
-                            mosaic_filename = os.path.join(self.output_folder, "stack_final_mosaic_drizzle.fit") 
-                            self.update_progress(f"   -> Sauvegarde de la mosaïque finale : {os.path.basename(mosaic_filename)}")
-                            save_fits_image(final_mosaic_data, mosaic_filename, final_mosaic_header, overwrite=True)
-                            self.final_stacked_path = mosaic_filename; self.last_saved_data_for_preview = final_mosaic_data.copy()
-                            self.update_progress("   -> Mosaïque finale sauvegardée.")
-                        else: self.update_progress("   -> ERREUR: L'assemblage final de la mosaïque a échoué."); self.processing_error = "Échec assemblage mosaïque"
-                    else: self.update_progress("   -> ERREUR CRITIQUE: process_mosaic_from_aligned_files non importable."); self.processing_error = "Module mosaïque manquant"
-
+                    
+                    if use_local_aligner_for_this_mosaic_run:
+                        print("DEBUG QM [_worker V5.1]: Mosaïque Locale -> Appel à _calculate_local_mosaic_output_grid (OMBB) pour la grille finale.")
+                        if self.reference_wcs_object is None: 
+                            self.update_progress("   -> ERREUR Mosaïque Locale: WCS d'ancrage manquant pour calcul grille optimisée (OMBB).")
+                            self.processing_error = "WCS ancre manquant pour grille mosaïque locale (OMBB)"
+                            self.drizzle_output_wcs = None 
+                            self.drizzle_output_shape_hw = None
+                        else:
+                            temp_output_wcs, temp_output_shape_hw = self._calculate_local_mosaic_output_grid(
+                                all_aligned_files_with_info_for_mosaic, 
+                                self.reference_wcs_object 
+                            )
+                            if temp_output_wcs and temp_output_shape_hw:
+                                self.drizzle_output_wcs = temp_output_wcs
+                                self.drizzle_output_shape_hw = temp_output_shape_hw
+                                self.update_progress(f"   -> Grille Mosaïque Locale (OMBB) calculée. Shape HW: {self.drizzle_output_shape_hw}")
+                                print(f"DEBUG QM [_worker V5.1]: Grille Mosaïque Locale (OMBB) prête. WCS: {self.drizzle_output_wcs is not None}, Shape HW: {self.drizzle_output_shape_hw}")
+                            else:
+                                self.update_progress("   -> ERREUR Mosaïque Locale: Échec calcul grille de sortie optimisée (OMBB).")
+                                self.processing_error = "Échec calcul grille mosaïque locale (OMBB)"
+                                self.drizzle_output_wcs = None 
+                                self.drizzle_output_shape_hw = None
+                    else: 
+                        print("DEBUG QM [_worker V5.1]: Mosaïque Astrometry -> La grille de sortie sera calculée DANS process_mosaic_from_aligned_files.")
+                        self.drizzle_output_wcs = None
+                        self.drizzle_output_shape_hw = None 
+                    
+                    process_mosaic_func = None
+                    try: 
+                        from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files as pm_func
+                        process_mosaic_func = pm_func
+                    except ImportError: pass
+                    
+                    if process_mosaic_func:
+                        # Si la grille a échoué à être calculée pour le mode local, drizzle_output_wcs sera None,
+                        # ce qui fera échouer process_mosaic_from_aligned_files ou le poussera à essayer de recalculer la grille.
+                        # On vérifie ici pour être sûr et éviter un appel inutile si la grille est déjà connue comme manquante.
+                        if use_local_aligner_for_this_mosaic_run and self.drizzle_output_wcs is None:
+                             print("ERREUR QM [_worker V5.1]: Grille locale OMBB non calculée, assemblage mosaïque annulé.")
+                             if not self.processing_error: self.processing_error = "Grille locale OMBB manquante" # S'assurer qu'une erreur est enregistrée
+                             self.final_stacked_path = None
+                        else:
+                            final_mosaic_data, final_mosaic_header = process_mosaic_func(
+                                all_aligned_files_with_info_for_mosaic, 
+                                self, 
+                                self.update_progress
+                            )
+                            if final_mosaic_data is not None and final_mosaic_header is not None:
+                                mosaic_filename = os.path.join(self.output_folder, "stack_final_mosaic_drizzle.fit") 
+                                self.update_progress(f"   -> Sauvegarde de la mosaïque finale : {os.path.basename(mosaic_filename)}")
+                                save_fits_image(final_mosaic_data, mosaic_filename, final_mosaic_header, overwrite=True)
+                                self.final_stacked_path = mosaic_filename
+                                self.last_saved_data_for_preview = final_mosaic_data.copy() 
+                                self.update_progress("   -> Mosaïque finale sauvegardée avec succès.")
+                            else: 
+                                self.update_progress("   -> ERREUR: L'assemblage final de la mosaïque (dans process_mosaic...) a échoué.")
+                                if not self.processing_error: self.processing_error = "Échec assemblage final mosaïque (process_mosaic...)"
+                                self.final_stacked_path = None 
+                    else: 
+                        self.update_progress("   -> ERREUR CRITIQUE: La fonction process_mosaic_from_aligned_files n'a pas pu être importée.")
+                        self.processing_error = "Module/Fonction d'assemblage mosaïque manquant(e)"
+                        self.final_stacked_path = None
+            
             elif self.drizzle_active_session and (self.drizzle_mode == "Final" or self.drizzle_mode == "Incremental"): 
-                print(f"DEBUG QM [_worker V4]: Entrée dans branche 'DRIZZLE (Mode: {self.drizzle_mode})'")
+                # ... (logique inchangée pour Drizzle standard) ...
+                print(f"DEBUG QM [_worker V5.1]: Entrée dans branche 'DRIZZLE STANDARD (Mode: {self.drizzle_mode})'")
                 self.update_progress(f"🏁 Finalisation Drizzle (Mode {self.drizzle_mode})...")
-                if self.intermediate_drizzle_batch_files:
-                    print(f"DEBUG QM [_worker V4]: Combinaison de {len(self.intermediate_drizzle_batch_files)} lots Drizzle intermédiaires.")
-                    final_sci_drizzle_combined, final_wht_drizzle_combined = self._combine_intermediate_drizzle_batches(self.intermediate_drizzle_batch_files, self.drizzle_output_wcs, self.drizzle_output_shape_hw)
-                    if final_sci_drizzle_combined is not None and final_wht_drizzle_combined is not None:
-                        print(f"DEBUG QM [_worker V4]: Drizzle (Mode {self.drizzle_mode}) - Combinaison des lots réussie.")
-                        self.current_stack_header = self._update_header_for_drizzle_final()
-                        drizzle_suffix = "_drizzle_final" if self.drizzle_mode == "Final" else "_drizzle_incr_combined"
-                        print(f"DEBUG QM [_worker V4]: Appel _save_final_stack pour Drizzle (Mode {self.drizzle_mode}) avec suffixe '{drizzle_suffix}'.")
-                        self._save_final_stack(output_filename_suffix=drizzle_suffix, stopped_early=False, drizzle_final_sci_data=final_sci_drizzle_combined, drizzle_final_wht_data=final_wht_drizzle_combined)
-                    else: self.update_progress(f"   -> ERREUR: Échec combinaison finale des lots Drizzle (Mode {self.drizzle_mode})."); self.processing_error = f"Échec combinaison Drizzle {self.drizzle_mode}"; self.final_stacked_path = None
-                else: self.update_progress(f"   -> Aucun lot Drizzle intermédiaire à combiner pour Drizzle (Mode {self.drizzle_mode})."); self.final_stacked_path = None
+                if self.intermediate_drizzle_batch_files: 
+                    print(f"DEBUG QM [_worker V5.1]: Combinaison de {len(self.intermediate_drizzle_batch_files)} lots Drizzle intermédiaires (standard).")
+                    if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                         self.update_progress("   -> ERREUR: Grille de sortie Drizzle standard non définie pour combinaison finale.");
+                         self.processing_error = "Grille sortie Drizzle standard manquante (combinaison)"; self.final_stacked_path = None
+                    else:
+                        final_sci_drizzle_combined, final_wht_drizzle_combined = self._combine_intermediate_drizzle_batches(
+                            self.intermediate_drizzle_batch_files, 
+                            self.drizzle_output_wcs, 
+                            self.drizzle_output_shape_hw
+                        )
+                        if final_sci_drizzle_combined is not None and final_wht_drizzle_combined is not None:
+                            print(f"DEBUG QM [_worker V5.1]: Drizzle (Mode {self.drizzle_mode}) - Combinaison des lots réussie.")
+                            self.current_stack_header = self._update_header_for_drizzle_final() 
+                            drizzle_suffix = "_drizzle_final" if self.drizzle_mode == "Final" else "_drizzle_incr_combined"
+                            print(f"DEBUG QM [_worker V5.1]: Appel _save_final_stack pour Drizzle (Mode {self.drizzle_mode}) avec suffixe '{drizzle_suffix}'.")
+                            self._save_final_stack(
+                                output_filename_suffix=drizzle_suffix, 
+                                stopped_early=False, 
+                                drizzle_final_sci_data=final_sci_drizzle_combined, 
+                                drizzle_final_wht_data=final_wht_drizzle_combined
+                            )
+                        else: 
+                            self.update_progress(f"   -> ERREUR: Échec combinaison finale des lots Drizzle (Mode {self.drizzle_mode})."); 
+                            self.processing_error = f"Échec combinaison Drizzle {self.drizzle_mode}"; self.final_stacked_path = None
+                else: 
+                    self.update_progress(f"   -> Aucun lot Drizzle intermédiaire à combiner pour Drizzle (Mode {self.drizzle_mode})."); 
+                    self.final_stacked_path = None 
 
             elif not self.is_mosaic_run and not self.drizzle_active_session: 
-                print("DEBUG QM [_worker V4]: Entrée dans branche 'STACKING CLASSIQUE (SUM/W)'")
+                # ... (logique inchangée pour stacking classique)
+                print("DEBUG QM [_worker V5.1]: Entrée dans branche 'STACKING CLASSIQUE (SUM/W)'")
                 self.update_progress("🏁 Finalisation du stacking classique (SUM/W)...")
-                if self.images_in_cumulative_stack > 0 or (self.cumulative_sum_memmap is not None and np.any(self.cumulative_sum_memmap)):
-                    print(f"DEBUG QM [_worker V4]: Appel à _save_final_stack pour SUM/W classique. Images accumulées: {self.images_in_cumulative_stack}")
+                if self.images_in_cumulative_stack > 0 or \
+                   (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None and np.any(self.cumulative_sum_memmap)):
+                    print(f"DEBUG QM [_worker V5.1]: Appel à _save_final_stack pour SUM/W classique. Images accumulées: {self.images_in_cumulative_stack}")
                     self._save_final_stack(output_filename_suffix="_classic_sumw", stopped_early=False)
-                else: self.update_progress("   -> Aucune image accumulée pour le stacking classique."); self.final_stacked_path = None
+                else: 
+                    self.update_progress("   -> Aucune image accumulée pour le stacking classique. Pas de sauvegarde finale."); 
+                    self.final_stacked_path = None
+            
             else: 
-                print(f"ERREUR QM [_worker V4]: État de finalisation non reconnu. Pas de sauvegarde finale."); self.update_progress("❌ Erreur interne: État finalisation non géré."); self.processing_error = "État finalisation non géré"; self.final_stacked_path = None
+                print(f"ERREUR QM [_worker V5.1]: État de finalisation non reconnu. Pas de sauvegarde finale."); 
+                self.update_progress("❌ Erreur interne: État de finalisation non géré."); 
+                self.processing_error = "État de finalisation non géré"; self.final_stacked_path = None
 
         except RuntimeError as rte: 
-             error_msg_runtime = f"Erreur exécution critique: {rte}"; print(f"ERREUR QM [_worker V4]: {error_msg_runtime}"); self.update_progress(f"❌ {error_msg_runtime}"); self.processing_error = str(rte)
+             error_msg_runtime = f"Erreur exécution critique (RuntimeError): {rte}"; 
+             print(f"ERREUR QM [_worker V5.1]: {error_msg_runtime}"); self.update_progress(f"❌ {error_msg_runtime}"); 
+             self.processing_error = str(rte); traceback.print_exc(limit=2) 
         except Exception as e_global: 
-            error_msg_global = f"Erreur critique worker: {type(e_global).__name__}: {e_global}"; print(f"ERREUR QM [_worker V4]: {error_msg_global}"); self.update_progress(f"❌ {error_msg_global}"); traceback.print_exc(limit=3); self.processing_error = error_msg_global
+            error_msg_global = f"Erreur critique inattendue dans le worker: {type(e_global).__name__}: {e_global}"; 
+            print(f"ERREUR QM [_worker V5.1]: {error_msg_global}"); self.update_progress(f"❌ {error_msg_global}"); 
+            traceback.print_exc(limit=3); self.processing_error = error_msg_global
         
         finally: 
-            print("DEBUG QM [_worker V4]: Entrée dans le bloc FINALLY du worker (version de test radical).") 
-            self._close_memmaps()
+            print("DEBUG QM [_worker V5.1]: Entrée dans le bloc FINALLY du worker.") 
+            self._close_memmaps() 
+            
             if self.perform_cleanup:
-                print("DEBUG QM [_worker V4]: Début du bloc de nettoyage perform_cleanup (version de test radical).") 
+                print("DEBUG QM [_worker V5.1]: Début du bloc de nettoyage (perform_cleanup=True).") 
                 self.update_progress("🧹 Nettoyage final des fichiers temporaires...")
-                self.cleanup_unaligned_files(); self.cleanup_temp_reference(); self._cleanup_drizzle_temp_files(); self._cleanup_drizzle_batch_outputs(); self._cleanup_mosaic_panel_stacks_temp()
-                print("DEBUG QM [_worker V4]: Appels _cleanup effectués dans le bloc finally de _worker (version de test radical).") 
-                memmap_dir_final = os.path.join(self.output_folder, "memmap_accumulators")
-                if self.sum_memmap_path and os.path.exists(self.sum_memmap_path): 
-                    try: os.remove(self.sum_memmap_path); print("   -> SUM.npy (worker V4 finally) supprimé.") 
-                    except Exception as e: print(f"   WARN: Erreur suppression SUM.npy: {e}")
-                if self.wht_memmap_path and os.path.exists(self.wht_memmap_path): 
-                    try: os.remove(self.wht_memmap_path); print("   -> WHT.npy (worker V4 finally) supprimé.") 
-                    except Exception as e: print(f"   WARN: Erreur suppression WHT.npy: {e}")
-                try:
-                    if os.path.isdir(memmap_dir_final) and not os.listdir(memmap_dir_final): os.rmdir(memmap_dir_final); print(f"   -> Dossier memmap vide (worker V4 finally) supprimé.")
-                except Exception: pass
-            else: self.update_progress("ⓘ Fichiers temporaires et memmap conservés.")
-            print("   -> Vidage listes internes et GC...")
-            current_batch_items_with_masks_for_stack_batch = []; all_aligned_files_with_info_for_mosaic = []; self.intermediate_drizzle_batch_files = []
+                self.cleanup_unaligned_files(); self.cleanup_temp_reference()
+                self._cleanup_drizzle_temp_files(); self._cleanup_drizzle_batch_outputs()   
+                self._cleanup_mosaic_panel_stacks_temp() 
+                
+                memmap_dir_final = os.path.join(self.output_folder, "memmap_accumulators") if self.output_folder else None
+                if memmap_dir_final: 
+                    if self.sum_memmap_path and os.path.exists(self.sum_memmap_path): 
+                        try: os.remove(self.sum_memmap_path); print("   -> Fichier SUM.npy (worker finally) supprimé.") 
+                        except Exception as e_del_sum: print(f"   WARN: Erreur suppression SUM.npy (worker finally): {e_del_sum}")
+                    if self.wht_memmap_path and os.path.exists(self.wht_memmap_path): 
+                        try: os.remove(self.wht_memmap_path); print("   -> Fichier WHT.npy (worker finally) supprimé.") 
+                        except Exception as e_del_wht: print(f"   WARN: Erreur suppression WHT.npy (worker finally): {e_del_wht}")
+                    try: 
+                        if os.path.isdir(memmap_dir_final) and not os.listdir(memmap_dir_final): 
+                            os.rmdir(memmap_dir_final); print(f"   -> Dossier memmap vide (worker finally) supprimé.")
+                    except Exception as e_del_dir: print(f"   WARN: Erreur suppression dossier memmap (worker finally): {e_del_dir}")
+            else: 
+                self.update_progress("ⓘ Fichiers temporaires et memmap conservés (perform_cleanup=False).")
+            
+            print("   -> Vidage listes internes et appel garbage collector...")
+            current_batch_items_with_masks_for_stack_batch = []
+            all_aligned_files_with_info_for_mosaic = []
+            self.intermediate_drizzle_batch_files = []
             gc.collect()
-            self.processing_active = False; print("DEBUG QM [_worker V4]: Flag processing_active mis à False.")
+            
+            self.processing_active = False 
+            print("DEBUG QM [_worker V5.1]: Flag processing_active mis à False.")
             self.update_progress("🚪 Thread de traitement principal terminé.")
 
 
@@ -1764,175 +2036,268 @@ class SeestarQueuedStacker:
 
 
 
+    @staticmethod
+    def _project_to_tangent_plane(sky_coords_obj: SkyCoord, tangent_point_sky: SkyCoord):
+        """
+        Projete des coordonnées célestes sur un plan tangent.
+
+        Args:
+            sky_coords_obj (SkyCoord): Coordonnées célestes à projeter.
+            tangent_point_sky (SkyCoord): Point de tangence (centre de la projection).
+
+        Returns:
+            np.ndarray: Array de points (x, y) projetés en arcsecondes sur le plan tangent.
+                        L'origine (0,0) du plan tangent correspond à tangent_point_sky.
+        """
+        # Créer un frame de projection centré sur le point de tangence
+        # SkyOffsetFrame représente les offsets angulaires par rapport à un point central.
+        # Ces offsets (lon, lat) sont essentiellement des coordonnées sur le plan tangent.
+        skyoffset_frame = tangent_point_sky.skyoffset_frame()
+        coords_in_offset_frame = sky_coords_obj.transform_to(skyoffset_frame)
+
+        # Extraire les longitudes et latitudes dans ce frame (en arcsecondes)
+        # .lon et .lat dans SkyOffsetFrame sont les coordonnées tangentielles.
+        projected_x_arcsec = coords_in_offset_frame.lon.to(u.arcsec).value
+        projected_y_arcsec = coords_in_offset_frame.lat.to(u.arcsec).value
+        
+        # print(f"DEBUG _project_to_tangent_plane: SkyCoords (premier): {sky_coords_obj[0].ra.deg:.3f}, {sky_coords_obj[0].dec.deg:.3f}")
+        # print(f"DEBUG _project_to_tangent_plane: Tangent Point: {tangent_point_sky.ra.deg:.3f}, {tangent_point_sky.dec.deg:.3f}")
+        # print(f"DEBUG _project_to_tangent_plane: Projected (premier): x={projected_x_arcsec[0]:.2f}\", y={projected_y_arcsec[0]:.2f}\"")
+        
+        return np.column_stack((projected_x_arcsec, projected_y_arcsec))
+
+    @staticmethod
+    def _deproject_from_tangent_plane(xy_arcsec_array: np.ndarray, tangent_point_sky: SkyCoord):
+        """
+        Dé-projete des coordonnées d'un plan tangent vers des coordonnées célestes.
+
+        Args:
+            xy_arcsec_array (np.ndarray): Array de points (x, y) en arcsecondes sur le plan tangent.
+            tangent_point_sky (SkyCoord): Point de tangence utilisé pour la projection initiale.
+
+        Returns:
+            SkyCoord: Objet SkyCoord contenant les coordonnées célestes dé-projetées.
+        """
+        skyoffset_frame = tangent_point_sky.skyoffset_frame()
+        
+        # Créer des SkyCoord à partir des coordonnées du plan tangent, dans le SkyOffsetFrame
+        # lon et lat dans SkyOffsetFrame correspondent à nos x et y projetés.
+        coords_on_tangent_plane = SkyCoord(
+            lon=xy_arcsec_array[:, 0] * u.arcsec,
+            lat=xy_arcsec_array[:, 1] * u.arcsec,
+            frame=skyoffset_frame
+        )
+        
+        # Transformer ces coordonnées retour vers le système céleste de base (ex: ICRS)
+        deprojected_sky_coords = coords_on_tangent_plane.transform_to(tangent_point_sky.frame) # Utiliser le frame du point de tangence
+        
+        # print(f"DEBUG _deproject_from_tangent_plane: Input XY (premier): {xy_arcsec_array[0,0]:.2f}\", {xy_arcsec_array[0,1]:.2f}\"")
+        # print(f"DEBUG _deproject_from_tangent_plane: Deprojected (premier): RA={deprojected_sky_coords[0].ra.deg:.3f}, Dec={deprojected_sky_coords[0].dec.deg:.3f}")
+
+        return deprojected_sky_coords
+
+##########################################################################################################################
 
 
+
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _calculate_local_mosaic_output_grid(self, 
                                             panel_info_list_for_grid: list, 
                                             anchor_wcs: WCS):
         """
-        Calcule le WCS et la Shape optimaux pour la mosaïque finale basée sur l'alignement local.
-
-        Args:
-            panel_info_list_for_grid (list): Liste de dictionnaires ou tuples, où chaque item contient
-                                             au moins {'image_shape_hw': (H,W), 'transform_M_to_anchor': np.ndarray(2,3)}.
-                                             Le premier item doit être le panneau de référence avec M=identité.
-            anchor_wcs (astropy.wcs.WCS): WCS absolu résolu du panneau de référence.
-
-        Returns:
-            tuple: (output_wcs_mosaic, output_shape_mosaic_hw) ou (None, None) si échec.
+        Version: V_OMBB_SnapToAxes
+        OMBB pour dimensions et centre, puis orientation "snappée" aux axes cardinaux.
         """
         num_panels = len(panel_info_list_for_grid)
-        print(f"DEBUG QM [_calculate_local_mosaic_output_grid]: Début pour {num_panels} panneaux, anchor_wcs fourni: {'Oui' if anchor_wcs else 'Non'}")
-        self.update_progress(f"📐 Calcul grille mosaïque locale ({num_panels} panneaux)...")
-
-        if num_panels == 0 or not anchor_wcs or not anchor_wcs.is_celestial:
-            print("ERREUR QM [_calculate_local_mosaic_output_grid]: Infos panneaux ou WCS d'ancrage invalide.")
-            return None, None
-
-        all_sky_corners_list = [] # Liste pour stocker les SkyCoord de tous les coins
-
+        print(f"DEBUG QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Début pour {num_panels} panneaux...")
+        # ... (calcul de all_corners_flat_skycoord, tangent_point_sky, tangent_plane_points_arcsec, hull_points_arcsec comme avant)
+        # ... jusqu'à obtenir rect de cv2.minAreaRect
+        # Les premières parties sont identiques à V_OMBB_Fix5
+        all_sky_corners_list = [] 
+        anchor_frame_name = 'icrs' 
+        if hasattr(anchor_wcs, 'wcs') and hasattr(anchor_wcs.wcs, 'radesys') and anchor_wcs.wcs.radesys:
+            radesys_val = str(anchor_wcs.wcs.radesys).strip().lower()
+            if radesys_val in ['icrs', 'fk5', 'fk4', 'galactic']: anchor_frame_name = radesys_val
         for i, panel_info in enumerate(panel_info_list_for_grid):
             try:
-                # S'assurer que panel_info a la structure attendue
-                # Dans _worker V4, on stocke: (img_data_orig, header, wcs_ref_abs, M_matrix, mask)
-                # Donc ici, panel_info serait ce tuple.
-                img_data_orig = panel_info[0]
-                # header_orig = panel_info[1] # Non utilisé directement ici
-                # wcs_ref_abs_for_this_panel = panel_info[2] # Devrait être == anchor_wcs
-                transform_M = panel_info[3] # La matrice M
-                
-                if img_data_orig is None or transform_M is None:
-                    print(f"WARN QM [_calculate_local_mosaic_output_grid]: Données image ou matrice M manquante pour panneau {i}. Ignoré.")
-                    continue
-
+                img_data_orig = panel_info[0]; transform_M = panel_info[3] 
+                if img_data_orig is None or transform_M is None: continue
                 original_h, original_w = img_data_orig.shape[:2]
-                
-                # 1. Coins de l'image originale du panneau (en pixels, 0-based)
-                #    Format pour cv2.transform: (1, N, 2) ou (N, 1, 2)
-                pixel_corners_orig = np.array([
-                    [0.0, 0.0],            # Coin Haut-Gauche
-                    [original_w - 1.0, 0.0], # Coin Haut-Droite
-                    [original_w - 1.0, original_h - 1.0], # Coin Bas-Droite
-                    [0.0, original_h - 1.0]  # Coin Bas-Gauche
-                ], dtype=np.float32).reshape(-1, 1, 2) # Shape (4, 1, 2)
-
-                # 2. Appliquer la matrice M pour transformer ces coins dans le repère du panneau d'ancrage
-                #    M est (2,3). cv2.transform gère cela.
-                corners_in_anchor_pixels = cv2.transform(pixel_corners_orig, transform_M)
-                # Le résultat est (4, 1, 2), on le reshape en (4, 2)
-                corners_in_anchor_pixels = corners_in_anchor_pixels.reshape(-1, 2)
-                
-                if self.is_mosaic_run and i < 2: # Log pour les premiers panneaux
-                     print(f"  Panneau {i}: Shape Orig (H,W)=({original_h},{original_w})")
-                     print(f"    Matrice M:\n{transform_M}")
-                     print(f"    Coins originaux (pixels):\n{pixel_corners_orig.reshape(-1,2)}")
-                     print(f"    Coins transformés (pixels dans repère ancre):\n{corners_in_anchor_pixels}")
-
-                # 3. Convertir ces pixels (du repère de l'ancre) en coordonnées célestes via anchor_wcs
-                #    anchor_wcs.all_pix2world attend X, Y séparément
-                sky_corners_panel = anchor_wcs.all_pix2world(
-                    corners_in_anchor_pixels[:, 0], # Coords X
-                    corners_in_anchor_pixels[:, 1], # Coords Y
-                    0                               # Origine 0-based
-                )
-                all_sky_corners_list.append(sky_corners_panel)
-                if self.is_mosaic_run and i < 2:
-                    print(f"    Coins Ciel (RA, Dec deg):")
-                    for sc_idx in range(len(sky_corners_panel)):
-                        print(f"      {sky_corners_panel.ra.deg[sc_idx]:.5f}, {sky_corners_panel.dec.deg[sc_idx]:.5f}")
-
-            except Exception as e_panel_calc:
-                print(f"ERREUR QM [_calculate_local_mosaic_output_grid]: Erreur calcul coins pour panneau {i}: {e_panel_calc}")
-                traceback.print_exc(limit=1)
-                # On continue pour essayer de calculer avec les panneaux valides
-                continue
+                pixel_corners_orig = np.array([[0.,0.],[original_w-1.,0.],[original_w-1.,original_h-1.],[0.,original_h-1.]], dtype=np.float32).reshape(-1,1,2) 
+                corners_in_anchor_pixels = cv2.transform(pixel_corners_orig, transform_M).reshape(-1,2)
+                ra_coords_deg, dec_coords_deg = anchor_wcs.all_pix2world(corners_in_anchor_pixels[:,0], corners_in_anchor_pixels[:,1],0)
+                sky_corners_panel_obj = SkyCoord(ra=ra_coords_deg,dec=dec_coords_deg,unit='deg',frame=anchor_frame_name) 
+                all_sky_corners_list.append(sky_corners_panel_obj)
+            except Exception: continue # Simplifié pour la longueur
+        if not all_sky_corners_list: return None, None
         
-        if not all_sky_corners_list:
-            print("ERREUR QM [_calculate_local_mosaic_output_grid]: Aucun coin céleste n'a pu être calculé.")
-            return None, None
-        
-        # --- Maintenant, la logique est similaire à l'ancienne _calculate_final_mosaic_grid ---
-        # --- mais basée sur all_sky_corners_list ---
         try:
-            print(f"DEBUG QM [_calculate_local_mosaic_output_grid]: {len(all_sky_corners_list)} jeux de coins célestes collectés.")
-            # Aplatir la liste de SkyCoord en une seule
-            all_corners_flat_skycoord = SkyCoord(
-                ra=np.concatenate([sc.ra.deg for sc in all_sky_corners_list]),
-                dec=np.concatenate([sc.dec.deg for sc in all_sky_corners_list]),
-                unit='deg', frame='icrs' # ou le frame de anchor_wcs
-            )
+            if len(all_sky_corners_list) == 1: all_corners_flat_skycoord = all_sky_corners_list[0]
+            else: all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list) 
+            
+            median_ra_deg=np.median(all_corners_flat_skycoord.ra.wrap_at(180*u.deg).deg); median_dec_deg=np.median(all_corners_flat_skycoord.dec.deg)
+            tangent_point_sky=SkyCoord(ra=median_ra_deg*u.deg,dec=median_dec_deg*u.deg,frame=all_corners_flat_skycoord.frame.name.lower()) 
+            tangent_plane_points_arcsec = SeestarQueuedStacker._project_to_tangent_plane(all_corners_flat_skycoord, tangent_point_sky)
+            if tangent_plane_points_arcsec is None or len(tangent_plane_points_arcsec) < 3: return None, None
+            
+            unique_tangent_points = np.unique(tangent_plane_points_arcsec, axis=0)
+            if len(unique_tangent_points) < 3 : hull_points_arcsec = np.ascontiguousarray(unique_tangent_points)
+            else:
+                try: hull = ConvexHull(np.ascontiguousarray(unique_tangent_points)); hull_points_arcsec = unique_tangent_points[hull.vertices]
+                except Exception: hull_points_arcsec = np.ascontiguousarray(unique_tangent_points)
+            if len(hull_points_arcsec) < 2 : return None, None
 
-            # Calcul du centre (CRVAL)
-            # Utiliser wrap_at pour gérer la discontinuité RA
-            central_ra_deg = np.median(all_corners_flat_skycoord.ra.wrap_at(180 * u.deg).deg)
-            # Remettre dans la plage 0-360 si nécessaire (ou laisser wrap_at gérer)
-            # central_ra_deg = central_ra_deg % 360
-            central_dec_deg = np.median(all_corners_flat_skycoord.dec.deg)
-            print(f"  Centre Mosaïque Calculé (RA, Dec deg): ({central_ra_deg:.5f}, {central_dec_deg:.5f})")
+            rect = cv2.minAreaRect(hull_points_arcsec.astype(np.float32)) 
+            (center_x_tan_arcsec, center_y_tan_arcsec), (dim1_arcsec, dim2_arcsec), angle_cv_deg = rect
+            print(f"DEBUG QM: OMBB brut: centre_tan=({center_x_tan_arcsec:.1f}, {center_y_tan_arcsec:.1f}), dims_tan=({dim1_arcsec:.1f}, {dim2_arcsec:.1f}), angle_cv={angle_cv_deg:.1f}°")
 
-            # Création du WCS de sortie
+            # --- NOUVELLE LOGIQUE D'ORIENTATION ET DE DIMENSION ---
+            # angle_cv_deg est l'angle du côté dim1_arcsec par rapport à l'axe X du plan tangent.
+            # On veut que l'image finale soit "droite" (horizontale ou verticale).
+            # On teste deux orientations principales pour l'OMBB : son orientation naturelle, et tournée de 90 deg.
+            # Puis on choisit celle qui est la plus proche d'être alignée aux axes.
+
+            angle_option1 = angle_cv_deg         # dim1 est la largeur, dim2 est la hauteur
+            angle_option2 = angle_cv_deg + 90.0  # dim2 est la largeur, dim1 est la hauteur
+
+            # Normaliser les angles à [-90, 90] pour faciliter la comparaison avec 0 (horizontal)
+            # Un angle de 0 ou ~180 devient 0. Un angle de ~90 ou ~-90 devient ~90.
+            def normalize_angle_for_straightness(angle):
+                angle = angle % 180 # Met dans [0, 180) ou (-180, 0]
+                if angle > 90: angle -= 180  # Met dans (-90, 90]
+                elif angle < -90: angle += 180 # Met dans [-90, 90)
+                return angle
+
+            norm_angle1 = normalize_angle_for_straightness(angle_option1)
+            norm_angle2 = normalize_angle_for_straightness(angle_option2)
+
+            # Choisir l'orientation qui est la plus "droite" (plus proche de 0 ou 90, donc |angle| plus petit ou |angle-90| plus petit)
+            # On veut minimiser l'angle absolu par rapport à l'axe le plus proche (0 ou 90)
+            # Un angle normalisé de 0 est horizontal, un angle de +/-90 est vertical.
+            # On préfère celui dont l'angle normalisé est le plus proche de 0.
+            # (Si |norm_angle1| est plus petit, dim1 est plus "horizontal")
+            # (Si |norm_angle2| est plus petit, dim2 est plus "horizontal")
+
+            final_wcs_rotation_deg = 0.0
+            # On veut que le côté le plus long de l'OMBB soit la largeur de l'image SI CETTE ORIENTATION EST PLUS "DROITE"
+            # OU que le côté le plus long de l'OMBB soit la hauteur de l'image SI CETTE ORIENTATION EST PLUS "DROITE"
+
+            # Si l'angle de dim1 (angle_cv_deg) est plus proche de 0 (ou 180) que de 90 (ou -90),
+            # alors on préfère aligner dim1 horizontalement.
+            # Si l'angle de dim1 est plus proche de 90 (ou -90) que de 0,
+            # alors on préfère aligner dim1 verticalement (donc dim2 horizontalement).
+
+            # `angle_cv_deg` est dans [-90, 0).
+            # Si angle_cv_deg est entre -45 et 0, dim1 est "plutôt horizontal". Rotation WCS = angle_cv_deg.
+            # Si angle_cv_deg est entre -90 et -45, dim1 est "plutôt vertical". Rotation WCS = angle_cv_deg + 90 (pour rendre dim2 horizontal).
+            
+            if abs(angle_cv_deg) <= 45.0: # dim1 est plus horizontal que vertical
+                final_wcs_rotation_deg = angle_cv_deg
+                # Les dimensions de l'OMBB SONT déjà celles-ci par rapport à cette rotation
+                # Mais pour le calcul de la SHAPE finale, on utilisera la reprojection de tous les coins
+            else: # dim1 est plus vertical, donc on tourne de 90 deg pour que dim2 devienne "horizontal"
+                final_wcs_rotation_deg = angle_cv_deg + 90.0
+            
+            # Maintenant, on "snappe" cet angle à 0 ou 90 pour que ce soit vraiment droit
+            # Mais attention, si on snappe l'angle WCS, les dimensions de l'OMBB ne correspondent plus.
+            # L'objectif de l'OMBB était de minimiser l'aire. Si on force l'angle WCS à 0 ou 90,
+            # alors on devrait utiliser les dimensions de l'AABB (Axis Aligned Bounding Box) sur le plan tangent.
+            
+            # REVENONS À L'IDÉE SIMPLE : PAS DE ROTATION PAR RAPPORT AUX AXES RA/DEC
+            # L'OMBB sert uniquement à trouver le CRVAL.
+            # La SHAPE est ensuite calculée pour englober tout.
+
+            final_wcs_rotation_deg = 0.0 # Forcer l'alignement avec les axes RA/Dec
+            self.update_progress(f"   -> Orientation WCS forcée à 0° (alignée RA/Dec).")
+            print(f"DEBUG QM: Angle de rotation WCS final forcé à: {final_wcs_rotation_deg:.1f}°")
+            
+            # CRVAL vient du centre de l'OMBB (calculé avant)
+            crval_skycoord_list = SeestarQueuedStacker._deproject_from_tangent_plane(np.array([[center_x_tan_arcsec, center_y_tan_arcsec]]), tangent_point_sky)
+            crval_skycoord = crval_skycoord_list[0]
+            output_crval = [crval_skycoord.ra.deg, crval_skycoord.dec.deg]
+            print(f"DEBUG QM: CRVAL utilisé (centre OMBB): RA={output_crval[0]:.4f}, Dec={output_crval[1]:.4f}")
+            # --- FIN NOUVELLE LOGIQUE D'ORIENTATION ---
+            
+            # ... (Calcul de anchor_pix_scale_deg et output_pixel_scale_deg comme dans V_OMBB_Fix4)
+            # ... (Utiliser le code de calcul d'échelle de V_OMBB_Fix4 ici)
+            anchor_pix_scale_deg = 0.0 
+            try:
+                if hasattr(anchor_wcs.wcs, 'cd') and anchor_wcs.wcs.cd is not None and anchor_wcs.wcs.cd.shape == (2,2) and np.all(np.isfinite(anchor_wcs.wcs.cd)):
+                    det_cd = np.abs(np.linalg.det(anchor_wcs.wcs.cd));
+                    if det_cd > 1e-20: anchor_pix_scale_deg = np.sqrt(det_cd)
+                    else: raise ValueError("Det CD trop faible")
+                elif hasattr(anchor_wcs.wcs, 'pc') and hasattr(anchor_wcs.wcs, 'cdelt') and anchor_wcs.wcs.pc is not None and anchor_wcs.wcs.cdelt is not None:
+                    scale_m = np.diag(anchor_wcs.wcs.cdelt); cd_m_reco = np.dot(scale_m, anchor_wcs.wcs.pc); det_cd_reco = np.abs(np.linalg.det(cd_m_reco))
+                    if det_cd_reco > 1e-20: anchor_pix_scale_deg = np.sqrt(det_cd_reco)
+                    else: raise ValueError("Det CD reconstruit trop faible")
+                else:
+                    from astropy.wcs.utils import proj_plane_pixel_scales
+                    if anchor_wcs.is_celestial and hasattr(anchor_wcs,'array_shape') and anchor_wcs.array_shape and anchor_wcs.array_shape[0]>0:
+                        scales_dpp = proj_plane_pixel_scales(anchor_wcs); anchor_pix_scale_deg = np.mean(np.abs(scales_dpp))
+                    else: raise ValueError("Fallback échelle")
+            except Exception:
+                fov_e = getattr(self,'estimated_fov_degrees',1.); iw_e = anchor_wcs.pixel_shape[0] if hasattr(anchor_wcs,'pixel_shape') and anchor_wcs.pixel_shape and anchor_wcs.pixel_shape[0]>0 else 1000
+                anchor_pix_scale_deg = fov_e / (iw_e if iw_e > 0 else 1000)
+            if anchor_pix_scale_deg <= 1e-15: return None, None
+            output_pixel_scale_deg = anchor_pix_scale_deg / self.drizzle_scale 
+
+
+            # --- Construction du WCS de sortie avec CRVAL et CD (maintenant avec rotation snappée) ---
             output_wcs = WCS(naxis=2)
-            output_wcs.wcs.ctype = anchor_wcs.wcs.ctype # Garder la projection
-            output_wcs.wcs.crval = [central_ra_deg, central_dec_deg]
-            output_wcs.wcs.cunit = anchor_wcs.wcs.cunit
-
-            # Échelle de pixel de sortie (divisée par le facteur Drizzle)
-            # Prendre l'échelle de l'ancre comme référence
-            if anchor_wcs.pixel_scale_matrix is not None:
-                anchor_pix_scale_deg = np.mean(np.abs(np.diag(anchor_wcs.pixel_scale_matrix)))
-            elif hasattr(anchor_wcs.wcs, 'cdelt') and anchor_wcs.wcs.cdelt is not None:
-                anchor_pix_scale_deg = np.mean(np.abs(anchor_wcs.wcs.cdelt))
-            else: # Fallback très approximatif
-                print("WARN QM: Impossible de déterminer l'échelle pixel de l'ancre WCS. Utilisation d'une valeur par défaut.")
-                fov_estim_deg = 2.0 # Supposer un champ de vue pour estimer l'échelle
-                img_width_estim_pix = anchor_wcs.pixel_shape[0] if anchor_wcs.pixel_shape else 1000
-                anchor_pix_scale_deg = fov_estim_deg / img_width_estim_pix
-
-            output_pixel_scale_deg = anchor_pix_scale_deg / self.drizzle_scale # self.drizzle_scale est un attribut
-            print(f"  Échelle Pixel Ancre: {anchor_pix_scale_deg*3600:.3f} arcsec/pix. Échelle Sortie Mosaïque: {output_pixel_scale_deg*3600:.3f} arcsec/pix (scale={self.drizzle_scale}x)")
-
-            # Assigner la CD matrix (supposant pas de rotation/skew complexe dans la sortie finale)
-            # Le signe de cd1_1 est souvent négatif pour RA croissant vers la gauche.
-            output_wcs.wcs.cd = np.array([[-output_pixel_scale_deg, 0.0],
-                                          [0.0, output_pixel_scale_deg]])
-
-            # Projeter tous les coins célestes sur cette nouvelle grille WCS pour trouver l'étendue en pixels
-            output_pixels_x, output_pixels_y = output_wcs.all_world2pix(all_corners_flat_skycoord, 0)
+            output_wcs.wcs.ctype = [str(getattr(anchor_wcs.wcs, 'ctype', ["RA---TAN", "DEC--TAN"])[0]), 
+                                    str(getattr(anchor_wcs.wcs, 'ctype', ["RA---TAN", "DEC--TAN"])[1])]
+            output_wcs.wcs.crval = output_crval
+            output_wcs.wcs.cunit = [str(getattr(anchor_wcs.wcs, 'cunit', ['deg', 'deg'])[0]),
+                                    str(getattr(anchor_wcs.wcs, 'cunit', ['deg', 'deg'])[1])]
+            output_wcs.wcs.radesys = str(getattr(anchor_wcs.wcs,'radesys', 'ICRS')).upper()
             
-            x_min_out, x_max_out = np.min(output_pixels_x), np.max(output_pixels_x)
-            y_min_out, y_max_out = np.min(output_pixels_y), np.max(output_pixels_y)
+            angle_pc_rad = np.deg2rad(final_wcs_rotation_deg) # UTILISER L'ANGLE SNAPPÉ
+            cos_rot = np.cos(angle_pc_rad); sin_rot = np.sin(angle_pc_rad)
+            pc_matrix = np.array([[cos_rot, -sin_rot], [sin_rot,  cos_rot]])
+            cdelt_matrix = np.array([[-output_pixel_scale_deg, 0.0], [0.0, output_pixel_scale_deg]])
+            output_wcs.wcs.cd = np.dot(cdelt_matrix, pc_matrix)
+            print(f"DEBUG QM: WCS orienté (snappé) créé. CRVAL={output_wcs.wcs.crval}, CD=\n{output_wcs.wcs.cd}")
 
-            # Calculer la largeur et hauteur finales en pixels
-            out_width_pix = int(np.ceil(x_max_out - x_min_out + 1))
-            out_height_pix = int(np.ceil(y_max_out - y_min_out + 1))
-            out_width_pix = max(10, out_width_pix); out_height_pix = max(10, out_height_pix) # Taille minimale
-            output_shape_final_hw = (out_height_pix, out_width_pix) # (H, W)
-            print(f"  Dimensions Pixels Mosaïque Finale (W,H): ({out_width_pix}, {out_height_pix})")
-
-            # Ajuster CRPIX pour que crval soit au centre de la nouvelle origine pixel
-            # Le centre du ciel (crval) doit correspondre au pixel (crpix)
-            # Les pixels (x_min_out, y_min_out) deviennent (0,0) dans le tableau final.
-            # Donc crpix1 = (crval_x_en_pixels_intermediaires - x_min_out) + 1 (pour 1-based FITS)
-            crval_x_pix_intermed, crval_y_pix_intermed = output_wcs.all_world2pix(central_ra_deg, central_dec_deg, 0)
+            # --- Reprojection des coins, calcul shape et CRPIX final (comme dans V_OMBB_Fix5) ---
+            all_ra_deg = all_corners_flat_skycoord.ra.deg
+            all_dec_deg = all_corners_flat_skycoord.dec.deg
+            projected_x_pixels, projected_y_pixels = output_wcs.all_world2pix(all_ra_deg, all_dec_deg, 0)
             
-            output_wcs.wcs.crpix = [
-                crval_x_pix_intermed - x_min_out + 1.0,
-                crval_y_pix_intermed - y_min_out + 1.0
-            ]
-            output_wcs.pixel_shape = (out_width_pix, out_height_pix) # (W, H) pour astropy
-            try: output_wcs._naxis1 = out_width_pix; output_wcs._naxis2 = out_height_pix
+            valid_projection_mask = np.isfinite(projected_x_pixels) & np.isfinite(projected_y_pixels)
+            if not np.any(valid_projection_mask): return None, None # Erreur si aucun point valide
+            projected_x_pixels = projected_x_pixels[valid_projection_mask]
+            projected_y_pixels = projected_y_pixels[valid_projection_mask]
+
+            x_min_final = np.min(projected_x_pixels); x_max_final = np.max(projected_x_pixels)
+            y_min_final = np.min(projected_y_pixels); y_max_final = np.max(projected_y_pixels)
+
+            final_output_width_px = int(np.ceil(x_max_final - x_min_final + 1.0))
+            final_output_height_px = int(np.ceil(y_max_final - y_min_final + 1.0))
+            final_output_width_px = max(10, final_output_width_px)    
+            final_output_height_px = max(10, final_output_height_px)  
+            output_shape_final_hw = (final_output_height_px, final_output_width_px)
+            
+            crval_x_abs_pix, crval_y_abs_pix = output_wcs.all_world2pix(output_wcs.wcs.crval[0], output_wcs.wcs.crval[1], 0)
+            final_crpix1 = crval_x_abs_pix - x_min_final + 1.0
+            final_crpix2 = crval_y_abs_pix - y_min_final + 1.0
+            
+            output_wcs.wcs.crpix = [final_crpix1, final_crpix2]
+            output_wcs.pixel_shape = (final_output_width_px, final_output_height_px)
+            try: output_wcs._naxis1 = final_output_width_px; output_wcs._naxis2 = final_output_height_px
             except AttributeError: pass
 
-            print(f"  WCS Mosaïque Finale OK: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
+            print(f"DEBUG QM: WCS Mosaïque Finale (SnapToAxes) OK: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
             return output_wcs, output_shape_final_hw
 
         except Exception as e_grid:
-            print(f"ERREUR QM [_calculate_local_mosaic_output_grid]: Échec calcul final grille/WCS: {e_grid}")
+            print(f"ERREUR QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Échec calcul final grille/WCS: {e_grid}")
             traceback.print_exc(limit=2)
             return None, None
 
-# --- FIN DE LA MÉTHODE _calculate_local_mosaic_output_grid ---
+    # ... (reste de la classe) ...
 
 
 

@@ -231,7 +231,7 @@ class FastAligner:
         num_inliers = np.sum(inliers_mask)
         self._log(f"Matrice de transformation trouvée. Inliers: {num_inliers} / {len(good_matches)}.")
         
-        min_ransac_inliers = max(6, min_absolute_matches // 2)
+        min_ransac_inliers = max(4, min_absolute_matches // 2)
         if num_inliers < min_ransac_inliers:
             self._log(f"Nombre d'inliers RANSAC ({num_inliers}) trop faible (requis: {min_ransac_inliers}). Transformation rejetée.", level="WARN")
             return None
@@ -340,9 +340,9 @@ class FastSeestarAligner: # Nom changé pour éviter confusion avec celui dans c
         ref_gray_f32 = to_gray_if_color(ref_f32)
 
         M = self._fa.estimate_transform(ref_gray_f32, src_gray_f32, 
-                                        orb_features=2500, 
+                                        orb_features=5000, 
                                         ransac_thresh=5.0, 
-                                        min_absolute_matches=8) 
+                                        min_absolute_matches=12) 
         
         if M is None:
             self._fa._log(f"Alignement ÉCHOUÉ pour '{tag}': estimate_transform a retourné None.", level="ERROR")
@@ -366,7 +366,7 @@ class FastSeestarAligner: # Nom changé pour éviter confusion avec celui dans c
             self._fa._log(f"Format d'image source non supporté pour warp: {src_f32.shape}", level="ERROR")
             return None, M, False # MODIFIÉ: Retourne M même si warp échoue pour info
 
-        if aligned_image is img_f32: # Si warp_image a retourné l'original en cas d'erreur interne
+        if aligned_image is src_f32: # Si warp_image a retourné l'original en cas d'erreur interne
              self._fa._log(f"Alignement PARTIELLEMENT ÉCHOUÉ pour '{tag}': warp_image n'a pas modifié l'image.", level="WARN")
              return None, M, False # MODIFIÉ: Retourne M mais échec
 

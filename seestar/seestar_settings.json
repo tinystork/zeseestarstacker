@@ -1,6 +1,6 @@
 {
     "version": "1.8.1",
-    "input_folder": "F:\\astro photos\\seestar s 50\\M 81\\test mosaic",
+    "input_folder": "F:\\astro photos\\seestar s 50\\M 81\\M 81_mosaic_sub",
     "output_folder": "F:\\astro photos\\seestar s 50\\M 81\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
@@ -23,10 +23,10 @@
     "drizzle_mode": "Incremental",
     "drizzle_kernel": "square",
     "drizzle_pixfrac": 0.3,
-    "mosaic_mode_active": false,
+    "mosaic_mode_active": true,
     "mosaic_settings": {
         "kernel": "square",
-        "pixfrac": 0.55
+        "pixfrac": 0.5
     },
     "apply_chroma_correction": true,
     "apply_final_scnr": true,
@@ -51,12 +51,12 @@
     "photutils_bn_exclude_percentile": 95.0,
     "astrometry_api_key": "xzckujuedwjglnaj",
     "preview_stretch_method": "Asinh",
-    "preview_black_point": 0.0078,
-    "preview_white_point": 0.013,
+    "preview_black_point": 0.0,
+    "preview_white_point": 0.0115,
     "preview_gamma": 1.0,
-    "preview_r_gain": 1.002,
+    "preview_r_gain": 1.041,
     "preview_g_gain": 1.0,
-    "preview_b_gain": 1.002,
+    "preview_b_gain": 1.225,
     "language": "en",
     "window_geometry": "1707x937+-13+-10",
     "apply_feathering": true,
