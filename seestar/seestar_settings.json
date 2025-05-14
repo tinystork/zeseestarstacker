@@ -1,8 +1,7 @@
 {
     "version": "1.8.1",
-
-    "input_folder": "",
-    "output_folder": "",
+    "input_folder": "F:\\astro photos\\seestar s 50\\M 81\\test mosaic",
+    "output_folder": "F:\\astro photos\\seestar s 50\\M 81\\out",
     "reference_image_path": "",
     "bayer_pattern": "GRBG",
     "stacking_mode": "winsorized-sigma",
@@ -21,6 +20,7 @@
     "use_drizzle": false,
     "drizzle_scale": 2,
     "drizzle_wht_threshold": 0.7,
+<<<<<<< HEAD
     "drizzle_mode": "Final",
     "drizzle_kernel": "square",
     "drizzle_pixfrac": 0.3,
@@ -28,6 +28,15 @@
     "mosaic_settings": {
         "kernel": "square",
         "pixfrac": 0.25
+=======
+    "drizzle_mode": "Incremental",
+    "drizzle_kernel": "square",
+    "drizzle_pixfrac": 0.3,
+    "mosaic_mode_active": false,
+    "mosaic_settings": {
+        "kernel": "square",
+        "pixfrac": 0.55
+>>>>>>> graphic-Beta
     },
     "apply_chroma_correction": true,
     "apply_final_scnr": true,
@@ -52,12 +61,21 @@
     "photutils_bn_exclude_percentile": 95.0,
     "astrometry_api_key": "xzckujuedwjglnaj",
     "preview_stretch_method": "Asinh",
+<<<<<<< HEAD
     "preview_black_point": 0.0233,
     "preview_white_point": 0.0244,
     "preview_gamma": 1.0,
     "preview_r_gain": 1.0,
     "preview_g_gain": 1.0,
     "preview_b_gain": 1.0,
+=======
+    "preview_black_point": 0.0078,
+    "preview_white_point": 0.013,
+    "preview_gamma": 1.0,
+    "preview_r_gain": 1.002,
+    "preview_g_gain": 1.0,
+    "preview_b_gain": 1.002,
+>>>>>>> graphic-Beta
     "language": "en",
     "window_geometry": "1707x937+-13+-10",
     "apply_feathering": true,

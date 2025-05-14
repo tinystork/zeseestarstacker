@@ -12,9 +12,10 @@ from .image_processing import (
 )
 
 from .hot_pixels import detect_and_correct_hot_pixels
-from .utils import estimate_batch_size, apply_denoise
-from .alignment import SeestarAligner
+from .utils import estimate_batch_size, apply_denoise, check_cuda, check_cupy_cuda # Ajout des checks CUDA/CuPy
+from .alignment import SeestarAligner # C'est l'aligneur basé sur astroalign
 
+# Liste initiale des éléments à exporter
 __all__ = [
     'load_and_validate_fits',
     'debayer_image',
@@ -23,6 +24,27 @@ __all__ = [
     'save_preview_image',
     'estimate_batch_size',
     'apply_denoise',
-    'SeestarAligner',
+    'check_cuda',             # Exposer la fonction de vérification CUDA
+    'check_cupy_cuda',        # Exposer la fonction de vérification CuPy
+    'SeestarAligner',         # L'aligneur astroalign
 ]
+
+# Tentative d'importation du nouvel aligneur local
+try:
+    from .fast_aligner_module import FastSeestarAligner as SeestarLocalAligner # Alias pour clarté
+    print("DEBUG [core/__init__.py]: SeestarLocalAligner (FastSeestarAligner) importé avec succès.")
+    __all__.append('SeestarLocalAligner') # Ajouter à __all__ SI l'import réussit
+except ImportError as e_fla:
+    print(f"WARN [core/__init__.py]: FastSeestarAligner non importable depuis fast_aligner_module: {e_fla}")
+    # Optionnel: définir SeestarLocalAligner comme None pour que le reste du code puisse vérifier son existence
+    # Cependant, si une partie du code essaie de l'utiliser sans vérifier, cela plantera.
+    # Il est peut-être préférable de laisser l'ImportError se propager si c'est une dépendance critique
+    # pour une fonctionnalité activée. Pour l'instant, on logue juste.
+    # SeestarLocalAligner = None
+except Exception as e_other_fla:
+    print(f"ERREUR [core/__init__.py]: Erreur inattendue lors de l'import de FastSeestarAligner: {e_other_fla}")
+    import traceback
+    traceback.print_exc(limit=2)
+
+print(f"DEBUG [core/__init__.py]: Contenu final de __all__: {__all__}")
 # --- END OF FILE seestar/core/__init__.py ---
