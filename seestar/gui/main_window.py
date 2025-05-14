@@ -203,6 +203,36 @@ class SeestarStackerGUI:
         self._update_show_folders_button_state()
         self.update_ui_language()
 
+        # --- BLOC DE DÉBOGAGE AVANT APPEL SET_PREVIEW_CALLBACK ---
+        print("--------------------")
+        print("DEBUG MW __init__: Vérification de self.queued_stacker.set_preview_callback AVANT appel...")
+        if hasattr(self.queued_stacker, 'set_preview_callback') and callable(self.queued_stacker.set_preview_callback):
+            import inspect
+            try:
+                source_lines, start_line = inspect.getsourcelines(self.queued_stacker.set_preview_callback)
+                print(f"  Source de self.queued_stacker.set_preview_callback (ligne de début: {start_line}):")
+                for i, line_content in enumerate(source_lines[:10]): # Afficher les 10 premières lignes
+                    print(f"    L{start_line + i}: {line_content.rstrip()}")
+                
+                source_code_str = "".join(source_lines)
+                if "_cleanup_mosaic_panel_stacks_temp()" in source_code_str or \
+                   "_cleanup_drizzle_batch_outputs()" in source_code_str or \
+                   "cleanup_unaligned_files()" in source_code_str:
+                    print("  ALERTE MW DEBUG: Un appel _cleanup_ SEMBLE ÊTRE PRÉSENT dans le code source de la méthode set_preview_callback attachée à l'instance !")
+                else:
+                    print("  INFO MW DEBUG: Aucun appel _cleanup_ évident dans le code source de la méthode set_preview_callback attachée à l'instance.")
+
+            except TypeError:
+                print("  ERREUR MW DEBUG: Impossible d'obtenir la source pour une méthode built-in ou C (ne devrait pas être le cas ici).")
+            except IOError:
+                print("  ERREUR MW DEBUG: Impossible de lire le fichier source (très étrange).")
+            except Exception as e_inspect:
+                print(f"  ERREUR MW DEBUG: Erreur inspect: {e_inspect}")
+        else:
+            print("  ERREUR MW DEBUG: self.queued_stacker n'a pas de méthode set_preview_callback ou elle n'est pas callable.")
+        print("--------------------")
+        # --- FIN BLOC DE DÉBOGAGE ---
+        
         # --- Connexion Callbacks Backend (Inchangé) ---
         self.queued_stacker.set_progress_callback(self.update_progress_gui)
         self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)

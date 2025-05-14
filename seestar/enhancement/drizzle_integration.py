@@ -69,11 +69,30 @@ except Exception as e_other:
     def dummy_tdriz(*args, **kwargs):
         raise ImportError(f"Unexpected error during drizzle import: {e_other}")
     tdriz_function = dummy_tdriz
-
+try:
+    from ..queuep.queue_manager import SeestarQueuedStacker
+    print("DEBUG [DrizzleIntegration Import]: SeestarQueuedStacker importé (pour type hint).")
+except ImportError:
+    SeestarQueuedStacker = None # Type hint factice
+    # print("WARN [DrizzleIntegration Import]: SeestarQueuedStacker manquant pour type hint.")
 
 # Ignorer certains avertissements Astropy WCS
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
 ################################################################################################################################################
+def __init__(self, scale_factor=2.0, pixfrac=1.0, kernel='square', fillval="0.0", final_wht_threshold=0.1):
+    # ... (constructeur inchangé) ...
+    print(f"DEBUG DrizzleProcessor (tdriz) Initialized: ScaleFactor={self.scale_factor}, Pixfrac={self.pixfrac}, Kernel='{self.kernel}'")
+    self.scale_factor = float(scale_factor)
+    self.pixfrac = float(pixfrac)
+    self.kernel = kernel
+    self.fillval = str(fillval)
+    self.final_wht_threshold = float(final_wht_threshold)
+    if not _DRIZZLE_AVAILABLE:
+        print("ERREUR DrizzleProcessor: Drizzle non disponible (stsci.drizzle ou cdrizzle).")
+
+
+
+
 
 
 def _load_drizzle_temp_file(filepath):
@@ -456,185 +475,244 @@ class DrizzleProcessor:
 
 
 
-    def apply_drizzle(self, temp_filepath_list, output_wcs=None, output_shape_2d_hw=None):
-        start_time = time.time()
-        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None: 
-            print("ERREUR (DrizzleProcessor.apply_drizzle): Classe Drizzle non disponible.")
-            return None, None
-        if not temp_filepath_list: 
-            print("WARNING (DrizzleProcessor.apply_drizzle): Liste fichiers vide.")
-            return None, None
+    def apply_drizzle(self, 
+                      input_file_paths: list, 
+                      output_wcs: WCS, 
+                      output_shape_2d_hw: tuple,
+                      # --- NOUVEAUX ARGUMENTS OPTIONNELS ---
+                      use_local_alignment_logic: bool = False,
+                      anchor_wcs_for_local: WCS = None,
+                      # Si use_local_alignment_logic est True, on s'attend à ce que
+                      # les headers des input_file_paths contiennent les matrices M.
+                      # Alternativement, on pourrait passer une liste de matrices M ici.
+                      # Pour l'instant, on va essayer de lire M depuis le header.
+                      progress_callback: callable = None
+                      ):
+        """
+        Applique Drizzle à une liste de fichiers FITS d'entrée.
+        MODIFIÉ: Pour gérer la logique de pixmap pour l'alignement local de mosaïque.
 
-        print(f"DrizzleProcessor (resample): Application sur {len(temp_filepath_list)} fichiers...")
+        Args:
+            input_file_paths (list): Liste des chemins vers les fichiers FITS d'entrée.
+                                     Chaque FITS doit être CxHxW et avoir un WCS valide dans son header,
+                                     OU, si use_local_alignment_logic, contenir les clés de la matrice M.
+            output_wcs (WCS): WCS de la grille de sortie Drizzle.
+            output_shape_2d_hw (tuple): Shape (Hauteur, Largeur) de la grille de sortie.
+            use_local_alignment_logic (bool): Si True, active la logique pour mosaïque locale.
+            anchor_wcs_for_local (WCS): WCS absolu du panneau de référence (si local_logic).
+            progress_callback (callable): Callback de progression.
+        
+        Returns:
+            tuple: (final_sci_image_hxwxc, final_wht_map_hxwxc) ou (None, None)
+        """
+        if not progress_callback: progress_callback = lambda msg, prog=None: print(msg)
+        
+        print(f"DEBUG DrizzleProcessor.apply_drizzle: Appelée avec {len(input_file_paths)} fichiers.")
+        print(f"  -> use_local_alignment_logic: {use_local_alignment_logic}")
+        print(f"  -> anchor_wcs_for_local fourni: {'Oui' if anchor_wcs_for_local else 'Non'}")
         print(f"  -> Shape de sortie CIBLE (H,W): {output_shape_2d_hw}, WCS de sortie fourni: {'Oui' if output_wcs else 'Non'}")
 
-        # --- Déterminer la Grille de Sortie ---
-        final_output_wcs = output_wcs
-        final_output_shape_hw = output_shape_2d_hw
+
+        if not _DRIZZLE_AVAILABLE:
+            progress_callback("Drizzle ERREUR: Bibliothèque Drizzle non disponible.", 0)
+            return None, None
+        if not input_file_paths:
+            progress_callback("Drizzle: Aucune image d'entrée fournie.", 0)
+            return None, None
+        if output_wcs is None or output_shape_2d_hw is None:
+            progress_callback("Drizzle ERREUR: WCS ou shape de sortie Drizzle non défini.", 0)
+            return None, None
+        if use_local_alignment_logic and anchor_wcs_for_local is None:
+            progress_callback("Drizzle ERREUR (Local Mosaic): WCS d'ancrage non fourni.", 0)
+            return None, None
+
+        num_output_channels = 3 # On suppose RGB
         
-        if final_output_wcs is None or final_output_shape_hw is None:
-            # Cette section ne devrait plus être atteinte si appelée depuis mosaic_processor
-            # car mosaic_processor calcule et passe ces arguments.
-            # Mais on la garde pour un usage autonome potentiel.
-            print("   -> Grille sortie non fournie, tentative de calcul depuis première image valide...")
-            ref_shape_2d_for_grid_calc = None
-            first_valid_wcs_for_grid_calc = None
-            for i_ref, filepath_ref in enumerate(temp_filepath_list):
-                img_data_ref, wcs_in_ref, _ = _load_drizzle_temp_file(filepath_ref)
-                if img_data_ref is not None and wcs_in_ref is not None and wcs_in_ref.is_celestial:
-                    ref_shape_2d_for_grid_calc = img_data_ref.shape[:2]
-                    first_valid_wcs_for_grid_calc = wcs_in_ref
-                    del img_data_ref, wcs_in_ref; gc.collect()
-                    break
-            if first_valid_wcs_for_grid_calc is None:
-                print("ERREUR (DrizzleProcessor.apply_drizzle): Impossible de déterminer la grille de sortie (pas d'image/WCS de référence valide).")
-                return None, None
-            try:
-                final_output_wcs, final_output_shape_hw = self._create_output_wcs(first_valid_wcs_for_grid_calc, ref_shape_2d_for_grid_calc, self.scale_factor)
-                print(f"   -> Grille sortie auto-calculée: Shape={final_output_shape_hw} (H,W)")
-            except Exception as e_init_grid:
-                print(f"      - ERREUR calcul grille de sortie auto: {e_init_grid}. Arrêt Drizzle.")
-                traceback.print_exc(limit=1)
-                return None, None
-        
-        # --- Initialiser Drizzle et Tableaux de Sortie ---
-        num_output_channels = 3; final_drizzlers = []; output_images_list = []; output_weights_list = []; initialized = False
+        # Initialiser les tableaux NumPy pour les données de sortie Drizzle par canal
+        # Ces tableaux seront directement modifiés par les instances de Drizzle
+        out_images_by_channel = [np.zeros(output_shape_2d_hw, dtype=np.float32) for _ in range(num_output_channels)]
+        out_weights_by_channel = [np.zeros(output_shape_2d_hw, dtype=np.float32) for _ in range(num_output_channels)]
+
+        drizzlers_by_channel = []
         try:
-            print(f"   -> Initialisation Drizzle pour {num_output_channels} canaux (Shape sortie: {final_output_shape_hw})...")
-            for _ in range(num_output_channels):
-                out_img_ch = np.zeros(final_output_shape_hw, dtype=np.float32)
-                out_wht_ch = np.zeros(final_output_shape_hw, dtype=np.float32)
-                output_images_list.append(out_img_ch); output_weights_list.append(out_wht_ch)
+            progress_callback(f"Drizzle: Initialisation pour {num_output_channels} canaux (Shape sortie: {output_shape_2d_hw})...", None)
+            for i in range(num_output_channels):
+                # L'instance de Drizzle prend les tableaux NumPy où elle écrira.
                 driz_ch = Drizzle(
-                    out_img=out_img_ch, out_wht=out_wht_ch, # Pas de out_shape si out_img/wht sont des arrays
-                    kernel=self.kernel, fillval="0.0"
-                    # Le WCS de sortie est implicitement géré par la transformation dans pixmap
+                    outsci=out_images_by_channel[i],    # Alias pour out_img
+                    outwht=out_weights_by_channel[i],   # Alias pour out_wht
+                    # out_shape=output_shape_2d_hw,     # out_shape n'est pas un param de Drizzle.__init__
+                    # out_wcs=output_wcs,               # out_wcs n'est pas un param de Drizzle.__init__
+                    kernel=self.kernel,
+                    pixfrac=self.pixfrac,
+                    fillval=self.fillval 
+                    # exptime, wt_scl, etc., sont pour add_image
                 )
-                final_drizzlers.append(driz_ch)
-            initialized = True; print("   -> Initialisation Drizzle terminée.")
-        except Exception as init_err: 
-            print(f"   -> ERREUR init Drizzle: {init_err}"); traceback.print_exc(limit=1)
+                drizzlers_by_channel.append(driz_ch)
+            progress_callback("Drizzle: Initialisation Drizzle terminée.", None)
+            print("DEBUG DrizzleProcessor: Initialisation Drizzle terminée.")
+        except Exception as e_init_driz:
+            progress_callback(f"Drizzle ERREUR: Initialisation Drizzle échouée: {e_init_driz}", 0)
+            traceback.print_exc(limit=1)
             return None, None
-        if not initialized: return None, None
 
-        # --- Boucle Drizzle (add_image) ---
-        print(f"   -> Démarrage boucle Drizzle sur {len(temp_filepath_list)} fichiers...")
-        processed_count = 0
-        for i, filepath in enumerate(temp_filepath_list):
-            if (i + 1) % 10 == 0 or i == 0 or i == len(temp_filepath_list) - 1: 
-                print(f"      Processing Drizzle Input {i+1}/{len(temp_filepath_list)}: {os.path.basename(filepath)}")
+        # Boucle sur les fichiers d'entrée
+        progress_callback(f"Drizzle: Démarrage boucle Drizzle sur {len(input_file_paths)} fichiers...", None)
+        files_processed_count = 0
+        for i, file_path in enumerate(input_file_paths):
+            if progress_callback and i % 5 == 0: # Mise à jour moins fréquente
+                progress_callback(f"Drizzle: Traitement image {i+1}/{len(input_file_paths)}...", int(i / len(input_file_paths) * 100) if len(input_file_paths) > 0 else 0)
             
-            img_data_hxwxc, wcs_in, header_in = _load_drizzle_temp_file(filepath)
-            if img_data_hxwxc is None or wcs_in is None: 
-                print(f"      - Skip Input {i+1} (échec chargement/WCS pour {os.path.basename(filepath)})")
-                if img_data_hxwxc is not None: del img_data_hxwxc 
-                if wcs_in is not None: del wcs_in
-                if header_in is not None: del header_in
-                gc.collect(); continue
+            print(f"  Processing Drizzle Input {i+1}/{len(input_file_paths)}: {os.path.basename(file_path)}")
+            
+            input_image_cxhxw = None
+            input_wcs_obj = None # WCS lu depuis le fichier FITS
+            input_header = None
+            exposure_time = 1.0 # Valeur par défaut
 
-            current_input_shape_hw = img_data_hxwxc.shape[:2]
-            pixmap = None
             try:
-                print(f"        - Calcul Pixmap pour {os.path.basename(filepath)} (Input Shape: {current_input_shape_hw})...")
-                print(f"          WCS Entrée (Résumé): CRVAL=({wcs_in.wcs.crval[0]:.4f}, {wcs_in.wcs.crval[1]:.4f}), PixelShape={wcs_in.pixel_shape}")
-                print(f"          WCS Sortie (Résumé): CRVAL=({final_output_wcs.wcs.crval[0]:.4f}, {final_output_wcs.wcs.crval[1]:.4f}), PixelShape={final_output_wcs.pixel_shape}, OutputShapeHW={final_output_shape_hw}")
+                # Charger l'image et son header
+                # _load_drizzle_temp_file n'est plus adapté si on ne sauve plus de WCS dedans pour le local.
+                # On lit directement.
+                with fits.open(file_path, memmap=False) as hdul:
+                    if not hdul or hdul[0].data is None:
+                        print(f"    WARN: Fichier FITS invalide ou vide: {file_path}. Ignoré.")
+                        continue
+                    input_image_cxhxw = hdul[0].data.astype(np.float32) # Doit être CxHxW
+                    input_header = hdul[0].header
+                    try:
+                        # Essayer d'extraire le WCS depuis le header du fichier
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            input_wcs_obj = WCS(input_header, naxis=2) # naxis=2 pour HxW
+                        if not input_wcs_obj.is_celestial: input_wcs_obj = None
+                    except Exception as e_wcs_read:
+                        print(f"    WARN: Impossible de lire le WCS du header de {file_path}: {e_wcs_read}")
+                        input_wcs_obj = None # Sera géré par la logique locale si besoin
 
-                y_in, x_in = np.indices(current_input_shape_hw)
-                world_coords_ra, world_coords_dec = wcs_in.all_pix2world(x_in.flatten(), y_in.flatten(), 0) # Retourne RA, Dec séparément
+                if input_image_cxhxw.ndim != 3 or input_image_cxhxw.shape[0] != num_output_channels:
+                    print(f"    WARN: Shape d'image inattendue {input_image_cxhxw.shape} pour {file_path} (attendu CxHxW). Ignoré.")
+                    continue
                 
-                print(f"          ... Pixels Entrée -> Ciel OK. Nombre de points: {world_coords_ra.size}")
-                # Vérifier les coordonnées célestes
-                if np.any(~np.isfinite(world_coords_ra)) or np.any(~np.isfinite(world_coords_dec)):
-                    print(f"          WARNING: Coordonnées célestes non finies détectées pour {os.path.basename(filepath)}!")
-                    # Optionnel: remplacer NaN/Inf par une valeur (ex: CRVAL) ou skipper l'image
-                    world_coords_ra = np.nan_to_num(world_coords_ra, nan=wcs_in.wcs.crval[0])
-                    world_coords_dec = np.nan_to_num(world_coords_dec, nan=wcs_in.wcs.crval[1])
+                input_shape_hw = (input_image_cxhxw.shape[1], input_image_cxhxw.shape[2]) # H, W
 
-                x_out, y_out = final_output_wcs.all_world2pix(world_coords_ra, world_coords_dec, 0)
-                print(f"          ... Ciel -> Pixels Sortie OK.")
-
-                # ===== AJOUT DE LOGS POUR PIXMAP =====
-                if np.any(~np.isfinite(x_out)) or np.any(~np.isfinite(y_out)):
-                    print(f"          WARNING: Coordonnées Pixmap NON FINIES pour {os.path.basename(filepath)}!")
-                    print(f"            x_out (avant reshape): min={np.nanmin(x_out):.1f}, max={np.nanmax(x_out):.1f}, NaNs? {np.any(np.isnan(x_out))}, Infs? {np.any(np.isinf(x_out))}")
-                    print(f"            y_out (avant reshape): min={np.nanmin(y_out):.1f}, max={np.nanmax(y_out):.1f}, NaNs? {np.any(np.isnan(y_out))}, Infs? {np.any(np.isinf(y_out))}")
-                    # Optionnel: Remplacer les non-finis dans x_out, y_out par une valeur sûre (ex: -1, ou coin)
-                    # Cela peut éviter un crash dans Drizzle C, mais peut introduire des artefacts.
-                    # x_out = np.nan_to_num(x_out, nan=-1.0, posinf=final_output_shape_hw[1]*2, neginf=-final_output_shape_hw[1]) # Exemple
-                    # y_out = np.nan_to_num(y_out, nan=-1.0, posinf=final_output_shape_hw[0]*2, neginf=-final_output_shape_hw[0])
-                # =======================================
-                pixmap = np.dstack((x_out.reshape(current_input_shape_hw), y_out.reshape(current_input_shape_hw))).astype(np.float32)
-                print(f"        - Pixmap calculé. Shape: {pixmap.shape}. Range X: [{np.min(pixmap[...,0]):.1f}, {np.max(pixmap[...,0]):.1f}], Range Y: [{np.min(pixmap[...,1]):.1f}, {np.max(pixmap[...,1]):.1f}]")
-
-            except Exception as map_err: 
-                print(f"      - ERREUR calcul pixmap pour {os.path.basename(filepath)}: {map_err}"); 
-                traceback.print_exc(limit=1) # Plus de détails pour l'erreur pixmap
-                del img_data_hxwxc, wcs_in, header_in; gc.collect(); continue
-
-            # Si l'arrêt se produit ici, c'est probablement dans add_image
-            if pixmap is not None:
-                try: 
-                    exptime = 1.0
-                    if header_in and 'EXPTIME' in header_in:
-                        try: exptime = max(1e-6, float(header_in['EXPTIME']))
-                        except (ValueError, TypeError): pass
+                if input_header and 'EXPTIME' in input_header:
+                    try: exposure_time = max(1e-6, float(input_header['EXPTIME']))
+                    except (ValueError, TypeError): pass
+                
+                # --- Calcul du Pixmap ---
+                current_pixmap = None
+                if use_local_alignment_logic:
+                    # On s'attend à ce que M soit dans input_header (ajouté par mosaic_processor)
+                    # et que anchor_wcs_for_local soit fourni.
+                    # input_wcs_obj (lu du header) est le WCS du panneau de référence dans ce cas.
+                    if anchor_wcs_for_local is None:
+                        print(f"    ERREUR (Local Mosaic): WCS d'ancrage manquant pour {file_path}. Ignoré."); continue
                     
-                    print(f"        - Appel add_image pour les 3 canaux de {os.path.basename(filepath)}...")
-                    for c in range(3): # Boucle sur R, G, B
-                        channel_data_2d = img_data_hxwxc[:, :, c]; 
-                        finite_mask = np.isfinite(channel_data_2d); 
-                        if not np.all(finite_mask): channel_data_2d[~finite_mask] = 0.0
-                        
-                        # ===== LOG AVANT ADD_IMAGE =====
-                        print(f"          Canal {c}: data range [{np.min(channel_data_2d):.3f}, {np.max(channel_data_2d):.3f}], exptime={exptime:.2f}, pixfrac={self.pixfrac}")
-                        # ===============================
-                        final_drizzlers[c].add_image(data=channel_data_2d, pixmap=pixmap, exptime=exptime, in_units='counts', pixfrac=self.pixfrac)
-                    processed_count += 1
-                    print(f"        - add_image terminé pour {os.path.basename(filepath)}.")
-                except Exception as e_add: 
-                    print(f"   -> ERREUR add_image pour {os.path.basename(filepath)} (input {i+1}): {e_add}"); 
-                    traceback.print_exc(limit=2) # Traceback plus détaillé pour add_image
-                finally: 
-                    del img_data_hxwxc, wcs_in, header_in, pixmap; gc.collect()
-            else: # pixmap était None
-                del img_data_hxwxc, wcs_in, header_in; gc.collect()
-        # --- Fin Boucle Drizzle ---
+                    M_matrix = np.array([
+                        [input_header.get('M11', 1.0), input_header.get('M12', 0.0), input_header.get('M13', 0.0)],
+                        [input_header.get('M21', 0.0), input_header.get('M22', 1.0), input_header.get('M23', 0.0)]
+                    ], dtype=np.float32)
+                    
+                    # Si M est l'identité (panneau de référence lui-même), le WCS d'entrée est anchor_wcs_for_local
+                    is_ref_panel = np.allclose(M_matrix, np.array([[1,0,0],[0,1,0]]))
+                    
+                    y_orig, x_orig = np.indices(input_shape_hw) # Coords de l'image originale du panneau
 
-        # ... (Reste de la fonction : assemblage final, normalisation, retour - inchangé pour l'instant) ...
-        print(f"   -> Boucle Drizzle terminée. {processed_count}/{len(temp_filepath_list)} fichiers traités.")
-        if processed_count == 0: print("ERREUR (DrizzleProcessor.apply_drizzle): Aucun fichier traité avec succès."); return None, None
+                    # 1. pixel_panneau_original -> pixel_dans_repere_panneau_ref (via M)
+                    # cv2.transform attend (N,1,2) ou (1,N,2)
+                    pts_orig = np.dstack((x_orig.ravel(), y_orig.ravel())).astype(np.float32).reshape(-1,1,2)
+                    pts_in_anchor_ref_pixels = cv2.transform(pts_orig, M_matrix).reshape(-1,2)
+                    
+                    # 2. pixel_dans_repere_panneau_ref -> coord_celeste (via anchor_wcs_for_local)
+                    sky_coords_ra, sky_coords_dec = anchor_wcs_for_local.all_pix2world(
+                        pts_in_anchor_ref_pixels[:,0], pts_in_anchor_ref_pixels[:,1], 0
+                    )
+                    
+                    # 3. coord_celeste -> pixel_grille_drizzle_sortie (via output_wcs)
+                    final_pix_x, final_pix_y = output_wcs.all_world2pix(sky_coords_ra, sky_coords_dec, 0)
+                    
+                    current_pixmap = np.dstack((final_pix_x.reshape(input_shape_hw), 
+                                                final_pix_y.reshape(input_shape_hw))).astype(np.float32)
+                    print(f"    Pixmap (Local Mosaic) calculé pour {file_path}. Shape: {current_pixmap.shape}")
+                
+                else: # Logique standard (Astrometry pour chaque, ou Drizzle non-mosaïque)
+                    if input_wcs_obj is None:
+                        print(f"    WARN: WCS manquant pour {file_path} en mode non-local. Ignoré."); continue
+                    # Pas besoin de calculer pixmap ici, Drizzle le fait avec input_wcs et output_wcs.
+                    print(f"    Utilisation du WCS du fichier pour {file_path} (pas de pixmap externe).")
 
+
+                # Ajouter l'image à chaque Drizzler de canal
+                for ch_idx in range(num_output_channels):
+                    channel_data_2d = input_image_cxhxw[ch_idx, :, :].astype(np.float32)
+                    # S'assurer qu'il n'y a pas de NaN/Inf
+                    finite_mask = np.isfinite(channel_data_2d)
+                    if not np.all(finite_mask): channel_data_2d[~finite_mask] = 0.0
+                    
+                    drizzlers_by_channel[ch_idx].add_image(
+                        data=channel_data_2d,       # Image 2D du canal
+                        inwcs=input_wcs_obj if not use_local_alignment_logic else None, # WCS de l'image d'ENTRÉE si non-local
+                        outwcs=output_wcs if not use_local_alignment_logic else None,  # WCS de la grille de SORTIE si non-local
+                        pixmap=current_pixmap if use_local_alignment_logic else None, # PIXMAP si logique locale
+                        expin=exposure_time,        # Exposition de l'image d'entrée
+                        in_units='cps' if self.kernel == 'turbo' else 'counts', # Adapter selon kernel ?
+                        wt_scl='expsq'              # Poids par exp² typique
+                    )
+                files_processed_count += 1
+                if i < 3 or i == len(input_file_paths) -1 : # Log pour les premiers et le dernier
+                     print(f"    Image {os.path.basename(file_path)} ajoutée aux Drizzlers (Exp: {exposure_time:.1f}s).")
+
+            except Exception as e_file_proc:
+                progress_callback(f"Drizzle ERREUR: Traitement fichier {file_path} échoué: {e_file_proc}", None)
+                traceback.print_exc(limit=1)
+                # Continuer avec les autres fichiers
+            finally:
+                del input_image_cxhxw, input_wcs_obj, input_header, current_pixmap
+                if i % 20 == 0: gc.collect() # GC plus fréquent
+        
+        progress_callback(f"Drizzle: Boucle Drizzle terminée. {files_processed_count}/{len(input_file_paths)} fichiers traités.", 100)
+        print(f"DEBUG DrizzleProcessor: Boucle Drizzle terminée. {files_processed_count} fichiers effectivement ajoutés.")
+
+        if files_processed_count == 0:
+            progress_callback("Drizzle ERREUR: Aucun fichier n'a pu être traité par Drizzle.", 0)
+            return None, None
+
+        # Récupérer les données finales
         try:
-            print("   -> Combinaison canaux finaux..."); 
-            final_sci = np.stack(output_images_list, axis=-1); 
-            final_wht = np.stack(output_weights_list, axis=-1)
-            print(f"   -> Combinaison terminée. Shape finale SCI: {final_sci.shape}, WHT: {final_wht.shape}")
-        except Exception as e_final_stack: 
-            print(f"   -> ERREUR assemblage final canaux: {e_final_stack}"); 
+            progress_callback("Drizzle: Combinaison des canaux finaux...", None)
+            # Les tableaux out_images_by_channel et out_weights_by_channel ont été modifiés "in-place"
+            final_sci_image_hxwxc = np.stack(out_images_by_channel, axis=-1).astype(np.float32) # HxWxC
+            final_wht_map_hxwxc = np.stack(out_weights_by_channel, axis=-1).astype(np.float32) # HxWxC
+            progress_callback("Drizzle: Combinaison canaux terminée.", None)
+            print(f"DEBUG DrizzleProcessor: Combinaison canaux terminée. Shape finale SCI: {final_sci_image_hxwxc.shape}, WHT: {final_wht_map_hxwxc.shape}")
+
+            # Nettoyage des données pour éviter NaN/Inf dans le résultat final
+            final_sci_image_hxwxc = np.nan_to_num(final_sci_image_hxwxc, nan=0.0, posinf=0.0, neginf=0.0)
+            final_wht_map_hxwxc = np.nan_to_num(final_wht_map_hxwxc, nan=0.0, posinf=0.0, neginf=0.0)
+            final_wht_map_hxwxc = np.maximum(final_wht_map_hxwxc, 0.0) # Poids non-négatifs
+
+            # Normalisation optionnelle ou gestion du seuil de poids ici si nécessaire
+            # Par exemple, masquer les pixels où le poids est trop faible
+            if self.final_wht_threshold > 0:
+                # Créer un masque basé sur la moyenne des poids des canaux (ou un canal spécifique)
+                mean_wht = np.mean(final_wht_map_hxwxc, axis=2)
+                max_overall_wht = np.max(mean_wht)
+                if max_overall_wht > 1e-9:
+                    low_wht_mask = mean_wht < (self.final_wht_threshold * max_overall_wht)
+                    for c in range(num_output_channels):
+                        final_sci_image_hxwxc[low_wht_mask, c] = 0.0 # Mettre à zéro les pixels science avec faible poids
+                        # Optionnel: mettre aussi les poids à zéro pour ces pixels
+                        # final_wht_map_hxwxc[low_wht_mask, c] = 0.0
+                    print(f"DEBUG DrizzleProcessor: Seuil de poids final appliqué (seuil relatif: {self.final_wht_threshold * 100}% du max).")
+
+            print(f"DEBUG DrizzleProcessor.apply_drizzle return: Retour SCI is None? False, WHT is None? False")
+            return final_sci_image_hxwxc, final_wht_map_hxwxc
+
+        except Exception as e_final_stack:
+            progress_callback(f"Drizzle ERREUR: Assemblage final des canaux échoué: {e_final_stack}", 0)
             traceback.print_exc(limit=1)
             return None, None
-        
-        final_image_normalized = None
-        try:
-            print("   -> Normalisation finale 0-1...")
-            min_val_sci = np.nanmin(final_sci); max_val_sci = np.nanmax(final_sci)
-            print(f"      - Avant Norm -> SCI Min: {min_val_sci:.4g}, Max: {max_val_sci:.4g}")
-            if max_val_sci > min_val_sci:
-                final_image_normalized = (final_sci - min_val_sci) / (max_val_sci - min_val_sci)
-                final_image_normalized = np.clip(final_image_normalized, 0.0, 1.0)
-                final_image_normalized = np.nan_to_num(final_image_normalized, nan=0.0)
-            else:
-                print("   - WARNING: Image finale constante/vide après Drizzle. Mise à zéro.")
-                final_image_normalized = np.zeros_like(final_sci)
-            final_image_normalized = final_image_normalized.astype(np.float32)
-            print(f"      - Après Norm -> Shape: {final_image_normalized.shape}, Type: {final_image_normalized.dtype}, Min: {np.min(final_image_normalized):.2f}, Max: {np.max(final_image_normalized):.2f}")
-        except Exception as norm_err:
-            print(f"   - ERREUR normalisation finale: {norm_err}"); 
-            traceback.print_exc(limit=1)
-            final_image_normalized = None; final_wht = None
-
-        end_time = time.time(); print(f"✅ DrizzleProcessor terminé en {end_time - start_time:.2f}s.")
-        print(f"DEBUG (DrizzleProcessor.apply_drizzle return): Retour SCI is None? {final_image_normalized is None}, WHT is None? {final_wht is None}")
-        return final_image_normalized, final_wht
-
-# --- FIN DE LA MÉTHODE apply_drizzle (MODIFIÉE) ---
+        finally:
+            del drizzlers_by_channel, out_images_by_channel, out_weights_by_channel
+            gc.collect()
