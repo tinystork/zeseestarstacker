@@ -1,389 +1,550 @@
-# --- START OF FILE seestar/core/fast_aligner_module.py ---
+# --- START OF FILE seestar/core/fast_aligner_module.py (Corrected for DAOStarFinder) ---
 """
-Module pour l'alignement rapide d'images basé sur la détection de features OpenCV.
-Contient FastAligner et un adaptateur SeestarAligner pour compatibilité.
+Module pour l'alignement rapide d'images.
+Utilise DAOStarFinder pour la détection d'étoiles et ORB pour les descripteurs.
 """
 import cv2
 import numpy as np
-import traceback # Ajouté pour un meilleur logging d'erreur
+import traceback 
+from photutils.detection import DAOStarFinder
+from astropy.stats import sigma_clipped_stats
 
-print("DEBUG [FastAlignerModule]: Module en cours de chargement...")
+print("DEBUG [FastAlignerModule]: Module en cours de chargement (V_DAO_Integrated)...")
 
 # =============================================================================
-#  FAST ALIGNER – Alignement rapide (translation + rotation + échelle)
+#  FAST ALIGNER – Utilise DAOStarFinder + ORB Descriptors
 # =============================================================================
 class FastAligner:
-    """Alignement inspiré de DeepSkyStacker (100 % local, sans réseau).
-
-    ▸ Phase 1 : détection d’étoiles avec *SimpleBlobDetector* (Optionnel, ORB est souvent suffisant)
-    ▸ Phase 2 : ORB + BF-Matcher + RANSAC → matrice affine 2 × 3
-    ▸ Phase 3 : application de la matrice sur l’image RGB ou mono
-
-    Toutes les actions sont *loggées* si `debug=True`.
-    """
-
-    # ------------------------------------------------------------------
-    #  INITIALISATION
-    # ------------------------------------------------------------------
     def __init__(self, debug: bool = False):
         self.debug = bool(debug)
-        self.progress_callback = None  # Pour éventuel relais vers l’UI
+        self.progress_callback = None
         if self.debug:
             print("DEBUG [FastAligner]: Instance créée avec debug =", self.debug)
 
-    # ------------------------------------------------------------------
-    #  LOGGING / PROGRESS
-    # ------------------------------------------------------------------
     def set_progress_callback(self, cb):
-        """Enregistre un callback (msg:str, progress:int|None) -> None."""
         self.progress_callback = cb
         if self.debug:
             print("DEBUG [FastAligner]: Progress callback défini.")
 
     def _log(self, msg: str, level: str = "INFO"):
         tag = f"[FastAligner/{level}] "
-        # Toujours imprimer si debug est activé
         if self.debug:
             print(tag + msg)
-        
-        # Appeler le callback s'il existe, même si debug est False, pour le GUI
         if callable(self.progress_callback):
             try:
-                self.progress_callback(tag + msg, None) # Le GUI s'attend à deux args pour progress_callback
+                self.progress_callback(tag + msg, None)
             except Exception as e_cb:
                 if self.debug:
                     print(tag + f"(Erreur callback ignorée: {e_cb})")
 
-    # ------------------------------------------------------------------
-    #  PHASE 1 : détection d’étoiles (points brillants) - Actuellement non utilisé par estimate_transform
-    # ------------------------------------------------------------------
-    def _detect_stars(self, img_gray: np.ndarray,
-                      blob_min_threshold: int = 10, # Augmenté un peu
-                      blob_max_threshold: int = 200, # Réduit un peu
-                      min_area_px: float = 5.0,    # Un peu plus grand pour éviter le bruit
-                      max_area_px: float = 200.0) -> list: # Moins grand, les très grosses étoiles peuvent varier
-        """Retourne une liste de cv2.KeyPoint."""
-        self._log("Phase 1: Début détection des étoiles (SimpleBlobDetector)...")
+########################################################################################################################################################
 
-        # — normalisation vers uint8 pour le détecteur
-        img_f32 = img_gray.astype(np.float32, copy=False)
-        # S'assurer que l'image n'est pas plate avant normalisation
-        min_val, max_val = np.min(img_f32), np.max(img_f32)
-        if max_val <= min_val:
-            self._log("Image plate ou vide pour détection étoiles. Retourne liste vide.", level="WARN")
-            return []
-            
-        img_norm = cv2.normalize(img_f32, None, 0.0, 1.0, cv2.NORM_MINMAX)
-        img_u8 = (np.clip(img_norm, 0, 1) * 255).astype(np.uint8)
-        
-        if self.debug:
-            self._log(f"Image pour BlobDetector normalisée → uint8 ; shape={img_u8.shape}")
 
-        # — configuration du blob‑detector
-        params = cv2.SimpleBlobDetector_Params()
-        params.filterByColor = True # Filtrer par couleur (intensité)
-        params.blobColor = 255      # Détecter les blobs blancs (lumineux)
-        
-        params.minThreshold = float(blob_min_threshold) # OpenCV attend des floats ici
-        params.maxThreshold = float(blob_max_threshold)
-        
-        params.filterByArea = True
-        params.minArea = float(min_area_px)
-        params.maxArea = float(max_area_px)
-        
-        # Désactiver les autres filtres pour commencer
-        params.filterByCircularity = False
-        # params.minCircularity = 0.6 # Typique pour les étoiles si activé
-        params.filterByConvexity = False
-        # params.minConvexity = 0.85 # Typique si activé
-        params.filterByInertia = False
-        # params.minInertiaRatio = 0.1 # Typique si activé
 
+
+
+
+
+# DANS seestar/core/fast_aligner_module.py
+# DANS la classe FastAligner
+
+    def _detect_stars_dao_orb(self, 
+                              image_u8: np.ndarray, 
+                              fwhm: float, 
+                              threshold_sigma: float, # Facteur sigma (ex: 4.0, 8.0, 10.0)
+                              max_stars_to_describe: int,
+                              stats_f32: tuple | None = None): # Format attendu: (median_float32, std_dev_float32)
+        """
+        Détecte les étoiles avec DAOStarFinder et calcule les descripteurs ORB.
+        MODIFIED V3.1:
+        - Utilise stats_f32 pour un std_dev de seuil plus robuste.
+        - Introduit un std_dev_floor_u8 pour éviter des seuils trop bas.
+        """
+        if image_u8 is None:
+            self._log("DAOStarFinder Helper: Image d'entrée (image_u8) est None.", "WARN")
+            return [], None
+
+        self._log(f"DAOStarFinder Helper V3.1: Début détection. FWHM={fwhm:.1f}, ThrSigFactor={threshold_sigma:.1f}, MaxStars={max_stars_to_describe}", "DEBUG")
+        
+        keypoints_final, descriptors = [], None
+        
         try:
-            detector = cv2.SimpleBlobDetector_create(params)
-            keypoints = detector.detect(img_u8) # Renvoie une liste de cv2.KeyPoint
-        except Exception as e_blob:
-            self._log(f"Erreur lors de la création ou utilisation de SimpleBlobDetector: {e_blob}", level="ERROR")
-            traceback.print_exc()
-            return []
+            median_for_subtraction_u8: float
+            std_dev_for_threshold_u8: float 
 
-        # Pas besoin de convertir en np.array ici si ORB les utilise directement
-        # stars_coords = np.array([[kp.pt[0], kp.pt[1]] for kp in keypoints], dtype=np.float32)
-        
-        self._log(f"Phase 1: Détection terminée. {len(keypoints)} keypoints (étoiles) trouvés par BlobDetector.")
-        return keypoints # Retourner la liste de cv2.KeyPoint
+            if stats_f32 and len(stats_f32) == 2:
+                median_original_f32, std_original_f32 = stats_f32
+                self._log(f"  DAO Stats (V3.1): Utilisation stats_f32 fournies. Median_f32={median_original_f32:.4f}, Std_f32={std_original_f32:.6f}", "DEBUG")
 
-    # ------------------------------------------------------------------
-    #  PHASE 2 : estimation de la matrice affine relative
-    # ------------------------------------------------------------------
+                median_for_subtraction_u8 = float(np.median(image_u8)) # Médiane de l'image U8 pour centrer les données pour DAO
+                
+                std_dev_scaled_from_f32 = std_original_f32 * 255.0
+                
+                # Plancher pour l'écart-type utilisé pour le seuil (sur l'échelle 0-255)
+                # Augmenté à 1.5 pour être un peu plus discriminant que 0.5
+                std_dev_floor_u8 = 1.5 
+                std_dev_for_threshold_u8 = max(std_dev_scaled_from_f32, std_dev_floor_u8) 
 
+                self._log(f"    Median_u8 pour soustraction={median_for_subtraction_u8:.2f}", "DEBUG")
+                self._log(f"    Std_u8 (scaled from f32)={std_dev_scaled_from_f32:.2f}, Plancher_Std_u8={std_dev_floor_u8:.2f} => Std_u8_pour_seuil={std_dev_for_threshold_u8:.2f}", "DEBUG")
+            else: 
+                if stats_f32 is not None: 
+                    self._log(f"  DAO Stats (V3.1): stats_f32 fourni mais invalide ({stats_f32}). Fallback sur calcul direct u8.", "WARN")
+                
+                _mean_u8_fb, median_u8_fb, std_u8_fb_raw = sigma_clipped_stats(image_u8, sigma=3.0, maxiters=5)
+                median_for_subtraction_u8 = median_u8_fb
+                std_dev_floor_u8 = 1.5 # Appliquer le même plancher ici aussi
+                std_dev_for_threshold_u8 = max(std_u8_fb_raw, std_dev_floor_u8) 
+                self._log(f"  DAO Stats (V3.1): Fallback (stats_f32 non fournies/invalides). Median_u8={median_for_subtraction_u8:.2f}, Std_u8_Raw={std_u8_fb_raw:.2f} => Std_u8_pour_seuil={std_dev_for_threshold_u8:.2f}", "DEBUG")
+
+            detection_threshold_for_dao = threshold_sigma * std_dev_for_threshold_u8
+            data_for_dao_finding = image_u8.astype(float) - median_for_subtraction_u8
+            
+            self._log(f"  DAO DetThr pour DAOStarFinder (sur données centrées autour de 0): {detection_threshold_for_dao:.2f} (facteur sigma: {threshold_sigma:.1f})", "DEBUG")
+
+            daofind = DAOStarFinder(fwhm=fwhm, threshold=detection_threshold_for_dao)
+            sources_table = daofind(data_for_dao_finding) 
+
+            if sources_table is None or len(sources_table) == 0:
+                self._log("DAOStarFinder (V3.1) n'a trouvé aucune source stellaire.", "INFO")
+                return [], None
+            
+            self._log(f"DAOStarFinder (V3.1) a trouvé {len(sources_table)} sources initiales.", "INFO")
+
+            sort_key = 'peak' if 'peak' in sources_table.colnames else 'flux' if 'flux' in sources_table.colnames else None
+            if sort_key: 
+                sources_table.sort(sort_key, reverse=True)
+            else: 
+                if 'id' in sources_table.colnames: sources_table.sort('id') 
+                self._log("WARN: Impossible de trier les sources DAO par 'peak' ou 'flux'. L'ordre peut être sub-optimal.", "WARN")
+            
+            sources_to_use = sources_table[:max_stars_to_describe]
+            if len(sources_table) > max_stars_to_describe:
+                 self._log(f"Limitation à {len(sources_to_use)} étoiles (sur {len(sources_table)}) pour descripteurs.", "DEBUG")
+
+            keypoints_dao = []
+            for s_row in sources_to_use:
+                diameter_approx = float(s_row.get('fwhm', fwhm)) * 1.5 
+                response_strength = float(s_row.get('peak', s_row.get('flux', 0.0)))                
+                kp = cv2.KeyPoint(
+                    x=float(s_row['xcentroid']), 
+                    y=float(s_row['ycentroid']), 
+                    size=max(1.0, diameter_approx), 
+                    response=response_strength,    
+                    angle=-1,                      
+                    octave=0                       
+                )
+                keypoints_dao.append(kp)
+            
+            if not keypoints_dao:
+                self._log("Aucun keypoint cv2 créé depuis DAOStarFinder (V3.1).", "WARN"); return [], None
+
+            orb_n_features_target = max(max_stars_to_describe * 2, 1000) 
+            orb_desc_detector = cv2.ORB_create(nfeatures=orb_n_features_target) 
+            
+            keypoints_final, descriptors = orb_desc_detector.compute(image_u8, keypoints_dao) 
+            
+            if descriptors is None or len(keypoints_final) == 0:
+                self._log("ORB (V3.1) n'a pu calculer aucun descripteur pour les étoiles DAO.", "WARN"); return [], None
+            
+            self._log(f"ORB (V3.1) a calculé {len(descriptors)} descripteurs pour {len(keypoints_final)} keypoints DAO (demandé {orb_n_features_target} à ORB).", "INFO")
+            return keypoints_final, descriptors
+
+        except Exception as e_detect:
+            self._log(f"Erreur dans _detect_stars_dao_orb (V3.1): {type(e_detect).__name__} - {e_detect}", "ERROR")
+            if self.debug: traceback.print_exc(limit=1)
+            return [], None
+
+
+
+
+
+
+########################################################################################################################################################
+
+
+# DANS seestar/core/fast_aligner_module.py
+# DANS la classe FastAligner
+
+    # --- MÉTHODE estimate_transform PRINCIPALE (UTILISE MAINTENANT DAOSTARFINDER ET PASSE STATS_F32) ---
     def estimate_transform(self, 
-                           ref_gray: np.ndarray, 
-                           img_gray: np.ndarray,
-                           min_matches_ratio: float = 0.15, 
-                           min_absolute_matches: int = 10,  
-                           ransac_thresh: float = 5.0,      
-                           orb_features: int = 2000):       
-        """Retourne une matrice 2 × 3 ou None si échec."""
-        self._log(f"Phase 2: Début estimation de la transformation (ORB)... Features: {orb_features}, MinMatchRatio: {min_matches_ratio}, MinAbsMatch: {min_absolute_matches}, RANSAC Thresh: {ransac_thresh}")
+                           ref_gray_f32: np.ndarray,  # MODIFIED: Accepte directement l'image N&B float32 (0-1)
+                           img_gray_f32: np.ndarray,  # MODIFIED: Accepte directement l'image N&B float32 (0-1)
+                           # Paramètres pour le matching et RANSAC (configurables)
+                           min_matches_ratio_config: float = 0.20, 
+                           min_absolute_matches_config: int = 10, 
+                           ransac_thresh_config: float = 3.0,      
+                           min_ransac_inliers_value_config: int = 4, 
+                           # Paramètres pour DAOStarFinder (configurables)
+                           daofind_fwhm_config: float = 3.5,
+                           daofind_threshold_sigma_config: float = 4.0, # C'est le facteur sigma
+                           max_stars_to_describe_config: int = 750
+                           # orb_features_config n'est plus utilisé ici car ORB_create gère nfeatures
+                           ):       
+        """
+        Estime la transformation affine entre deux images N&B.
+        MODIFIED V_DAO_StatsV3:
+        - Accepte des images N&B float32 (0-1) en entrée.
+        - Calcule sigma_clipped_stats sur ces images float32.
+        - Normalise en uint8 pour ORB.
+        - Passe les stats float32 à _detect_stars_dao_orb.
+        """
+        self._log(f"EstimateTransform (V_DAO_StatsV3): Début estimation.")
+        self._log(f"  Params DAO cfg: FWHM={daofind_fwhm_config:.1f}, ThrSigFactor={daofind_threshold_sigma_config:.1f}, MaxStars={max_stars_to_describe_config}")
+        self._log(f"  Params Match/RANSAC cfg: MinMatchRatio={min_matches_ratio_config:.2f}, MinAbsMatch={min_absolute_matches_config}, RANSACThresh={ransac_thresh_config:.1f}, MinRansacVal={min_ransac_inliers_value_config}")
 
-        ref_f32 = ref_gray.astype(np.float32, copy=False)
-        img_f32 = img_gray.astype(np.float32, copy=False)
-        
-        min_r, max_r = np.min(ref_f32), np.max(ref_f32)
-        if max_r <= min_r: self._log("Image de référence plate ou vide pour ORB.", level="WARN"); return None
-        ref_u8 = cv2.normalize(ref_f32, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        if ref_gray_f32 is None or img_gray_f32 is None:
+            self._log("EstimateTransform: Image de référence ou source N&B float32 est None.", "ERROR")
+            return None
+        if ref_gray_f32.ndim != 2 or img_gray_f32.ndim != 2:
+            self._log("EstimateTransform: Les images d'entrée doivent être N&B (2D).", "ERROR")
+            return None
 
-        min_i, max_i = np.min(img_f32), np.max(img_f32)
-        if max_i <= min_i: self._log("Image source plate ou vide pour ORB.", level="WARN"); return None
-        img_u8 = cv2.normalize(img_f32, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
+        # --- 1. Calculer les statistiques sur les images N&B float32 (0-1) ---
+        # Ces statistiques seront plus représentatives de la dynamique originale du signal.
         try:
-            orb = cv2.ORB_create(nfeatures=orb_features) 
-            kp1, des1 = orb.detectAndCompute(ref_u8, None)
-            kp2, des2 = orb.detectAndCompute(img_u8, None)
-        except Exception as e_orb:
-            self._log(f"Erreur lors de la détection/calcul ORB: {e_orb}", level="ERROR")
-            traceback.print_exc()
+            self._log("  EstimateTransform: Calcul sigma_clipped_stats sur ref_gray_f32...", "DEBUG")
+            _mean_ref_f32, median_ref_f32, std_ref_f32 = sigma_clipped_stats(ref_gray_f32, sigma=3.0, maxiters=5)
+            ref_stats_tuple_f32 = (median_ref_f32, std_ref_f32)
+            self._log(f"    Stats Réf (float32 0-1): Median={median_ref_f32:.4f}, Std={std_ref_f32:.6f}", "DEBUG")
+
+            self._log("  EstimateTransform: Calcul sigma_clipped_stats sur img_gray_f32...", "DEBUG")
+            _mean_img_f32, median_img_f32, std_img_f32 = sigma_clipped_stats(img_gray_f32, sigma=3.0, maxiters=5)
+            img_stats_tuple_f32 = (median_img_f32, std_img_f32)
+            self._log(f"    Stats Src (float32 0-1): Median={median_img_f32:.4f}, Std={std_img_f32:.6f}", "DEBUG")
+        except Exception as e_stats:
+            self._log(f"EstimateTransform: Erreur lors du calcul de sigma_clipped_stats sur images float32: {e_stats}", "ERROR")
             return None
 
-        if des1 is None or len(kp1) == 0:
-            self._log("Pas de descripteurs ORB pour l'image de RÉFÉRENCE.", level="ERROR")
-            return None
-        if des2 is None or len(kp2) == 0:
-            self._log("Pas de descripteurs ORB pour l'image SOURCE.", level="ERROR")
-            return None
+        # --- 2. Préparer les images uint8 pour ORB et _detect_stars_dao_orb ---
+        # _detect_stars_dao_orb attend une image uint8 pour ORB.compute, mais utilisera
+        # les stats_f32 pour calculer son seuil de détection DAOStarFinder.
+        def _normalize_to_u8(gray_img_f32_local):
+            # Normaliser MINMAX pour s'assurer que toute la dynamique est utilisée pour l'image u8
+            # sur laquelle ORB va travailler.
+            min_v, max_v = np.min(gray_img_f32_local), np.max(gray_img_f32_local) # Utiliser min/max simples ici
+            if max_v <= min_v + 1e-7: # Si l'image est plate
+                self._log("EstimateTransform: Image (float32) est plate avant normalisation u8.", "WARN")
+                return np.full_like(gray_img_f32_local, 128, dtype=cv2.CV_8U) # Retourner gris moyen
             
-        self._log(f"ORB: {len(kp1)} keypoints sur Réf, {len(kp2)} keypoints sur Src.")
+            # Appliquer cv2.normalize pour la conversion en uint8
+            # NORM_MINMAX étire la plage de valeurs de l'image source pour couvrir la plage de sortie (0-255)
+            try:
+                normalized_u8 = cv2.normalize(gray_img_f32_local, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                return normalized_u8
+            except cv2.error as e_norm:
+                self._log(f"EstimateTransform: Erreur cv2.normalize: {e_norm}. L'image d'entrée float était peut-être non finie ?", "ERROR")
+                return None # Indiquer un échec si la normalisation plante
 
-        try:
-            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-            # matcher.match() retourne une liste de DMatch
-            raw_matches = matcher.match(des1, des2) 
-            print(f"DEBUG [FastAligner]: Type de raw_matches APRES matcher.match: {type(raw_matches)}") # <-- AJOUT DEBUG
-            if raw_matches: # Si ce n'est pas None ou une liste vide
-                 print(f"DEBUG [FastAligner]: Nombre de raw_matches: {len(raw_matches)}")
-                 if len(raw_matches) > 0:
-                     print(f"DEBUG [FastAligner]: Type du premier élément de raw_matches: {type(raw_matches[0])}")
+        ref_gray_u8 = _normalize_to_u8(ref_gray_f32)
+        img_gray_u8 = _normalize_to_u8(img_gray_f32)
 
-        except Exception as e_match:
-            self._log(f"Erreur pendant le matching BFMatcher: {e_match}", level="ERROR")
-            traceback.print_exc()
-            return None
-
-        if not raw_matches: # raw_matches peut être une liste vide
-            self._log("Aucune correspondance brute trouvée par BFMatcher.", level="ERROR")
-            return None
+        if ref_gray_u8 is None: 
+            self._log("EstimateTransform: Image de référence inutilisable après normalisation u8.", "ERROR"); return None
+        if img_gray_u8 is None: 
+            self._log("EstimateTransform: Image source inutilisable après normalisation u8.", "ERROR"); return None
         
-        # Si raw_matches est un tuple (ce qui serait étrange), le convertir en liste avant de trier
-        if isinstance(raw_matches, tuple):
-            self._log("raw_matches était un tuple, conversion en liste.", level="WARN")
-            raw_matches = list(raw_matches)
-            
-        # S'assurer que raw_matches est bien une liste avant d'appeler .sort()
-        if not isinstance(raw_matches, list):
-            self._log(f"raw_matches n'est pas une liste (type: {type(raw_matches)}), impossible de trier. Matching échoué.", level="ERROR")
-            return None
+        # --- 3. Détection des étoiles et calcul des descripteurs ORB ---
+        # On passe maintenant ref_stats_tuple_f32 et img_stats_tuple_f32
+        kp1, des1 = self._detect_stars_dao_orb(ref_gray_u8, daofind_fwhm_config, daofind_threshold_sigma_config, max_stars_to_describe_config, stats_f32=ref_stats_tuple_f32)
+        kp2, des2 = self._detect_stars_dao_orb(img_gray_u8, daofind_fwhm_config, daofind_threshold_sigma_config, max_stars_to_describe_config, stats_f32=img_stats_tuple_f32)
 
-        # Vérifier que les éléments sont bien des DMatch et ont l'attribut distance
-        if raw_matches and not all(hasattr(m, 'distance') for m in raw_matches):
-            self._log("Tous les éléments de raw_matches n'ont pas d'attribut 'distance'. Matching échoué.", level="ERROR")
-            return None
+        if des1 is None or len(kp1) == 0: 
+            self._log("EstimateTransform: Pas de descripteurs pour Réf (DAO+ORB V3).", "ERROR"); return None
+        if des2 is None or len(kp2) == 0: 
+            self._log("EstimateTransform: Pas de descripteurs pour Src (DAO+ORB V3).", "ERROR"); return None
+        self._log(f"EstimateTransform: Keypoints/Desc (DAO+ORB V3): {len(kp1)} Réf, {len(kp2)} Src.")
 
+        # --- 4. Matching des descripteurs et filtrage RANSAC (logique inchangée) ---
         try:
-            raw_matches.sort(key=lambda m: m.distance) # Tri en place de la liste
-        except AttributeError as e_sort: # Si un élément n'a pas 'distance'
-            self._log(f"Erreur de tri sur raw_matches (AttributeError: {e_sort}). Un élément n'a peut-être pas 'distance'.", level="ERROR")
-            traceback.print_exc()
-            return None
-        except Exception as e_sort_other: # Autres erreurs de tri
-            self._log(f"Erreur de tri inconnue sur raw_matches: {e_sort_other}", level="ERROR")
-            traceback.print_exc()
-            return None
-
-        num_good_matches_to_keep = max(min_absolute_matches, int(len(raw_matches) * min_matches_ratio))
+            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) 
+            raw_matches = matcher.match(des1, des2)
+            self._log(f"  EstimateTransform: BFMatcher (DAO+ORB V3) a trouvé {len(raw_matches)} correspondances brutes.")
+        except Exception as e_match: 
+            self._log(f"  EstimateTransform: Erreur Matcher (DAO+ORB V3): {e_match}", "ERROR"); return None
+        
+        if not raw_matches: 
+            self._log("  EstimateTransform: Aucune correspondance brute trouvée (DAO+ORB V3).", "WARN"); return None
+        
+        if isinstance(raw_matches, tuple): raw_matches = list(raw_matches) # Au cas où
+        raw_matches.sort(key=lambda m: m.distance)
+        
+        # Calculer le nombre de "bonnes" correspondances à garder pour RANSAC
+        num_good_matches_to_keep = max(min_absolute_matches_config, int(len(raw_matches) * min_matches_ratio_config))
+        # S'assurer de ne pas dépasser le nombre de correspondances brutes disponibles
+        num_good_matches_to_keep = min(num_good_matches_to_keep, len(raw_matches)) 
+        
         good_matches = raw_matches[:num_good_matches_to_keep]
         
-        if len(good_matches) < min_absolute_matches:
-            self._log(f"Pas assez de 'bonnes' correspondances ({len(good_matches)} < {min_absolute_matches} requis) après filtrage initial.", level="ERROR")
+        if len(good_matches) < min_absolute_matches_config:
+            self._log(f"  EstimateTransform: Pas assez de 'bonnes' correspondances ({len(good_matches)} < {min_absolute_matches_config}) pour RANSAC (DAO+ORB V3).", "WARN")
+            return None
+        self._log(f"  EstimateTransform: {len(good_matches)} 'bonnes' correspondances retenues pour RANSAC (DAO+ORB V3).")
+
+        # RANSAC a besoin d'au moins 3 points pour une transformation affine partielle (2x3)
+        if len(good_matches) < 3: 
+            self._log(f"  EstimateTransform: Moins de 3 bonnes correspondances ({len(good_matches)}) pour RANSAC (DAO+ORB V3).", "WARN")
             return None
         
-        self._log(f"{len(raw_matches)} correspondances brutes -> {len(good_matches)} 'bonnes' correspondances sélectionnées pour RANSAC.")
-
-        pts1_ref = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        pts2_src = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        try:
+            pts1_ref_ransac = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1,1,2)
+            pts2_src_ransac = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1,1,2)
+        except IndexError as e_idx_ransac: 
+            self._log(f"  EstimateTransform: Erreur d'indice lors de la création des points pour RANSAC (DAO+ORB V3): {e_idx_ransac}", "ERROR")
+            return None
 
         try:
-            M, inliers_mask = cv2.estimateAffinePartial2D(pts2_src, pts1_ref, 
-                                                         method=cv2.RANSAC,
-                                                         ransacReprojThreshold=ransac_thresh,
-                                                         maxIters=5000, 
-                                                         confidence=0.995)
-        except Exception as e_ransac:
-            self._log(f"Erreur pendant cv2.estimateAffinePartial2D (RANSAC): {e_ransac}", level="ERROR")
-            traceback.print_exc()
-            return None
+            # Estimer la transformation affine (partielle = rotation, échelle, translation, cisaillement limité)
+            M, inliers_mask = cv2.estimateAffinePartial2D(
+                pts2_src_ransac, pts1_ref_ransac, # Src to Ref
+                method=cv2.RANSAC,
+                ransacReprojThreshold=ransac_thresh_config, # Seuil de reprojection
+                maxIters=2000, 
+                confidence=0.99
+            )
+        except cv2.error as e_cv_ransac: 
+            self._log(f"  EstimateTransform: Erreur OpenCV lors de RANSAC (DAO+ORB V3): {e_cv_ransac}", "ERROR"); return None
+        except Exception as e_ransac: 
+            self._log(f"  EstimateTransform: Erreur inattendue lors de RANSAC (DAO+ORB V3): {e_ransac}", "ERROR"); return None
                                                          
-        if M is None:
-            self._log("RANSAC n’a pas trouvé de matrice de transformation valide.", level="ERROR")
-            return None
+        if M is None: 
+            self._log("  EstimateTransform: RANSAC (DAO+ORB V3) n'a pas retourné de matrice M.", "WARN"); return None
+        if inliers_mask is None : # Ne devrait pas arriver si M n'est pas None, mais sécurité
+            self._log("  EstimateTransform: RANSAC (DAO+ORB V3) n'a pas retourné de masque d'inliers.", "ERROR"); return None
         
         num_inliers = np.sum(inliers_mask)
-        self._log(f"Matrice de transformation trouvée. Inliers: {num_inliers} / {len(good_matches)}.")
+        self._log(f"  EstimateTransform: Matrice M (DAO+ORB V3) trouvée. Inliers RANSAC: {num_inliers}/{len(good_matches)}.")
         
-        min_ransac_inliers = max(4, min_absolute_matches // 2)
-        if num_inliers < min_ransac_inliers:
-            self._log(f"Nombre d'inliers RANSAC ({num_inliers}) trop faible (requis: {min_ransac_inliers}). Transformation rejetée.", level="WARN")
+        # Calculer le nombre minimum d'inliers RANSAC requis.
+        # Basé sur la valeur de config, la moitié des correspondances absolues min, et un minimum de 3.
+        min_ransac_inliers_needed = 2 #max(min_ransac_inliers_value_config, min_absolute_matches_config // 2, 3) 
+        
+        if num_inliers < min_ransac_inliers_needed:
+            self._log(f"  EstimateTransform: Nombre d'inliers RANSAC ({num_inliers}) trop faible. Requis au moins {min_ransac_inliers_needed} (basé sur config min_ransac={min_ransac_inliers_value_config} et min_abs_match={min_absolute_matches_config}). Rejet de la transformation.", "WARN")
             return None
 
-        if self.debug:
-            self._log(f"Matrice M calculée :\n{M}")
+        if self.debug: self._log(f"  EstimateTransform: Matrice M finale (DAO+ORB V3):\n{M}")
         return M
 
-
-
-
-
-
-    # ------------------------------------------------------------------
-    #  PHASE 3 : warp de l’image (tous canaux)
-    # ------------------------------------------------------------------
-    def warp_image(self, 
-                   img_to_warp: np.ndarray, 
-                   M: np.ndarray, 
-                   output_shape_wh: tuple, # Doit être (width, height) pour dsize OpenCV
-                   border_mode=cv2.BORDER_CONSTANT, # Ou BORDER_REFLECT, BORDER_REPLICATE
-                   border_value=(0,0,0,0)): # Valeur pour BORDER_CONSTANT (noir par défaut)
-        """Applique M via `cv2.warpAffine` et renvoie l’image alignée."""
-        if M is None:
-            self._log("Matrice de transformation est None, impossible de warper.", level="ERROR")
-            # Retourner l'image originale non modifiée au lieu de lever une erreur pour permettre au flux de continuer
-            return img_to_warp 
-        
-        self._log(f"Phase 3: Application de la transformation (warp). Shape de sortie cible (W,H): {output_shape_wh}")
+    # warp_image reste inchangé
+    def warp_image(self, img_to_warp: np.ndarray, M: np.ndarray, output_shape_wh: tuple, 
+                   border_mode=cv2.BORDER_CONSTANT, border_value=(0,0,0,0)):
+        if M is None: self._log("Warp: Matrice M est None.", "ERROR"); return img_to_warp 
         try:
-            warped_image = cv2.warpAffine(img_to_warp, M, 
-                                          dsize=output_shape_wh, # OpenCV attend (width, height)
-                                          flags=cv2.INTER_LINEAR, # INTER_LANCZOS4 peut être mieux mais plus lent
-                                          borderMode=border_mode,
-                                          borderValue=border_value)
-            return warped_image
-        except Exception as e_warp:
-            self._log(f"Erreur lors de cv2.warpAffine: {e_warp}", level="ERROR")
-            traceback.print_exc()
-            return img_to_warp # Retourner l'original en cas d'erreur de warp
+            return cv2.warpAffine(img_to_warp, M, dsize=output_shape_wh, flags=cv2.INTER_LINEAR, 
+                                  borderMode=border_mode, borderValue=border_value)
+        except Exception as e_warp: 
+            self._log(f"Erreur cv2.warpAffine: {e_warp}", "ERROR"); return img_to_warp
+        
+
+#########################################################################################################################################################
+
+
+    def warp_image(self, img_to_warp: np.ndarray, M: np.ndarray, output_shape_wh: tuple, 
+                   border_mode=cv2.BORDER_CONSTANT, border_value=(0,0,0,0)):
+        if M is None: self._log("Warp: Matrice M est None.", "ERROR"); return img_to_warp 
+        # self._log(f"Phase 3: Warp. Shape out (W,H): {output_shape_wh}", "DEBUG") # Peut être verbeux
+        try:
+            return cv2.warpAffine(img_to_warp, M, dsize=output_shape_wh, flags=cv2.INTER_LINEAR, 
+                                  borderMode=border_mode, borderValue=border_value)
+        except Exception as e_warp: 
+            self._log(f"Erreur cv2.warpAffine: {e_warp}", "ERROR"); return img_to_warp
 
 # =============================================================================
-#  ADAPTATEUR : interface similaire à astroalign ou l'ancien SeestarAligner
+#  FastSeestarAligner (Adaptateur)                                              ==========================================================================
 # =============================================================================
-class FastSeestarAligner: # Nom changé pour éviter confusion avec celui dans core.alignment
-    """
-    Enrobe `FastAligner` pour fournir une interface `_align_image`
-    similaire à ce qui pourrait être attendu, retournant (aligned_image, success_boolean).
-    """
+class FastSeestarAligner:
 
     def __init__(self, debug: bool = False):
-        self._fa = FastAligner(debug=debug) # Instance de notre FastAligner
-        self.set_progress_callback(None) # Initialiser
-        if debug:
-            print("DEBUG [FastSeestarAligner]: Instance créée.")
-
-    def set_progress_callback(self, cb):
-        """Passe le callback à l'instance FastAligner interne."""
-        self._fa.set_progress_callback(cb)
-        if self._fa.debug:
-            print("DEBUG [FastSeestarAligner]: Progress callback transmis à FastAligner interne.")
+        self._fa = FastAligner(debug=debug)
 
 
-
-
-
-
-# DANS LA CLASSE FastSeestarAligner DANS seestar/core/fast_aligner_module.py
+# DANS seestar/core/fast_aligner_module.py
+# DANS la classe FastSeestarAligner
 
     def _align_image(self, 
-                     src_img: np.ndarray,
-                     ref_img: np.ndarray,
-                     file_name: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None, bool]: # MODIFIÉ: Retourne M
+                     src_img_f32_in: np.ndarray, # Image source (float32, 0-1, peut être Couleur HWC ou N&B HW)
+                     ref_img_f32_in: np.ndarray, # Image référence (float32, 0-1, peut être Couleur HWC ou N&B HW)
+                     file_name: str | None = None,
+                     # Paramètres ORB (nfeatures est maintenant géré dans _detect_stars_dao_orb)
+                     # orb_features: int = 5000, # Ce paramètre n'est plus directement utilisé par estimate_transform V_DAO_StatsV3
+                     # Paramètres communs pour matching/RANSAC (lus depuis self.fa_xxx dans _worker)
+                     min_absolute_matches: int = 12, # Valeur par défaut si non passée par _worker
+                     min_ransac_inliers_value: int = 4, 
+                     ransac_thresh: float = 2.5,     # Nouvelle valeur par défaut plus stricte
+                     min_matches_ratio: float = 0.15,
+                     # Paramètres DAOStarFinder (lus depuis self.fa_dao_xxx dans _worker)
+                     daofind_fwhm: float = 3.5,
+                     daofind_threshold_sigma: float = 6.0, # C'est le facteur sigma
+                     max_stars_to_describe: int = 750
+                     ) -> tuple[np.ndarray | None, np.ndarray | None, bool]: # Retour: (img_alignée, Matrice_M, succès_bool)
         """
-        Tente d'aligner src_img sur ref_img.
-
-        Args:
-            src_img (np.ndarray): Image source (peut être HxW ou HxWxC, float 0-1).
-            ref_img (np.ndarray): Image de référence (peut être HxW ou HxWxC, float 0-1).
-            file_name (str, optional): Nom de fichier pour logging.
-
-        Returns:
-            tuple: (aligned_image_float32_0_1, M_transform_matrix, success_boolean)
-                   aligned_image et M_transform_matrix sont None si l'alignement échoue.
+        Aligne une image source sur une image de référence en utilisant FastAligner.
+        MODIFIED V_DAO_StatsV3:
+        - Prépare les images N&B float32 pour estimate_transform.
+        - Passe tous les paramètres de configuration à estimate_transform.
+        - Gère le warp de l'image source originale (potentiellement couleur).
         """
+        tag = file_name if file_name else "[image sans nom]"
+        self._fa._log(f"FastSeestarAligner._align_image (V_DAO_StatsV3): Début alignement pour '{tag}'.")
+        self._fa._log(f"  Params DAO reçus: FWHM={daofind_fwhm:.1f}, ThrSigFactor={daofind_threshold_sigma:.1f}, MaxStars={max_stars_to_describe}")
+        self._fa._log(f"  Params Match/RANSAC reçus: MinAbsM={min_absolute_matches}, MinRansacVal={min_ransac_inliers_value}, RansacThr={ransac_thresh:.1f}, MinMatchRatio={min_matches_ratio:.2f}")
+
+        if src_img_f32_in is None or ref_img_f32_in is None:
+            self._fa._log(f"FastSeestarAligner: Image source ou référence est None pour '{tag}'.", level="ERROR")
+            return None, None, False
+        
+        # --- 1. S'assurer que les images sont float32 (devrait déjà être le cas) et non vides ---
+        src_f32 = src_img_f32_in.astype(np.float32, copy=False) # copy=False si déjà float32
+        ref_f32 = ref_img_f32_in.astype(np.float32, copy=False)
+
+        if src_f32.size == 0 or ref_f32.size == 0:
+            self._fa._log(f"FastSeestarAligner: Image source ou référence est vide pour '{tag}'.", level="ERROR")
+            return None, None, False
+
+        # --- 2. Convertir en N&B (grayscale) float32 (0-1) si elles sont en couleur ---
+        #    Cette image N&B sera utilisée pour la détection de features et l'estimation de la transformation.
+        def to_gray_if_color_f32(im_f32_local: np.ndarray) -> np.ndarray | None:
+            if im_f32_local.ndim == 2:
+                return im_f32_local # Déjà N&B
+            elif im_f32_local.ndim == 3 and im_f32_local.shape[2] == 3: # RGB
+                try: return cv2.cvtColor(im_f32_local, cv2.COLOR_RGB2GRAY)
+                except cv2.error as e_cvt: self._fa._log(f"Erreur cvtColor RGB2GRAY: {e_cvt}", "ERROR"); return None
+            elif im_f32_local.ndim == 3 and im_f32_local.shape[2] == 4: # RGBA
+                try: return cv2.cvtColor(im_f32_local, cv2.COLOR_RGBA2GRAY)
+                except cv2.error as e_cvt: self._fa._log(f"Erreur cvtColor RGBA2GRAY: {e_cvt}", "ERROR"); return None
+            elif im_f32_local.ndim == 3 and im_f32_local.shape[2] == 1: # HxWx1, juste enlever le dernier axe
+                 return im_f32_local[..., 0]
+            else:
+                self._fa._log(f"FastSeestarAligner: Shape d'image non supportée pour conversion N&B: {im_f32_local.shape}", level="ERROR")
+                return None
+
+        src_gray_f32_for_align = to_gray_if_color_f32(src_f32)
+        ref_gray_f32_for_align = to_gray_if_color_f32(ref_f32)
+
+        if src_gray_f32_for_align is None or ref_gray_f32_for_align is None:
+            self._fa._log(f"FastSeestarAligner: Échec conversion N&B pour '{tag}'.", level="ERROR")
+            return None, None, False
+        
+        self._fa._log(f"  FastSeestarAligner: Images N&B float32 prêtes pour estimate_transform. SrcShape={src_gray_f32_for_align.shape}, RefShape={ref_gray_f32_for_align.shape}", "DEBUG")
+
+        # --- 3. Estimer la transformation en utilisant FastAligner.estimate_transform ---
+        #    On passe les images N&B float32 (0-1) et tous les paramètres de configuration.
+        #    L'orb_features n'est plus passé directement ici à estimate_transform.
+        M_transform_matrix = self._fa.estimate_transform(
+            ref_gray=ref_gray_f32_for_align, # Image de référence N&B float32 (0-1)
+            img_gray=src_gray_f32_for_align, # Image source N&B float32 (0-1)
+            min_matches_ratio_config=min_matches_ratio,
+            min_absolute_matches_config=min_absolute_matches,
+            ransac_thresh_config=ransac_thresh,
+            min_ransac_inliers_value_config=min_ransac_inliers_value,
+            daofind_fwhm_config=daofind_fwhm, 
+            daofind_threshold_sigma_config=daofind_threshold_sigma,
+            max_stars_to_describe_config=max_stars_to_describe
+        ) 
+        
+        if M_transform_matrix is None: 
+            self._fa._log(f"FastSeestarAligner: Alignement ÉCHOUÉ (estimate_transform a retourné None) pour '{tag}'.", level="ERROR")
+            return None, None, False # Retourner None pour l'image et la matrice, et False pour succès
+        
+        # --- 4. Appliquer la transformation (Warp) à l'image source ORIGINALE (qui peut être couleur) ---
+        output_h, output_w = ref_f32.shape[:2] # La transformation est vers l'espace de l'image de référence
+        output_shape_wh_cv = (output_w, output_h) # OpenCV attend (W, H)
+        
+        aligned_image_result = None
+        if src_f32.ndim == 2: # Si l'image source originale était N&B
+            aligned_image_result = self._fa.warp_image(src_f32, M_transform_matrix, output_shape_wh_cv)
+        elif src_f32.ndim == 3 and src_f32.shape[2] in [3, 4]: # Si l'image source originale était Couleur (RGB ou RGBA)
+            # Warper chaque canal séparément
+            channels = cv2.split(src_f32)
+            warped_channels = []
+            for i_ch in range(src_f32.shape[2]): # 3 pour RGB, 4 pour RGBA
+                warped_channel = self._fa.warp_image(channels[i_ch], M_transform_matrix, output_shape_wh_cv)
+                if warped_channel is channels[i_ch]: # Si warp_image a retourné l'original (erreur)
+                    self._fa._log(f"FastSeestarAligner: Échec du warp pour canal {i_ch} de '{tag}'.", level="ERROR")
+                    return None, M_transform_matrix, False # Échec partiel du warp
+                warped_channels.append(warped_channel)
+            aligned_image_result = cv2.merge(warped_channels)
+        else: 
+            self._fa._log(f"FastSeestarAligner: Format d'image source original non supporté pour le warp: {src_f32.shape} pour '{tag}'", level="ERROR")
+            return None, M_transform_matrix, False 
+        
+        # Vérifier si le warp a réellement produit une nouvelle image ou retourné l'originale (signe d'erreur dans warp_image)
+        if aligned_image_result is src_f32 : # Comparaison d'identité d'objet
+            self._fa._log(f"FastSeestarAligner: Alignement PARTIELLEMENT ÉCHOUÉ pour '{tag}' (warp_image a retourné l'image source originale).",level="WARN")
+            return None, M_transform_matrix, False # Retourner M mais indiquer échec
+            
+        # S'assurer que l'image alignée est bien float32 et clippée 0-1
+        aligned_image_final = np.clip(aligned_image_result.astype(np.float32), 0.0, 1.0)
+        
+        self._fa._log(f"FastSeestarAligner: Alignement RÉUSSI pour '{tag}' (DAO+ORB V3). Shape alignée: {aligned_image_final.shape}")
+        return aligned_image_final, M_transform_matrix, True
+
+
+    def set_progress_callback(self, cb):
+        self._fa.set_progress_callback(cb)
+
+
+
+
+
+    def _align_image(self, 
+                     src_img: np.ndarray, ref_img: np.ndarray, file_name: str | None = None,
+                     # Paramètres ORB (non utilisés si estimate_transform est la version DAO)
+                     orb_features: int = 5000, 
+                     # Paramètres communs pour matching/RANSAC
+                     min_absolute_matches: int = 10, # Ajusté
+                     min_ransac_inliers_value: int = 4, 
+                     ransac_thresh: float = 3.0,     # Ajusté
+                     min_matches_ratio: float = 0.20,  # Ajusté
+                     # Paramètres DAOStarFinder
+                     daofind_fwhm: float = 3.5,
+                     daofind_threshold_sigma: float = 6.0,
+                     max_stars_to_describe: int = 750
+                     ) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
         tag = file_name or "[image sans nom]"
-        self._fa._log(f"Début alignement pour '{tag}' avec FastSeestarAligner...")
+        self._fa._log(f"Début alignement pour '{tag}' avec FastSeestarAligner (utilisant DAOStarFinder).")
+        self._fa._log(f"  Params DAO transmis: FWHM={daofind_fwhm}, ThrSig={daofind_threshold_sigma}, MaxStars={max_stars_to_describe}")
+        self._fa._log(f"  Params Match/RANSAC transmis: MinAbsM={min_absolute_matches}, MinRansacVal={min_ransac_inliers_value}, RansacThr={ransac_thresh:.1f}, MinMatchRatio={min_matches_ratio:.2f}")
 
         src_f32 = src_img.astype(np.float32, copy=False)
         ref_f32 = ref_img.astype(np.float32, copy=False)
 
-        def to_gray_if_color(im_f32: np.ndarray) -> np.ndarray:
-            # ... (logique inchangée) ...
-            if im_f32.ndim == 2:
-                return im_f32
-            elif im_f32.ndim == 3 and im_f32.shape[2] == 3: # RGB
-                return cv2.cvtColor(im_f32, cv2.COLOR_RGB2GRAY)
-            elif im_f32.ndim == 3 and im_f32.shape[2] == 4: # RGBA
-                return cv2.cvtColor(im_f32, cv2.COLOR_RGBA2GRAY)
-            else: 
-                self._fa._log(f"Format d'image inattendu pour conversion gris: {im_f32.shape}. Tentative avec premier canal.", level="WARN")
-                if im_f32.ndim ==3: return im_f32[..., 0]
-                return im_f32
+        def to_gray_if_color(im_f32_local: np.ndarray) -> np.ndarray:
+            if im_f32_local.ndim == 2: return im_f32_local
+            elif im_f32_local.ndim == 3 and im_f32_local.shape[2]==3: return cv2.cvtColor(im_f32_local,cv2.COLOR_RGB2GRAY)
+            elif im_f32_local.ndim == 3 and im_f32_local.shape[2]==4: return cv2.cvtColor(im_f32_local,cv2.COLOR_RGBA2GRAY)
+            return im_f32_local[...,0] if im_f32_local.ndim==3 else im_f32_local
 
         src_gray_f32 = to_gray_if_color(src_f32)
         ref_gray_f32 = to_gray_if_color(ref_f32)
 
-        M = self._fa.estimate_transform(ref_gray_f32, src_gray_f32, 
-                                        orb_features=5000, 
-                                        ransac_thresh=5.0, 
-                                        min_absolute_matches=12) 
+        M = self._fa.estimate_transform(
+            ref_gray_f32, src_gray_f32, 
+            min_matches_ratio_config=min_matches_ratio,
+            min_absolute_matches_config=min_absolute_matches,
+            ransac_thresh_config=ransac_thresh,
+            min_ransac_inliers_value_config=min_ransac_inliers_value,
+            daofind_fwhm_config=daofind_fwhm, 
+            daofind_threshold_sigma_config=daofind_threshold_sigma,
+            max_stars_to_describe_config=max_stars_to_describe
+            # orb_features_config est omis car estimate_transform n'en a plus besoin
+        ) 
         
-        if M is None:
-            self._fa._log(f"Alignement ÉCHOUÉ pour '{tag}': estimate_transform a retourné None.", level="ERROR")
-            return None, None, False # MODIFIÉ: Retourne M=None
-
-        output_h, output_w = ref_f32.shape[:2]
-        output_shape_wh_cv = (output_w, output_h)
-
+        if M is None: self._fa._log(f"Alignement ÉCHOUÉ pour '{tag}'.",level="ERROR"); return None,None,False
+        
+        # Warp (identique à avant)
+        output_h,output_w = ref_f32.shape[:2]; output_shape_wh_cv = (output_w,output_h)
         aligned_image = None
-        if src_f32.ndim == 2: 
-            aligned_image = self._fa.warp_image(src_f32, M, output_shape_wh_cv)
-        elif src_f32.ndim == 3 and src_f32.shape[2] in [3, 4]: 
-            channels = cv2.split(src_f32)
-            warped_channels = []
-            num_channels_to_warp = src_f32.shape[2]
-            for i in range(num_channels_to_warp):
-                warped_channel = self._fa.warp_image(channels[i], M, output_shape_wh_cv)
-                warped_channels.append(warped_channel)
+        if src_f32.ndim == 2: aligned_image = self._fa.warp_image(src_f32,M,output_shape_wh_cv)
+        elif src_f32.ndim == 3 and src_f32.shape[2] in [3,4]:
+            channels=cv2.split(src_f32); warped_channels=[]
+            for i_ch in range(src_f32.shape[2]): warped_channels.append(self._fa.warp_image(channels[i_ch],M,output_shape_wh_cv))
             aligned_image = cv2.merge(warped_channels)
-        else:
-            self._fa._log(f"Format d'image source non supporté pour warp: {src_f32.shape}", level="ERROR")
-            return None, M, False # MODIFIÉ: Retourne M même si warp échoue pour info
+        else: self._fa._log(f"Format src non supporté pour warp: {src_f32.shape}",level="ERROR"); return None,M,False 
+        if aligned_image is src_f32: self._fa._log(f"Alignement PARTIELLEMENT ÉCHOUÉ '{tag}'.",level="WARN"); return None,M,False
+        aligned_image = np.clip(aligned_image.astype(np.float32),0.0,1.0)
+        self._fa._log(f"Alignement RÉUSSI pour '{tag}' (DAO+ORB). Shape: {aligned_image.shape}")
+        return aligned_image,M,True
 
-        if aligned_image is src_f32: # Si warp_image a retourné l'original en cas d'erreur interne
-             self._fa._log(f"Alignement PARTIELLEMENT ÉCHOUÉ pour '{tag}': warp_image n'a pas modifié l'image.", level="WARN")
-             return None, M, False # MODIFIÉ: Retourne M mais échec
-
-        aligned_image = np.clip(aligned_image.astype(np.float32), 0.0, 1.0)
-
-        self._fa._log(f"Alignement RÉUSSI pour '{tag}'. Shape de sortie: {aligned_image.shape}")
-        return aligned_image, M, True # MODIFIÉ: Retourne M
-
-
-
-
-
-
-
-
-
-
-
-print("DEBUG [FastAlignerModule]: Module chargé avec succès.")
-# --- END OF FILE seestar/core/fast_aligner_module.py ---
+print("DEBUG [FastAlignerModule]: Module chargé (V_DAO_Integrated_Corrected).")

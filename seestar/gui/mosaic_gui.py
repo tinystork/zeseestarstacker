@@ -1,338 +1,270 @@
-# --- START OF FILE seestar/gui/mosaic_gui.py ---
-"""
-Fenêtre modale pour la configuration des paramètres de traitement en mode Mosaïque.
-MAJ: Ajout options Kernel et Pixfrac Drizzle.
-"""
-
+# --- START OF FILE seestar/gui/mosaic_gui.py (Avec options alignement et FastAligner) ---
 import tkinter as tk
 from tkinter import ttk, messagebox
-import traceback
-import numpy as np # Ajouté pour np.clip
+# import traceback # Décommentez si besoin pour le debug
+import numpy as np 
 
-# Liste des noyaux valides (pour le Combobox)
-VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point'] # , 'lanczos2', 'lanczos3', 'gaussian', 'tophat' 
+# VALID_DRIZZLE_KERNELS est déjà défini dans votre fichier, je le garde.
+VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'gaussian', 'lanczos2', 'lanczos3'] 
 
 class MosaicSettingsWindow(tk.Toplevel):
-    """
-    Fenêtre Toplevel modale pour configurer et activer le mode Mosaïque.
-    """
-
-# --- DANS LE FICHIER: seestar/gui/mosaic_gui.py ---
-# --- DANS LA CLASSE: MosaicSettingsWindow ---
-
     def __init__(self, parent_gui):
-        """
-        Initialise la fenêtre.
-        MAJ: Ajout options Kernel, Pixfrac et Clé API.
-
-        Args:
-            parent_gui: Instance de SeestarStackerGUI (la fenêtre principale).
-        """
-        print("DEBUG (MosaicSettingsWindow __init__): Initialisation...")
+        print("DEBUG (MosaicSettingsWindow __init__ V4 - Full Options): Initialisation...")
         if not hasattr(parent_gui, 'root') or not parent_gui.root.winfo_exists():
              raise ValueError("Parent GUI invalide pour MosaicSettingsWindow")
 
         super().__init__(parent_gui.root)
         self.parent_gui = parent_gui
-        self.withdraw() # Cacher pendant la construction
+        self.withdraw() 
 
-        # --- Récupérer l'état actuel et les settings spécifiques depuis le parent ---
+        # Récupérer l'état et les settings
         initial_mosaic_state = getattr(self.parent_gui, 'mosaic_mode_active', False)
-        mosaic_settings = getattr(self.parent_gui, 'mosaic_settings', {})
-        # Utiliser les valeurs par défaut globales si non trouvées dans mosaic_settings ou settings globaux
-        initial_kernel = mosaic_settings.get('kernel', self.parent_gui.settings.drizzle_kernel)
-        initial_pixfrac = mosaic_settings.get('pixfrac', self.parent_gui.settings.drizzle_pixfrac)
-        # Récupérer la clé API sauvegardée depuis le parent GUI (via son StringVar)
-        initial_api_key = getattr(self.parent_gui, 'astrometry_api_key_var', tk.StringVar()).get()
-
-        print(f"DEBUG (MosaicSettingsWindow __init__): État initial mosaic: {initial_mosaic_state}")
-        print(f"DEBUG (MosaicSettingsWindow __init__): Settings initiaux -> Kernel: {initial_kernel}, Pixfrac: {initial_pixfrac}")
-        # Éviter d'afficher la clé API complète dans les logs généraux
-        print(f"DEBUG (MosaicSettingsWindow __init__): Clé API initiale chargée: {'Oui' if initial_api_key else 'Non'}")
+        
+        # Obtenir les valeurs par défaut complètes de SettingsManager pour mosaic_settings
+        # Ceci garantit que toutes les clés attendues par l'UI ont une valeur par défaut
+        sm_defaults = self.parent_gui.settings.get_default_values() 
+        default_mosaic_settings_from_sm = sm_defaults.get('mosaic_settings', {})
+        
+        # Obtenir les settings actuels du parent (qui peuvent être vides ou partiels)
+        current_parent_mosaic_settings = getattr(self.parent_gui.settings, 'mosaic_settings', {})
+        if not isinstance(current_parent_mosaic_settings, dict): 
+            current_parent_mosaic_settings = {}
+        
+        # Fusionner : commencer avec les défauts du SM, puis écraser avec les settings actuels du parent
+        self.settings = default_mosaic_settings_from_sm.copy()
+        self.settings.update(current_parent_mosaic_settings) 
+        print(f"DEBUG (MosaicSettingsWindow __init__): self.settings initialisé: {self.settings}")
 
         # --- Variables Tkinter locales ---
-        self.local_mosaic_active_var = tk.BooleanVar(value=initial_mosaic_state)
-        self.local_drizzle_kernel_var = tk.StringVar(value=initial_kernel)
-        self.local_drizzle_pixfrac_var = tk.DoubleVar(value=initial_pixfrac)
-        ### AJOUT Clé API Var ###
-        self.local_api_key_var = tk.StringVar(value=initial_api_key)
-        ### FIN AJOUT ###
+        self.local_mosaic_active_var = tk.BooleanVar(value=self.settings.get('enabled', initial_mosaic_state))
+        
+        self.local_mosaic_align_mode_var = tk.StringVar(value=self.settings.get('alignment_mode')) 
 
-        # --- Interface ---
+        initial_api_key = getattr(self.parent_gui.settings, 'astrometry_api_key', '') # Lire clé API globale
+        self.local_api_key_var = tk.StringVar(value=initial_api_key) 
+
+        # Options Drizzle (Kernel, Pixfrac, Fillval, WHT Threshold)
+        self.local_drizzle_kernel_var = tk.StringVar(value=self.settings.get('kernel'))
+        self.local_drizzle_pixfrac_var = tk.DoubleVar(value=self.settings.get('pixfrac'))
+        self.local_drizzle_fillval_var = tk.StringVar(value=self.settings.get('fillval'))
+        
+        initial_wht_storage = self.settings.get('wht_threshold') # Valeur 0-1
+        self.local_drizzle_wht_thresh_storage_var = tk.DoubleVar(value=initial_wht_storage)
+        self.local_drizzle_wht_thresh_display_var = tk.StringVar(value=f"{initial_wht_storage * 100.0:.0f}")
+        self.local_drizzle_wht_thresh_display_var.trace_add("write", self._convert_wht_display_to_storage)
+
+        # Paramètres FastAligner
+        self.local_fastalign_orb_features_var = tk.IntVar(value=self.settings.get('fastalign_orb_features'))
+        self.local_fastalign_min_abs_matches_var = tk.IntVar(value=self.settings.get('fastalign_min_abs_matches'))
+        self.local_fastalign_min_ransac_var = tk.IntVar(value=self.settings.get('fastalign_min_ransac')) 
+        self.local_fastalign_ransac_thresh_var = tk.DoubleVar(value=self.settings.get('fastalign_ransac_thresh'))
+
         self.title(self.parent_gui.tr("mosaic_settings_title", default="Mosaic Options"))
         self.transient(parent_gui.root)
-        # self.resizable(False, False) # Laisser redimensionnable pour l'instant
-
-        # --- Création des widgets ---
-        main_frame = ttk.Frame(self, padding="15")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        # --- Frame Activation ---
-        options_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_activation_frame", default="Activation"))
-        options_frame.pack(fill=tk.X, pady=(0, 10))
-        self.activate_check = ttk.Checkbutton(
-            options_frame,
-            text=self.parent_gui.tr("mosaic_activate_label", default="Enable Mosaic Processing Mode"),
-            variable=self.local_mosaic_active_var,
-            command=self._on_toggle_activate
-        )
-        self.activate_check.pack(anchor=tk.W, padx=10, pady=10)
-
-        ### AJOUT Cadre API Key ###
-        # --- Cadre pour la clé API ---
-        self.api_key_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"))
-        self.api_key_frame.pack(fill=tk.X, pady=5)
-
-        api_key_inner_frame = ttk.Frame(self.api_key_frame, padding=5)
-        api_key_inner_frame.pack(fill=tk.X)
-
-        api_key_label = ttk.Label(api_key_inner_frame, text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"), width=10)
-        api_key_label.pack(side=tk.LEFT, padx=(0, 5))
-
-        # Champ Entry pour la clé, avec affichage masqué
-        self.api_key_entry = ttk.Entry(
-            api_key_inner_frame,
-            textvariable=self.local_api_key_var,
-            show="*", # Masquer la clé
-            width=40 # Ajuster la largeur si besoin
-        )
-        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        # Petit label d'aide (optionnel)
-        api_help_label = ttk.Label(self.api_key_frame, text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"), style="TLabel", foreground="gray", font=("Arial", 8))
-        api_help_label.pack(anchor=tk.W, padx=10, pady=(0, 5))
-        ### FIN AJOUT Cadre API Key ###
-
-        ### AJOUT Kernel/Pixfrac (Cadre existant) ###
-        # --- Cadre pour les options Drizzle spécifiques ---
-        self.drizzle_options_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_drizzle_options_frame", default="Mosaic Drizzle Options"))
-        self.drizzle_options_frame.pack(fill=tk.X, pady=10)
-
-        # Ligne Kernel (inchangée)
-        kernel_frame = ttk.Frame(self.drizzle_options_frame, padding=5); kernel_frame.pack(fill=tk.X)
-        kernel_label = ttk.Label(kernel_frame, text=self.parent_gui.tr("mosaic_drizzle_kernel_label", default="Kernel:"), width=10); kernel_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.local_drizzle_kernel_var, values=VALID_DRIZZLE_KERNELS, state="readonly", width=15); self.kernel_combo.pack(side=tk.LEFT, padx=5)
-
-        # Ligne Pixfrac (inchangée)
-        pixfrac_frame = ttk.Frame(self.drizzle_options_frame, padding=5); pixfrac_frame.pack(fill=tk.X)
-        pixfrac_label = ttk.Label(pixfrac_frame, text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), width=10); pixfrac_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
-        ### FIN AJOUT Kernel/Pixfrac ###
-
-        # --- Boutons OK / Annuler (inchangés) ---
-        button_frame = ttk.Frame(main_frame); button_frame.pack(fill=tk.X, pady=(15, 0))
-        self.cancel_button = ttk.Button(button_frame, text=self.parent_gui.tr("cancel", default="Cancel"), command=self._cancel); self.cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
-        self.ok_button = ttk.Button(button_frame, text=self.parent_gui.tr("ok", default="OK"), command=self._apply_and_close); self.ok_button.pack(side=tk.RIGHT)
-
-        print("DEBUG (MosaicSettingsWindow __init__): Widgets créés.")
-
-        # --- Finalisation ---
-        self._on_toggle_activate() # Appliquer état initial (maintenant aussi pour clé API)
-
-        # --- Ajustement Taille Fenêtre ---
-        # Utiliser minsize pour s'adapter au contenu
-        # Augmenter la hauteur pour accommoder le nouveau cadre API
-        self.minsize(450, 320) # Ajuste ces valeurs si nécessaire
-        print("DEBUG (MosaicSettingsWindow __init__): Taille minimale définie.")
-
-        self.update_idletasks() # Calculer taille
-
-        # Centrage fenêtre (inchangé)
-        # ... (code centrage) ...
-        parent_x=self.parent_gui.root.winfo_rootx(); parent_y=self.parent_gui.root.winfo_rooty(); parent_w=self.parent_gui.root.winfo_width(); parent_h=self.parent_gui.root.winfo_height(); win_w = self.winfo_reqwidth(); win_h = self.winfo_reqheight(); x = parent_x + (parent_w // 2) - (win_w // 2); y = parent_y + (parent_h // 2) - (win_h // 2); self.geometry(f"+{x}+{y}")
-        print(f"DEBUG (MosaicSettingsWindow __init__): Fenêtre positionnée à {x},{y}.")
-
+        
+        self._build_ui()
+        self._update_options_state() 
+        
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.minsize(500, 620) 
+        self.update_idletasks()
+        
+        # Centrage (simplifié pour la lisibilité)
+        self.master.update_idletasks()
+        x = self.master.winfo_rootx() + (self.master.winfo_width() - self.winfo_reqwidth()) // 2
+        y = self.master.winfo_rooty() + (self.master.winfo_height() - self.winfo_reqheight()) // 2
+        self.geometry(f"+{x}+{y}")
+        
         self.deiconify()
         self.focus_force()
         self.grab_set()
-        self.wait_window(self)
-        print("DEBUG (MosaicSettingsWindow __init__): Fenêtre fermée.")
+        # self.wait_window(self) # Retiré pour debug, peut être remis
+        print("DEBUG (MosaicSettingsWindow __init__ V4): Fin initialisation.")
 
-    ###########################################################################################################################
+    def _build_ui(self):
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(expand=True, fill=tk.BOTH)
 
+        # --- 1. Section Activation (Toujours en haut) ---
+        activation_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_activation_frame", default="Activation"), padding="5")
+        activation_frame.pack(fill=tk.X, pady=(0, 10), padx=5)
+        self.activate_check = ttk.Checkbutton(activation_frame, text=self.parent_gui.tr("enable_mosaic_mode_label", default="Enable Mosaic Processing Mode"),
+                                            variable=self.local_mosaic_active_var, command=self._update_options_state)
+        self.activate_check.pack(anchor=tk.W, padx=5, pady=5)
 
+        # --- 2. Cadre Mode d'Alignement (Toujours packé, état géré) ---
+        self.alignment_mode_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_alignment_method_frame", default="Mosaic Alignment Method"), padding="5")
+        self.alignment_mode_frame.pack(fill=tk.X, pady=5, padx=5) 
+        ttk.Radiobutton(self.alignment_mode_frame, text=self.parent_gui.tr("mosaic_align_local_fast_fallback", default="Fast Local + WCS Fallback (Recommended)"),
+                        variable=self.local_mosaic_align_mode_var, value="local_fast_fallback", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(self.alignment_mode_frame, text=self.parent_gui.tr("mosaic_align_local_fast_only", default="Fast Local Only (Strict)"),
+                        variable=self.local_mosaic_align_mode_var, value="local_fast_only", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(self.alignment_mode_frame, text=self.parent_gui.tr("mosaic_align_astrometry_per_panel", default="Astrometry.net per Panel (Slower)"),
+                        variable=self.local_mosaic_align_mode_var, value="astrometry_per_panel", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
 
-    def _on_toggle_activate(self):
-        """
-        Grise/dégrise les options Drizzle ET le cadre Clé API
-        en désactivant explicitement les widgets enfants interactifs.
-        """
-        is_active = self.local_mosaic_active_var.get()
-        print(f"DEBUG (MosaicSettingsWindow _on_toggle_activate): Nouvel état Mosaic Active = {is_active}")
-        # Déterminer l'état (NORMAL ou DISABLED) pour les options dépendantes
-        dependent_options_state = tk.NORMAL if is_active else tk.DISABLED
-        # L'état 'disabled' est spécifique pour certains widgets comme Combobox
-        combobox_state = tk.NORMAL if is_active else 'disabled'
+        # --- 3. Cadre Options FastAligner (Créé, packé/dépacké conditionnellement) ---
+        self.fastaligner_options_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("fastaligner_tuning_frame", default="FastAligner Tuning (for Local Alignment)"), padding="5")
+        # NE PAS PACKER ICI, _update_options_state s'en charge
+        fa_params_config = [
+            (self.parent_gui.tr("fa_orb_features_label", default="ORB Features:"), self.local_fastalign_orb_features_var, 1000, 8000, 500, "%d"),
+            (self.parent_gui.tr("fa_min_abs_matches_label", default="Min Abs. Matches:"), self.local_fastalign_min_abs_matches_var, 5, 50, 1, "%d"),
+            (self.parent_gui.tr("fa_min_ransac_inliers_label", default="Min RANSAC Inliers:"), self.local_fastalign_min_ransac_var, 2, 10, 1, "%d"),
+            (self.parent_gui.tr("fa_ransac_thresh_label", default="RANSAC Thresh (px):"), self.local_fastalign_ransac_thresh_var, 1.0, 15.0, 0.5, "%.1f")
+        ]
+        for label_text, var, from_val, to_val, incr_val, fmt_str in fa_params_config:
+            param_frame = ttk.Frame(self.fastaligner_options_frame)
+            param_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(param_frame, text=label_text, width=22).pack(side=tk.LEFT, padx=2)
+            ttk.Spinbox(param_frame, textvariable=var, from_=from_val, to=to_val, increment=incr_val, width=7, format=fmt_str, justify=tk.RIGHT).pack(side=tk.LEFT, padx=2)
 
-        # --- Désactiver/Activer les options Drizzle ---
-        try:
-            # Widgets interactifs
-            if hasattr(self, 'kernel_combo'):
-                self.kernel_combo.config(state=combobox_state)
-            if hasattr(self, 'pixfrac_spinbox'):
-                self.pixfrac_spinbox.config(state=dependent_options_state)
-            # Labels associés (Optionnel: griser les labels aussi)
-            if hasattr(self, 'drizzle_options_frame'):
-                for child in self.drizzle_options_frame.winfo_children():
-                    if isinstance(child, ttk.Frame):
-                        for grandchild in child.winfo_children():
-                            if isinstance(grandchild, ttk.Label):
-                                grandchild.config(state=dependent_options_state)
-            print(f"   -> État options Drizzle (Kernel/Pixfrac) mis à: {dependent_options_state}")
-        except tk.TclError:
-            print("   -> WARNING: Erreur TclError config état widgets Drizzle.")
-        except AttributeError:
-            print("   -> WARNING: Widget Drizzle manquant pendant config état.")
+        # --- 4. Cadre Clé API (Toujours packé, état géré) ---
+        self.api_key_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"), padding="5")
+        self.api_key_frame.pack(fill=tk.X, pady=5, padx=5)
+        api_key_inner_frame = ttk.Frame(self.api_key_frame, padding=5); api_key_inner_frame.pack(fill=tk.X)
+        api_key_label = ttk.Label(api_key_inner_frame, text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"), width=10); api_key_label.pack(side=tk.LEFT, padx=(0,5))
+        self.api_key_entry = ttk.Entry(api_key_inner_frame, textvariable=self.local_api_key_var, show="*", width=40); self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        api_help_label = ttk.Label(self.api_key_frame, text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"), foreground="gray", font=("Arial", 8)); api_help_label.pack(anchor=tk.W, padx=10, pady=(0,5))
+        
+        # --- 5. Cadre Options Drizzle Mosaïque (Toujours packé, état géré) ---
+        self.drizzle_options_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("mosaic_drizzle_options_frame", default="Mosaic Drizzle Options"), padding="5")
+        self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
+        # Contenu Drizzle
+        kernel_frame = ttk.Frame(self.drizzle_options_frame, padding=5); kernel_frame.pack(fill=tk.X)
+        ttk.Label(kernel_frame, text=self.parent_gui.tr("mosaic_drizzle_kernel_label", default="Kernel:"), width=15).pack(side=tk.LEFT, padx=(0,5))
+        self.kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.local_drizzle_kernel_var, values=VALID_DRIZZLE_KERNELS, state="readonly", width=12); self.kernel_combo.pack(side=tk.LEFT, padx=5)
+        pixfrac_frame = ttk.Frame(self.drizzle_options_frame, padding=5); pixfrac_frame.pack(fill=tk.X)
+        ttk.Label(pixfrac_frame, text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), width=15).pack(side=tk.LEFT, padx=(0,5))
+        self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        fillval_frame = ttk.Frame(self.drizzle_options_frame, padding=5); fillval_frame.pack(fill=tk.X)
+        ttk.Label(fillval_frame, text=self.parent_gui.tr("mosaic_drizzle_fillval_label", default="Fill Value:"), width=15).pack(side=tk.LEFT, padx=(0,5))
+        self.fillval_entry = ttk.Entry(fillval_frame, textvariable=self.local_drizzle_fillval_var, width=7, justify=tk.RIGHT); self.fillval_entry.pack(side=tk.LEFT, padx=5)
+        wht_frame = ttk.Frame(self.drizzle_options_frame, padding=5); wht_frame.pack(fill=tk.X)
+        ttk.Label(wht_frame, text=self.parent_gui.tr("mosaic_drizzle_wht_thresh_label", default="Low WHT Mask (%):"), width=15).pack(side=tk.LEFT, padx=(0,5))
+        self.wht_spinbox = ttk.Spinbox(wht_frame, from_=0, to=100, increment=1, textvariable=self.local_drizzle_wht_thresh_display_var, width=7, justify=tk.RIGHT, format="%.0f"); self.wht_spinbox.pack(side=tk.LEFT, padx=5)
 
+        # --- 6. Boutons OK / Annuler (Toujours en bas) ---
+        button_frame = ttk.Frame(main_frame, padding="5")
+        button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0))
+        self.cancel_button = ttk.Button(button_frame, text=self.parent_gui.tr("cancel_button", default="Cancel"), command=self._on_cancel)
+        self.cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
+        self.ok_button = ttk.Button(button_frame, text=self.parent_gui.tr("ok_button", default="OK"), command=self._on_ok)
+        self.ok_button.pack(side=tk.RIGHT)
 
-        # --- Désactiver/Activer le cadre Clé API ---
-        try:
-            # Widget interactif
-            if hasattr(self, 'api_key_entry'):
-                self.api_key_entry.config(state=dependent_options_state)
-            # Labels associés (Optionnel: griser les labels aussi)
-            if hasattr(self, 'api_key_frame'):
-                for child in self.api_key_frame.winfo_children():
-                     # Cadre interne contenant le label principal
-                     if isinstance(child, ttk.Frame):
-                         for grandchild in child.winfo_children():
-                             if isinstance(grandchild, ttk.Label):
-                                 try: grandchild.config(state=dependent_options_state)
-                                 except tk.TclError: pass
-                     # Label d'aide direct
-                     elif isinstance(child, ttk.Label):
-                          try: child.config(state=dependent_options_state)
-                          except tk.TclError: pass
-            print(f"   -> État cadre Clé API (Entry/Labels) mis à: {dependent_options_state}")
-        except tk.TclError:
-            print("   -> WARNING: Erreur TclError config état widgets Clé API.")
-        except AttributeError:
-            print("   -> WARNING: Widget Clé API manquant pendant config état.")
+    def _on_alignment_mode_change(self):
+        self._update_options_state()
 
-# --- FIN DE LA MÉTHODE _on_toggle_activate  ---
-################################################################################################################################
+    def _update_options_state(self):
+        print(f"DEBUG (MosaicSettingsWindow _update_options_state V4): Exécution...")
+        is_mosaic_enabled = self.local_mosaic_active_var.get()
+        current_align_mode = self.local_mosaic_align_mode_var.get()
+        
+        # Fonction pour activer/désactiver les enfants d'un frame
+        def toggle_frame_children_state(frame_widget, state_to_set):
+            if hasattr(frame_widget, 'winfo_children'):
+                for child in frame_widget.winfo_children():
+                    if isinstance(child, ttk.Frame): # Gérer les frames enfants
+                        toggle_frame_children_state(child, state_to_set)
+                    elif hasattr(child, 'config'):
+                        try:
+                            # Comboboxes utilisent 'disabled' ou 'readonly'/'normal'
+                            if isinstance(child, ttk.Combobox):
+                                child.config(state='readonly' if state_to_set == tk.NORMAL else 'disabled')
+                            else:
+                                child.config(state=state_to_set)
+                        except tk.TclError: pass # Ignorer pour les labels qui n'ont pas 'state'
 
-
-
-
-    def _apply_and_close(self):
-        """
-        Valide les paramètres (y compris clé API si mode mosaïque actif),
-        les applique au GUI parent et ferme la fenêtre.
-        """
-        # Récupérer l'état de la checkbox d'activation
-        new_mosaic_state = self.local_mosaic_active_var.get()
-
-        # --- Initialiser les variables pour les settings ---
-        selected_kernel = ""
-        selected_pixfrac = 1.0 # Valeur défaut sûre
-        api_key_value = ""
-
-        # --- Validation SEULEMENT si le mode mosaïque est activé ---
-        if new_mosaic_state:
-            print("DEBUG (MosaicSettingsWindow _apply_and_close): Mode Mosaïque coché, validation des options...")
-
-            # --- 1. Valider Kernel ---
-            selected_kernel = self.local_drizzle_kernel_var.get()
-            if selected_kernel not in VALID_DRIZZLE_KERNELS:
-                messagebox.showerror(self.parent_gui.tr("error", default="Error"),
-                                     self.parent_gui.tr("mosaic_invalid_kernel", default="Invalid Drizzle kernel selected."),
-                                     parent=self)
-                print("ERREUR Validation: Kernel invalide.")
-                return # Ne pas fermer
-
-            # --- 2. Valider Pixfrac ---
-            try:
-                selected_pixfrac = float(self.local_drizzle_pixfrac_var.get())
-                selected_pixfrac = np.clip(selected_pixfrac, 0.01, 1.0) # Assurer dans la plage
-                # Optionnel: remettre la valeur clippée dans la variable pour l'affichage
-                # self.local_drizzle_pixfrac_var.set(selected_pixfrac)
-            except (ValueError, tk.TclError):
-                 messagebox.showerror(self.parent_gui.tr("error", default="Error"),
-                                      self.parent_gui.tr("mosaic_invalid_pixfrac", default="Invalid Pixfrac value. Must be between 0.01 and 1.0."),
-                                      parent=self)
-                 print("ERREUR Validation: Pixfrac invalide.")
-                 return # Ne pas fermer
-
-            # --- 3. Valider Clé API ---
-            api_key_value = self.local_api_key_var.get().strip() # Lire et enlever espaces blancs
-            if not api_key_value:
-                messagebox.showerror(self.parent_gui.tr("error", default="Error"),
-                                     self.parent_gui.tr("mosaic_api_key_required", default="Astrometry.net API Key is required when Mosaic Mode is enabled."),
-                                     parent=self)
-                print("ERREUR Validation: Clé API manquante.")
-                return # Ne pas fermer
-            # Optionnel: Ajouter une vérification basique du format de la clé ? (ex: longueur)
-            # if len(api_key_value) < 10: # Exemple très simple
-            #     messagebox.showwarning(...)
-            #     return
-
-            print(f"DEBUG (MosaicSettingsWindow _apply_and_close): Validation OK -> Active: {new_mosaic_state}, Kernel: {selected_kernel}, Pixfrac: {selected_pixfrac:.2f}, Clé API: Présente")
-
-        else: # Si mode mosaïque n'est pas coché
-            print(f"DEBUG (MosaicSettingsWindow _apply_and_close): Mode Mosaïque désactivé. Pas de validation des options spécifiques.")
-            # On pourrait vouloir récupérer quand même kernel/pixfrac pour les sauvegarder même si inactifs ?
-            # Ou les laisser tels quels dans self.parent_gui.mosaic_settings. Pour l'instant, on ne les lit pas si inactif.
-            # Lire quand même la clé API pour la sauvegarder même si le mode est inactif
-            api_key_value = self.local_api_key_var.get().strip()
-
-
-        # --- Si toutes les validations sont passées (ou si mode inactif) ---
-        try:
-            print(f"DEBUG (MosaicSettingsWindow _apply_and_close): Application état mosaïque = {new_mosaic_state} au parent.")
-            # Mettre à jour le flag dans l'instance parente
-            setattr(self.parent_gui, 'mosaic_mode_active', new_mosaic_state)
-
-            # Mettre à jour les settings spécifiques (kernel/pixfrac) si mode actif
-            if new_mosaic_state:
-                if not hasattr(self.parent_gui, 'mosaic_settings') or not isinstance(self.parent_gui.mosaic_settings, dict):
-                    print("DEBUG (MosaicSettingsWindow): Création dict mosaic_settings sur parent.")
-                    setattr(self.parent_gui, 'mosaic_settings', {})
-                self.parent_gui.mosaic_settings['kernel'] = selected_kernel
-                self.parent_gui.mosaic_settings['pixfrac'] = selected_pixfrac
-                print(f"   -> Settings Mosaïque Parent mis à jour: {self.parent_gui.mosaic_settings}")
-
-            # Mettre à jour la clé API dans le parent (TOUJOURS, pour sauvegarde)
-            if hasattr(self.parent_gui, 'astrometry_api_key_var'):
-                self.parent_gui.astrometry_api_key_var.set(api_key_value)
-                print(f"   -> Clé API Parent mise à jour: {'Oui' if api_key_value else 'Non'}")
+        # État des cadres principaux (sauf FastAligner)
+        main_frames_state = tk.NORMAL if is_mosaic_enabled else tk.DISABLED
+        toggle_frame_children_state(self.alignment_mode_frame, main_frames_state)
+        toggle_frame_children_state(self.api_key_frame, main_frames_state)
+        toggle_frame_children_state(self.drizzle_options_frame, main_frames_state)
+        
+        # Visibilité et état du cadre FastAligner
+        show_fa_opts = is_mosaic_enabled and current_align_mode in ["local_fast_fallback", "local_fast_only"]
+        if hasattr(self, 'fastaligner_options_frame'):
+            if show_fa_opts:
+                if not self.fastaligner_options_frame.winfo_ismapped():
+                    # Packer juste avant api_key_frame
+                    self.fastaligner_options_frame.pack(fill=tk.X, pady=5, padx=5, before=self.api_key_frame)
+                toggle_frame_children_state(self.fastaligner_options_frame, tk.NORMAL)
             else:
-                print("   -> WARNING: Attribut 'astrometry_api_key_var' manquant sur parent_gui.")
+                if self.fastaligner_options_frame.winfo_ismapped():
+                    self.fastaligner_options_frame.pack_forget()
+                # Même si caché, s'assurer que ses enfants sont conceptuellement désactivés
+                toggle_frame_children_state(self.fastaligner_options_frame, tk.DISABLED)
+        
+        if hasattr(self.parent_gui, 'update_mosaic_button_appearance'):
+            self.parent_gui.update_mosaic_button_appearance()
+        print(f"DEBUG _update_options_state V4: MosaicEnabled={is_mosaic_enabled}, AlignMode='{current_align_mode}', ShowFAOpts={show_fa_opts}")
 
-            # --- Déclencher Sauvegarde Settings ---
-            print("   -> Déclenchement sauvegarde settings via parent...")
-            self.parent_gui.settings.update_from_ui(self.parent_gui)
-            self.parent_gui.settings.save_settings()
-            print("   -> Sauvegarde settings terminée.")
+    def _convert_wht_display_to_storage(self, *args):
+        try:
+            display_val_str = self.local_drizzle_wht_thresh_display_var.get()
+            if not display_val_str: self.local_drizzle_wht_thresh_storage_var.set(0.01); return
+            percent_val = float(display_val_str)
+            float_val = np.clip(percent_val / 100.0, 0.0, 1.0) 
+            self.local_drizzle_wht_thresh_storage_var.set(round(float_val, 3))
+        except (ValueError, tk.TclError): self.local_drizzle_wht_thresh_storage_var.set(0.01)
 
+    def _on_ok(self):
+        new_mosaic_state = self.local_mosaic_active_var.get()
+        selected_align_mode = self.local_mosaic_align_mode_var.get()
+        api_key_value = self.local_api_key_var.get().strip()
+        selected_kernel = self.local_drizzle_kernel_var.get()
+        selected_pixfrac = self.local_drizzle_pixfrac_var.get()
+        selected_fillval = self.local_drizzle_fillval_var.get()
+        selected_wht_thresh_storage = self.local_drizzle_wht_thresh_storage_var.get()
 
-            # Log et màj UI parent
-            # ... (code log et indicateur UI parent comme avant) ...
-            if hasattr(self.parent_gui, 'update_progress_gui'):
-                status_msg_key = "mosaic_mode_enabled_log" if new_mosaic_state else "mosaic_mode_disabled_log"
-                status_msg_default = f"Mosaic mode {'ENABLED' if new_mosaic_state else 'DISABLED'}."
-                self.parent_gui.update_progress_gui(f"ⓘ {self.parent_gui.tr(status_msg_key, default=status_msg_default)}", None)
-            if hasattr(self.parent_gui, '_update_mosaic_status_indicator'): self.parent_gui._update_mosaic_status_indicator()
+        fa_orb_features = self.local_fastalign_orb_features_var.get()
+        fa_min_abs_matches = self.local_fastalign_min_abs_matches_var.get()
+        fa_min_ransac = self.local_fastalign_min_ransac_var.get()
+        fa_ransac_thresh = self.local_fastalign_ransac_thresh_var.get()
 
-        except Exception as e:
-            print(f"ERREUR (MosaicSettingsWindow _apply_and_close): Erreur application état/sauvegarde: {e}")
-            messagebox.showerror("Erreur Interne", f"Erreur application paramètres mosaïque:\n{e}", parent=self)
-            # On ne ferme PAS la fenêtre en cas d'erreur ici pour pouvoir réessayer
-            return
+        # Validation (comme avant)
+        if new_mosaic_state:
+            if selected_kernel not in VALID_DRIZZLE_KERNELS: messagebox.showerror(self.parent_gui.tr("error"), self.parent_gui.tr("mosaic_invalid_kernel"), parent=self); return
+            if not (0.01 <= selected_pixfrac <= 1.0): messagebox.showerror(self.parent_gui.tr("error"), self.parent_gui.tr("mosaic_invalid_pixfrac"), parent=self); return
+            if not (0.0 <= selected_wht_thresh_storage <= 1.0): messagebox.showerror(self.parent_gui.tr("error"), "Invalid Mosaic WHT Threshold (internal error, should be 0-1).", parent=self); return
+            if not api_key_value: messagebox.showerror(self.parent_gui.tr("error"), self.parent_gui.tr("mosaic_api_key_required"), parent=self); return
+            if selected_align_mode in ["local_fast_fallback", "local_fast_only"]: # Validation des params FA
+                if not (500 <= fa_orb_features <= 10000): messagebox.showerror("Error", "ORB Features must be between 500 and 10000.", parent=self); return
+                if not (3 <= fa_min_abs_matches <= 50): messagebox.showerror("Error", "Min Absolute Matches must be between 3 and 50.", parent=self); return
+                if not (2 <= fa_min_ransac <= 20): messagebox.showerror("Error", "Min RANSAC Inliers must be between 2 and 20.", parent=self); return
+                if not (1.0 <= fa_ransac_thresh <= 15.0): messagebox.showerror("Error", "RANSAC Threshold must be between 1.0 and 15.0.", parent=self); return
 
-        # --- Fermer la fenêtre si tout s'est bien passé ---
+        # Sauvegarde (comme avant)
+        if not hasattr(self.parent_gui.settings, 'mosaic_settings') or \
+           not isinstance(getattr(self.parent_gui.settings, 'mosaic_settings'), dict):
+            self.parent_gui.settings.mosaic_settings = {}
+
+        self.parent_gui.settings.mosaic_settings['enabled'] = new_mosaic_state
+        self.parent_gui.settings.mosaic_settings['alignment_mode'] = selected_align_mode
+        self.parent_gui.settings.mosaic_settings['kernel'] = selected_kernel
+        self.parent_gui.settings.mosaic_settings['pixfrac'] = selected_pixfrac
+        self.parent_gui.settings.mosaic_settings['fillval'] = selected_fillval
+        self.parent_gui.settings.mosaic_settings['wht_threshold'] = selected_wht_thresh_storage
+        self.parent_gui.settings.mosaic_settings['fastalign_orb_features'] = fa_orb_features
+        self.parent_gui.settings.mosaic_settings['fastalign_min_abs_matches'] = fa_min_abs_matches
+        self.parent_gui.settings.mosaic_settings['fastalign_min_ransac'] = fa_min_ransac
+        self.parent_gui.settings.mosaic_settings['fastalign_ransac_thresh'] = fa_ransac_thresh
+        
+        self.parent_gui.settings.astrometry_api_key = api_key_value
+        if hasattr(self.parent_gui, 'astrometry_api_key_var'):
+            self.parent_gui.astrometry_api_key_var.set(api_key_value)
+        
+        self.parent_gui.mosaic_mode_active = new_mosaic_state
+        
+        print(f"DEBUG (MosaicSettingsWindow _on_ok V4): Settings sauvegardés -> {self.parent_gui.settings.mosaic_settings}")
+        if hasattr(self.parent_gui, 'update_mosaic_button_appearance'):
+            self.parent_gui.update_mosaic_button_appearance()
+        
         self.grab_release()
         self.destroy()
-        print("DEBUG (MosaicSettingsWindow _apply_and_close): Fenêtre détruite.")
 
-# --- FIN DE LA MÉTHODE _apply_and_close ---
-
-
-###################################################################################################################################
-    def _cancel(self):
-        """ Annule et ferme la fenêtre sans appliquer les changements. """
-        print("DEBUG (MosaicSettingsWindow _cancel): Annulation, fermeture sans appliquer.")
+    def _on_cancel(self):
         self.grab_release()
         self.destroy()
+        if hasattr(self.parent_gui, 'update_mosaic_button_appearance'):
+            self.parent_gui.update_mosaic_button_appearance()
 
-# --- FIN DU FICHIER seestar/gui/mosaic_gui.py ---
+# --- FIN DE LA CLASSE MosaicSettingsWindow ---

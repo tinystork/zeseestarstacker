@@ -197,9 +197,12 @@ def apply_denoise(image, strength=1):
         traceback.print_exc()
         return image # Return original float32 image
 
+
+
 def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
     """
     Estime la taille de lot optimale en fonction de la mémoire disponible.
+    CORRIGÉ: Gère correctement le tuple retourné par load_and_validate_fits.
 
     Parameters:
         sample_image_path: Chemin vers une image exemple pour estimer la taille mémoire
@@ -226,23 +229,27 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         # Estimer la taille d'une image en mémoire pendant le traitement
         single_image_size_bytes = 0
         if sample_image_path and os.path.exists(sample_image_path):
+            img_data_for_estimation = None # Initialiser
             try:
                 # Load image to get dimensions and type (returns float32 0-1)
-                img = load_and_validate_fits(sample_image_path)
-                if img is None: raise ValueError("Failed to load sample image for size estimation.")
+                loaded_tuple = load_and_validate_fits(sample_image_path) # APPEL MODIFIÉ
+
+                # --- DÉBUT DE LA CORRECTION ---
+                if loaded_tuple and loaded_tuple[0] is not None:
+                    img_data_for_estimation = loaded_tuple[0] # Déballer l'array image
+                else:
+                    # Si load_and_validate_fits retourne None ou si les données sont None,
+                    # img_data_for_estimation restera None.
+                    # Le ValueError sera levé plus bas si img_data_for_estimation est None.
+                    pass # img_data_for_estimation est déjà None
+                # --- FIN DE LA CORRECTION ---
+
+                if img_data_for_estimation is None: # Vérifier après la tentative de déballage
+                    raise ValueError(f"Failed to load sample image: {sample_image_path}")
 
                 # Estimate memory usage during processing (alignment + stacking buffer)
-                # This is a rough estimate and depends heavily on the exact workflow.
-                # Assume output will be color (3 channels float32) for sizing.
-                # Factors to consider:
-                # - Loaded image (float32, maybe 1 or 3 channels)
-                # - Debayered/Preprocessed image (float32, 3 channels)
-                # - Aligned image buffer (float32, 3 channels)
-                # - Stacking accumulator (float32 or float64, 3 channels)
-                # - Intermediate arrays in astroalign etc.
-                # Let's use a factor of ~5-7 times the *output* data size (HxWx3 float32).
                 memory_factor = 6
-                h, w = img.shape[:2]
+                h, w = img_data_for_estimation.shape[:2] # Utiliser img_data_for_estimation
                 channels_out = 3 # Assume color output for worst-case size
                 bytes_per_float = 4
                 single_image_size_bytes = h * w * channels_out * bytes_per_float * memory_factor
@@ -257,24 +264,19 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
 
         # Fallback estimation if image loading failed or no path provided
         if single_image_size_bytes <= 0:
-            # Conservative estimate for a ~4MP color image (float32) + overhead
-            # 2000 * 2000 * 3 channels * 4 bytes/float * 6x overhead = ~288 MB
             print("Using fallback image size estimation (approx. 4MP color image).")
             single_image_size_bytes = 2000 * 2000 * 3 * 4 * 6
 
 
         # Safety factor for other system usage and Python overhead
-        safety_factor = 1.5 # Includes buffer for OS, other apps, Python interpreter overhead
+        safety_factor = 1.5
 
-        if single_image_size_bytes <= 0: # Should not happen, but safeguard
+        if single_image_size_bytes <= 0:
              print("Error: Calculated image size is zero or negative.")
              return default_batch_size
 
-        # Calculate how many images can fit in memory
         estimated_batch = int(usable_memory / (single_image_size_bytes * safety_factor))
-
-        # Reasonable limits for batch size (at least 3 for sigma clipping, max 50 to avoid huge single batches)
-        estimated_batch = max(3, min(50, estimated_batch))
+        estimated_batch = max(3, min(50, estimated_batch)) # Limites raisonnables
 
         print(f"Mémoire disponible: {available_memory / (1024**3):.2f} Go "
               f"(Utilisable: {usable_memory / (1024**3):.2f} Go)")
@@ -288,4 +290,5 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         traceback.print_exc()
         print(f"Utilisation de la taille de lot par défaut : {default_batch_size}")
         return default_batch_size
+
 

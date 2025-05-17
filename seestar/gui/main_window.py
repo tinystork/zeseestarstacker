@@ -150,10 +150,10 @@ class SeestarStackerGUI:
         # --- Chargement Settings & Langue ---
         self.settings.load_settings()
         # ---  Forcer la désactivation du mode mosaïque au démarrage ---
-        if hasattr(self.settings, 'mosaic_mode_active'):
-            print(f"DEBUG (GUI __init__): Valeur self.settings.mosaic_mode_active APRES load: {self.settings.mosaic_mode_active}")
-            self.settings.mosaic_mode_active = False # Remettre à False pour cette session
-            print(f"DEBUG (GUI __init__): self.settings.mosaic_mode_active FORCÉ à False pour le démarrage de l'UI.")
+        #if hasattr(self.settings, 'mosaic_mode_active'):
+        #    print(f"DEBUG (GUI __init__): Valeur self.settings.mosaic_mode_active APRES load: {self.settings.mosaic_mode_active}")
+        #    self.settings.mosaic_mode_active = False # Remettre à False pour cette session
+        #    print(f"DEBUG (GUI __init__): self.settings.mosaic_mode_active FORCÉ à False pour le démarrage de l'UI.")
         
         self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
@@ -2147,44 +2147,105 @@ class SeestarStackerGUI:
         if hasattr(self.preview_manager, 'update_info_text'):
             self.preview_manager.update_info_text(info_text)
 
+
+
+
+################################################################################################################################################################
+
+
+
+
     def _try_show_first_input_image(self):
-        input_folder = self.input_path.get()
-        if not hasattr(self, 'preview_manager') or not hasattr(self, 'histogram_widget'): return
-        if not input_folder or not os.path.isdir(input_folder):
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Input folder not found"))
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+        """
+        Tente de charger et d'afficher la première image FITS du dossier d'entrée
+        pour un aperçu initial.
+        MODIFIED V2_TupleFix: Gère correctement le retour (tuple) de load_and_validate_fits.
+        """
+        print("DEBUG GUI (_try_show_first_input_image V2_TupleFix): Tentative d'affichage de la première image.")
+        input_folder = self.input_path.get() 
+
+        if not hasattr(self, 'preview_manager') or not hasattr(self, 'histogram_widget'):
+            print("  WARN GUI (_try_show_first_input_image): PreviewManager ou HistogramWidget manquant.")
             return
+
+        if not input_folder or not os.path.isdir(input_folder):
+            print(f"  DEBUG GUI (_try_show_first_input_image): Dossier d'entrée non valide ou non défini ('{input_folder}'). Effacement aperçu.")
+            if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr("Input folder not found or not set"))
+            if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
+            return
+        
         try:
             files = sorted([f for f in os.listdir(input_folder) if f.lower().endswith((".fit", ".fits"))])
             if not files:
-                if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("No FITS files in input"))
-                if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+                print(f"  DEBUG GUI (_try_show_first_input_image): Aucun fichier FITS trouvé dans '{input_folder}'. Effacement aperçu.")
+                if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr("No FITS files in input folder"))
+                if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
                 return
-            first_image_path = os.path.join(input_folder, files[0])
-            self.update_progress_gui(f"Chargement aperçu: {files[0]}...", None)
-            img_data = load_and_validate_fits(first_image_path)
-            if img_data is None: raise ValueError(f"Échec chargement/validation {files[0]}")
-            header = fits.getheader(first_image_path)
-            img_for_preview = img_data
-            if img_data.ndim == 2:
-                bayer_pattern = header.get("BAYERPAT", self.settings.bayer_pattern); valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
-                if isinstance(bayer_pattern, str) and bayer_pattern.upper() in valid_bayer_patterns:
-                    try: img_for_preview = debayer_image(img_data, bayer_pattern.upper())
-                    except ValueError as debayer_err: self.update_progress_gui(f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.", None)
-            self.current_preview_data = img_for_preview.copy(); self.current_stack_header = header.copy() if header else None
-            self.refresh_preview()
-            if self.current_stack_header: self.update_image_info(self.current_stack_header)
+
+            first_image_filename = files[0]
+            first_image_path = os.path.join(input_folder, first_image_filename)
+            self.update_progress_gui(f"{self.tr('Loading preview for', default='Loading preview')}: {first_image_filename}...", None)
+            print(f"  DEBUG GUI (_try_show_first_input_image): Chargement de '{first_image_path}'...")
+
+            # --- MODIFICATION ICI pour déballer le tuple ---
+            loaded_data_tuple = load_and_validate_fits(first_image_path) 
+            
+            img_data_from_load = None # Doit être défini avant le if
+            header_from_load = None   # Doit être défini avant le if
+
+            if loaded_data_tuple is not None and loaded_data_tuple[0] is not None:
+                img_data_from_load, header_from_load = loaded_data_tuple # Déballer
+                print(f"  DEBUG GUI (_try_show_first_input_image): load_and_validate_fits OK. Shape données: {img_data_from_load.shape}")
+            else:
+                raise ValueError(f"Échec chargement/validation de '{first_image_filename}' par load_and_validate_fits (retour None ou données None).")
+            # --- FIN MODIFICATION ---
+
+            img_for_preview = img_data_from_load 
+            
+            if img_for_preview.ndim == 2:
+                bayer_pattern_from_header = header_from_load.get("BAYERPAT", self.settings.bayer_pattern) if header_from_load else self.settings.bayer_pattern
+                valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
+                
+                if isinstance(bayer_pattern_from_header, str) and bayer_pattern_from_header.upper() in valid_bayer_patterns:
+                    print(f"  DEBUG GUI (_try_show_first_input_image): Debayering aperçu initial (Pattern: {bayer_pattern_from_header.upper()})...")
+                    try: 
+                        img_for_preview = debayer_image(img_for_preview, bayer_pattern_from_header.upper())
+                    except ValueError as debayer_err: 
+                        self.update_progress_gui(f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.", None)
+                        print(f"    WARN GUI: Erreur Debayer aperçu initial: {debayer_err}. Affichage N&B.")
+                else:
+                    print(f"  DEBUG GUI (_try_show_first_input_image): Pas de debayering pour aperçu (pas de pattern Bayer valide ou image supposée déjà couleur).")
+            
+            self.current_preview_data = img_for_preview.copy()
+            self.current_stack_header = header_from_load.copy() if header_from_load else fits.Header() 
+            
+            print(f"  DEBUG GUI (_try_show_first_input_image): Données prêtes pour refresh_preview. Shape: {self.current_preview_data.shape}")
+            self.refresh_preview() 
+
+            if self.current_stack_header:
+                self.update_image_info(self.current_stack_header)
+            
+            self.update_progress_gui(f"{self.tr('Preview loaded', default='Preview loaded')}: {first_image_filename}", None)
+
         except FileNotFoundError:
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Input folder not found"))
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
-        except ValueError as ve:
+            print(f"  ERREUR GUI (_try_show_first_input_image): FileNotFoundError pour '{input_folder}'.")
+            if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr("Input folder not found or inaccessible"))
+            if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
+        except ValueError as ve: 
             self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {ve}", None)
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Error loading preview (invalid format?)"))
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            print(f"  ERREUR GUI (_try_show_first_input_image): ValueError - {ve}")
+            if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr("Error loading preview (invalid format?)"))
+            if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
         except Exception as e:
-            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {e}", None); traceback.print_exc(limit=2)
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(self.tr("Error loading preview"))
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {e}", None)
+            print(f"  ERREUR GUI (_try_show_first_input_image): Exception inattendue - {type(e).__name__}: {e}")
+            traceback.print_exc(limit=2)
+            if hasattr(self, 'preview_manager') and self.preview_manager: self.preview_manager.clear_preview(self.tr("Error loading preview"))
+            if hasattr(self, 'histogram_widget') and self.histogram_widget: self.histogram_widget.plot_histogram(None)
+
+
+################################################################################################################################################################
+
 
     def apply_auto_white_balance(self):
         if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."); return
@@ -3092,7 +3153,6 @@ class SeestarStackerGUI:
 #########################################################################################################################################
 
 
-
 # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def start_processing(self):
@@ -3107,6 +3167,7 @@ class SeestarStackerGUI:
                Puis mettre à jour l'état des widgets dépendants (grisé/dégrisé).
         7. Préparer les arguments pour le backend en lisant depuis self.settings (maintenant la source de vérité).
         8. Lancer le thread de traitement du backend.
+        MODIFIED: Ajout d'un CRITICAL CHECK pour vérifier mosaic_settings avant l'envoi au backend.
         """
         print("DEBUG (GUI start_processing): Début tentative démarrage du traitement...")
 
@@ -3142,7 +3203,7 @@ class SeestarStackerGUI:
                 if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
                     if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
                     return
-        except Exception as e: 
+        except Exception as e:
             messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
             if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             return
@@ -3151,7 +3212,8 @@ class SeestarStackerGUI:
         # --- 2. Avertissement Drizzle/Mosaïque (si activé) ---
         print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle/Mosaïque...")
         drizzle_globally_enabled_ui = self.use_drizzle_var.get()
-        is_mosaic_mode_ui = getattr(self, 'mosaic_mode_active', False) 
+        # Lire mosaic_mode_active depuis self.settings, qui devrait avoir été mis à jour par MosaicSettingsWindow
+        is_mosaic_mode_ui = getattr(self.settings, 'mosaic_mode_active', False)
 
         if drizzle_globally_enabled_ui or is_mosaic_mode_ui:
             warning_title = self.tr('drizzle_warning_title')
@@ -3160,8 +3222,8 @@ class SeestarStackerGUI:
             full_warning_text = base_warning_text
             if is_mosaic_mode_ui and not drizzle_globally_enabled_ui:
                  full_warning_text += "\n\n" + self.tr("mosaic_requires_drizzle_note", default="(Note: Mosaic mode requires Drizzle for final combination.)")
-            
-            print(f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire.")
+
+            print(f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire. is_mosaic_mode_ui={is_mosaic_mode_ui}")
             continue_processing = messagebox.askyesno(warning_title, full_warning_text, parent=self.root)
             if not continue_processing:
                 self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur après avertissement.", None)
@@ -3180,7 +3242,7 @@ class SeestarStackerGUI:
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
         self.additional_folders_to_process = []
         self.update_additional_folders_display()
-        self._set_parameter_widgets_state(tk.DISABLED) # Désactive les contrôles principaux
+        self._set_parameter_widgets_state(tk.DISABLED)
         if hasattr(self, "stop_button") and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
         if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists(): self.open_output_button.config(state=tk.DISABLED)
         if hasattr(self, "progress_manager"): self.progress_manager.reset(); self.progress_manager.start_timer()
@@ -3189,84 +3251,72 @@ class SeestarStackerGUI:
             self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n"); self.status_text.config(state=tk.DISABLED)
         print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK.")
 
-        # --- 4. Synchronisation et Validation des Settings (ORDRE CORRIGÉ) ---
-        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings (ORDRE CORRIGÉ)...")
-        
-        # (4A) D'ABORD, lire l'état actuel de l'UI (ce que l'utilisateur a potentiellement modifié
-        #      depuis que les settings ont été chargés/appliqués à l'init ou lors du dernier run)
-        #      vers l'objet self.settings.
-        print("  -> (4A) Appel self.settings.update_from_ui(self) pour capturer les valeurs actuelles de l'UI...")
-        self.settings.update_from_ui(self) 
-        # Maintenant, self.settings contient les valeurs telles qu'elles sont dans l'UI juste avant ce clic "Start".
-        
-        print(f"  DEBUG GUI SETTINGS CHECK (Phase 4A - après update_from_ui initial):")
-        print(f"    self.settings.apply_feathering = {getattr(self.settings, 'apply_feathering', 'NonTrouve')}")
-        print(f"    self.settings.feather_blur_px = {getattr(self.settings, 'feather_blur_px', 'NonTrouve')}")
-        print(f"    self.settings.photutils_bn_filter_size = {getattr(self.settings, 'photutils_bn_filter_size', 'NonTrouve')}")
-        # ... (ajoutez d'autres logs pour les paramètres clés que vous suivez)
+        # --- 4. Synchronisation et Validation des Settings ---
+        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")
+        print("  -> (4A) Appel self.settings.update_from_ui(self)...")
+        self.settings.update_from_ui(self)
+        # ... (logs de vérification des settings après update_from_ui) ...
+        print(f"  DEBUG GUI SETTINGS (Phase 4A): self.settings.mosaic_settings['alignment_mode'] = {self.settings.mosaic_settings.get('alignment_mode', 'NonTrouve')}")
 
-        # (4B) ENSUITE, valider les settings qui sont maintenant dans self.settings.
-        #      La validation peut modifier/corriger des valeurs dans self.settings.
         print("  -> (4B) Appel self.settings.validate_settings()...")
         validation_messages = self.settings.validate_settings()
-        
-        print(f"  DEBUG GUI SETTINGS CHECK (Phase 4B - après validate_settings):")
-        print(f"    self.settings.apply_feathering = {getattr(self.settings, 'apply_feathering', 'NonTrouve')}") # Valeur potentiellement validée
-        print(f"    self.settings.feather_blur_px = {getattr(self.settings, 'feather_blur_px', 'NonTrouve')}")     # Valeur potentiellement validée
-        print(f"    self.settings.photutils_bn_filter_size = {getattr(self.settings, 'photutils_bn_filter_size', 'NonTrouve')}")
-        
+        # ... (logs de vérification des settings après validate_settings) ...
+        print(f"  DEBUG GUI SETTINGS (Phase 4B): self.settings.mosaic_settings['alignment_mode'] = {self.settings.mosaic_settings.get('alignment_mode', 'NonTrouve')}")
+
         if validation_messages:
             self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
             for msg in validation_messages: self.update_progress_gui(f"  - {msg}", None)
-            # (4C) Si la validation a modifié des valeurs dans self.settings, 
-            #      ré-appliquer à l'UI pour que l'utilisateur voie les valeurs finales corrigées.
-            #      Ceci met à jour les tk.StringVar etc. avec les valeurs finales de self.settings.
-            print("  -> (4C) Ré-appel self.settings.apply_to_ui(self) pour refléter les settings validés à l'UI...")
+            print("  -> (4C) Ré-appel self.settings.apply_to_ui(self)...")
             self.settings.apply_to_ui(self)
-            # Ré-appliquer aussi les états des widgets dépendants (grisé/dégrisé) pour être sûr.
             self._update_weighting_options_state()
             self._update_drizzle_options_state()
             self._update_final_scnr_options_state()
             self._update_photutils_bn_options_state()
             self._update_feathering_options_state()
-        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés. self.settings est maintenant la source de vérité.")
+            self._update_low_wht_mask_options_state() # S'assurer d'appeler ceci aussi
+        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        # --- 5. Préparation des arguments pour le backend EN LISANT DEPUIS self.settings ---
-        # L'objet self.settings contient maintenant les valeurs finales à utiliser.
+        # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
         print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings...")
-        
-        # ---- LOG DE TOUS LES PARAMETRES QUI SERONT PASSES AU BACKEND (lus depuis self.settings) ----
+        # ... (log de tous les paramètres envoyés au backend, inchangé) ...
+        print("  --- VALEURS ENVOYÉES AU BACKEND (depuis self.settings) ---")
         params_to_log_for_backend = [
-            'input_folder', 'output_folder', 'reference_image_path', 'stacking_mode', 'kappa', 
-            'batch_size', 'correct_hot_pixels', 'hot_pixel_threshold', 'neighborhood_size', 
-            'bayer_pattern', 'cleanup_temp', 'use_quality_weighting', 'weight_by_snr', 
-            'weight_by_stars', 'snr_exponent', 'stars_exponent', 'min_weight', 
-            'use_drizzle', 'drizzle_scale', 'drizzle_wht_threshold', 'drizzle_mode', 
-            'drizzle_kernel', 'drizzle_pixfrac', 'apply_chroma_correction', 'apply_final_scnr', 
+            'input_folder', 'output_folder', 'reference_image_path', 'stacking_mode', 'kappa',
+            'batch_size', 'correct_hot_pixels', 'hot_pixel_threshold', 'neighborhood_size',
+            'bayer_pattern', 'cleanup_temp', 'use_quality_weighting', 'weight_by_snr',
+            'weight_by_stars', 'snr_exponent', 'stars_exponent', 'min_weight',
+            'use_drizzle', 'drizzle_scale', 'drizzle_wht_threshold', 'drizzle_mode',
+            'drizzle_kernel', 'drizzle_pixfrac', 'apply_chroma_correction', 'apply_final_scnr',
             'final_scnr_target_channel', 'final_scnr_amount', 'final_scnr_preserve_luminosity',
-            'bn_grid_size_str', 'bn_perc_low', 'bn_perc_high', 'bn_std_factor', 
-            'bn_min_gain', 'bn_max_gain', 'cb_border_size', 'cb_blur_radius', 
-            'cb_min_b_factor', 'cb_max_b_factor', 'final_edge_crop_percent', 
-            'apply_photutils_bn', 'photutils_bn_box_size', 'photutils_bn_filter_size', 
-            'photutils_bn_sigma_clip', 'photutils_bn_exclude_percentile', 
-            'apply_feathering', 'feather_blur_px', 
+            'bn_grid_size_str', 'bn_perc_low', 'bn_perc_high', 'bn_std_factor',
+            'bn_min_gain', 'bn_max_gain', 'cb_border_size', 'cb_blur_radius',
+            'cb_min_b_factor', 'cb_max_b_factor', 'final_edge_crop_percent',
+            'apply_photutils_bn', 'photutils_bn_box_size', 'photutils_bn_filter_size',
+            'photutils_bn_sigma_clip', 'photutils_bn_exclude_percentile',
+            'apply_feathering', 'feather_blur_px', 'apply_low_wht_mask',
+            'low_wht_percentile', 'low_wht_soften_px',
             'mosaic_mode_active', 'astrometry_api_key', 'mosaic_settings'
         ]
-        print("  --- VALEURS ENVOYÉES AU BACKEND (depuis self.settings) ---")
         for param_name in params_to_log_for_backend:
             value = getattr(self.settings, param_name, f"ERREUR_ATTR_{param_name}")
-            if param_name == 'astrometry_api_key': # Ne pas logger la clé complète
-                print(f"    {param_name}: {'Présente' if value else 'Absente'} (longueur: {len(str(value))})")
-            else:
-                print(f"    {param_name}: {value}")
+            if param_name == 'astrometry_api_key': print(f"    {param_name}: {'Présente' if value else 'Absente'} (longueur: {len(str(value))})")
+            elif param_name == 'mosaic_settings': print(f"    {param_name}: {value}") # Afficher le dict complet
+            else: print(f"    {param_name}: {value}")
         print("  --- FIN VALEURS ENVOYÉES AU BACKEND ---")
-        # ---- FIN LOG ----
         print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée.")
+
+        # --- AJOUT DU BLOC DE VÉRIFICATION CRITIQUE ---
+        print("DEBUG (GUI start_processing): Phase 5.5 - Vérification critique avant appel backend...")
+        final_mosaic_settings_for_backend = self.settings.mosaic_settings.copy()
+        alignment_mode_to_backend = final_mosaic_settings_for_backend.get('alignment_mode', 'NON_DÉFINI_DANS_DICT_BACKEND')
+        print(f"  CRITICAL CHECK (GUI start_processing): mosaic_settings QUI SERA ENVOYÉ: {final_mosaic_settings_for_backend}")
+        print(f"  CRITICAL CHECK (GUI start_processing): alignment_mode DANS CE DICT: '{alignment_mode_to_backend}'")
+        # --- FIN AJOUT ---
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
         processing_started = self.queued_stacker.start_processing(
-            input_dir=self.settings.input_folder, # Toujours lire depuis self.settings ici
+            input_dir=self.settings.input_folder,
             output_dir=self.settings.output_folder,
             reference_path_ui=self.settings.reference_image_path,
             initial_additional_folders=folders_to_pass_to_backend,
@@ -3279,13 +3329,13 @@ class SeestarStackerGUI:
             bayer_pattern=self.settings.bayer_pattern,
             perform_cleanup=self.settings.cleanup_temp,
             use_weighting=self.settings.use_quality_weighting,
-            weight_by_snr=self.settings.weight_by_snr,        
-            weight_by_stars=self.settings.weight_by_stars,    
-            snr_exp=self.settings.snr_exponent,               
-            stars_exp=self.settings.stars_exponent,           
-            min_w=self.settings.min_weight,                   
+            weight_by_snr=self.settings.weight_by_snr,
+            weight_by_stars=self.settings.weight_by_stars,
+            snr_exp=self.settings.snr_exponent,
+            stars_exp=self.settings.stars_exponent,
+            min_w=self.settings.min_weight,
             use_drizzle=self.settings.use_drizzle,
-            drizzle_scale=float(self.settings.drizzle_scale),
+            drizzle_scale=float(self.settings.drizzle_scale), # Assurer float
             drizzle_wht_threshold=self.settings.drizzle_wht_threshold,
             drizzle_mode=self.settings.drizzle_mode,
             drizzle_kernel=self.settings.drizzle_kernel,
@@ -3311,16 +3361,14 @@ class SeestarStackerGUI:
             photutils_bn_filter_size=self.settings.photutils_bn_filter_size,
             photutils_bn_sigma_clip=self.settings.photutils_bn_sigma_clip,
             photutils_bn_exclude_percentile=self.settings.photutils_bn_exclude_percentile,
-            apply_feathering=self.settings.apply_feathering, 
+            apply_feathering=self.settings.apply_feathering,
             feather_blur_px=self.settings.feather_blur_px,
-            # --- Passage des paramètres Low WHT Mask ---
-            apply_low_wht_mask=self.settings.apply_low_wht_mask, # Passé depuis settings
-            low_wht_percentile=self.settings.low_wht_percentile, # Passé depuis settings
-            low_wht_soften_px=self.settings.low_wht_soften_px,   # Passé depuis settings
-            # --- FIN NOUVEAU ---     
+            apply_low_wht_mask=self.settings.apply_low_wht_mask,
+            low_wht_percentile=self.settings.low_wht_percentile,
+            low_wht_soften_px=self.settings.low_wht_soften_px,
             is_mosaic_run=self.settings.mosaic_mode_active,
             api_key=self.settings.astrometry_api_key,
-            mosaic_settings=self.settings.mosaic_settings
+            mosaic_settings=self.settings.mosaic_settings # Transmettre le dictionnaire complet
         )
         print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
@@ -3329,13 +3377,12 @@ class SeestarStackerGUI:
             if hasattr(self, 'stop_button') and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
             self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
             self.thread.start()
-        else: 
+        else:
             if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             self.processing = False
             self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
-            self._set_parameter_widgets_state(tk.NORMAL) 
+            self._set_parameter_widgets_state(tk.NORMAL)
         print("DEBUG (GUI start_processing): Fin de la méthode.")
-
 
 
 ##############################################################################################################################################

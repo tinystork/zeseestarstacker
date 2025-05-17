@@ -32,151 +32,173 @@ class SettingsManager:
             setattr(self, key, value)
         print("DEBUG (Settings reset_to_defaults): Tous les attributs de l'instance réinitialisés aux valeurs par défaut.")
 
+
+
+
+
+# --- DANS seestar/gui/settings.py ---
+# --- DANS la classe SettingsManager ---
+
     def update_from_ui(self, gui_instance):
-        """ Met à jour les paramètres depuis les variables Tkinter de l'interface. """
-        # ... (validation gui_instance inchangée) ...
+        """
+        Met à jour les paramètres de CETTE instance SettingsManager depuis les
+        variables Tkinter de l'instance GUI fournie.
+        MODIFIED V4: Correction de la lecture de mosaic_settings depuis gui_instance.settings.
+        """
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
-            print("Warning: Cannot update settings from invalid GUI instance.")
+            print("Warning (SM update_from_ui): Cannot update settings from invalid GUI instance.")
             return
-        print("DEBUG (Settings update_from_ui): Lecture des paramètres depuis l'UI...") # <-- AJOUTÉ DEBUG
+        print("DEBUG SM (update_from_ui V4 - GUI Settings): Lecture des paramètres depuis l'UI...")
+
+        # Obtenir les valeurs par défaut du code au cas où un getattr échouerait
+        # ou pour comparaison si une valeur lue de l'UI est invalide.
+        default_values_for_fallback = self.get_default_values()
+
         try:
             # --- Processing Settings ---
-            # ... (inchangé) ...
-            self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar()).get()
-            self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar()).get()
-            self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar()).get()
-            self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=self.stacking_mode)).get()
-            self.kappa = getattr(gui_instance, 'kappa', tk.DoubleVar(value=self.kappa)).get()
-            self.batch_size = getattr(gui_instance, 'batch_size', tk.IntVar(value=self.batch_size)).get()
-            self.correct_hot_pixels = getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar(value=self.correct_hot_pixels)).get()
-            self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=self.hot_pixel_threshold)).get()
-            self.neighborhood_size = getattr(gui_instance, 'neighborhood_size', tk.IntVar(value=self.neighborhood_size)).get()
-            self.cleanup_temp = getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar(value=self.cleanup_temp)).get()
+            self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar(value=default_values_for_fallback['input_folder'])).get()
+            self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar(value=default_values_for_fallback['output_folder'])).get()
+            self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar(value=default_values_for_fallback['reference_image_path'])).get()
+            self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=default_values_for_fallback['stacking_mode'])).get()
+            self.kappa = getattr(gui_instance, 'kappa', tk.DoubleVar(value=default_values_for_fallback['kappa'])).get()
+            self.batch_size = getattr(gui_instance, 'batch_size', tk.IntVar(value=default_values_for_fallback['batch_size'])).get()
+            self.correct_hot_pixels = getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar(value=default_values_for_fallback['correct_hot_pixels'])).get()
+            self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=default_values_for_fallback['hot_pixel_threshold'])).get()
+            self.neighborhood_size = getattr(gui_instance, 'neighborhood_size', tk.IntVar(value=default_values_for_fallback['neighborhood_size'])).get()
+            self.cleanup_temp = getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar(value=default_values_for_fallback['cleanup_temp'])).get()
+            self.bayer_pattern = getattr(gui_instance, 'bayer_pattern_var', tk.StringVar(value=default_values_for_fallback['bayer_pattern'])).get() # Supposant que tu as bayer_pattern_var
 
             # --- Quality Weighting Settings ---
-            # ... (inchangé) ...
-            self.use_quality_weighting = getattr(gui_instance, 'use_weighting_var', tk.BooleanVar(value=self.use_quality_weighting)).get()
-            self.weight_by_snr = getattr(gui_instance, 'weight_snr_var', tk.BooleanVar(value=self.weight_by_snr)).get()
-            self.weight_by_stars = getattr(gui_instance, 'weight_stars_var', tk.BooleanVar(value=self.weight_by_stars)).get()
-            self.snr_exponent = getattr(gui_instance, 'snr_exponent_var', tk.DoubleVar(value=self.snr_exponent)).get()
-            self.stars_exponent = getattr(gui_instance, 'stars_exponent_var', tk.DoubleVar(value=self.stars_exponent)).get()
-            self.min_weight = getattr(gui_instance, 'min_weight_var', tk.DoubleVar(value=self.min_weight)).get()
+            self.use_quality_weighting = getattr(gui_instance, 'use_weighting_var', tk.BooleanVar(value=default_values_for_fallback['use_quality_weighting'])).get()
+            self.weight_by_snr = getattr(gui_instance, 'weight_snr_var', tk.BooleanVar(value=default_values_for_fallback['weight_by_snr'])).get()
+            self.weight_by_stars = getattr(gui_instance, 'weight_stars_var', tk.BooleanVar(value=default_values_for_fallback['weight_by_stars'])).get()
+            self.snr_exponent = getattr(gui_instance, 'snr_exponent_var', tk.DoubleVar(value=default_values_for_fallback['snr_exponent'])).get()
+            self.stars_exponent = getattr(gui_instance, 'stars_exponent_var', tk.DoubleVar(value=default_values_for_fallback['stars_exponent'])).get()
+            self.min_weight = getattr(gui_instance, 'min_weight_var', tk.DoubleVar(value=default_values_for_fallback['min_weight'])).get()
 
-            # --- Drizzle Settings ---
-            self.use_drizzle = getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar(value=self.use_drizzle)).get()
-            scale_str = getattr(gui_instance, 'drizzle_scale_var', tk.StringVar(value=str(self.drizzle_scale))).get()
-            try: self.drizzle_scale = int(float(scale_str))
-            except ValueError: print(f"Warning: Invalid Drizzle scale value '{scale_str}' from UI."); self.drizzle_scale = self.reset_to_defaults()['drizzle_scale']
+            # --- Drizzle Settings (Globaux) ---
+            self.use_drizzle = getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar(value=default_values_for_fallback['use_drizzle'])).get()
+            scale_str_ui = getattr(gui_instance, 'drizzle_scale_var', tk.StringVar(value=str(default_values_for_fallback['drizzle_scale']))).get()
+            try: self.drizzle_scale = int(float(scale_str_ui))
+            except ValueError:
+                print(f"Warning SM: Invalid Drizzle scale value '{scale_str_ui}' from UI. Using default from code.")
+                self.drizzle_scale = default_values_for_fallback['drizzle_scale']
+            self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=default_values_for_fallback['drizzle_wht_threshold'])).get()
+            self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=default_values_for_fallback['drizzle_mode'])).get()
+            self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=default_values_for_fallback['drizzle_kernel'])).get()
+            self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=default_values_for_fallback['drizzle_pixfrac'])).get()
 
-            # --- LECTURE CORRECTION CHROMA ---
-            self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=self.apply_chroma_correction)).get()
-            print(f"DEBUG (Settings update_from_ui): apply_chroma_correction lu depuis UI: {self.apply_chroma_correction}") # <-- AJOUTÉ DEBUG
-            # ---  ---
+            # --- Mosaïque Settings (CORRIGÉ) ---
+            self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', default_values_for_fallback['mosaic_mode_active'])
 
-            # ---  Lecture Seuil WHT ---
-            # Lire directement la variable DoubleVar (0.0-1.0)
-            self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=self.drizzle_wht_threshold)).get()
-            print(f"DEBUG (Settings update_from_ui): WHT Threshold (0-1) lu: {self.drizzle_wht_threshold}") # <-- AJOUTÉ DEBUG
-            # ---  ---
+            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Avant décision pour self.mosaic_settings:")
+            print(f"  -> self.mosaic_settings (valeur actuelle DANS CETTE instance SettingsManager AVANT lecture UI): {self.mosaic_settings}")
 
-            self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=self.drizzle_mode)).get()
-            self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=self.drizzle_kernel)).get()
-            self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=self.drizzle_pixfrac)).get()
-            # --- juste lire les attributs du GUI) ---
-            self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', False) # Lire le flag
-            self.mosaic_settings = getattr(gui_instance, 'mosaic_settings', {}).copy() # Lire le dict (faire une copie)
-            # ---  ---
+            # Lire le dictionnaire mosaic_settings depuis l'instance `settings` de `gui_instance`.
+            # `gui_instance.settings` est l'objet SettingsManager de SeestarStackerGUI.
+            # `gui_instance.settings.mosaic_settings` est le dictionnaire qui a été mis à jour par MosaicSettingsWindow._on_ok.
+            gui_settings_obj = getattr(gui_instance, 'settings', None)
+            mosaic_settings_from_gui_settings_obj = None # Initialiser
 
-            # Lecture Paramètres SCNR Final ###
-            self.apply_final_scnr = getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar(value=self.apply_final_scnr)).get()
-            # self.final_scnr_target_channel reste 'green' pour l'instant (pas d'UI pour changer)
-            self.final_scnr_amount = getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar(value=self.final_scnr_amount)).get()
-            self.final_scnr_preserve_luminosity = getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar(value=self.final_scnr_preserve_luminosity)).get()
-            print(f"DEBUG (Settings update_from_ui): SCNR Final lu -> Apply: {self.apply_final_scnr}, Amount: {self.final_scnr_amount:.2f}, PreserveLum: {self.final_scnr_preserve_luminosity}")
-            
+            if gui_settings_obj and hasattr(gui_settings_obj, 'mosaic_settings') and \
+               isinstance(gui_settings_obj.mosaic_settings, dict) and \
+               gui_settings_obj.mosaic_settings: # S'assurer qu'il existe, est un dict, et n'est pas vide
 
-            ### Lecture Paramètres Expert depuis l'UI ###
-            print("DEBUG (Settings update_from_ui): Lecture des paramètres Expert...")
-            # BN
-            self.bn_grid_size_str = getattr(gui_instance, 'bn_grid_size_str_var', tk.StringVar(value=self.bn_grid_size_str)).get()
-            self.bn_perc_low = getattr(gui_instance, 'bn_perc_low_var', tk.IntVar(value=self.bn_perc_low)).get()
-            self.bn_perc_high = getattr(gui_instance, 'bn_perc_high_var', tk.IntVar(value=self.bn_perc_high)).get()
-            self.bn_std_factor = getattr(gui_instance, 'bn_std_factor_var', tk.DoubleVar(value=self.bn_std_factor)).get()
-            self.bn_min_gain = getattr(gui_instance, 'bn_min_gain_var', tk.DoubleVar(value=self.bn_min_gain)).get()
-            self.bn_max_gain = getattr(gui_instance, 'bn_max_gain_var', tk.DoubleVar(value=self.bn_max_gain)).get()
-
-            # CB
-            self.cb_border_size = getattr(gui_instance, 'cb_border_size_var', tk.IntVar(value=self.cb_border_size)).get()
-            self.cb_blur_radius = getattr(gui_instance, 'cb_blur_radius_var', tk.IntVar(value=self.cb_blur_radius)).get()
-            self.cb_min_b_factor = getattr(gui_instance, 'cb_min_b_factor_var', tk.DoubleVar(value=self.cb_min_b_factor)).get()
-            self.cb_max_b_factor = getattr(gui_instance, 'cb_max_b_factor_var', tk.DoubleVar(value=self.cb_max_b_factor)).get()
-
-            # Rognage
-            self.final_edge_crop_percent = getattr(gui_instance, 'final_edge_crop_percent_var', tk.DoubleVar(value=self.final_edge_crop_percent)).get()
-            print("DEBUG (Settings update_from_ui): Paramètres Expert lus.")
-            ### FIN paramètre experts ###
-
-            ###  Lecture Paramètres Photutils BN depuis l'UI ###
-            print("DEBUG (Settings update_from_ui): Lecture des paramètres Photutils BN...")
-            self.apply_photutils_bn = getattr(gui_instance, 'apply_photutils_bn_var', tk.BooleanVar(value=self.apply_photutils_bn)).get()
-            if hasattr(gui_instance, 'apply_photutils_bn_var'):
-                print(f"DEBUG SM update_from_ui: VALEUR DIRECTE DE gui_instance.apply_photutils_bn_var.get() = {gui_instance.apply_photutils_bn_var.get()}")
+                mosaic_settings_from_gui_settings_obj = gui_settings_obj.mosaic_settings.copy()
+                print(f"  -> mosaic_settings lu depuis gui_instance.settings.mosaic_settings: {mosaic_settings_from_gui_settings_obj}")
+                print("  -> Décision: Utilisation de mosaic_settings depuis gui_instance.settings car il contient des données.")
+                self.mosaic_settings = mosaic_settings_from_gui_settings_obj # On met à jour self (CE SettingsManager)
             else:
-                print("DEBUG SM update_from_ui: gui_instance N'A PAS apply_photutils_bn_var, getattr a utilisé sa valeur par défaut.")
-            print(f"DEBUG SM update_from_ui: self.apply_photutils_bn (dans SettingsManager) APRES LECTURE UI = {self.apply_photutils_bn}")
-            print(f"DEBUG (Settings update_from_ui): Photutils BN lu DEPUIS UI -> Apply: {self.apply_photutils_bn}")
-            self.photutils_bn_box_size = getattr(gui_instance, 'photutils_bn_box_size_var', tk.IntVar(value=self.photutils_bn_box_size)).get()
-            self.photutils_bn_filter_size = getattr(gui_instance, 'photutils_bn_filter_size_var', tk.IntVar(value=self.photutils_bn_filter_size)).get()
-            self.photutils_bn_sigma_clip = getattr(gui_instance, 'photutils_bn_sigma_clip_var', tk.DoubleVar(value=self.photutils_bn_sigma_clip)).get()
-            self.photutils_bn_exclude_percentile = getattr(gui_instance, 'photutils_bn_exclude_percentile_var', tk.DoubleVar(value=self.photutils_bn_exclude_percentile)).get()
-            print(f"DEBUG (Settings update_from_ui): Photutils BN lus -> Apply: {self.apply_photutils_bn}, Box: {self.photutils_bn_box_size}, Filt: {self.photutils_bn_filter_size}")
-            ### FIN Paramètres Photutils BN ###
+                # Si la source depuis gui_instance.settings.mosaic_settings n'est pas valide/trouvée/vide,
+                # on conserve la valeur que self.mosaic_settings avait déjà (chargée du JSON ou les défauts initiaux de CETTE instance).
+                # On s'assure juste que c'est au moins un dictionnaire (il devrait l'être après __init__ ou load_settings).
+                print(f"  -> Décision: Conservation de self.mosaic_settings (valeur actuelle) car la source depuis gui_instance.settings.mosaic_settings est vide/invalide/non trouvée.")
+                if not isinstance(self.mosaic_settings, dict) or not self.mosaic_settings:
+                    # Fallback ultime si self.mosaic_settings était aussi corrompu pour une raison quelconque.
+                    print(f"    WARN SM: self.mosaic_settings actuel aussi invalide ({self.mosaic_settings}), réinitialisation aux défauts du code pour mosaic_settings.")
+                    self.mosaic_settings = default_values_for_fallback.get('mosaic_settings', {}).copy()
+            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Valeur FINALE de self.mosaic_settings après décision: {self.mosaic_settings}")
+            # --- FIN CORRECTION Mosaïque Settings ---
+
+            # --- Astrometry.net API Key ---
+            self.astrometry_api_key = getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar(value=default_values_for_fallback['astrometry_api_key'])).get().strip()
+            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Clé API Astrometry lue de l'UI (longueur: {len(self.astrometry_api_key)}).")
+
+            # --- Post-Processing Settings (Chroma, SCNR, Expert, Feathering, LowWHT) ---
+            self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=default_values_for_fallback['apply_chroma_correction'])).get()
+            self.apply_final_scnr = getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar(value=default_values_for_fallback['apply_final_scnr'])).get()
+            self.final_scnr_target_channel = default_values_for_fallback['final_scnr_target_channel']
+            self.final_scnr_amount = getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar(value=default_values_for_fallback['final_scnr_amount'])).get()
+            self.final_scnr_preserve_luminosity = getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar(value=default_values_for_fallback['final_scnr_preserve_luminosity'])).get()
             
-            ### Lecture Clé API Astrometry.net ###
-            # La variable Tkinter sera dans gui_instance (SeestarStackerGUI)
-            self.astrometry_api_key = getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar(value=self.astrometry_api_key)).get()
-            # Ne pas logguer la clé API complète pour la sécurité
-            print(f"DEBUG (Settings update_from_ui): Clé API Astrometry lue (longueur: {len(self.astrometry_api_key)}).")
-            ### FIN ###            
+            # BN (Expert)
+            self.bn_grid_size_str = getattr(gui_instance, 'bn_grid_size_str_var', tk.StringVar(value=default_values_for_fallback['bn_grid_size_str'])).get()
+            self.bn_perc_low = getattr(gui_instance, 'bn_perc_low_var', tk.IntVar(value=default_values_for_fallback['bn_perc_low'])).get()
+            self.bn_perc_high = getattr(gui_instance, 'bn_perc_high_var', tk.IntVar(value=default_values_for_fallback['bn_perc_high'])).get()
+            self.bn_std_factor = getattr(gui_instance, 'bn_std_factor_var', tk.DoubleVar(value=default_values_for_fallback['bn_std_factor'])).get()
+            self.bn_min_gain = getattr(gui_instance, 'bn_min_gain_var', tk.DoubleVar(value=default_values_for_fallback['bn_min_gain'])).get()
+            self.bn_max_gain = getattr(gui_instance, 'bn_max_gain_var', tk.DoubleVar(value=default_values_for_fallback['bn_max_gain'])).get()
+
+            # CB (Expert)
+            self.cb_border_size = getattr(gui_instance, 'cb_border_size_var', tk.IntVar(value=default_values_for_fallback['cb_border_size'])).get()
+            self.cb_blur_radius = getattr(gui_instance, 'cb_blur_radius_var', tk.IntVar(value=default_values_for_fallback['cb_blur_radius'])).get()
+            self.cb_min_b_factor = getattr(gui_instance, 'cb_min_b_factor_var', tk.DoubleVar(value=default_values_for_fallback['cb_min_b_factor'])).get()
+            self.cb_max_b_factor = getattr(gui_instance, 'cb_max_b_factor_var', tk.DoubleVar(value=default_values_for_fallback['cb_max_b_factor'])).get()
+
+            # Rognage (Expert)
+            self.final_edge_crop_percent = getattr(gui_instance, 'final_edge_crop_percent_var', tk.DoubleVar(value=default_values_for_fallback['final_edge_crop_percent'])).get()
             
-            # ---  Lire les paramètres de feathering depuis l'UI ---
-            self.apply_feathering = getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar(value=self.apply_feathering)).get()
-            self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=self.feather_blur_px)).get()
-            print(f"DEBUG (Settings update_from_ui): Feathering lu -> Apply: {self.apply_feathering}, BlurPx: {self.feather_blur_px}")
-            # --- FIN ---
-            # --- NOUVEAU : Lecture Low WHT Mask depuis l'UI ---
-            self.apply_low_wht_mask = getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar(value=self.apply_low_wht_mask)).get()
-            self.low_wht_percentile = getattr(gui_instance, 'low_wht_pct_var', tk.IntVar(value=self.low_wht_percentile)).get() # Assurez-vous que low_wht_pct_var existe dans gui_instance
-            self.low_wht_soften_px = getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar(value=self.low_wht_soften_px)).get() # Assurez-vous que low_wht_soften_px_var existe dans gui_instance (sera créé à l'étape UI)
-            print(f"DEBUG (Settings update_from_ui): LowWHT Mask lu -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
-            # --- FIN NOUVEAU ---
+            # Photutils BN (Expert)
+            self.apply_photutils_bn = getattr(gui_instance, 'apply_photutils_bn_var', tk.BooleanVar(value=default_values_for_fallback['apply_photutils_bn'])).get()
+            self.photutils_bn_box_size = getattr(gui_instance, 'photutils_bn_box_size_var', tk.IntVar(value=default_values_for_fallback['photutils_bn_box_size'])).get()
+            self.photutils_bn_filter_size = getattr(gui_instance, 'photutils_bn_filter_size_var', tk.IntVar(value=default_values_for_fallback['photutils_bn_filter_size'])).get()
+            self.photutils_bn_sigma_clip = getattr(gui_instance, 'photutils_bn_sigma_clip_var', tk.DoubleVar(value=default_values_for_fallback['photutils_bn_sigma_clip'])).get()
+            self.photutils_bn_exclude_percentile = getattr(gui_instance, 'photutils_bn_exclude_percentile_var', tk.DoubleVar(value=default_values_for_fallback['photutils_bn_exclude_percentile'])).get()
+
+            # Feathering (Expert)
+            self.apply_feathering = getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar(value=default_values_for_fallback['apply_feathering'])).get()
+            self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=default_values_for_fallback['feather_blur_px'])).get()
+
+            # Low WHT Mask (Expert)
+            self.apply_low_wht_mask = getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar(value=default_values_for_fallback['apply_low_wht_mask'])).get()
+            self.low_wht_percentile = getattr(gui_instance, 'low_wht_pct_var', tk.IntVar(value=default_values_for_fallback['low_wht_percentile'])).get()
+            self.low_wht_soften_px = getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar(value=default_values_for_fallback['low_wht_soften_px'])).get()
+
             # --- Preview Settings ---
-            # ... (inchangé) ...
-            self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=self.preview_stretch_method)).get()
-            self.preview_black_point = getattr(gui_instance, 'preview_black_point', tk.DoubleVar(value=self.preview_black_point)).get()
-            self.preview_white_point = getattr(gui_instance, 'preview_white_point', tk.DoubleVar(value=self.preview_white_point)).get()
-            self.preview_gamma = getattr(gui_instance, 'preview_gamma', tk.DoubleVar(value=self.preview_gamma)).get()
-            self.preview_r_gain = getattr(gui_instance, 'preview_r_gain', tk.DoubleVar(value=self.preview_r_gain)).get()
-            self.preview_g_gain = getattr(gui_instance, 'preview_g_gain', tk.DoubleVar(value=self.preview_g_gain)).get()
-            self.preview_b_gain = getattr(gui_instance, 'preview_b_gain', tk.DoubleVar(value=self.preview_b_gain)).get()
+            self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=default_values_for_fallback['preview_stretch_method'])).get()
+            self.preview_black_point = getattr(gui_instance, 'preview_black_point', tk.DoubleVar(value=default_values_for_fallback['preview_black_point'])).get()
+            self.preview_white_point = getattr(gui_instance, 'preview_white_point', tk.DoubleVar(value=default_values_for_fallback['preview_white_point'])).get()
+            self.preview_gamma = getattr(gui_instance, 'preview_gamma', tk.DoubleVar(value=default_values_for_fallback['preview_gamma'])).get()
+            self.preview_r_gain = getattr(gui_instance, 'preview_r_gain', tk.DoubleVar(value=default_values_for_fallback['preview_r_gain'])).get()
+            self.preview_g_gain = getattr(gui_instance, 'preview_g_gain', tk.DoubleVar(value=default_values_for_fallback['preview_g_gain'])).get()
+            self.preview_b_gain = getattr(gui_instance, 'preview_b_gain', tk.DoubleVar(value=default_values_for_fallback['preview_b_gain'])).get()
+            self.preview_brightness = getattr(gui_instance, 'preview_brightness', tk.DoubleVar(value=1.0)).get()
+            self.preview_contrast = getattr(gui_instance, 'preview_contrast', tk.DoubleVar(value=1.0)).get()
+            self.preview_saturation = getattr(gui_instance, 'preview_saturation', tk.DoubleVar(value=1.0)).get()
 
             # --- UI Settings ---
-            # ... (inchangé) ...
-            self.language = getattr(gui_instance, 'language_var', tk.StringVar(value=self.language)).get()
+            self.language = getattr(gui_instance, 'language_var', tk.StringVar(value=default_values_for_fallback['language'])).get()
             if gui_instance.root.winfo_exists():
-                 current_geo = gui_instance.root.geometry()
-                 if isinstance(current_geo, str) and 'x' in current_geo and '+' in current_geo: self.window_geometry = current_geo
+                 current_geo_ui = gui_instance.root.geometry()
+                 if isinstance(current_geo_ui, str) and 'x' in current_geo_ui and '+' in current_geo_ui:
+                     self.window_geometry = current_geo_ui
 
-            # --- NOUVEAU : Lire les paramètres de feathering depuis l'UI ---
-            self.apply_feathering = getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar(value=self.apply_feathering)).get()
-            self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=self.feather_blur_px)).get()
-            print(f"DEBUG (Settings update_from_ui): Feathering lu -> Apply: {self.apply_feathering}, BlurPx: {self.feather_blur_px}")
-            # --- FIN NOUVEAU ---
+            print("DEBUG SM (update_from_ui V4 - GUI Settings): Fin lecture UI.")
 
-        # ... (gestion erreurs inchangée) ...
-        except AttributeError as ae: print(f"Error updating settings from UI (AttributeError): {ae}")
-        except tk.TclError as te: print(f"Error updating settings from UI (TclError): {te}")
-        except Exception as e: print(f"Unexpected error updating settings from UI: {e}"); traceback.print_exc(limit=2)
+        except AttributeError as ae:
+            print(f"Error SM (update_from_ui V4 - GUI Settings) (AttributeError): {ae}. Un widget/variable Tk est peut-être manquant sur gui_instance.")
+            traceback.print_exc(limit=1)
+        except tk.TclError as te:
+            print(f"Error SM (update_from_ui V4 - GUI Settings) (TclError): {te}. Un widget Tk est peut-être détruit.")
+        except Exception as e:
+            print(f"Unexpected error SM (update_from_ui V4 - GUI Settings): {e}")
+            traceback.print_exc(limit=2)
+
+# --- FIN de la méthode update_from_ui ---
+
+
+
+
 
     def apply_to_ui(self, gui_instance):
         """ Applique les paramètres chargés/actuels aux variables Tkinter. """
@@ -353,14 +375,16 @@ class SettingsManager:
 
 
 
+
+
 # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
     def get_default_values(self):
         """ 
         Retourne un dictionnaire des valeurs par défaut de tous les paramètres.
-        MAJ: Ajout des paramètres pour Low WHT Mask.
+        MAJ: Ajout des nouveaux paramètres pour les modes d'alignement mosaïque et FastAligner.
         """
-        print("DEBUG (SettingsManager get_default_values): Récupération des valeurs par défaut (incluant Low WHT Mask).")
+        print("DEBUG (SettingsManager get_default_values): Récupération des valeurs par défaut...") # Log mis à jour
         defaults_dict = {}
         
         # --- Paramètres de Traitement de Base ---
@@ -384,59 +408,78 @@ class SettingsManager:
         defaults_dict['stars_exponent'] = 0.5   
         defaults_dict['min_weight'] = 0.01      
 
-        # --- Paramètres Drizzle ---
-        defaults_dict['use_drizzle'] = False
+        # --- Paramètres Drizzle (Globaux) ---
+        defaults_dict['use_drizzle'] = False # Drizzle global, pas spécifique mosaïque
         defaults_dict['drizzle_scale'] = 2
         defaults_dict['drizzle_wht_threshold'] = 0.7 
         defaults_dict['drizzle_mode'] = "Final" 
-        defaults_dict['drizzle_kernel'] = "square" 
-        defaults_dict['drizzle_pixfrac'] = 1.0
+        defaults_dict['drizzle_kernel'] = "square" # Kernel Drizzle global
+        defaults_dict['drizzle_pixfrac'] = 1.0    # Pixfrac Drizzle global
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
+        # (Ceux-ci sont globaux, pas spécifiques à la mosaïque)
         defaults_dict['apply_chroma_correction'] = True 
         defaults_dict['apply_final_scnr'] = True        
         defaults_dict['final_scnr_target_channel'] = 'green'
         defaults_dict['final_scnr_amount'] = 0.6        
         defaults_dict['final_scnr_preserve_luminosity'] = True 
-
-        # --- Paramètres "Expert" - Neutralisation du Fond (BN) Globale ---
         defaults_dict['bn_grid_size_str'] = "24x24"     
         defaults_dict['bn_perc_low'] = 5
         defaults_dict['bn_perc_high'] = 40              
         defaults_dict['bn_std_factor'] = 1.5            
         defaults_dict['bn_min_gain'] = 0.2
         defaults_dict['bn_max_gain'] = 7.0
-
-        # --- Paramètres "Expert" - ChromaticBalancer (CB) pour les bords ---
         defaults_dict['cb_border_size'] = 25
         defaults_dict['cb_blur_radius'] = 8
         defaults_dict['cb_min_b_factor'] = 0.4 
         defaults_dict['cb_max_b_factor'] = 1.5 
-
-        # --- Paramètres "Expert" - Rognage Final ---
         defaults_dict['final_edge_crop_percent'] = 2.0 
-
-        # --- Paramètres "Expert" - Photutils Background Subtraction (BN 2D) ---
         defaults_dict['apply_photutils_bn'] = False      
         defaults_dict['photutils_bn_box_size'] = 128
         defaults_dict['photutils_bn_filter_size'] = 11  
         defaults_dict['photutils_bn_sigma_clip'] = 3.0
         defaults_dict['photutils_bn_exclude_percentile'] = 95.0 
-        
-        # --- Paramètres Feathering ---
         defaults_dict['apply_feathering'] = True 
         defaults_dict['feather_blur_px'] = 256   
-
-        # --- NOUVEAU : Feathering / Low WHT Mask ---
-        defaults_dict['apply_low_wht_mask'] = False   # Masque OFF par défaut
-        defaults_dict['low_wht_percentile'] = 5       # Seuil : % le plus bas des poids
-        defaults_dict['low_wht_soften_px'] = 128      # Rayon de flou (px) pour lisser
-        # --- FIN NOUVEAU ---
+        defaults_dict['apply_low_wht_mask'] = False   
+        defaults_dict['low_wht_percentile'] = 5       
+        defaults_dict['low_wht_soften_px'] = 128      
 
         # --- Paramètres Mosaïque & Astrometry.net ---
-        defaults_dict['mosaic_mode_active'] = False
-        defaults_dict['mosaic_settings'] = {"kernel": "square", "pixfrac": 1.0} 
-        defaults_dict['astrometry_api_key'] = "" 
+        defaults_dict['mosaic_mode_active'] = False # Ce flag est pour l'UI principale
+        
+        # Le dictionnaire `mosaic_settings` contiendra TOUS les paramètres spécifiques à la mosaïque
+        # y compris ceux pour Drizzle ET ceux pour l'alignement des panneaux.
+        defaults_dict['mosaic_settings'] = {
+            # Paramètres Drizzle spécifiques à la mosaïque (ceux que vous aviez déjà)
+            "kernel": "square",  # Valeur par défaut pour le kernel Drizzle de la mosaïque
+            "pixfrac": 0.8,      # Valeur par défaut pour le pixfrac Drizzle de la mosaïque
+            # "fillval" et "wht_threshold" peuvent être ajoutés ici aussi si vous les exposez dans MosaicSettingsWindow pour Drizzle
+            "fillval": "0.0",       # Ajouté, valeur par défaut
+            "wht_threshold": 0.01,  # Ajouté, valeur par défaut (0-1)
+
+            # NOUVEAU: Paramètres pour le mode d'alignement de la mosaïque
+            "alignment_mode": "local_fast_fallback", # Valeurs possibles: "local_fast_fallback", "local_fast_only", "astrometry_per_panel"
+            
+            # NOUVEAU: Paramètres pour FastAligner (utilisés si alignment_mode est local*)
+            "fastalign_orb_features": 3000,
+            "fastalign_min_abs_matches": 8,
+            "fastalign_min_ransac": 4, # La valeur brute (ex: 4, pas le calcul max(...))
+            "fastalign_ransac_thresh": 2.5,
+            "fastalign_dao_fwhm": 3.5,       # Valeur par défaut pour FWHM DAO
+            "fastalign_dao_thr_sig": 8.0,    # NOUVELLE VALEUR PAR DÉFAUT PLUS ÉLEVÉE pour le facteur sigma
+            "fastalign_dao_max_stars": 750,  # Valeur par défaut pour max étoiles DAO
+            # --- FIN AJOUT ---
+            # 
+            #     
+            # Clé API est stockée séparément au niveau global mais aussi ici pour la fenêtre mosaïque
+            # Si on veut que MosaicSettingsWindow ait sa propre copie de la clé utilisée lors de sa dernière validation "OK"
+            # Cela peut être redondant avec self.astrometry_api_key global.
+            # Pour l'instant, on peut se fier à la clé API globale et ne pas la dupliquer ici.
+            # "api_key": "" # Optionnel: si on veut que MosaicSettingsWindow se souvienne de sa propre clé
+        }
+        
+        defaults_dict['astrometry_api_key'] = "" # Clé API globale
 
         # --- Paramètres de Prévisualisation ---
         defaults_dict['preview_stretch_method'] = "Asinh"
@@ -451,8 +494,13 @@ class SettingsManager:
         defaults_dict['language'] = 'en' 
         defaults_dict['window_geometry'] = "1200x750" 
 
-        print(f"DEBUG (SettingsManager get_default_values): Dictionnaire de défauts créé. LowWHT Apply={defaults_dict['apply_low_wht_mask']}, Pct={defaults_dict['low_wht_percentile']}")
+        print(f"DEBUG (SettingsManager get_default_values): Dictionnaire de défauts créé.")
+        # print(f"  Exemple mosaic_settings par défaut: {defaults_dict['mosaic_settings']}") # Pour vérifier
         return defaults_dict
+
+
+
+
 
 
 ###################################################################################################################################
