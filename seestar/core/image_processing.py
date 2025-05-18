@@ -10,163 +10,158 @@ import warnings
 from astropy.io.fits.verify import VerifyWarning
 from astropy.utils.exceptions import AstropyWarning 
 from PIL import Image, ImageEnhance, ImageFilter # Added PIL imports for enhanced stretch
+from astropy.stats import sigma_clipped_stats
+import traceback # Pour un meilleur débogage des erreurs de lecture FITS
+from astropy.io import fits
 import sys
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 
-
-# --- DANS seestar/core/image_processing.py ---
-
-def load_and_validate_fits(filepath: str):
+def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
     """
-    Charge un fichier FITS, le valide, le convertit en float32 et le normalise [0,1].
-    Gère la conversion de type et les erreurs potentielles de manière robuste.
-    Retourne également le header FITS original.
-    MODIFIED: Logs de debug détaillés ajoutés, gestion des types améliorée.
+    Charge une image FITS, la valide, la normalise en float32 [0,1] et gère la transposition.
+    Version: V2.1 (Gère CxHxW et HxWxC, logs améliorés, fallback header)
 
     Args:
-        filepath (str): Chemin complet vers le fichier FITS.
+        filepath (str): Chemin vers le fichier FITS.
+        normalize_to_float32 (bool): Si True, normalise l'image en float32 [0,1].
+        attempt_fix_nonfinite (bool): Si True, tente de remplacer NaN/Inf par 0.
 
     Returns:
-        tuple: (np.ndarray or None, fits.Header or None)
-               - L'array image (H,W ou H,W,C) normalisé [0,1] float32.
-               - Le header FITS original.
-               Retourne (None, None) en cas d'erreur majeure non récupérable,
-               ou (image_noire, header) si l'image est inutilisable mais que le header est lu.
+        tuple: (image_data, header) ou (None, header_fallback) en cas d'échec.
+               image_data est np.ndarray (HxW ou HxWxC) float32 [0,1] si normalisé,
+               sinon les données brutes.
+               header est l'objet astropy.io.fits.Header.
+               header_fallback est un header (potentiellement partiel ou vide) si la lecture des données échoue.
     """
-    base_filename = os.path.basename(filepath) # Pour les logs
-    print(f"DEBUG IP (load_and_validate_fits V2): Début chargement pour '{base_filename}'")
-
-    # --- 1. Vérification initiale du chemin ---
-    if not filepath or not isinstance(filepath, str):
-        print(f"  REJET (load_and_validate_fits V2): Chemin de fichier invalide fourni ({filepath}).")
-        return None, None
-    if not os.path.exists(filepath):
-        print(f"  REJET (load_and_validate_fits V2): Fichier non trouvé à '{filepath}'.")
-        return None, None
-
-    # --- 2. Tentative de chargement FITS ---
-    data_raw = None # Contiendra les données brutes lues du FITS
+    filename = os.path.basename(filepath)
+    print(f"DEBUG IP (load_and_validate_fits V2.1): Début chargement pour '{filename}'")
+    
+    data_raw = None
     header = None
+    header_for_fallback = fits.Header() # Header vide par défaut pour fallback
+    img_hdu_idx = -1 # Pour loguer quelle HDU a été utilisée
+
     try:
-        print(f"  DEBUG IP (load_and_validate_fits V2): Tentative fits.open pour '{base_filename}'...")
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', category=AstropyWarning) # Ignore tous les warnings Astropy ici
-            # do_not_scale_image_data=True est important pour lire les valeurs brutes
-            with fits.open(filepath, memmap=False, do_not_scale_image_data=True) as hdul:
-                image_hdu = None
-                if len(hdul) == 0:
-                    print(f"  REJET (load_and_validate_fits V2): Fichier FITS vide (0 HDUs) pour '{base_filename}'.")
-                    return None, None
+        with fits.open(filepath, memmap=False, do_not_scale_image_data=True) as hdul:
+            if not hdul:
+                print(f"  REJET (load_and_validate_fits V2.1): Fichier FITS vide ou corrompu: '{filename}'")
+                return None, header_for_fallback
 
-                # Essayer de trouver la première HDU avec des données image valides
-                for i_hdu, hdu_item in enumerate(hdul):
-                    if hdu_item.is_image and hdu_item.data is not None:
-                        # Vérifier si les données ont au moins 2 dimensions (HxW)
-                        if hdu_item.data.ndim >= 2:
-                            image_hdu = hdu_item
-                            print(f"  DEBUG IP (load_and_validate_fits V2): Données image trouvées dans HDU {i_hdu} pour '{base_filename}'. Shape brute: {hdu_item.data.shape}, Dtype brut: {hdu_item.data.dtype}")
-                            break
-                        else:
-                            print(f"  WARN IP (load_and_validate_fits V2): HDU {i_hdu} est image mais data.ndim < 2 ({hdu_item.data.ndim}) pour '{base_filename}'. On continue la recherche.")
+            # Essayer de trouver la première HDU image valide
+            hdu_img = None
+            for idx, hdu_item in enumerate(hdul):
+                if hdu_item.is_image and hasattr(hdu_item, 'data') and hdu_item.data is not None:
+                    # Si c'est une HDU principale ou une extension nommée 'SCI' ou 'IMAGE'
+                    if idx == 0 or \
+                       (hasattr(hdu_item, 'name') and isinstance(hdu_item.name, str) and 
+                        hdu_item.name.upper() in ['SCI', 'IMAGE', 'PRIMARY']):
+                        hdu_img = hdu_item
+                        img_hdu_idx = idx
+                        break # Prendre la première de ce type
+            
+            # Si pas trouvée avec nom/index prioritaire, prendre la première HDU image non vide
+            if hdu_img is None:
+                for idx, hdu_item in enumerate(hdul):
+                    if hdu_item.is_image and hasattr(hdu_item, 'data') and hdu_item.data is not None:
+                        hdu_img = hdu_item
+                        img_hdu_idx = idx
+                        break
+            
+            if hdu_img is None:
+                print(f"  REJET (load_and_validate_fits V2.1): Aucune HDU image valide trouvée dans '{filename}'.")
+                # Essayer de récupérer au moins le header primaire s'il existe
+                if len(hdul) > 0 and hdul[0].header:
+                    header_for_fallback = hdul[0].header.copy()
+                return None, header_for_fallback
+
+            data_raw = hdu_img.data
+            header = hdu_img.header.copy() # Toujours prendre une copie
+            header_for_fallback = header.copy() # Mettre à jour le fallback avec le header trouvé
+            
+            print(f"  DEBUG IP (load_and_validate_fits V2.1): Données image trouvées dans HDU {img_hdu_idx} pour '{filename}'. Shape brute: {data_raw.shape if data_raw is not None else 'None'}, Dtype brut: {data_raw.dtype if data_raw is not None else 'None'}")
+
+            if data_raw is None:
+                raise ValueError("Données image (data_raw) sont None après lecture HDU.")
+            
+            print(f"  DEBUG IP (load_and_validate_fits V2.1): Validation données brutes pour '{filename}'. Shape: {data_raw.shape}, Dtype: {data_raw.dtype}")
+
+            # --- VALIDATION ET TRANSPOSITION SI NÉCESSAIRE ---
+            if data_raw.ndim == 3:
+                # Cas 1: CxHxW (souvent 3xHxW pour RGB ou N fichiers empilés)
+                # Heuristique : si le premier axe est petit (1,3,4) et les autres grands
+                if data_raw.shape[0] in [1, 3, 4] and data_raw.shape[1] > 4 and data_raw.shape[2] > 4:
+                    print(f"    INFO IP: Détection format CxHxW ({data_raw.shape}). Transposition en HxWxC...")
+                    data_raw = np.moveaxis(data_raw, 0, -1) 
+                    print(f"    INFO IP: Shape après transposition: {data_raw.shape}")
+                # Cas 2: HxWxC (déjà au bon format)
+                elif data_raw.shape[2] in [1, 3, 4] and data_raw.shape[0] > 4 and data_raw.shape[1] > 4:
+                    print(f"    INFO IP: Détection format HxWxC ({data_raw.shape}). Aucune transposition nécessaire.")
+                    pass 
+                else:
+                    print(f"  REJET (load_and_validate_fits V2.1): Shape de données brutes 3D non supportée ({data_raw.shape}) pour '{filename}'. Les axes doivent être clairement (C,H,W) ou (H,W,C) avec C=1,3,4.")
+                    return None, header # Retourner le header lu même si les données sont rejetées
+            elif data_raw.ndim != 2:
+                print(f"  REJET (load_and_validate_fits V2.1): Shape de données {data_raw.ndim}D non supportée pour '{filename}'. Doit être 2D ou 3D (HxW, HxWxC, ou CxHxW).")
+                return None, header # Retourner le header lu
+            # Si data_raw.ndim == 2, c'est un format N&B HxW, ce qui est valide.
+            
+            # --- FIN VALIDATION ET TRANSPOSITION ---
+
+            # Gérer les valeurs non finies si demandé
+            if attempt_fix_nonfinite and not np.all(np.isfinite(data_raw)):
+                print(f"    WARN IP: Données non finies détectées dans '{filename}'. Remplacement par 0.")
+                data_raw = np.nan_to_num(data_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Normalisation optionnelle
+            if normalize_to_float32:
+                print(f"  DEBUG IP (load_and_validate_fits V2.1): Préparation pour normalisation de '{filename}'...")
+                # Convertir en float64 pour les stats pour éviter overflow/underflow avec entiers
+                try:
+                    data_stats_type = data_raw.astype(np.float64) 
+                    print(f"    DEBUG IP: Conversion data_raw (dtype {data_raw.dtype}) vers float64 pour stats...")
+                except Exception as e_astype_stats:
+                    print(f"    WARN IP: Échec conversion pour stats float64: {e_astype_stats}. Utilisation type original.")
+                    data_stats_type = data_raw # Fallback
                 
-                if image_hdu is None:
-                    print(f"  REJET (load_and_validate_fits V2): Aucune HDU image avec données >= 2D trouvée dans '{base_filename}'.")
-                    # Essayer de retourner le header de la première HDU si possible pour logs
-                    try: header_fallback = hdul[0].header.copy() if len(hdul) > 0 and hdul[0].header else None
-                    except: header_fallback = None
-                    return None, header_fallback
-                
-                data_raw = image_hdu.data 
-                header = image_hdu.header.copy()
+                min_val, max_val = np.nanmin(data_stats_type), np.nanmax(data_stats_type)
+                print(f"    DEBUG IP: Stats sur {data_stats_type.dtype} pour '{filename}': Min={min_val}, Max={max_val} (dtype_stats: {data_stats_type.dtype})")
 
-        if data_raw is None: 
-            print(f"  REJET (load_and_validate_fits V2): Échec extraction données (data_raw est None) de '{base_filename}'.")
-            return None, header # Retourner header même si data est None, pour logs
+                # Convertir en float32 pour la normalisation et la sortie
+                data_float32_to_norm = data_raw.astype(np.float32)
+                print(f"    DEBUG IP: data_float32_to_norm (pour normalisation) - dtype: {data_float32_to_norm.dtype}, shape: {data_float32_to_norm.shape}")
 
-    except FileNotFoundError: # Devrait être attrapé par os.path.exists, mais sécurité
-        print(f"  REJET (load_and_validate_fits V2): FileNotFoundError (devrait être impossible ici) pour '{filepath}'.")
-        return None, None
-    except Exception as e_load:
-        print(f"  REJET (load_and_validate_fits V2): Exception lors du chargement FITS de '{base_filename}': {type(e_load).__name__} - {e_load}")
-        return None, header 
+                if np.isfinite(min_val) and np.isfinite(max_val) and (max_val > min_val):
+                    denominator = max_val - min_val
+                    print(f"    DEBUG IP: Normalisation standard pour '{filename}' (denominator={denominator:.3g})...")
+                    image_data_normalized = (data_float32_to_norm - min_val) / denominator
+                    image_data = np.clip(image_data_normalized, 0.0, 1.0).astype(np.float32)
+                elif np.any(np.isfinite(data_float32_to_norm)): # Image constante non-Nan/Inf
+                    print(f"    WARN IP: Image '{filename}' semble constante (min={min_val}, max={max_val}). Normalisation à 0.5.")
+                    image_data = np.full_like(data_float32_to_norm, 0.5, dtype=np.float32)
+                else: # Toutes les valeurs sont NaN ou Inf
+                    print(f"    WARN IP: Image '{filename}' ne contient que des valeurs non finies. Normalisation à 0.0.")
+                    image_data = np.zeros_like(data_float32_to_norm, dtype=np.float32)
+            else: # Pas de normalisation, retourner les données brutes (potentiellement transposées)
+                image_data = data_raw.astype(np.float32) # Assurer float32 en sortie quand même
 
-    # --- 3. Validation des dimensions et type des données BRUTES ---
-    print(f"  DEBUG IP (load_and_validate_fits V2): Validation données brutes pour '{base_filename}'. Shape: {data_raw.shape}, Dtype: {data_raw.dtype}")
-    
-    # La logique originale de rejet des shapes CxHxW reste, car cette fonction est pour les images "pixel-like"
-    if data_raw.ndim not in [2, 3]: 
-        print(f"  REJET (load_and_validate_fits V2): Shape de données brutes non supportée ({data_raw.shape}) pour '{base_filename}'. Doit être 2D (HxW) ou 3D (HxWxC).")
-        return None, header
-    if data_raw.ndim == 3 and data_raw.shape[-1] not in [1, 3, 4]: # HxWxC: C doit être 1 (gris), 3 (RGB) ou 4 (RGBA)
-        # Si c'est CxHxW, data_raw.shape[-1] sera W, ce qui sera rejeté ici.
-        print(f"  REJET (load_and_validate_fits V2): Shape de données brutes 3D non supportée ({data_raw.shape}) pour '{base_filename}'. Dernier axe (canaux) doit être 1, 3 ou 4. Reçu: {data_raw.shape[-1]}.")
-        return None, header
-    if data_raw.size == 0: 
-        print(f"  REJET (load_and_validate_fits V2): Image brute vide (size=0) pour '{base_filename}'.")
-        return None, header
-        
-    # --- 4. Conversion en float32 (si nécessaire) et Normalisation [0,1] ---
-    print(f"  DEBUG IP (load_and_validate_fits V2): Préparation pour normalisation de '{base_filename}'...")
-    
-    # S'assurer qu'on travaille avec des flottants pour les stats min/max pour éviter overflow/underflow des entiers
-    # et pour gérer les NaN potentiels.
-    # Utiliser float64 pour les stats pour plus de précision, surtout avec des entiers larges.
-    if data_raw.dtype not in [np.float32, np.float64]:
-        print(f"    DEBUG IP: Conversion data_raw (dtype {data_raw.dtype}) vers float64 pour stats...")
-        data_for_stats = data_raw.astype(np.float64)
-    else:
-        # Si déjà float, faire une copie pour ne pas modifier data_raw en place si c'est une vue
-        data_for_stats = data_raw.copy().astype(np.float64) # Assurer float64 pour stats
-    
-    min_val_stats = np.nanmin(data_for_stats)
-    max_val_stats = np.nanmax(data_for_stats)
-    print(f"    DEBUG IP: Stats sur float64 pour '{base_filename}': Min={min_val_stats}, Max={max_val_stats} (dtype_stats: {data_for_stats.dtype})")
+            mean_val = np.nanmean(image_data)
+            std_val = np.nanstd(image_data)
+            print(f"  DEBUG IP (load_and_validate_fits V2.1): FIN pour '{filename}'. Shape sortie: {image_data.shape}, Dtype: {image_data.dtype}. Range final: [{np.nanmin(image_data):.4f} - {np.nanmax(image_data):.4f}], Moyenne: {mean_val:.4f}, StdDev: {std_val:.6f}")
+            return image_data, header
 
-    if not (np.isfinite(min_val_stats) and np.isfinite(max_val_stats)):
-        print(f"  WARN (load_and_validate_fits V2): Données FITS '{base_filename}' contiennent seulement NaN/Inf ou erreur de calcul min/max. Retourne image noire.")
-        # Créer une image noire avec la même shape que data_raw
-        return np.zeros_like(data_raw, dtype=np.float32), header
-
-    denominator = max_val_stats - min_val_stats
-    
-    # Convertir les données originales en float32 pour la normalisation et la sortie finale.
-    # Ceci crée une copie si data_raw n'est pas déjà float32.
-    data_float32_to_norm = data_raw.astype(np.float32, copy=True) 
-    print(f"    DEBUG IP: data_float32_to_norm (pour normalisation) - dtype: {data_float32_to_norm.dtype}, shape: {data_float32_to_norm.shape}")
-
-    data_normalized = None # Initialiser
-    if denominator > 1e-9: # Éviter division par zéro ou par un nombre très petit
-        print(f"    DEBUG IP: Normalisation standard pour '{base_filename}' (denominator={denominator:.4g})...")
-        data_normalized = (data_float32_to_norm - float(min_val_stats)) / float(denominator)
-        data_normalized = np.clip(data_normalized, 0.0, 1.0) # Assurer [0,1]
-    elif np.any(np.isfinite(data_float32_to_norm)): 
-        data_normalized = np.full_like(data_float32_to_norm, 0.5, dtype=np.float32) 
-        print(f"  WARN (load_and_validate_fits V2): Image '{base_filename}' quasi-constante (min~max). Normalisée à 0.5. MinVal={min_val_stats}, MaxVal={max_val_stats}")
-    else: 
-        data_normalized = np.zeros_like(data_float32_to_norm, dtype=np.float32) 
-        print(f"  WARN (load_and_validate_fits V2): Image '{base_filename}' vide ou tout NaN/Inf (après cast float32). Normalisée à 0.0.")
-    
-    # Nettoyage final des NaN/Inf et s'assurer du type float32
-    # Si data_normalized est None (ne devrait pas arriver avec la logique ci-dessus), nan_to_num plantera.
-    if data_normalized is None: # Sécurité, ne devrait jamais être atteint.
-        print(f"  CRITICAL ERROR IP: data_normalized est None AVANT nan_to_num pour '{base_filename}'. C'est un bug. Retourne None.")
-        return None, header
-
-    final_data = np.nan_to_num(data_normalized, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
-    
-    # --- Log de la plage finale ---
-    min_final, max_final = np.min(final_data), np.max(final_data) # Utiliser np.min/max car plus de NaN
-    mean_final = np.mean(final_data)
-    std_final = np.std(final_data) # Calculer l'écart-type final pour info
-    print(f"  DEBUG IP (load_and_validate_fits V2): FIN pour '{base_filename}'. "
-          f"Shape sortie: {final_data.shape}, Dtype: {final_data.dtype}. "
-          f"Range final: [{min_final:.4f} - {max_final:.4f}], Moyenne: {mean_final:.4f}, StdDev: {std_final:.6f}")
-
-    return final_data, header
-
-
+    except FileNotFoundError:
+        print(f"  ERREUR IP (load_and_validate_fits V2.1): Fichier non trouvé: '{filepath}'")
+        return None, header_for_fallback # Retourner un header vide si le fichier n'est pas trouvé
+    except MemoryError as me:
+        print(f"  ERREUR IP (load_and_validate_fits V2.1): ERREUR MÉMOIRE lors du chargement de '{filename}': {me}")
+        traceback.print_exc(limit=1)
+        return None, header_for_fallback
+    except Exception as e:
+        print(f"  ERREUR IP (load_and_validate_fits V2.1): Erreur inattendue lors du chargement/validation de '{filename}': {e}")
+        traceback.print_exc(limit=2) # Afficher plus de détails pour les erreurs inattendues
+        return None, header_for_fallback
 
 def debayer_image(img, bayer_pattern="GRBG"):
     """

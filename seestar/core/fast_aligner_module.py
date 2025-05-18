@@ -317,7 +317,7 @@ class FastAligner:
         
         # Calculer le nombre minimum d'inliers RANSAC requis.
         # Basé sur la valeur de config, la moitié des correspondances absolues min, et un minimum de 3.
-        min_ransac_inliers_needed = 2 #max(min_ransac_inliers_value_config, min_absolute_matches_config // 2, 3) 
+        min_ransac_inliers_needed = max(min_ransac_inliers_value_config, min_absolute_matches_config, 3) 
         
         if num_inliers < min_ransac_inliers_needed:
             self._log(f"  EstimateTransform: Nombre d'inliers RANSAC ({num_inliers}) trop faible. Requis au moins {min_ransac_inliers_needed} (basé sur config min_ransac={min_ransac_inliers_value_config} et min_abs_match={min_absolute_matches_config}). Rejet de la transformation.", "WARN")

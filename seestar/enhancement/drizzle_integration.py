@@ -262,90 +262,147 @@ class DrizzleProcessor:
                 progress_callback(f"Drizzle: Traitement image {i+1}/{len(input_file_paths)} ('{os.path.basename(file_path)}')...", 
                                   int(i / len(input_file_paths) * 100) if len(input_file_paths) > 0 else 0)
             
-            input_image_cxhxw=None; input_header=None; exposure_time=1.0 
-            current_pixmap_for_drizzle=None; input_wcs_for_drizzle=None 
+            input_image_cxhxw=None # Image d'entrée chargée (CxHxW)
+            input_header=None      # Header du fichier d'entrée
+            exposure_time=1.0      # Temps d'exposition lu du header
+            current_pixmap_for_drizzle=None # Pixmap calculé pour CE fichier vers la grille de sortie
+            # Les variables suivantes sont pour le calcul du pixmap
+            sky_ra_deg = None
+            sky_dec_deg = None
 
             try:
-                # --- 3.A Charger l'image et son header ---
+                # --- 3.A Charger l'image et son header (CxHxW et header) ---
+                # (Cette partie est cruciale et doit être correcte pour que la suite fonctionne)
                 with fits.open(file_path, memmap=False) as hdul:
-                    if not hdul or len(hdul) == 0 or hdul[0].data is None: continue
-                    input_image_cxhxw = hdul[0].data.astype(np.float32) 
+                    if not hdul or len(hdul) == 0 or hdul[0].data is None:
+                        print(f"    WARN (DrizzleProcessor): FITS invalide/vide pour {file_path}. Ignoré."); continue
+                    
+                    data_loaded = hdul[0].data # Peut être HWC, CHW, ou HW
                     input_header = hdul[0].header
+
+                    # S'assurer que les données sont CxHxW, float32
+                    if data_loaded.ndim == 3 and data_loaded.shape[0] == num_output_channels: # Déjà CxHxW
+                        input_image_cxhxw = data_loaded.astype(np.float32)
+                    elif data_loaded.ndim == 3 and data_loaded.shape[2] == num_output_channels: # HWC -> CxHxW
+                        input_image_cxhxw = np.moveaxis(data_loaded, -1, 0).astype(np.float32)
+                    elif data_loaded.ndim == 2 and num_output_channels == 1: # N&B et on veut N&B
+                        input_image_cxhxw = data_loaded.astype(np.float32)[np.newaxis, :, :] # CxHxW
+                    elif data_loaded.ndim == 2 and num_output_channels == 3: # N&B mais on veut RGB (répliquer)
+                        input_image_cxhxw = np.stack([data_loaded.astype(np.float32)]*3, axis=0)
+                    else:
+                        raise ValueError(f"Shape image {data_loaded.shape} non supportée ou incompatible avec num_output_channels={num_output_channels}")
                 
-                if input_image_cxhxw.ndim != 3 or input_image_cxhxw.shape[0] != num_output_channels: continue
-                input_shape_hw = (input_image_cxhxw.shape[1], input_image_cxhxw.shape[2]) 
                 if input_header and 'EXPTIME' in input_header:
                     try: exposure_time = max(1e-6, float(input_header['EXPTIME']))
                     except (ValueError, TypeError): pass
                 
-                # --- 3.B Calcul du Pixmap (si alignement local) ou récupération du WCS d'entrée ---
-                if use_local_alignment_logic:
-                    if anchor_wcs_for_local is None: print(f"    ERREUR (Drizzle Local): WCS ancre manquant {file_path}. Ignoré."); continue
-                    M_matrix = np.array([[input_header.get('M11',1.),input_header.get('M12',0.),input_header.get('M13',0.)],
-                                         [input_header.get('M21',0.),input_header.get('M22',1.),input_header.get('M23',0.)]], dtype=np.float32)
-                    if 'M11' not in input_header: M_matrix = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32)
-                    y_orig, x_orig = np.indices(input_shape_hw)
-                    pts_orig = np.dstack((x_orig.ravel(),y_orig.ravel())).astype(np.float32).reshape(-1,1,2)
-                    pts_anchor = cv2.transform(pts_orig, M_matrix).reshape(-1,2)
-                    sky_ra, sky_dec = anchor_wcs_for_local.all_pix2world(pts_anchor[:,0],pts_anchor[:,1], 0)
-                    final_x, final_y = output_wcs.all_world2pix(sky_ra, sky_dec, 0)
-                    current_pixmap_for_drizzle = np.dstack((final_x.reshape(input_shape_hw), final_y.reshape(input_shape_hw))).astype(np.float32)
-                else: 
-                    try:
-                        with warnings.catch_warnings(): warnings.simplefilter("ignore"); input_wcs_for_drizzle = WCS(input_header, naxis=2) 
-                        if not input_wcs_for_drizzle.is_celestial: input_wcs_for_drizzle = None
-                    except Exception: input_wcs_for_drizzle = None
-                    if input_wcs_for_drizzle is None: print(f"    ERREUR (Drizzle Non-Local): WCS invalide {file_path}. Ignoré."); continue
+                input_shape_hw = (input_image_cxhxw.shape[1], input_image_cxhxw.shape[2]) 
+                y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw).reshape(2, -1)
+
+                # --- 3.B Calcul du Pixmap (Unifié) ---
+                print(f"    DEBUG (DrizzleProcessor): Calcul Pixmap pour {os.path.basename(file_path)} - Mode Local: {use_local_alignment_logic}")
+                if use_local_alignment_logic: # Mosaïque avec alignement local (utilise ancre WCS et matrice M)
+                    if anchor_wcs_for_local is None: 
+                        print(f"      ERREUR (DrizzleProcessor Local): WCS ancre manquant pour {file_path}. Ignoré."); continue
+                    
+                    # La matrice M doit être dans le header du fichier d'entrée (file_path)
+                    # car _save_drizzle_input_temp ne la sauvegarde pas.
+                    # CELA SIGNIFIE QUE POUR use_local_alignment_logic=True, input_file_paths doit contenir
+                    # des fichiers qui ont DÉJÀ ÉTÉ alignés sur l'ancre et dont le header contient M.
+                    # Si ce n'est pas le cas, cette logique est fausse.
+                    # Actuellement, _save_drizzle_input_temp injecte le WCS de réf globale, pas de matrice M.
+                    # Donc, cette branche use_local_alignment_logic ne fonctionnera pas correctement
+                    # si les fichiers dans input_file_paths sont ceux créés par _save_drizzle_input_temp.
+                    # Il faudrait soit :
+                    # 1. Que _save_drizzle_input_temp sauvegarde M si use_local_alignment_logic.
+                    # 2. OU que DrizzleProcessor.apply_drizzle reçoive M séparément pour chaque fichier.
+                    # Pour l'instant, on suppose que M est dans le header (ce qui n'est pas le cas avec le code actuel).
+                    # *** CELA DOIT ÊTRE REVU SI use_local_alignment_logic EST UTILISÉ AVEC apply_drizzle ***
+                    M11 = input_header.get('M11', None); M12 = input_header.get('M12', None); M13 = input_header.get('M13', None)
+                    M21 = input_header.get('M21', None); M22 = input_header.get('M22', None); M23 = input_header.get('M23', None)
+
+                    if not all(v is not None for v in [M11, M12, M13, M21, M22, M23]):
+                        print(f"      ERREUR (DrizzleProcessor Local): Matrice M incomplète/manquante dans header de {file_path}. Ignoré."); continue
+                    M_matrix = np.array([[M11,M12,M13],[M21,M22,M23]], dtype=np.float32)
+                                        
+                    pts_orig_N12 = np.dstack((x_in_coords_flat, y_in_coords_flat)).astype(np.float32).reshape(-1,1,2)
+                    pts_in_anchor_pixels_N2 = cv2.transform(pts_orig_N12, M_matrix).reshape(-1,2)
+                    
+                    sky_ra_deg, sky_dec_deg = anchor_wcs_for_local.all_pix2world(pts_in_anchor_pixels_N2[:,0], pts_in_anchor_pixels_N2[:,1], 0)
                 
-                # --- 3.C Ajouter l'image à chaque Drizzler de canal ---
-                for ch_idx in range(num_output_channels):
-                    channel_data_2d = input_image_cxhxw[ch_idx, :, :].astype(np.float32)
-                    if not np.all(np.isfinite(channel_data_2d)): channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
+                else: # Drizzle Standard (utilise le WCS du fichier d'entrée, qui devrait être le WCS de référence globale)
+                    input_wcs_for_drizzle_std = None
+                    try:
+                        with warnings.catch_warnings(): warnings.simplefilter("ignore"); input_wcs_for_drizzle_std = WCS(input_header, naxis=2) 
+                        if not input_wcs_for_drizzle_std.is_celestial: input_wcs_for_drizzle_std = None
+                    except Exception: input_wcs_for_drizzle_std = None
                     
-                    exptime_to_pass_to_add_image = 1.0 # Pour données déjà normalisées 0-1
-                    in_units_to_pass_to_add_image = 'counts'
-                    # self.kernel est déjà sur l'objet driz_ch. self.pixfrac sera passé à add_image.
+                    if input_wcs_for_drizzle_std is None: 
+                        print(f"      ERREUR (DrizzleProcessor Standard): WCS invalide pour {file_path}. Ignoré."); continue
                     
-                    # Log avant add_image
-                    if i < 3 or (i+1) % 50 == 0 : # Log pour les premières et toutes les 50 images
-                        print(f"    LOG Drizzle.add_image: F={os.path.basename(file_path)} Ch={ch_idx}")
-                        print(f"      Data Range: [{np.min(channel_data_2d):.3f}-{np.max(channel_data_2d):.3f}], Mean: {np.mean(channel_data_2d):.3f}")
-                        print(f"      >> exptime: {exptime_to_pass_to_add_image:.2f}, in_units: '{in_units_to_pass_to_add_image}', pixfrac: {self.pixfrac:.2f}")
+                    sky_ra_deg, sky_dec_deg = input_wcs_for_drizzle_std.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
 
-                    if use_local_alignment_logic:
-                        if current_pixmap_for_drizzle is None: continue
-                        drizzlers_by_channel[ch_idx].add_image(
-                            data=channel_data_2d, 
-                            pixmap=current_pixmap_for_drizzle, 
-                            exptime=exptime_to_pass_to_add_image,
-                            in_units=in_units_to_pass_to_add_image, 
-                            pixfrac=self.pixfrac    # pixfrac est pour add_image
-                        )
-                    else: 
-                        if input_wcs_for_drizzle is None: continue
-                        drizzlers_by_channel[ch_idx].add_image(
-                            data=channel_data_2d, 
-                            inwcs=input_wcs_for_drizzle, 
-                            outwcs=output_wcs,
-                            exptime=exptime_to_pass_to_add_image,
-                            in_units=in_units_to_pass_to_add_image,
-                            pixfrac=self.pixfrac    # pixfrac est pour add_image
-                        )
-                files_processed_count += 1
-            except Exception as e_file_proc:
-                progress_callback(f"Drizzle ERREUR: Traitement fichier {file_path} échoué: {e_file_proc}", None)
+                # Projection sur la grille Drizzle de sortie finale (output_wcs)
+                if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
+                    print(f"      WARN (DrizzleProcessor): Coordonnées célestes non finies pour {file_path} avant projection sur grille Drizzle. Ignoré."); continue
+
+                final_x_output_pixels, final_y_output_pixels = output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
+
+                if not (np.all(np.isfinite(final_x_output_pixels)) and np.all(np.isfinite(final_y_output_pixels))):
+                    print(f"      WARN (DrizzleProcessor): Pixmap contient des NaN/Inf pour {file_path} après projection sur grille Drizzle. Tentative de nettoyage.");
+                    # Remplacer les NaN/Inf par une valeur hors champ (ex: très négative) que Drizzle pourrait ignorer
+                    final_x_output_pixels = np.nan_to_num(final_x_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                    final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
+
+                current_pixmap_for_drizzle = np.dstack((
+                    final_x_output_pixels.reshape(input_shape_hw), 
+                    final_y_output_pixels.reshape(input_shape_hw)
+                )).astype(np.float32)
+                
+                # --- LOG DEBUG PIXMAP ---
+                if current_pixmap_for_drizzle is not None:
+                    print(f"      DEBUG PIXMAP File {i+1}: Shape={current_pixmap_for_drizzle.shape}, Dtype={current_pixmap_for_drizzle.dtype}")
+                    if np.isnan(current_pixmap_for_drizzle).any(): print(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES NaN !") # Ne devrait plus arriver avec nan_to_num
+                    if np.isinf(current_pixmap_for_drizzle).any(): print(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES INF !") # Idem
+                    print(f"      DEBUG PIXMAP File {i+1} X Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,0]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,0]):.2f}")
+                    print(f"      DEBUG PIXMAP File {i+1} Y Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,1]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,1]):.2f}")
+                else:
+                    print(f"      WARN PIXMAP File {i+1}: current_pixmap_for_drizzle EST NONE APRÈS CALCUL.")
+                # --- FIN LOG DEBUG PIXMAP ---
+
+            except Exception as e_pixmap_calc:
+                progress_callback(f"Drizzle ERREUR: Calcul Pixmap pour {file_path} échoué: {e_pixmap_calc}", None)
                 traceback.print_exc(limit=1)
-            finally:
-                del input_image_cxhxw, input_header, input_wcs_for_drizzle, current_pixmap_for_drizzle
-                if (i + 1) % 20 == 0: gc.collect()
-        # --- Fin Boucle sur les Fichiers d'Entrée ---
-        
-        progress_callback(f"Drizzle: Boucle Drizzle terminée. {files_processed_count}/{len(input_file_paths)} fichiers traités.", 100)
-        print(f"DEBUG DrizzleProcessor (V_Inspector_API_FINAL_Corrected): Boucle Drizzle terminée. {files_processed_count} fichiers effectivement ajoutés.")
+                continue 
 
-        if files_processed_count == 0:
-            progress_callback("Drizzle ERREUR: Aucun fichier n'a pu être traité par Drizzle.", 0)
-            return None, None
+            if current_pixmap_for_drizzle is None: 
+                print(f"    ERREUR (DrizzleProcessor): Pixmap final est None pour {file_path}. Ignoré."); continue
+
+            # --- 3.C Ajouter l'image à chaque Drizzler de canal ---
+            exptime_to_pass_to_add_image = exposure_time # Utiliser le temps d'expo lu du header
+            in_units_to_pass_to_add_image = 'counts' # Ou 'cps' si les données ne sont pas déjà normalisées par exptime
+
+            for ch_idx in range(num_output_channels):
+                channel_data_2d = input_image_cxhxw[ch_idx, :, :].astype(np.float32)
+                if not np.all(np.isfinite(channel_data_2d)): 
+                    channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
+                
+                if i < 3 or (i+1) % 50 == 0 or i == len(input_file_paths) -1 : 
+                    print(f"    LOG Drizzle.add_image: F={os.path.basename(file_path)} Ch={ch_idx}")
+                    print(f"      Data Range: [{np.min(channel_data_2d):.3f}-{np.max(channel_data_2d):.3f}], Mean: {np.mean(channel_data_2d):.3f}")
+                    print(f"      >> exptime: {exptime_to_pass_to_add_image:.2f}, in_units: '{in_units_to_pass_to_add_image}', pixfrac: {self.pixfrac:.2f}")
+
+                drizzlers_by_channel[ch_idx].add_image(
+                    data=channel_data_2d, 
+                    pixmap=current_pixmap_for_drizzle, # Toujours utiliser pixmap
+                    exptime=exptime_to_pass_to_add_image,
+                    in_units=in_units_to_pass_to_add_image, 
+                    pixfrac=self.pixfrac    # pixfrac est un argument valide pour add_image
+                    # weight_map peut être ajouté ici si on a des poids par pixel pour l'image d'entrée
+                )
+            files_processed_count += 1 # Incrémenter seulement si add_image a été appelé pour tous les canaux
+        # ... (le reste de la boucle et de la méthode apply_drizzle) ...
+
 
         # --- 4. Récupération des Données Finales et Masquage WHT Lissé ---
         try:
