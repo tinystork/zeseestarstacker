@@ -2673,41 +2673,29 @@ class SeestarQueuedStacker:
 
 
 
-
-
 # --- DANS LA CLASSE SeestarQueuedStacker ---
 
     def _process_file(self, file_path, 
-                      reference_image_data_for_alignment, # Pour Astroalign standard OU comme ANCRE pour FastAligner
+                      reference_image_data_for_alignment, # Image de l'ANCRE pour FastAligner ou réf. pour Astroalign std
                       solve_astrometry_for_this_file=False,
-                      # Nouveaux arguments pour les paramètres FastAligner, avec valeurs par défaut
                       fa_orb_features_config=5000,
                       fa_min_abs_matches_config=10,
-                      fa_min_ransac_inliers_value_config=4,
+                      fa_min_ransac_inliers_value_config=4, # Reçu de _worker
                       fa_ransac_thresh_config=3.0,
                       daofind_fwhm_config=3.5,
                       daofind_threshold_sigma_config=6.0,
                       max_stars_to_describe_config=750):
         """
         Traite un seul fichier image.
-        Version: V_FastAligner_Fallback_Logic
-        - Gère l'alignement local FastAligner.
-        - Gère le fallback WCS si FastAligner échoue et self.use_wcs_fallback_for_mosaic.
-        - Gère l'alignement Astroalign standard.
-        - Gère le plate-solving Astrometry.net par panneau.
-
-        Retourne pour les modes MOSAÏQUE LOCALE (FastAligner/Fallback):
-            (donnees_panneau_orig_pretraite, header_panneau, scores, wcs_ref_ou_panneau, M_vers_ancre, masque_valide)
-        Retourne pour Astrometry.net PAR PANNEAU:
-            (donnees_panneau_orig_pretraite, header_panneau_avec_wcs_resolu, scores, wcs_resolu_panneau, None_ou_Identite_M, masque_valide)
-        Retourne pour Stacking STANDARD/DRIZZLE:
-            (donnees_alignees_astroalign, header_orig, scores, wcs_approx_ou_None, masque_valide_sur_alignees)
+        Version: V_FastAligner_Fallback_Implemented
         """
         file_name = os.path.basename(file_path)
-        quality_scores = {'snr': 0.0, 'stars': 0.0} # Initialisation
-        print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Logic]: Début '{file_name}', SolveAstrometryDirectly: {solve_astrometry_for_this_file}")
-        if not solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
-            print(f"  -> Mode Mosaïque Locale. Params FA: ORB={fa_orb_features_config}, AbsM={fa_min_abs_matches_config}, RansacInl={fa_min_ransac_inliers_value_config}, RansacThr={fa_ransac_thresh_config}")
+        quality_scores = {'snr': 0.0, 'stars': 0.0}
+        print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Implemented]: Début '{file_name}', SolveAstrometryDirectly: {solve_astrometry_for_this_file}")
+        
+        if not solve_astrometry_for_this_file and self.is_mosaic_run and \
+           self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
+            print(f"  -> Mode Mosaïque Locale. Tentative FastAligner. Params FA: AbsM={fa_min_abs_matches_config}, RansacInl={fa_min_ransac_inliers_value_config}, RansacThr={fa_ransac_thresh_config}")
             print(f"  -> Params DAO: FWHM={daofind_fwhm_config}, ThrSig={daofind_threshold_sigma_config}, MaxStars={max_stars_to_describe_config}")
 
         header_final_pour_retour = None
@@ -2716,18 +2704,19 @@ class SeestarQueuedStacker:
         wcs_final_pour_retour = None
         data_final_pour_retour = None 
         valid_pixel_mask_2d = None
-        matrice_M_calculee = None # Spécifique pour mosaïque locale
-        align_method_log_msg = "Unknown" # Pour logguer la méthode d'alignement utilisée
+        matrice_M_calculee = None 
+        align_method_log_msg = "Unknown"
 
         try:
             # === 1. Charger et valider FITS ===
+            # ... (identique à V_FastAligner_Fallback_Logic, charge img_data_array_loaded et header_final_pour_retour) ...
             print(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
-            loaded_data_tuple = load_and_validate_fits(file_path) # Utilise la version V2.1
-
+            loaded_data_tuple = load_and_validate_fits(file_path)
             if loaded_data_tuple and loaded_data_tuple[0] is not None:
                 img_data_array_loaded, header_from_load = loaded_data_tuple
                 header_final_pour_retour = header_from_load.copy() if header_from_load else fits.Header()
             else:
+                # ... (logique fallback header) ...
                 header_temp_fallback = None
                 if loaded_data_tuple and loaded_data_tuple[1] is not None: header_temp_fallback = loaded_data_tuple[1].copy()
                 else:
@@ -2735,10 +2724,11 @@ class SeestarQueuedStacker:
                     except: header_temp_fallback = fits.Header()
                 header_final_pour_retour = header_temp_fallback
                 raise ValueError("Échec chargement/validation FITS (données non retournées).")
-            
             header_final_pour_retour['_SRCFILE'] = (file_name, "Original source filename")
 
+
             # === 2. Vérification variance ===
+            # ... (identique) ...
             print(f"  -> [2/7] Vérification variance pour '{file_name}'...")
             std_dev = np.std(img_data_array_loaded)
             variance_threshold = 0.0015 
@@ -2747,10 +2737,10 @@ class SeestarQueuedStacker:
             print(f"     - Variance OK (std: {std_dev:.4f}).")
 
             # === 3. Pré-traitement (Debayer, WB Auto basique, Correction HP) ===
+            # ... (identique, produit prepared_img_apres_pretraitement) ...
             print(f"  -> [3/7] Pré-traitement pour '{file_name}'...")
-            # ... (votre logique de pré-traitement existante pour prepared_img_apres_pretraitement reste ici) ...
-            # ... elle doit produire prepared_img_apres_pretraitement (HxWxC ou HxW, float32, 0-1) ...
             prepared_img_apres_pretraitement = img_data_array_loaded.astype(np.float32)
+            # ... (logique debayer, WB, hot_pixels) ...
             is_color_after_preprocessing = False
             if prepared_img_apres_pretraitement.ndim == 2:
                 bayer_pattern_from_header = header_final_pour_retour.get('BAYERPAT', self.bayer_pattern)
@@ -2774,13 +2764,13 @@ class SeestarQueuedStacker:
 
             if self.correct_hot_pixels:
                 prepared_img_apres_pretraitement = detect_and_correct_hot_pixels(prepared_img_apres_pretraitement, self.hot_pixel_threshold, self.neighborhood_size)
-            prepared_img_apres_pretraitement = prepared_img_apres_pretraitement.astype(np.float32) # Assurer float32
+            prepared_img_apres_pretraitement = prepared_img_apres_pretraitement.astype(np.float32)
             print(f"     - Pré-traitement terminé. Shape: {prepared_img_apres_pretraitement.shape}")
             
-            # Les données finales à retourner seront les données prétraitées pour les modes mosaïque
-            data_final_pour_retour = prepared_img_apres_pretraitement.copy() 
+            # Par défaut, les données à retourner sont les données prétraitées (sera écrasé par astroalign si non-mosaïque locale)
+            data_final_pour_retour = prepared_img_apres_pretraitement.copy()
 
-            # === 4. Logique d'Alignement / Résolution WCS (dépend du mode) ===
+            # === 4. Logique d'Alignement / Résolution WCS ===
             print(f"  -> [4/7] Alignement/Résolution WCS pour '{file_name}'...")
 
             # --- CAS A : Mosaïque avec Alignement Local (FastAligner + Fallback WCS) ---
@@ -2789,80 +2779,82 @@ class SeestarQueuedStacker:
                 
                 self.update_progress(f"   [ProcessFile] Tentative Alignement Local (FastAligner) pour '{file_name}' sur ancre...", None)
                 align_method_log_msg = "FastAligner_Attempted"
+                fa_success = False # Flag pour le succès de FastAligner
                 
                 if self.local_aligner_instance is not None and reference_image_data_for_alignment is not None:
                     # reference_image_data_for_alignment est l'image de l'ANCRE (prétraitée)
                     # prepared_img_apres_pretraitement est l'image du PANNEAU ACTUEL (prétraitée)
                     
-                    # _align_image de FastSeestarAligner attend (src, ref, ...)
-                    # Elle retourne (image_source_alignée_sur_ref, Matrice_M_de_src_vers_ref, succès_bool)
-                    # --- CORRECTION DES NOMS D'ARGUMENTS ICI ---
-                    _aligned_img_on_anchor, M_panel_to_anchor, fa_success = self.local_aligner_instance._align_image(
-                        src_img=prepared_img_apres_pretraitement,      # Nom corrigé
-                        ref_img=reference_image_data_for_alignment,  # Nom corrigé
+                    _image_alignee_par_fa, M_par_fa, fa_success_interne = self.local_aligner_instance._align_image(
+                        src_img=prepared_img_apres_pretraitement, # Image du panneau actuel
+                        ref_img=reference_image_data_for_alignment, # Image de l'ancre
                         file_name=file_name, 
                         min_absolute_matches=fa_min_abs_matches_config,
-                        min_ransac_inliers_value=fa_min_ransac_inliers_value_config, # Ce nom doit correspondre à la déf.
+                        min_ransac_inliers_value=fa_min_ransac_inliers_value_config,
                         ransac_thresh=fa_ransac_thresh_config,
-                        # min_matches_ratio est optionnel si valeur par défaut dans _align_image
+                        min_matches_ratio=0.15, # Pourrait être configurable via self.fa_min_matches_ratio
                         daofind_fwhm=daofind_fwhm_config,
                         daofind_threshold_sigma=daofind_threshold_sigma_config,
                         max_stars_to_describe=max_stars_to_describe_config
                     )
-                    # --- FIN CORRECTION ---
+                    fa_success = fa_success_interne # Mettre à jour le flag
 
-                    if fa_success and M_panel_to_anchor is not None:
+                    if fa_success and M_par_fa is not None:
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) RÉUSSI pour '{file_name}'.", "INFO")
                         align_method_log_msg = "FastAligner_Success"
-                        matrice_M_calculee = M_panel_to_anchor
-                        wcs_final_pour_retour = self.reference_wcs_object # Le WCS de l'ancre est la référence pour M
+                        matrice_M_calculee = M_par_fa
+                        wcs_final_pour_retour = self.reference_wcs_object # WCS de l'ancre
                         # data_final_pour_retour est déjà prepared_img_apres_pretraitement
-                    else: # FastAligner a échoué
+                    else: 
+                        fa_success = False # S'assurer qu'il est false si M est None
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}'.", "WARN")
                         align_method_log_msg = "FastAligner_Fail"
-                        if self.use_wcs_fallback_for_mosaic: # Tenter fallback Astrometry.net si activé
-                            self.update_progress(f"     -> Tentative Fallback Astrometry.net pour '{file_name}'...", None)
-                            align_method_log_msg += "_Fallback_Attempted"
-                            solve_wcs_func_local_fallback = None
-                            try: from ..enhancement.astrometry_solver import solve_image_wcs as siw_f_fb; solve_wcs_func_local_fallback = siw_f_fb
-                            except ImportError: pass
-
-                            if solve_wcs_func_local_fallback:
-                                wcs_panel_solved = solve_wcs_func_local_fallback(
-                                    img_data_array_loaded, header_final_pour_retour, self.api_key,
-                                    scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                                    progress_callback=self.update_progress, update_header_with_solution=True
-                                )
-                                if wcs_panel_solved and wcs_panel_solved.is_celestial:
-                                    self.update_progress(f"       -> Fallback Astrometry.net RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
-                                    align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
-                                    wcs_final_pour_retour = wcs_panel_solved # Le WCS résolu du panneau
-                                    # Calculer M pour transformer de wcs_panel_solved vers self.reference_wcs_object
-                                    matrice_M_calculee = self._calculate_M_from_wcs(
-                                        wcs_panel_solved, self.reference_wcs_object, 
-                                        prepared_img_apres_pretraitement.shape[:2] # Shape du panneau
-                                    )
-                                    if matrice_M_calculee is None:
-                                        self.update_progress(f"       -> ERREUR Fallback: Échec calcul Matrice M pour '{file_name}'.", "ERROR")
-                                        align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
-                                        wcs_final_pour_retour = None # Invalider si M échoue
-                                else:
-                                    self.update_progress(f"       -> Fallback Astrometry.net ÉCHOUÉ pour '{file_name}'.", "WARN")
-                                    align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
-                                    wcs_final_pour_retour = None # Échec fallback
-                            else: # solve_wcs_func_local_fallback non disponible
-                                align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
-                                wcs_final_pour_retour = None
-                        else: # Pas de fallback configuré
-                            align_method_log_msg = "FastAligner_Fail_No_Fallback"
-                            wcs_final_pour_retour = None # Échec alignement pour ce panneau
-                else: # Pas d'instance local_aligner ou pas de référence d'ancre
-                    self.update_progress(f"   [ProcessFile] Alignement Local non tenté pour '{file_name}' (prérequis manquants).", "WARN")
+                else:
+                    self.update_progress(f"   [ProcessFile] Alignement Local non tenté pour '{file_name}' (local_aligner ou ancre manquants).", "WARN")
                     align_method_log_msg = "LocalAlign_Not_Attempted"
-                    wcs_final_pour_retour = None # Ne peut pas aligner
+                
+                # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
+                if not fa_success and self.use_wcs_fallback_for_mosaic: # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback"
+                    self.update_progress(f"     -> Tentative Fallback Astrometry.net pour '{file_name}'...", None)
+                    align_method_log_msg += "_Fallback_Attempted"
+                    solve_wcs_func_local_fallback = None
+                    try: from ..enhancement.astrometry_solver import solve_image_wcs as siw_f_fb; solve_wcs_func_local_fallback = siw_f_fb
+                    except ImportError: pass
 
-            # --- CAS B : Mosaïque Astrometry.net par Panneau (solve_astrometry_for_this_file est True) ---
+                    if solve_wcs_func_local_fallback:
+                        wcs_panel_solved = solve_wcs_func_local_fallback(
+                            img_data_array_loaded, header_final_pour_retour, self.api_key,
+                            scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
+                            progress_callback=self.update_progress, update_header_with_solution=True
+                        )
+                        if wcs_panel_solved and wcs_panel_solved.is_celestial:
+                            self.update_progress(f"       -> Fallback Astrometry.net RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
+                            wcs_final_pour_retour = wcs_panel_solved 
+                            matrice_M_calculee = self._calculate_M_from_wcs(
+                                wcs_panel_solved, self.reference_wcs_object, 
+                                prepared_img_apres_pretraitement.shape[:2] 
+                            )
+                            if matrice_M_calculee is None:
+                                self.update_progress(f"       -> ERREUR Fallback: Échec calcul Matrice M pour '{file_name}'. Ce panneau sera probablement mal placé.", "ERROR")
+                                align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
+                                # On garde le wcs_panel_solved, mais sans M, il sera traité comme une nouvelle ancre par Drizzle si M est requis
+                        else:
+                            self.update_progress(f"       -> Fallback Astrometry.net ÉCHOUÉ pour '{file_name}'.", "WARN")
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
+                            wcs_final_pour_retour = None 
+                            matrice_M_calculee = None
+                    else: 
+                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
+                        wcs_final_pour_retour = None; matrice_M_calculee = None
+                elif not fa_success and not self.use_wcs_fallback_for_mosaic: # FastAligner a échoué et pas de fallback (mode "local_fast_only")
+                    align_method_log_msg = "FastAligner_Fail_No_Fallback"
+                    wcs_final_pour_retour = None; matrice_M_calculee = None
+
+
+            # --- CAS B : Mosaïque Astrometry.net par Panneau ---
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
+                # ... (logique identique à V_FastAligner_Fallback_Logic, qui fonctionne pour ce mode) ...
                 self.update_progress(f"   [ProcessFile] Tentative Astrometry.net direct pour panneau '{file_name}'...", None)
                 align_method_log_msg = "AstrometryNet_Per_Panel_Attempted"
                 solve_wcs_func_local_direct = None
@@ -2877,48 +2869,52 @@ class SeestarQueuedStacker:
                     )
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
                         align_method_log_msg = "AstrometryNet_Per_Panel_Success"
-                        # Pour ce mode, la "matrice M" est l'identité car le WCS est déjà absolu.
-                        # Ou on peut la laisser à None et _worker la créera.
                         matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32) 
                     else:
-                        align_method_log_msg = "AstrometryNet_Per_Panel_Fail"
-                        wcs_final_pour_retour = None
+                        align_method_log_msg = "AstrometryNet_Per_Panel_Fail"; wcs_final_pour_retour = None
                 else:
-                    align_method_log_msg = "AstrometryNet_Per_Panel_NoSolver"
-                    wcs_final_pour_retour = None
-                # data_final_pour_retour est déjà prepared_img_apres_pretraitement
+                    align_method_log_msg = "AstrometryNet_Per_Panel_NoSolver"; wcs_final_pour_retour = None
+                # data_final_pour_retour est prepared_img_apres_pretraitement
 
             # --- CAS C : Stacking Standard ou Drizzle Standard (Astroalign) ---
-            # (solve_astrometry_for_this_file est False, et on n'est pas en mode Mosaïque Locale)
             else: 
+                # ... (logique identique à V_FastAligner_Fallback_Logic) ...
                 self.update_progress(f"   [ProcessFile] Tentative Alignement Astroalign standard pour '{file_name}'...", None)
                 align_method_log_msg = "Astroalign_Standard_Attempted"
                 if reference_image_data_for_alignment is None:
                     raise RuntimeError("Image de référence (pour Astroalign standard) non disponible.")
                 
                 aligned_img_astroalign, align_success_astroalign = self.aligner._align_image(
-                    prepared_img_apres_pretraitement, # Image source prétraitée
-                    reference_image_data_for_alignment, # Image de référence globale
+                    prepared_img_apres_pretraitement, 
+                    reference_image_data_for_alignment, 
                     file_name
                 )
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
-                    data_final_pour_retour = aligned_img_astroalign # Utiliser l'image alignée par astroalign
-                    # Pour le stacking standard, wcs_final_pour_retour peut être un WCS approx ou None
-                    # Il n'est pas utilisé pour le Drizzle Standard qui se base sur le WCS de référence globale.
-                    if header_final_pour_retour:
+                    data_final_pour_retour = aligned_img_astroalign 
+                    if header_final_pour_retour: # WCS approx
                         try: 
                             with warnings.catch_warnings(): warnings.simplefilter('ignore'); wcs_approx = WCS(header_final_pour_retour, naxis=2)
                             if wcs_approx and wcs_approx.is_celestial: wcs_final_pour_retour = wcs_approx
                         except Exception: pass
+                        if wcs_final_pour_retour is None:
+                            try: from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_func; wcs_gen_temp = _cwfh_func(header_final_pour_retour)
+                            except ImportError: wcs_gen_temp = None
+                            if wcs_gen_temp and wcs_gen_temp.is_celestial: wcs_final_pour_retour = wcs_gen_temp
+                        if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
+                            naxis1_h = header_final_pour_retour.get('NAXIS1'); naxis2_h = header_final_pour_retour.get('NAXIS2')
+                            if naxis1_h and naxis2_h:
+                                try: wcs_final_pour_retour.pixel_shape = (int(naxis1_h), int(naxis2_h))
+                                except ValueError: pass
                 else:
                     align_method_log_msg = "Astroalign_Standard_Fail"
                     raise RuntimeError(f"Échec Alignement Astroalign standard pour {file_name}.")
+                matrice_M_calculee = None # Pas de matrice M spécifique pour ce mode
             
-            # Stocker la méthode d'alignement dans le header pour le log de mosaïque
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (align_method_log_msg, "Alignment method used for this panel")
 
             # === 5. Création du masque de pixels valides (sur data_final_pour_retour) ===
+            # ... (identique) ...
             print(f"  -> [5/7] Création du masque de pixels valides pour '{file_name}'...")
             if data_final_pour_retour is None: raise ValueError("Données finales pour masque sont None.")
             if data_final_pour_retour.ndim == 3 and data_final_pour_retour.shape[2] == 3:
@@ -2930,54 +2926,51 @@ class SeestarQueuedStacker:
                 valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool) 
             print(f"     - Masque de pixels valides créé. Shape: {valid_pixel_mask_2d.shape}")
 
+
             # === 6. Calcul des scores de qualité (sur prepared_img_apres_pretraitement) ===
+            # ... (identique) ...
             print(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting:
                 quality_scores = self._calculate_quality_metrics(prepared_img_apres_pretraitement)
-                # ... (logique de rejet si score trop bas) ...
             else: print(f"     - Pondération qualité désactivée.")
+
 
             # === 7. Vérification finale avant retour ===
             if data_final_pour_retour is None:
                 raise RuntimeError("data_final_pour_retour est None à la fin de _process_file.")
-            if self.is_mosaic_run and (wcs_final_pour_retour is None or matrice_M_calculee is None) and \
-               self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"] and \
-               align_method_log_msg not in ["AstrometryNet_Per_Panel_Success"]: # Si pas Astrometry/Panel et pas de WCS/M
-                # Pour mosaïque locale, si pas de WCS et pas de M (signifie échec complet), on rejette
-                raise RuntimeError(f"Pour mosaïque locale '{file_name}', WCS et/ou Matrice M manquant(e). AlignMethod: {align_method_log_msg}")
-            if self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel" and wcs_final_pour_retour is None:
-                raise RuntimeError(f"Pour mosaïque Astrometry/Panneau '{file_name}', WCS résolu manquant.")
-
-            print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Logic]: Traitement de '{file_name}' terminé. AlignMethod: {align_method_log_msg}.")
             
-            # Structure du tuple retourné :
-            # 0: donnees_image (HxWxC ou HxW, float32, 0-1)
-            # 1: header (objet fits.Header)
-            # 2: scores_qualite (dict)
-            # 3: wcs_objet (objet astropy.wcs.WCS ou None)
-            # 4: matrice_M (np.ndarray 2x3 ou None, pour mosaïque locale)
-            # 5: masque_pixels_valides (HxW bool)
-            # L'appelant devra s'adapter à cette structure.
-            # Si ce n'est pas une mosaïque locale, matrice_M_calculee sera None.
+            # Pour la mosaïque locale, un WCS ET une Matrice M sont nécessaires pour que le panneau soit utilisable.
+            # Le WCS peut être celui de l'ancre (si M vient de FastAligner) OU le WCS propre du panneau (si M vient du fallback WCS).
+            if self.is_mosaic_run and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
+                if wcs_final_pour_retour is None or matrice_M_calculee is None:
+                    raise RuntimeError(f"Pour mosaïque locale '{file_name}', WCS ou Matrice M manquant(e) après toutes tentatives. AlignMethod: {align_method_log_msg}")
+            
+            # Pour la mosaïque Astrometry/Panel, un WCS résolu est nécessaire.
+            elif self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
+                if wcs_final_pour_retour is None:
+                    raise RuntimeError(f"Pour mosaïque Astrometry/Panneau '{file_name}', WCS résolu manquant. AlignMethod: {align_method_log_msg}")
+
+            print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Implemented]: Traitement de '{file_name}' terminé. AlignMethod: {align_method_log_msg}.")
+            
             return (data_final_pour_retour, header_final_pour_retour, quality_scores, 
                     wcs_final_pour_retour, matrice_M_calculee, valid_pixel_mask_2d)
 
+        # ... (blocs except et finally identiques à V_FastAligner_Fallback_Logic) ...
         except (ValueError, RuntimeError) as proc_err:
             self.update_progress(f"   ⚠️ Fichier '{file_name}' ignoré dans _process_file: {proc_err}", "WARN")
-            # Retourner un tuple avec None pour les données pour indiquer l'échec, mais garder le header si possible
-            return None, header_final_pour_retour, quality_scores, None, None, None # 6 éléments pour cohérence
+            header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
+            header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"Error_{type(proc_err).__name__}", "Processing file error")
+            return None, header_final_pour_retour, quality_scores, None, None, None 
         except Exception as e:
             self.update_progress(f"❌ Erreur critique traitement fichier {file_name} dans _process_file: {e}", "ERROR")
-            print(f"ERREUR QM [_process_file V_FastAligner_Fallback_Logic]: Exception: {e}"); traceback.print_exc(limit=3)
-            return None, header_final_pour_retour, quality_scores, None, None, None # 6 éléments
+            print(f"ERREUR QM [_process_file V_FastAligner_Fallback_Implemented]: Exception: {e}"); traceback.print_exc(limit=3)
+            header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
+            header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"CritError_{type(e).__name__}", "Critical processing error")
+            return None, header_final_pour_retour, quality_scores, None, None, None 
         finally:
-            # Nettoyage mémoire
             if img_data_array_loaded is not None: del img_data_array_loaded
             if prepared_img_apres_pretraitement is not None: del prepared_img_apres_pretraitement
-            # data_final_pour_retour est ce qui est retourné, ne pas le supprimer ici.
             gc.collect()
-
-
 
 
 
