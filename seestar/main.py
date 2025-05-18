@@ -64,10 +64,10 @@ print(f"DEBUG [seestar/main.py import check]: sys.path au moment de l'import de 
 for p_idx, p_path in enumerate(sys.path): print(f"  [{p_idx}] {p_path}")
 print(f"--------------------")
 try:
-    import seestar.queuep.queue_manager
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.queuep.queue_manager CHARGÉ : {seestar.queuep.queue_manager.__file__}")
-    import seestar.gui.main_window
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.gui.main_window CHARGÉ : {seestar.gui.main_window.__file__}")
+    import queuep.queue_manager
+    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.queuep.queue_manager CHARGÉ : {queuep.queue_manager.__file__}")
+    import gui.main_window
+    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.gui.main_window CHARGÉ : {gui.main_window.__file__}")
 except Exception as e_qm_debug: print(f"DEBUG [seestar/main.py import check]: ERREUR import pour debug: {e_qm_debug}")
 print(f"--------------------")
 # --- FIN Bloc de débogage ---
