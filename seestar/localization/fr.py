@@ -290,6 +290,30 @@ FR_TRANSLATIONS = {
     'mosaic_api_key_label': "Clé API :",
     'mosaic_api_key_help': "Obtenez votre clé sur nova.astrometry.net (compte gratuit)",
     'mosaic_api_key_required': "La clé API Astrometry.net est requise lorsque le Mode Mosaïque est activé.",
+                                                                        
+    'mosaic_alignment_method_frame_title': "Méthode d'Alignement Mosaïque",
+    'mosaic_align_local_fast_fallback_label': "Local Rapide + Repli WCS (Recommandé)",
+    'mosaic_align_local_fast_only_label': "Local Rapide Uniquement (Strict)",
+    'mosaic_align_astrometry_per_panel_label': "Astrometry.net par Panneau (Plus lent)",
+
+    'fastaligner_tuning_frame_title': "Réglages FastAligner (pour Alignement Local)",
+    'fa_orb_features_label': "Points ORB :",
+    'fa_min_abs_matches_label': "Corresp. Abs. Min :",
+    'fa_min_ransac_inliers_label': "Inliers RANSAC Min :",
+    'fa_ransac_thresh_label': "Seuil RANSAC (px) :",
+
+    'mosaic_drizzle_fillval_label': "Val. Remplissage :", # Nouveau
+    'mosaic_drizzle_wht_thresh_label': "Masque Bas WHT (%) :", # Nouveau
+
+    'mosaic_validation_orb_range': "Points ORB doit être entre {min_orb} et {max_orb}.",
+    'mosaic_validation_matches_range': "Corresp. Abs. Min doit être entre {min_matches} et {max_matches}.",
+    'mosaic_validation_inliers_range': "Inliers RANSAC Min doit être entre {min_inliers} et {max_inliers}.",
+    'mosaic_validation_ransac_thresh_range': "Seuil RANSAC doit être entre {min_thresh:.1f} et {max_thresh:.1f}.",
+    'mosaic_error_reading_spinbox': "Erreur de lecture d'une valeur de Spinbox : {error_details}",
+    'mosaic_error_converting_spinbox': "Erreur de conversion d'une valeur de Spinbox : {error_details}",
+   
+   
+   
     #--- Tooltips pour Feathering ---
     'tooltip_apply_feathering': "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
     'tooltip_feather_blur_px': "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",

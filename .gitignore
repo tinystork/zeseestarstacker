@@ -1,0 +1,46 @@
+# === Fichiers de configuration locaux (non partagés) ===
+seestar/seestar_settings.json
+
+# === Fichiers Python compilés ===
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# === Fichiers temporaires et logs ===
+*.log
+*.tmp
+*.swp
+*.bak
+
+# === Fichiers systèmes / éditeurs ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# === Environnements virtuels Python ===
+.env/
+.venv/
+env/
+venv/
+
+# === Fichiers spécifiques à la GUI ou au traitement ===
+output/
+temp/
+cache/
+stack_output/
+drizzle_temp_inputs/
+drizzle_batch_outputs/
+unaligned_files/
+memmap_accumulators/
+
+# === Fichiers FITS intermédiaires (optionnel) ===
+*.fit
+*.fits
+
+# === Fichiers de sauvegarde de l'application ===
+*_autosave_*.json
