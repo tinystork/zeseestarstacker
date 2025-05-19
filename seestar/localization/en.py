@@ -108,9 +108,11 @@ EN_TRANSLATIONS = {
     'tooltip_cb_min_b_factor': "Edge Correct: Minimum gain factor applied to Blue channel in border regions to match local G. Limits reduction. Range: 0.1-1.0. Default: 0.4.",
     'tooltip_cb_max_b_factor': "Edge Correct: Maximum gain factor applied to Blue channel. Limits amplification. Range: 1.0-3.0. Default: 1.5.",
     'tooltip_final_edge_crop_percent': "Final Crop: Percentage of image to crop from EACH side (L,R,T,B) before final save. Ex: 2.0 for 2%. Range: 0-25. Default: 2.0.",
-    'tooltip_apply_final_scnr': "SCNR: Applies Subtle Color Noise Reduction to the final stack, targeting Green by default to reduce green/magenta casts.", # Existing
-    'tooltip_final_scnr_amount': "SCNR Amount: Strength of Green reduction (0.0=none, 1.0=full replacement by R/B reference). Typical: 0.6-0.9. Default: 0.8.", # Existing
-    'tooltip_final_scnr_preserve_lum': "SCNR Preserve Luminosity: If checked, attempts to restore original pixel luminance after color correction, preventing excessive darkening.", # Existing
+    'tooltip_apply_final_scnr': "SCNR: Applies Subtle Color Noise Reduction to the final stack, targeting Green by default to reduce green/magenta casts.", 
+    'tooltip_final_scnr_amount': "SCNR Amount: Strength of Green reduction (0.0=none, 1.0=full replacement by R/B reference). Typical: 0.6-0.9. Default: 0.8.", 
+    'tooltip_final_scnr_preserve_lum': "SCNR Preserve Luminosity: If checked, attempts to restore original pixel luminance after color correction, preventing excessive darkening.", 
+        'tooltip_apply_feathering': "Feathering: If enabled, smooths the stacked image based on a blurred version of the total weight map. Can help reduce sharp transitions or artifacts at combined data edges or where weights change abruptly. Acts before Photutils background subtraction.",
+    'tooltip_feather_blur_px': "Feather Blur Radius (px): Controls the extent of blur applied to the weight map for feathering. Larger values result in smoother, more gradual transitions. Typical range: 64-512. Default: 256.",
     # Tooltips for Photutils BN
     'tooltip_apply_photutils_bn': "PB2D: Enables subtraction of a 2D background model computed by Photutils. Acts before global Background Neutralization. Useful for complex gradients.",
     'tooltip_photutils_bn_box_size': "PB2D: Size of the boxes (px) for local background estimation. Should be large enough to avoid stars, but small enough to follow the gradient. Default: 128.",
@@ -271,7 +273,28 @@ EN_TRANSLATIONS = {
     'mosaic_api_key_label': "API Key:",
     'mosaic_api_key_help': "Get your key from nova.astrometry.net (free account)",
     'mosaic_api_key_required': "Astrometry.net API Key is required when Mosaic Mode is enabled.",
-   
+
+    'mosaic_alignment_method_frame_title': "Mosaic Alignment Method",
+    'mosaic_align_local_fast_fallback_label': "Fast Local + WCS Fallback (Recommended)",
+    'mosaic_align_local_fast_only_label': "Fast Local Only (Strict)",
+    'mosaic_align_astrometry_per_panel_label': "Astrometry.net per Panel (Slower)",
+
+    'fastaligner_tuning_frame_title': "FastAligner Tuning (for Local Alignment)",
+    'fa_orb_features_label': "ORB Features:", # Garder court pour UI
+    'fa_min_abs_matches_label': "Min Abs. Matches:", # Garder court
+    'fa_min_ransac_inliers_label': "Min RANSAC Inliers:", # Garder court
+    'fa_ransac_thresh_label': "RANSAC Thresh (px):", # Garder court
+
+    'mosaic_drizzle_fillval_label': "Fill Value:", # Nouveau
+    'mosaic_drizzle_wht_thresh_label': "Low WHT Mask (%):", # Nouveau (différent du Drizzle global pour être sûr)
+    'mosaic_validation_orb_range': "ORB Features must be between {min_orb} and {max_orb}.",
+    'mosaic_validation_matches_range': "Min Absolute Matches must be between {min_matches} and {max_matches}.",
+    'mosaic_validation_inliers_range': "Min RANSAC Inliers must be between {min_inliers} and {max_inliers}.",
+    'mosaic_validation_ransac_thresh_range': "RANSAC Threshold must be between {min_thresh:.1f} and {max_thresh:.1f}.",
+    'mosaic_error_reading_spinbox': "Error reading Spinbox value: {error_details}",
+    'mosaic_error_converting_spinbox': "Error converting Spinbox value: {error_details}",
+
+
     # final log popup 
     'Post-Processing Applied': "Post-Processing Applied",
     'Photutils 2D Background': "Photutils 2D Background",
