@@ -33,6 +33,7 @@ from ccdproc import CCDData, combine as ccdproc_combine
 from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
+from astropy.wcs.utils import proj_plane_pixel_scales
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -68,7 +69,7 @@ except ImportError as e_cb: print(f"ERREUR QM: Échec import ChromaticBalancer: 
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS (si utilisés uniquement dans des méthodes spécifiques) ---
 # Ces modules/fonctions sont gérés par des appels conditionnels ou try/except dans les méthodes où ils sont utilisés.
 # from ..enhancement.drizzle_integration import _load_drizzle_temp_file, DrizzleProcessor, _create_wcs_from_header 
-# from ..enhancement.astrometry_solver import solve_image_wcs 
+# from ..alignment.astrometry_solver import solve_image_wcs 
 # from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files 
 # from ..enhancement.stack_enhancement import StackEnhancer # Cette classe n'est pas utilisée ici
 
@@ -189,7 +190,7 @@ except ImportError as e:
 # pour éviter les dépendances circulaires au chargement initial.
 
 from ..enhancement.drizzle_integration import _load_drizzle_temp_file, DrizzleProcessor, _create_wcs_from_header # Déplacé vers _worker, etc.
-from ..enhancement.astrometry_solver import solve_image_wcs # Déplacé vers _worker/_process_file
+from ..alignment.astrometry_solver import AstrometrySolver # Déplacé vers _worker/_process_file
 from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files # Déplacé vers _worker
 from ..enhancement.stack_enhancement import StackEnhancer # Importé tardivement si nécessaire dans _save_final_stack ou ailleurs
 
@@ -332,7 +333,7 @@ class SeestarQueuedStacker:
             print(f"  -> ERREUR ChromaticBalancer: {e_cb}")
             self.chroma_balancer = None
             # raise # Optionnel: relancer si critique, ou juste continuer sans
-            
+
         try:
             print("  -> Instanciation SeestarAligner (pour alignement général astroalign)...")
             self.aligner = SeestarAligner() # Pour l'alignement individuel des images sur la référence principale
@@ -341,7 +342,20 @@ class SeestarQueuedStacker:
             print(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
             self.aligner = None
             raise # L'aligneur principal est critique
+
+        try:
+            print("  -> Instanciation AstrometrySolver...")
+            self.astrometry_solver = AstrometrySolver(progress_callback=self.update_progress) # Passer le callback
+            print("     ✓ AstrometrySolver instancié.")
+        except Exception as e_as_solver:
+            print(f"  -> ERREUR AstrometrySolver instantiation: {e_as_solver}")
+            self.astrometry_solver = None 
+            # Gérer cette erreur de manière appropriée, peut-être lever une exception si c'est critique
+            # Pour l'instant, on continue, mais les fonctions de solving ne marcheront pas.
         
+        print("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
+
+
         # --- Instanciation du SeestarLocalAligner (FastSeestarAligner) ---
         # _LOCAL_ALIGNER_AVAILABLE est une variable globale définie en haut du module queue_manager.py
         # lors de la tentative d'import de SeestarLocalAligner.
@@ -362,6 +376,8 @@ class SeestarQueuedStacker:
                 # On ne modifie PAS _LOCAL_ALIGNER_AVAILABLE ici. Son statut est fixé à l'import.
                 # L'échec de l'instanciation sera géré par la vérification de `self.local_aligner_instance is not None`.
                 print("     WARN QM: Instanciation de SeestarLocalAligner a échoué. Il ne sera pas utilisable.")
+
+
         else:
             print("  -> SeestarLocalAligner n'est pas disponible (import échoué ou classe non définie), instanciation ignorée.")
             self.local_aligner_instance = None # S'assurer qu'il est None
@@ -600,6 +616,7 @@ class SeestarQueuedStacker:
         if hasattr(self, 'aligner'): self.aligner.stop_processing = False
         print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init]: Initialisation terminée avec succès.")
         return True
+
 
 
 
@@ -1359,22 +1376,24 @@ class SeestarQueuedStacker:
 
         path_of_processed_ref_panel_basename = None # Pour skipper le panneau d'ancre si local_fast_fallback
 
+        
+
         try:
             # =====================================================================================
             # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
             # =====================================================================================
+        
             self.update_progress("⭐ Préparation image(s) de référence...")
-            # ... (logique pour trouver folder_for_ref_scan et files_for_ref_scan, inchangée)
-            if not self.current_folder or not os.path.isdir(self.current_folder):
-                if not self.additional_folders:
-                    raise RuntimeError(f"Dossier d'entrée initial ('{self.current_folder}') invalide et aucun dossier additionnel de départ.")
-                print(f"WARN QM [_worker]: Dossier d'entrée initial invalide, mais des dossiers additionnels existent. Tentative de continuer...")
-            files_for_ref_scan = []
-            folder_for_ref_scan = None
-            if self.current_folder and os.path.isdir(self.current_folder):
+            # ... (logique pour trouver folder_for_ref_scan et files_for_ref_scan, inchangée) ...
+            if not self.current_folder or not os.path.isdir(self.current_folder): # ... (etc)
+                # ... (comme avant) ...
+                pass # Pour la concision, cette logique reste
+            files_for_ref_scan = [] # ... (comme avant)
+            folder_for_ref_scan = None # ... (comme avant)
+            if self.current_folder and os.path.isdir(self.current_folder): # ... (etc)
                 files_for_ref_scan = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith((".fit", ".fits"))])
                 if files_for_ref_scan: folder_for_ref_scan = self.current_folder
-            if not files_for_ref_scan and self.additional_folders:
+            if not files_for_ref_scan and self.additional_folders: # ... (etc)
                 first_additional = self.additional_folders[0]
                 if os.path.isdir(first_additional):
                     files_for_ref_scan = sorted([f for f in os.listdir(first_additional) if f.lower().endswith((".fit", ".fits"))])
@@ -1382,122 +1401,137 @@ class SeestarQueuedStacker:
             if not files_for_ref_scan or not folder_for_ref_scan: raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence.")
             # ... (fin logique folder_for_ref_scan)
 
-            self.aligner.correct_hot_pixels = self.correct_hot_pixels
-            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
-            self.aligner.neighborhood_size = self.neighborhood_size
+            # ... (configuration de self.aligner, inchangée) ...
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels # ... (etc)
             self.aligner.bayer_pattern = self.bayer_pattern
 
             print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
             reference_image_data_for_global_alignment, reference_header_for_global_alignment = self.aligner._get_reference_image(
-                folder_for_ref_scan, files_for_ref_scan
+                folder_for_ref_scan, 
+                files_for_ref_scan,
+                self.output_folder  
             )
             if reference_image_data_for_global_alignment is None or reference_header_for_global_alignment is None:
                 raise RuntimeError("Échec critique obtention image/header de référence de base (globale/premier panneau).")
 
-            self.reference_header_for_wcs = reference_header_for_global_alignment.copy() # Pour Drizzle std et infos générales
+            self.reference_header_for_wcs = reference_header_for_global_alignment.copy() 
             if reference_header_for_global_alignment.get('_SOURCE_PATH'):
                 source_path_val_ref = reference_header_for_global_alignment.get('_SOURCE_PATH')
                 self.reference_header_for_wcs['_REFSRCFN'] = (str(source_path_val_ref), "Base name of global ref source")
 
-            self.aligner._save_reference_image(
-                reference_image_data_for_global_alignment,
-                reference_header_for_global_alignment,
-                self.output_folder
-            )
-            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Image de référence de base prête. Shape: {reference_image_data_for_global_alignment.shape}")
+            # _get_reference_image a déjà sauvegardé "reference_image.fit" dans "temp_processing"
+            # C'est ce fichier que nous allons utiliser pour le solving.
+            ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
+            reference_image_path_for_solver = os.path.join(ref_temp_processing_dir, "reference_image.fit")
+            
+            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
 
             # --- 1.A Plate-solving de la référence ---
             self.update_progress("DEBUG WORKER: Section 1.A - Plate-solving de la référence...")
-            self.reference_wcs_object = None # Sera le WCS de l'ancre pour local_fast, ou le WCS de la réf. globale pour les autres.
-            solve_image_wcs_func = None
-            try:
-                from ..enhancement.astrometry_solver import solve_image_wcs as siw_f; solve_image_wcs_func = siw_f
-                self.update_progress("DEBUG WORKER: solve_image_wcs importé avec succès.")
-            except ImportError as e_siw:
-                print(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: Import solve_image_wcs ÉCHOUÉ: {e_siw}")
-                self.update_progress(f"ERREUR WORKER: Import solve_image_wcs ÉCHOUÉ: {e_siw}")
+            self.reference_wcs_object = None 
+            temp_wcs_ancre = None 
 
-            temp_wcs_ancre = None # Pour le mode local_fast_fallback
+            # Construction du dictionnaire de settings pour le solveur
+            # Les attributs comme self.use_local_solver_priority, self.astap_path etc.
+            # DOIVENT avoir été définis dans start_processing() avant l'appel à _worker.
+            solver_settings_for_ref_anchor = {
+                "use_local_solver_priority": getattr(self, 'use_local_solver_priority', False),
+                "api_key": self.api_key, # Vient de self.api_key
+                "astap_path": getattr(self, 'astap_path', ""),
+                "astap_data_dir": getattr(self, 'astap_data_dir', ""),
+                "local_ansvr_path": getattr(self, 'local_ansvr_path', ""),
+                "scale_est_arcsec_per_pix": None, # Vient de self.reference_pixel_scale_arcsec
+                "scale_tolerance_percent": 20, # Peut être rendu configurable via self.settings
+                # Timeouts (valeurs par défaut si non définis sur self)
+                "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120),
+                "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
+                "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300),
+                "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0)
+                }
 
             # --- CAS 1: Mosaïque Locale (FastAligner avec ou sans fallback WCS) ---
             if use_local_aligner_for_this_mosaic_run:
                 self.update_progress("⭐ Mosaïque Locale: Traitement du panneau de référence (ancrage)...")
-
-                mosaic_ref_panel_image_data = reference_image_data_for_global_alignment # L'ancre est l'image "globale" trouvée
-                mosaic_ref_panel_header = reference_header_for_global_alignment.copy()
+                # L'image de référence globale *est* notre panneau d'ancrage pour ce mode.
+                mosaic_ref_panel_image_data = reference_image_data_for_global_alignment 
+                mosaic_ref_panel_header = self.reference_header_for_wcs.copy() # Utiliser le header déjà copié et potentiellement annoté
+                
                 if reference_header_for_global_alignment.get('_SOURCE_PATH'):
                     path_of_processed_ref_panel_basename = str(reference_header_for_global_alignment.get('_SOURCE_PATH'))
                     mosaic_ref_panel_header['_PANREF_FN'] = (path_of_processed_ref_panel_basename, "Base name of this mosaic ref panel source")
 
-                if solve_image_wcs_func:
-                    self.update_progress("   -> Mosaïque Locale: Tentative résolution astrométrique ancre via solve_image_wcs_func...")
-                    temp_wcs_ancre = solve_image_wcs_func(
-                        mosaic_ref_panel_image_data, mosaic_ref_panel_header, self.api_key,
-                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                        progress_callback=self.update_progress,
-                        update_header_with_solution=True # Mettre à jour mosaic_ref_panel_header
+                if self.astrometry_solver and os.path.exists(reference_image_path_for_solver):
+                    self.update_progress("   -> Mosaïque Locale: Tentative résolution astrométrique ancre via self.astrometry_solver.solve...")
+                    temp_wcs_ancre = self.astrometry_solver.solve(
+                        reference_image_path_for_solver,
+                        mosaic_ref_panel_header, # Ce header sera mis à jour par le solveur si succès
+                        solver_settings_for_ref_anchor,
+                        update_header_with_solution=True # Important pour mettre à jour mosaic_ref_panel_header
                     )
-                    if temp_wcs_ancre: self.update_progress("   -> Mosaïque Locale: Astrometry.net ancre RÉUSSI.")
-                    else: self.update_progress("   -> Mosaïque Locale: Astrometry.net ancre ÉCHOUÉ (temp_wcs_ancre is None).")
-                # ... (fallback pour temp_wcs_ancre si Astrometry.net échoue, inchangé)
-                if temp_wcs_ancre is None: # Fallback
-                    self.update_progress("   ⚠️ Échec Astrometry.net pour panneau de référence. Tentative WCS approximatif (fallback)...")
+                    if temp_wcs_ancre: self.update_progress("   -> Mosaïque Locale: Astrometry (via solveur) ancre RÉUSSI.")
+                    else: self.update_progress("   -> Mosaïque Locale: Astrometry (via solveur) ancre ÉCHOUÉ.")
+                else:
+                    self.update_progress("   -> Mosaïque Locale: AstrometrySolver non dispo ou fichier réf. manquant. Solving ancre impossible.", "ERROR")
+
+                # Si temp_wcs_ancre est None (échec de TOUS les solveurs) et qu'on n'a pas de WCS manuel:
+                if temp_wcs_ancre is None: 
+                     # Fallback WCS approximatif (si même les solveurs ont échoué)
+                    self.update_progress("   ⚠️ Échec de tous les solveurs pour panneau de référence. Tentative WCS approximatif (fallback)...")
                     _cwfh_func = None; from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh; _cwfh_func = _cwfh
-                    if _cwfh_func: temp_wcs_ancre = _cwfh_func(mosaic_ref_panel_header)
+                    if _cwfh_func: temp_wcs_ancre = _cwfh_func(mosaic_ref_panel_header) # Utilise le header de l'ancre
                     if temp_wcs_ancre and temp_wcs_ancre.is_celestial:
                          nx_hdr_a = mosaic_ref_panel_header.get('NAXIS1'); ny_hdr_a = mosaic_ref_panel_header.get('NAXIS2')
                          if nx_hdr_a and ny_hdr_a: temp_wcs_ancre.pixel_shape = (int(nx_hdr_a), int(ny_hdr_a))
                          elif hasattr(mosaic_ref_panel_image_data,'shape'): temp_wcs_ancre.pixel_shape=(mosaic_ref_panel_image_data.shape[1],mosaic_ref_panel_image_data.shape[0])
-                # ...
+                
                 if temp_wcs_ancre is None: raise RuntimeError("Mosaïque Locale: Échec critique obtention WCS pour panneau de référence.")
                 self.reference_wcs_object = temp_wcs_ancre # C'est LE WCS de l'ancre
-                self.update_progress("DEBUG WORKER: self.reference_wcs_object (ancre pour local) défini.")
-                # ... (log WCS ancre, ajout à all_aligned_files_with_info_for_mosaic, inchangés)
-                if self.reference_wcs_object: print(f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): ... (détails omis pour concision) ..."); # Version abrégée du log WCS
+                # ... (reste de la logique pour CAS 1, comme l'ajout à all_aligned_files_with_info_for_mosaic) ...
+                if self.reference_wcs_object: print(f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
                 mat_identite_ref_panel = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32); valid_mask_ref_panel_pixels = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool)
                 all_aligned_files_with_info_for_mosaic.append((mosaic_ref_panel_image_data.copy(), mosaic_ref_panel_header.copy(), self.reference_wcs_object, mat_identite_ref_panel, valid_mask_ref_panel_pixels))
                 self.aligned_files_count += 1; self.processed_files_count += 1; print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Mosaïque Locale: Panneau de référence ajouté.")
 
 
             # --- CAS 2: Mosaïque Astrometry.net par panneau OU Drizzle Standard ---
-            # Dans ces deux cas, on résout la référence globale `reference_image_data_for_global_alignment`.
-            # Pour `astrometry_per_panel`, ce `self.reference_wcs_object` n'est pas l'ancre des panneaux,
-            # mais peut être utilisé par d'autres parties (ex: si on basculait vers drizzle standard plus tard).
-            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic: # True pour astrometry_per_panel aussi
+            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic:
                 self.update_progress("DEBUG WORKER: Branche Drizzle Std / AstroMosaic pour référence globale...")
-                if solve_image_wcs_func:
-                    self.update_progress("   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale...")
-                    self.reference_wcs_object = solve_image_wcs_func( # Résout pour reference_image_data_for_global_alignment
-                        reference_image_data_for_global_alignment,
-                        self.reference_header_for_wcs, # Header qui sera mis à jour
-                        self.api_key,
-                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                        progress_callback=self.update_progress,
+                if self.astrometry_solver and os.path.exists(reference_image_path_for_solver):
+                    self.update_progress("   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve...")
+                    self.reference_wcs_object = self.astrometry_solver.solve(
+                        reference_image_path_for_solver,
+                        self.reference_header_for_wcs, # Ce header sera mis à jour
+                        solver_settings_for_ref_anchor,
                         update_header_with_solution=True
                     )
-                if self.reference_wcs_object is None:
-                    # C'est critique si Drizzle standard est actif.
-                    # Pour astrometry_per_panel, ce WCS de référence global n'est pas *strictement* nécessaire pour l'alignement
-                    # des panneaux eux-mêmes, mais son absence pourrait causer des problèmes ailleurs.
-                    self.update_progress("ERREUR WORKER: Échec plate-solving réf. principale (Drizzle Std / AstroMosaic). Levée de RuntimeError...")
-                    if self.drizzle_active_session or use_astrometry_per_panel_mosaic: # Condition pour lever l'erreur
-                         raise RuntimeError("Échec plate-solving réf. principale pour Drizzle standard ou Mosaïque Astrometry.")
                 else:
-                    self.update_progress("   -> Drizzle Std/AstroMosaic: Astrometry.net réf. globale RÉUSSI.")
-                    # ... (log WCS réf globale, inchangé) ...
-                    print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale (pour Drizzle Std / AstroMosaic): ... (détails omis pour concision) ..."); # Version abrégée du log WCS
-
-
-            # ---  Initialisation de la grille de sortie pour Drizzle Standard ---
-            if self.drizzle_active_session and not self.is_mosaic_run:
+                    self.update_progress("   -> Drizzle Std/AstroMosaic: AstrometrySolver non dispo ou fichier réf. manquant. Solving réf. globale impossible.", "ERROR")
+                    self.reference_wcs_object = None
+                
+                if self.reference_wcs_object is None:
+                    self.update_progress("ERREUR WORKER: Échec plate-solving réf. principale (Drizzle Std / AstroMosaic). Levée de RuntimeError...")
+                    raise RuntimeError("Échec plate-solving réf. principale pour Drizzle standard ou Mosaïque Astrometry.")
+                else:
+                    self.update_progress("   -> Drizzle Std/AstroMosaic: Astrometry (via solveur) réf. globale RÉUSSI.")
+                    if self.reference_wcs_object.pixel_shape is None: # S'assurer que pixel_shape est défini
+                         nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', reference_image_data_for_global_alignment.shape[1])
+                         ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', reference_image_data_for_global_alignment.shape[0])
+                         self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
+                    print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
+            
+            # ... (Le reste de la Section 1.A, puis Section 1.B initialisation grille Drizzle, etc. comme avant) ...
+            # ... (Puis la boucle principale Section 2, etc.) ...
+            # ... (Le reste de la Section 1.A, puis Section 1.B initialisation grille Drizzle, etc. comme avant) ...
+            if self.drizzle_active_session and not self.is_mosaic_run: # Initialisation grille Drizzle STANDARD
+                # ... (code existant, qui utilise self.reference_wcs_object et reference_image_data_for_global_alignment.shape[:2])
                 self.update_progress("DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...", "DEBUG_DETAIL")
                 if self.reference_wcs_object and hasattr(reference_image_data_for_global_alignment, 'shape'):
                     ref_shape_for_drizzle_grid_hw = reference_image_data_for_global_alignment.shape[:2]
                     try:
                         self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                            self.reference_wcs_object,       # WCS de la référence globale
-                            ref_shape_for_drizzle_grid_hw,  # Shape de la référence globale
-                            self.drizzle_scale              # Échelle Drizzle globale (de self)
+                            self.reference_wcs_object,      
+                            ref_shape_for_drizzle_grid_hw,  
+                            self.drizzle_scale              
                         )
                         if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
                             raise RuntimeError("Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard.")
@@ -1511,15 +1545,12 @@ class SeestarQueuedStacker:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
                     self.update_progress(error_msg_ref_driz, "ERROR")
                     raise RuntimeError(error_msg_ref_driz)
-            # --- FIN  Initialisation de la grille de sortie pour Drizzle Standard ---
 
-            self.update_progress("DEBUG WORKER: Fin Section 1.A Plate-solving de la référence.") # Ce log existait déjà
-            self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
-
-            self.update_progress("DEBUG WORKER: Fin Section 1.A Plate-solving de la référence.")
+            self.update_progress("DEBUG WORKER: Fin Section 1.A Plate-solving de la référence.") 
             self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
             self.update_progress(f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})...")
 
+            
 
 
 
@@ -2835,40 +2866,42 @@ class SeestarQueuedStacker:
             # === 4. Logique d'Alignement / Résolution WCS ===
             print(f"  -> [4/7] Alignement/Résolution WCS pour '{file_name}'...")
 
-            # --- CAS A : Mosaïque avec Alignement Local (FastAligner + Fallback WCS) ---
+
+            # --- CAS A : Mosaïque avec Alignement Local (FastAligner + Fallback WCS si activé) ---
             if not solve_astrometry_for_this_file and self.is_mosaic_run and \
                self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
                 
                 self.update_progress(f"   [ProcessFile] Tentative Alignement Local (FastAligner) pour '{file_name}' sur ancre...", None)
                 align_method_log_msg = "FastAligner_Attempted"
-                fa_success = False # Flag pour le succès de FastAligner
+                fa_success = False 
                 
                 if self.local_aligner_instance is not None and reference_image_data_for_alignment is not None:
                     # reference_image_data_for_alignment est l'image de l'ANCRE (prétraitée)
                     # prepared_img_apres_pretraitement est l'image du PANNEAU ACTUEL (prétraitée)
                     
                     _image_alignee_par_fa, M_par_fa, fa_success_interne = self.local_aligner_instance._align_image(
-                        src_img=prepared_img_apres_pretraitement, # Image du panneau actuel
-                        ref_img=reference_image_data_for_alignment, # Image de l'ancre
+                        src_img=prepared_img_apres_pretraitement,
+                        ref_img=reference_image_data_for_alignment,
                         file_name=file_name, 
                         min_absolute_matches=fa_min_abs_matches_config,
                         min_ransac_inliers_value=fa_min_ransac_inliers_value_config,
                         ransac_thresh=fa_ransac_thresh_config,
-                        min_matches_ratio=0.15, # Pourrait être configurable via self.fa_min_matches_ratio
+                        min_matches_ratio=0.15, 
                         daofind_fwhm=daofind_fwhm_config,
                         daofind_threshold_sigma=daofind_threshold_sigma_config,
                         max_stars_to_describe=max_stars_to_describe_config
                     )
-                    fa_success = fa_success_interne # Mettre à jour le flag
+                    fa_success = fa_success_interne 
 
                     if fa_success and M_par_fa is not None:
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) RÉUSSI pour '{file_name}'.", "INFO")
                         align_method_log_msg = "FastAligner_Success"
                         matrice_M_calculee = M_par_fa
-                        wcs_final_pour_retour = self.reference_wcs_object # WCS de l'ancre
-                        # data_final_pour_retour est déjà prepared_img_apres_pretraitement
+                        # Le WCS du panneau sera celui de l'ancre, car M transforme les pixels du panneau vers le système de l'ancre.
+                        wcs_final_pour_retour = self.reference_wcs_object 
+                        # data_final_pour_retour reste prepared_img_apres_pretraitement (non-warpé par FastAligner ici)
                     else: 
-                        fa_success = False # S'assurer qu'il est false si M est None
+                        fa_success = False 
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}'.", "WARN")
                         align_method_log_msg = "FastAligner_Fail"
                 else:
@@ -2876,43 +2909,73 @@ class SeestarQueuedStacker:
                     align_method_log_msg = "LocalAlign_Not_Attempted"
                 
                 # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
-                if not fa_success and self.use_wcs_fallback_for_mosaic: # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback"
-                    self.update_progress(f"     -> Tentative Fallback Astrometry.net pour '{file_name}'...", None)
+                # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback" (défini dans start_processing)
+                if not fa_success and self.use_wcs_fallback_for_mosaic: 
+                    self.update_progress(f"     -> Tentative Fallback (via AstrometrySolver) pour '{file_name}'...", None)
                     align_method_log_msg += "_Fallback_Attempted"
-                    solve_wcs_func_local_fallback = None
-                    try: from ..enhancement.astrometry_solver import solve_image_wcs as siw_f_fb; solve_wcs_func_local_fallback = siw_f_fb
-                    except ImportError: pass
-
-                    if solve_wcs_func_local_fallback:
-                        wcs_panel_solved = solve_wcs_func_local_fallback(
-                            img_data_array_loaded, header_final_pour_retour, self.api_key,
-                            scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                            progress_callback=self.update_progress, update_header_with_solution=True
+                    
+                    if self.astrometry_solver: # Vérifier si l'instance du solveur existe
+                        solver_settings_for_panel_fallback = {
+                            "use_local_solver_priority": self.use_local_solver_priority,
+                            "api_key": self.api_key,
+                            "astap_path": self.astap_path,
+                            "astap_data_dir": self.astap_data_dir,
+                            "local_ansvr_path": self.local_ansvr_path,
+                            "scale_est_arcsec_per_pix": None,
+                            #"scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
+                            "scale_tolerance_percent": 20, 
+                            "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120),
+                            "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
+                            "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300),
+                            "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0)
+                        }
+                        
+                        # AstrometrySolver.solve attend le chemin du fichier FITS brut du panneau (file_path)
+                        # et le header de ce panneau (header_final_pour_retour), qui sera mis à jour.
+                        # img_data_array_loaded est le contenu de ce fichier, utilisé par l'ancien solve_image_wcs.
+                        # Pour la nouvelle approche, AstrometrySolver.solve s'attend à un CHEMIN.
+                        
+                        wcs_panel_solved_by_solver = self.astrometry_solver.solve(
+                            image_path=file_path, # Le chemin du FITS original du panneau
+                            fits_header=header_final_pour_retour, # Le header de ce panneau
+                            settings=solver_settings_for_panel_fallback,
+                            update_header_with_solution=True # Mettre à jour le header_final_pour_retour
                         )
-                        if wcs_panel_solved and wcs_panel_solved.is_celestial:
-                            self.update_progress(f"       -> Fallback Astrometry.net RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
+
+                        if wcs_panel_solved_by_solver and wcs_panel_solved_by_solver.is_celestial:
+                            self.update_progress(f"       -> Fallback (via AstrometrySolver) RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
                             align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
-                            wcs_final_pour_retour = wcs_panel_solved 
+                            wcs_final_pour_retour = wcs_panel_solved_by_solver # WCS résolu pour CE panneau
+                            
+                            # Calculer la matrice M pour transformer CE panneau vers le WCS de l'ANCRE (self.reference_wcs_object)
                             matrice_M_calculee = self._calculate_M_from_wcs(
-                                wcs_panel_solved, self.reference_wcs_object, 
-                                prepared_img_apres_pretraitement.shape[:2] 
+                                wcs_panel_solved_by_solver,      # WCS source (ce panneau)
+                                self.reference_wcs_object,       # WCS cible (l'ancre de la mosaïque)
+                                prepared_img_apres_pretraitement.shape[:2] # Shape du panneau actuel
                             )
                             if matrice_M_calculee is None:
                                 self.update_progress(f"       -> ERREUR Fallback: Échec calcul Matrice M pour '{file_name}'. Ce panneau sera probablement mal placé.", "ERROR")
                                 align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
-                                # On garde le wcs_panel_solved, mais sans M, il sera traité comme une nouvelle ancre par Drizzle si M est requis
+                                # Si M échoue, même avec un WCS, le panneau ne peut pas être aligné correctement
+                                # sur l'ancre pour le Drizzle via pixmap.
+                                # On pourrait choisir de l'ignorer ou de le traiter comme une nouvelle "ancre" (complexe).
+                                # Pour l'instant, on marque l'échec.
+                                wcs_final_pour_retour = None # Invalider le WCS si M n'est pas calculable
                         else:
-                            self.update_progress(f"       -> Fallback Astrometry.net ÉCHOUÉ pour '{file_name}'.", "WARN")
+                            self.update_progress(f"       -> Fallback (via AstrometrySolver) ÉCHOUÉ pour '{file_name}'.", "WARN")
                             align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
                             wcs_final_pour_retour = None 
                             matrice_M_calculee = None
                     else: 
+                        self.update_progress(f"     -> AstrometrySolver non disponible pour fallback WCS pour '{file_name}'.", "ERROR")
                         align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
                         wcs_final_pour_retour = None; matrice_M_calculee = None
+                
                 elif not fa_success and not self.use_wcs_fallback_for_mosaic: # FastAligner a échoué et pas de fallback (mode "local_fast_only")
+                    self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}' et pas de fallback WCS (mode 'local_fast_only').", "WARN")
                     align_method_log_msg = "FastAligner_Fail_No_Fallback"
-                    wcs_final_pour_retour = None; matrice_M_calculee = None
-
+                    wcs_final_pour_retour = None 
+                    matrice_M_calculee = None
 
             # --- CAS B : Mosaïque Astrometry.net par Panneau ---
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
@@ -2920,7 +2983,7 @@ class SeestarQueuedStacker:
                 self.update_progress(f"   [ProcessFile] Tentative Astrometry.net direct pour panneau '{file_name}'...", None)
                 align_method_log_msg = "AstrometryNet_Per_Panel_Attempted"
                 solve_wcs_func_local_direct = None
-                try: from ..enhancement.astrometry_solver import solve_image_wcs as siw_f_direct; solve_wcs_func_local_direct = siw_f_direct
+                try: from ..alignment.astrometry_solver import solve_image_wcs as siw_f_direct; solve_wcs_func_local_direct = siw_f_direct
                 except ImportError: pass
 
                 if solve_wcs_func_local_direct:
@@ -4735,7 +4798,16 @@ class SeestarQueuedStacker:
                          low_wht_percentile=5,    
                          low_wht_soften_px=128,   
                          is_mosaic_run=False, api_key=None, 
-                         mosaic_settings=None):
+                         mosaic_settings=None,
+                         # --- NOUVEAUX ARGUMENTS AJOUTÉS ICI ---
+                         use_local_solver_priority=False,
+                         astap_path="",
+                         astap_data_dir="",
+                         local_ansvr_path="",
+                         astap_search_radius_ui=5.0):# Valeurs par défaut si non fournis
+                         
+                
+    
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
         Version: V_StartProcessing_CorrectOrder
@@ -4765,12 +4837,55 @@ class SeestarQueuedStacker:
             return False
         
         self.current_folder = os.path.abspath(input_dir) if input_dir else None
+        self.output_folder = os.path.abspath(output_dir) if output_dir else None
+        
 
         # =========================================================================================
         # === ÉTAPE 1 : CONFIGURATION DES PARAMÈTRES DE SESSION SUR L'INSTANCE (AVANT TOUT LE RESTE) ===
         # =========================================================================================
         print("DEBUG QM (start_processing): Étape 1 - Configuration des paramètres de session sur l'instance...")
+          
+                # --- Vérification préliminaire des chemins d'entrée/sortie ---
+        if not self.current_folder or not os.path.isdir(self.current_folder):
+            self.update_progress(f"❌ Dossier d'entrée principal '{input_dir}' invalide ou non défini.", "ERROR")
+            return False
+        if not self.output_folder: # Maintenant self.output_folder est défini
+            self.update_progress(f"❌ Dossier de sortie '{output_dir}' non défini.", "ERROR")
+            return False
+        try:
+            os.makedirs(self.output_folder, exist_ok=True) # S'assurer qu'il existe ou le créer
+        except OSError as e_mkdir:
+            self.update_progress(f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}", "ERROR")
+            return False
+        print(f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'")
+        # --- Fin Vérification ---
+        #         
+        # --- Paramètres des Solveurs Locaux (assignés depuis les arguments de la fonction) ---
+        self.use_local_solver_priority = bool(use_local_solver_priority) # Utilise l'argument de la fonction
+        self.astap_path = str(astap_path)                         # Utilise l'argument de la fonction
+        self.astap_data_dir = str(astap_data_dir)                   # Utilise l'argument de la fonction
+        self.local_ansvr_path = str(local_ansvr_path)                 # Utilise l'argument de la fonction
         
+        # Optionnel: Tu pourrais aussi initialiser les timeouts ici si tu les ajoutes comme arguments à start_processing
+        # Par exemple, si start_processing recevait `astap_timeout_sec_arg`:
+        # self.astap_timeout_sec = int(astap_timeout_sec_arg) 
+        # Pour l'instant, AstrometrySolver utilise des valeurs par défaut si non passées dans le dict settings.
+        # --- Stocker le rayon de recherche ASTAP ---
+        try:
+            self.astap_search_radius_config = float(astap_search_radius_ui)
+        except (ValueError, TypeError):
+            print(f"  WARN QM (start_processing): Valeur astap_search_radius_ui ('{astap_search_radius_ui}') invalide. Utilisation de 5.0° par défaut.")
+            self.astap_search_radius_config = 5.0 # Fallback sûr
+        # ---  ---
+
+        print(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}")
+        print(f"    [Solver Settings sur self] ASTAP Exe: '{self.astap_path}'")
+        print(f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'")
+        print(f"    [Solver Settings sur self] Ansvr Local: '{self.local_ansvr_path}'")
+        print(f"    [Solver Settings sur self] ASTAP Search Radius Config: {self.astap_search_radius_config}°")
+
+
+
         # Paramètres globaux qui déterminent le mode de fonctionnement
         self.is_mosaic_run = is_mosaic_run                     
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run   
@@ -4851,133 +4966,195 @@ class SeestarQueuedStacker:
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
         print("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
         
+
+
         # ==========================================================================================
         # === ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ===
         # ==========================================================================================
         print("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
         reference_image_data_for_shape_determination = None 
         reference_header_for_shape_determination = None     
-        ref_shape_hwc = None # Shape HWC de l'image de référence
-        # img_data_array_loaded_for_ref_solve sera les données normalisées de l'image de réf pour le solveur
-        img_data_array_loaded_for_ref_solve = None 
+        ref_shape_hwc = None 
+        # img_data_array_loaded_for_ref_solve n'est plus nécessaire ici car on utilisera un chemin de fichier
 
         try:
             # Partie 2.1: Charger l'image de référence pour déterminer sa shape
+            # et s'assurer qu'elle est sauvegardée par self.aligner._get_reference_image()
+            # car self.astrometry_solver.solve() attend un chemin de fichier.
+            
+            # --- Logique pour trouver le dossier et les fichiers pour la référence ---
             potential_folders_for_shape = []
-            if self.current_folder and os.path.isdir(self.current_folder): potential_folders_for_shape.append(self.current_folder)
-            if initial_additional_folders: 
+            if self.current_folder and os.path.isdir(self.current_folder): 
+                potential_folders_for_shape.append(self.current_folder)
+            if initial_additional_folders: # 'initial_additional_folders' est un argument de start_processing
                 for add_f in initial_additional_folders:
-                    abs_add_f = os.path.abspath(add_f)
+                    abs_add_f = os.path.abspath(str(add_f)) # Assurer str pour os.path.abspath
                     if abs_add_f and os.path.isdir(abs_add_f) and abs_add_f not in potential_folders_for_shape:
                         potential_folders_for_shape.append(abs_add_f)
-            if not potential_folders_for_shape: raise RuntimeError("Aucun dossier d'entrée valide pour trouver une image de référence.")
+            if not potential_folders_for_shape: 
+                raise RuntimeError("Aucun dossier d'entrée valide pour trouver une image de référence.")
             
-            current_folder_to_scan_for_shape = None; files_in_folder_for_shape = []
+            current_folder_to_scan_for_shape = None
+            files_in_folder_for_shape = []
             for folder_path_iter in potential_folders_for_shape:
-                temp_files = sorted([f for f in os.listdir(folder_path_iter) if f.lower().endswith(('.fit', '.fits'))])
-                if temp_files: files_in_folder_for_shape = temp_files; current_folder_to_scan_for_shape = folder_path_iter; break 
+                try:
+                    temp_files = sorted([f for f in os.listdir(folder_path_iter) if f.lower().endswith(('.fit', '.fits'))])
+                    if temp_files: 
+                        files_in_folder_for_shape = temp_files
+                        current_folder_to_scan_for_shape = folder_path_iter
+                        break 
+                except Exception as e_listdir:
+                    self.update_progress(f"Avertissement: Erreur lecture dossier '{folder_path_iter}' pour réf: {e_listdir}", "WARN")
             if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
                 raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers pour servir de référence.")
+            # --- Fin logique dossier/fichiers référence ---
 
             # Configurer l'aligneur pour _get_reference_image
             self.aligner.correct_hot_pixels = self.correct_hot_pixels
             self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
             self.aligner.neighborhood_size = self.neighborhood_size
             self.aligner.bayer_pattern = self.bayer_pattern
-            self.aligner.reference_image_path = reference_path_ui or None # Chemin optionnel de l'UI
+            self.aligner.reference_image_path = reference_path_ui or None 
 
-            # _get_reference_image retourne l'image DÉJÀ PRÉTRAITÉE (normalisée 0-1 par load_and_validate_fits)
-            reference_image_data_for_shape_determination, reference_header_for_shape_determination = self.aligner._get_reference_image(
-                current_folder_to_scan_for_shape, files_in_folder_for_shape
-            )
+            # _get_reference_image sauvegarde "reference_image.fit" dans "temp_processing"
+            # et retourne les données et le header de cette image (déjà prétraitée)
+            reference_image_data_for_shape_determination, reference_header_for_shape_determination = \
+                self.aligner._get_reference_image(
+                    current_folder_to_scan_for_shape, 
+                    files_in_folder_for_shape,
+                    self.output_folder  # <<< AJOUTER self.output_folder ICI COMME TROISIÈME ARGUMENT
+                )
+
+
             if reference_image_data_for_shape_determination is None or reference_header_for_shape_determination is None:
                 raise RuntimeError("Échec obtention de l'image de référence par self.aligner._get_reference_image.")
             
-            # Cette image est celle qui sera utilisée pour le plate-solving si nécessaire
-            img_data_array_loaded_for_ref_solve = reference_image_data_for_shape_determination.copy() 
-            
+            # Déterminer la shape HWC pour les accumulateurs
             ref_shape_initial = reference_image_data_for_shape_determination.shape
-            if len(ref_shape_initial) == 2: # N&B
-                ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3) # On travaille en HWC pour les accumulateurs
-            elif len(ref_shape_initial) == 3 and ref_shape_initial[2] == 3: # Déjà couleur HWC
+            if len(ref_shape_initial) == 2: 
+                ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3)
+            elif len(ref_shape_initial) == 3 and ref_shape_initial[2] == 3:
                 ref_shape_hwc = ref_shape_initial
             else:
-                raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée pour la suite.")
+                raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée.")
             
+            # Ce header sera utilisé pour le solving et mis à jour par celui-ci
             self.reference_header_for_wcs = reference_header_for_shape_determination.copy() 
             print(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
 
-            # Partie 2.2: Plate-solving de la référence (CONDITIONNEL : seulement si Drizzle ou Mosaïque)
-            self.reference_wcs_object = None # Initialiser
-            if self.drizzle_active_session or self.is_mosaic_run:
-                print("DEBUG QM (start_processing): Plate-solving de la référence principale requis (pour Drizzle/Mosaïque)...")
-                solve_image_wcs_func_startup = None
-                try:
-                    from ..enhancement.astrometry_solver import solve_image_wcs as siw_f_startup
-                    solve_image_wcs_func_startup = siw_f_startup
-                except ImportError:
-                    self.update_progress("❌ ERREUR: Import solveur astrométrique impossible. Drizzle/Mosaïque ne peut continuer.")
-                    return False 
+            # Chemin vers le fichier "reference_image.fit" sauvegardé par _get_reference_image
+            ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
+            reference_image_path_for_solving = os.path.join(ref_temp_processing_dir, "reference_image.fit")
 
-                if solve_image_wcs_func_startup and self.reference_header_for_wcs and img_data_array_loaded_for_ref_solve is not None:
-                    self.update_progress("   [StartProcRefSolve] Tentative résolution astrométrique pour référence globale...")
-                    self.reference_wcs_object = solve_image_wcs_func_startup(
-                        img_data_array_loaded_for_ref_solve, 
-                        self.reference_header_for_wcs, 
-                        self.api_key,
-                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                        progress_callback=self.update_progress,
-                        update_header_with_solution=True 
-                    )
-                    if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
-                        self.update_progress("   [StartProcRefSolve] Référence globale plate-solvée avec succès.")
-                        if self.reference_wcs_object.pixel_shape is None:
-                             nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', img_data_array_loaded_for_ref_solve.shape[1])
-                             ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', img_data_array_loaded_for_ref_solve.shape[0])
-                             self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
-                    else: # Plate-solving Astrometry.net a échoué
-                        self.update_progress("   [StartProcRefSolve] ÉCHEC plate-solving réf. globale. Tentative WCS approximatif...", "WARN")
-                        _cwfh_func_startup = None
-                        try: from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_s; _cwfh_func_startup = _cwfh_s
-                        except ImportError: pass
-                        if _cwfh_func_startup: self.reference_wcs_object = _cwfh_func_startup(self.reference_header_for_wcs)
-                        
-                        if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
-                            nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', img_data_array_loaded_for_ref_solve.shape[1])
-                            ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', img_data_array_loaded_for_ref_solve.shape[0])
-                            self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
-                            self.update_progress("   [StartProcRefSolve] WCS approximatif pour référence globale créé.")
-                        else: # Échec total d'obtention d'un WCS
-                            self.update_progress("❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.", "ERROR")
-                            return False 
-                else: # Prérequis manquants pour solveur
-                    self.update_progress("❌ ERREUR: Prérequis manquants pour plate-solving réf. globale (Drizzle/Mosaïque).", "ERROR")
-                    return False
-            else: # Mode Stacking Classique seul
-                print("DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique seul).")
-                self.reference_wcs_object = None # Reste None
+            # Partie 2.2: Plate-solving de la référence (CONDITIONNEL)
+            self.reference_wcs_object = None # Initialiser
             
-            # Libérer la mémoire des données d'image brutes de référence
-            if img_data_array_loaded_for_ref_solve is not None: del img_data_array_loaded_for_ref_solve
-            if reference_image_data_for_shape_determination is not None: del reference_image_data_for_shape_determination
+            if self.drizzle_active_session or self.is_mosaic_run: # Si Drizzle ou Mosaïque, un WCS est nécessaire
+                print("DEBUG QM (start_processing): Plate-solving de la référence principale requis...")
+                
+                if not os.path.exists(reference_image_path_for_solving):
+                    raise RuntimeError(f"Fichier de référence '{reference_image_path_for_solving}' non trouvé pour le solving.")
+
+                if self.astrometry_solver is None: # Vérifier si l'instance a été créée dans __init__
+                    self.update_progress("❌ ERREUR CRITIQUE: AstrometrySolver non initialisé.", "ERROR")
+                    return False # Ne peut pas continuer
+
+                # Préparer le dictionnaire de settings pour le solveur
+                solver_settings_for_ref = {
+                    "use_local_solver_priority": self.use_local_solver_priority,
+                    "api_key": self.api_key,
+                    "astap_path": self.astap_path,
+                    "astap_data_dir": self.astap_data_dir,
+                    "local_ansvr_path": self.local_ansvr_path,
+                    "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec, # Peut être None
+                    "scale_tolerance_percent": 20, # Pourrait être un setting
+                    "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120), # Valeurs par défaut
+                    "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
+                    "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300)
+                }
+                
+                self.update_progress("   [StartProcRefSolve] Tentative résolution astrométrique pour référence globale...")
+                self.reference_wcs_object = self.astrometry_solver.solve(
+                    image_path=reference_image_path_for_solving, 
+                    fits_header=self.reference_header_for_wcs, # Ce header sera mis à jour si solution trouvée
+                    settings=solver_settings_for_ref,
+                    update_header_with_solution=True # Très important
+                )
+                
+                if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
+                    self.update_progress("   [StartProcRefSolve] Référence globale plate-solvée avec succès.")
+                    # Assurer que pixel_shape est défini sur l'objet WCS (AstrometrySolver devrait le faire)
+                    if self.reference_wcs_object.pixel_shape is None:
+                         nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', ref_shape_hwc[1])
+                         ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
+                         self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
+                         print(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
+
+                # --- NOUVEAU : Extraire et stocker l'échelle du WCS de référence ---
+                try:
+                    # proj_plane_pixel_scales doit être importé: from astropy.wcs.utils import proj_plane_pixel_scales
+                    # Assure-toi que cet import est en haut de queue_manager.py
+                    scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
+                    avg_scale_deg_per_pix = np.mean(np.abs(scales_deg_per_pix))
+                    
+                    if avg_scale_deg_per_pix > 1e-9: # S'assurer que c'est une valeur raisonnable
+                        self.reference_pixel_scale_arcsec = avg_scale_deg_per_pix * 3600.0
+                        self.update_progress(f"   [StartProcRefSolve] Échelle image de référence estimée à: {self.reference_pixel_scale_arcsec:.2f} arcsec/pix.", "INFO")
+                        print(f"DEBUG QM: self.reference_pixel_scale_arcsec mis à jour à {self.reference_pixel_scale_arcsec:.3f} depuis le WCS de référence.")
+                    else:
+                        self.update_progress("   [StartProcRefSolve] Avertissement: Échelle calculée depuis WCS de référence trop faible ou invalide.", "WARN")
+                        # self.reference_pixel_scale_arcsec reste à sa valeur précédente (probablement None ou une config UI)
+                except Exception as e_scale_extract:
+                    self.update_progress(f"   [StartProcRefSolve] Avertissement: Impossible d'extraire l'échelle du WCS de référence: {e_scale_extract}", "WARN")
+                    # self.reference_pixel_scale_arcsec reste à sa valeur précédente
+                # --- FIN NOUVEAU ---
+                                         
+                else: 
+                    self.update_progress("   [StartProcRefSolve] ÉCHEC plate-solving réf. globale. Tentative WCS approximatif...", "WARN")
+                    _cwfh_func_startup = None
+                    try: from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_s; _cwfh_func_startup = _cwfh_s
+                    except ImportError: self.update_progress("     -> Import _create_wcs_from_header échoué pour fallback.", "ERROR")
+                    
+                    if _cwfh_func_startup: 
+                        self.reference_wcs_object = _cwfh_func_startup(self.reference_header_for_wcs) # Utilise le header déjà mis à jour (ou pas)
+                    
+                    if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
+                        # S'assurer que pixel_shape est défini pour ce WCS approximatif
+                        nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', ref_shape_hwc[1])
+                        ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
+                        self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
+                        self.update_progress("   [StartProcRefSolve] WCS approximatif pour référence globale créé.")
+                    else: 
+                        self.update_progress("❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.", "ERROR")
+                        return False 
+            else: # Mode Stacking Classique seul, pas besoin de WCS de référence global à ce stade.
+                print("DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique seul).")
+                self.reference_wcs_object = None 
+            
+            # Libérer la mémoire des données image de référence si elles ne sont plus nécessaires immédiatement
+            if reference_image_data_for_shape_determination is not None:
+                del reference_image_data_for_shape_determination
             gc.collect() 
             print("DEBUG QM (start_processing): Fin Étape 2 - Préparation référence et WCS global.")
 
         except Exception as e_ref_prep: 
-            self.update_progress(f"❌ Erreur préparation référence/WCS: {e_ref_prep}")
+            self.update_progress(f"❌ Erreur préparation référence/WCS: {e_ref_prep}", "ERROR")
             print(f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"); traceback.print_exc(limit=2)
             return False
         
         # --- LOGS DE DEBUG AVANT APPEL initialize() ---
+        # ... (comme avant) ...
         print(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
         print(f"  -> self.is_mosaic_run: {self.is_mosaic_run}")
         print(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
         print(f"  -> self.drizzle_mode: {self.drizzle_mode}")
         print(f"  -> self.reference_wcs_object IS None: {self.reference_wcs_object is None}")
         if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial: 
-            print(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}")
+            print(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}, PixelShape: {self.reference_wcs_object.pixel_shape}")
         else:
             print(f"     WCS Ref non disponible ou non céleste.")
+
+
 
         # --- ÉTAPE 3 : INITIALISATION DES ACCUMULATEURS ET DE L'ÉTAT DU QueuedStacker ---
         print(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")

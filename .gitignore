@@ -27,7 +27,7 @@ Thumbs.db
 .venv/
 env/
 venv/
-
+.venv-zsss/
 # === Fichiers spécifiques à la GUI ou au traitement ===
 output/
 temp/

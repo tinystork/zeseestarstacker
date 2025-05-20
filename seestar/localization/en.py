@@ -293,8 +293,30 @@ EN_TRANSLATIONS = {
     'mosaic_validation_ransac_thresh_range': "RANSAC Threshold must be between {min_thresh:.1f} and {max_thresh:.1f}.",
     'mosaic_error_reading_spinbox': "Error reading Spinbox value: {error_details}",
     'mosaic_error_converting_spinbox': "Error converting Spinbox value: {error_details}",
-
-
+    
+    # --- LocalSolverSettingsWindow ---   
+    'local_solver_button_text': "Local Solvers...",
+    'local_solver_window_create_error': "Could not open Local Solvers settings window.",
+    'local_solver_general_options_frame': "General Local Solver Options",
+    'local_solver_use_priority_label': "Prioritize local solvers over Astrometry.net (if paths are set)",
+    'local_solver_astap_frame_title': "ASTAP Configuration",
+    'local_solver_astap_path_label': "ASTAP Executable Path:",
+    'local_solver_astap_data_label': "ASTAP Star Index Data Directory:",
+    'local_solver_ansvr_frame_title': "Local Astrometry.net (ansvr) Configuration",
+    'local_solver_ansvr_path_label': "Ansvr Config/Data Path:",
+    'local_solver_info_text': "Leave paths empty if the solver is not used or is in system PATH.\nConsult solver documentation for specific path requirements.",
+    'executable_files': "Executable Files",
+    'astap_executable_win': "ASTAP Executable", # Specific for Windows .exe
+    'all_files': "All Files",
+    'select_astap_executable_title': "Select ASTAP Executable",
+    'select_astap_data_dir_title': "Select ASTAP Star Index Data Directory",
+    'select_local_ansvr_path_title': "Select Local Astrometry.net (ansvr) Path",
+    'astap_search_radius_label': "ASTAP Search Radius (deg):",
+    'tooltip_astap_search_radius': "ASTAP search radius around FITS header RA/DEC. Smaller values are faster if coordinates are good. Recommended: 0.5 to 10 degrees. (0.1-90.0 allowed).",
+    'invalid_astap_radius_range': "ASTAP Search Radius must be between 0.1 and 90.0 degrees.",
+    'invalid_astap_radius_value': "Invalid value for ASTAP Search Radius. Please enter a number.",
+    'settings_save_failed_on_ok': "Settings were updated in memory, but failed to save to file from this window. They will be saved when the main application closes if not overwritten.",
+    
     # final log popup 
     'Post-Processing Applied': "Post-Processing Applied",
     'Photutils 2D Background': "Photutils 2D Background",

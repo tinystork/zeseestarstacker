@@ -33,30 +33,29 @@ class SettingsManager:
         print("DEBUG (Settings reset_to_defaults): Tous les attributs de l'instance réinitialisés aux valeurs par défaut.")
 
 
+#####################################################################################################################################
 
 
 
-# --- DANS seestar/gui/settings.py ---
-# --- DANS la classe SettingsManager ---
 
+# DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py
     def update_from_ui(self, gui_instance):
         """
         Met à jour les paramètres de CETTE instance SettingsManager depuis les
         variables Tkinter de l'instance GUI fournie.
-        MODIFIED V4: Correction de la lecture de mosaic_settings depuis gui_instance.settings.
+        MODIFIED V5: Gestion améliorée pour les settings sans widget direct sur gui_instance.
         """
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning (SM update_from_ui): Cannot update settings from invalid GUI instance.")
             return
-        print("DEBUG SM (update_from_ui V4 - GUI Settings): Lecture des paramètres depuis l'UI...")
+        print("DEBUG SM (update_from_ui V5): Lecture des paramètres depuis l'UI...")
 
-        # Obtenir les valeurs par défaut du code au cas où un getattr échouerait
-        # ou pour comparaison si une valeur lue de l'UI est invalide.
         default_values_for_fallback = self.get_default_values()
 
         try:
             # --- Processing Settings ---
             self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar(value=default_values_for_fallback['input_folder'])).get()
+            # ... (tous les autres getattr pour les paramètres qui ONT un widget sur gui_instance) ...
             self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar(value=default_values_for_fallback['output_folder'])).get()
             self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar(value=default_values_for_fallback['reference_image_path'])).get()
             self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=default_values_for_fallback['stacking_mode'])).get()
@@ -66,72 +65,50 @@ class SettingsManager:
             self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=default_values_for_fallback['hot_pixel_threshold'])).get()
             self.neighborhood_size = getattr(gui_instance, 'neighborhood_size', tk.IntVar(value=default_values_for_fallback['neighborhood_size'])).get()
             self.cleanup_temp = getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar(value=default_values_for_fallback['cleanup_temp'])).get()
-            self.bayer_pattern = getattr(gui_instance, 'bayer_pattern_var', tk.StringVar(value=default_values_for_fallback['bayer_pattern'])).get() # Supposant que tu as bayer_pattern_var
+            self.bayer_pattern = getattr(gui_instance, 'bayer_pattern_var', tk.StringVar(value=default_values_for_fallback['bayer_pattern'])).get()
 
             # --- Quality Weighting Settings ---
             self.use_quality_weighting = getattr(gui_instance, 'use_weighting_var', tk.BooleanVar(value=default_values_for_fallback['use_quality_weighting'])).get()
+            # ... (autres pour quality weighting) ...
             self.weight_by_snr = getattr(gui_instance, 'weight_snr_var', tk.BooleanVar(value=default_values_for_fallback['weight_by_snr'])).get()
             self.weight_by_stars = getattr(gui_instance, 'weight_stars_var', tk.BooleanVar(value=default_values_for_fallback['weight_by_stars'])).get()
             self.snr_exponent = getattr(gui_instance, 'snr_exponent_var', tk.DoubleVar(value=default_values_for_fallback['snr_exponent'])).get()
             self.stars_exponent = getattr(gui_instance, 'stars_exponent_var', tk.DoubleVar(value=default_values_for_fallback['stars_exponent'])).get()
             self.min_weight = getattr(gui_instance, 'min_weight_var', tk.DoubleVar(value=default_values_for_fallback['min_weight'])).get()
 
+
             # --- Drizzle Settings (Globaux) ---
             self.use_drizzle = getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar(value=default_values_for_fallback['use_drizzle'])).get()
+            # ... (autres pour Drizzle) ...
             scale_str_ui = getattr(gui_instance, 'drizzle_scale_var', tk.StringVar(value=str(default_values_for_fallback['drizzle_scale']))).get()
             try: self.drizzle_scale = int(float(scale_str_ui))
-            except ValueError:
-                print(f"Warning SM: Invalid Drizzle scale value '{scale_str_ui}' from UI. Using default from code.")
-                self.drizzle_scale = default_values_for_fallback['drizzle_scale']
+            except ValueError: self.drizzle_scale = default_values_for_fallback['drizzle_scale']
             self.drizzle_wht_threshold = getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar(value=default_values_for_fallback['drizzle_wht_threshold'])).get()
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=default_values_for_fallback['drizzle_mode'])).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=default_values_for_fallback['drizzle_kernel'])).get()
             self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=default_values_for_fallback['drizzle_pixfrac'])).get()
 
-            # --- Mosaïque Settings (CORRIGÉ) ---
-            self.mosaic_mode_active = getattr(gui_instance, 'mosaic_mode_active', default_values_for_fallback['mosaic_mode_active'])
 
-            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Avant décision pour self.mosaic_settings:")
-            print(f"  -> self.mosaic_settings (valeur actuelle DANS CETTE instance SettingsManager AVANT lecture UI): {self.mosaic_settings}")
+            # --- Mosaïque Settings ---
+            # mosaic_mode_active et mosaic_settings sont mis à jour par MosaicSettingsWindow directement sur self.settings
+            # On ne les lit PAS depuis gui_instance ici pour éviter de les écraser par des valeurs par défaut si pas de widget direct.
+            current_mosaic_mode_active = getattr(self, 'mosaic_mode_active', "NON_DEFINI_SUR_SELF")
+            print(f"  DEBUG SM (update_from_ui): mosaic_mode_active: Conservation valeur actuelle: {current_mosaic_mode_active}")
+            current_mosaic_settings_dict = getattr(self, 'mosaic_settings', {})
+            print(f"  DEBUG SM (update_from_ui): mosaic_settings: Conservation valeur actuelle: {current_mosaic_settings_dict.get('alignment_mode', 'NonTrouve')}")
 
-            # Lire le dictionnaire mosaic_settings depuis l'instance `settings` de `gui_instance`.
-            # `gui_instance.settings` est l'objet SettingsManager de SeestarStackerGUI.
-            # `gui_instance.settings.mosaic_settings` est le dictionnaire qui a été mis à jour par MosaicSettingsWindow._on_ok.
-            gui_settings_obj = getattr(gui_instance, 'settings', None)
-            mosaic_settings_from_gui_settings_obj = None # Initialiser
-
-            if gui_settings_obj and hasattr(gui_settings_obj, 'mosaic_settings') and \
-               isinstance(gui_settings_obj.mosaic_settings, dict) and \
-               gui_settings_obj.mosaic_settings: # S'assurer qu'il existe, est un dict, et n'est pas vide
-
-                mosaic_settings_from_gui_settings_obj = gui_settings_obj.mosaic_settings.copy()
-                print(f"  -> mosaic_settings lu depuis gui_instance.settings.mosaic_settings: {mosaic_settings_from_gui_settings_obj}")
-                print("  -> Décision: Utilisation de mosaic_settings depuis gui_instance.settings car il contient des données.")
-                self.mosaic_settings = mosaic_settings_from_gui_settings_obj # On met à jour self (CE SettingsManager)
-            else:
-                # Si la source depuis gui_instance.settings.mosaic_settings n'est pas valide/trouvée/vide,
-                # on conserve la valeur que self.mosaic_settings avait déjà (chargée du JSON ou les défauts initiaux de CETTE instance).
-                # On s'assure juste que c'est au moins un dictionnaire (il devrait l'être après __init__ ou load_settings).
-                print(f"  -> Décision: Conservation de self.mosaic_settings (valeur actuelle) car la source depuis gui_instance.settings.mosaic_settings est vide/invalide/non trouvée.")
-                if not isinstance(self.mosaic_settings, dict) or not self.mosaic_settings:
-                    # Fallback ultime si self.mosaic_settings était aussi corrompu pour une raison quelconque.
-                    print(f"    WARN SM: self.mosaic_settings actuel aussi invalide ({self.mosaic_settings}), réinitialisation aux défauts du code pour mosaic_settings.")
-                    self.mosaic_settings = default_values_for_fallback.get('mosaic_settings', {}).copy()
-            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Valeur FINALE de self.mosaic_settings après décision: {self.mosaic_settings}")
-            # --- FIN CORRECTION Mosaïque Settings ---
-
-            # --- Astrometry.net API Key ---
+            # --- Astrometry.net API Key (Widget direct sur GUI principal) ---
             self.astrometry_api_key = getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar(value=default_values_for_fallback['astrometry_api_key'])).get().strip()
-            print(f"DEBUG SM (update_from_ui V4 - GUI Settings): Clé API Astrometry lue de l'UI (longueur: {len(self.astrometry_api_key)}).")
+            print(f"DEBUG SM (update_from_ui): Clé API Astrometry lue de l'UI (longueur: {len(self.astrometry_api_key)}).")
 
-            # --- Post-Processing Settings (Chroma, SCNR, Expert, Feathering, LowWHT) ---
+            # --- Post-Processing Settings (Ceux avec widgets directs sur GUI principal) ---
             self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=default_values_for_fallback['apply_chroma_correction'])).get()
             self.apply_final_scnr = getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar(value=default_values_for_fallback['apply_final_scnr'])).get()
-            self.final_scnr_target_channel = default_values_for_fallback['final_scnr_target_channel']
+            # ... (autres pour SCNR, BN, CB, Crop, Photutils BN, Feathering, LowWHT qui sont sur l'UI principale)
+            self.final_scnr_target_channel = default_values_for_fallback['final_scnr_target_channel'] # Pas d'UI directe pour ça
             self.final_scnr_amount = getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar(value=default_values_for_fallback['final_scnr_amount'])).get()
             self.final_scnr_preserve_luminosity = getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar(value=default_values_for_fallback['final_scnr_preserve_luminosity'])).get()
-            
-            # BN (Expert)
+
             self.bn_grid_size_str = getattr(gui_instance, 'bn_grid_size_str_var', tk.StringVar(value=default_values_for_fallback['bn_grid_size_str'])).get()
             self.bn_perc_low = getattr(gui_instance, 'bn_perc_low_var', tk.IntVar(value=default_values_for_fallback['bn_perc_low'])).get()
             self.bn_perc_high = getattr(gui_instance, 'bn_perc_high_var', tk.IntVar(value=default_values_for_fallback['bn_perc_high'])).get()
@@ -139,33 +116,39 @@ class SettingsManager:
             self.bn_min_gain = getattr(gui_instance, 'bn_min_gain_var', tk.DoubleVar(value=default_values_for_fallback['bn_min_gain'])).get()
             self.bn_max_gain = getattr(gui_instance, 'bn_max_gain_var', tk.DoubleVar(value=default_values_for_fallback['bn_max_gain'])).get()
 
-            # CB (Expert)
             self.cb_border_size = getattr(gui_instance, 'cb_border_size_var', tk.IntVar(value=default_values_for_fallback['cb_border_size'])).get()
             self.cb_blur_radius = getattr(gui_instance, 'cb_blur_radius_var', tk.IntVar(value=default_values_for_fallback['cb_blur_radius'])).get()
             self.cb_min_b_factor = getattr(gui_instance, 'cb_min_b_factor_var', tk.DoubleVar(value=default_values_for_fallback['cb_min_b_factor'])).get()
             self.cb_max_b_factor = getattr(gui_instance, 'cb_max_b_factor_var', tk.DoubleVar(value=default_values_for_fallback['cb_max_b_factor'])).get()
 
-            # Rognage (Expert)
             self.final_edge_crop_percent = getattr(gui_instance, 'final_edge_crop_percent_var', tk.DoubleVar(value=default_values_for_fallback['final_edge_crop_percent'])).get()
-            
-            # Photutils BN (Expert)
+
             self.apply_photutils_bn = getattr(gui_instance, 'apply_photutils_bn_var', tk.BooleanVar(value=default_values_for_fallback['apply_photutils_bn'])).get()
             self.photutils_bn_box_size = getattr(gui_instance, 'photutils_bn_box_size_var', tk.IntVar(value=default_values_for_fallback['photutils_bn_box_size'])).get()
             self.photutils_bn_filter_size = getattr(gui_instance, 'photutils_bn_filter_size_var', tk.IntVar(value=default_values_for_fallback['photutils_bn_filter_size'])).get()
             self.photutils_bn_sigma_clip = getattr(gui_instance, 'photutils_bn_sigma_clip_var', tk.DoubleVar(value=default_values_for_fallback['photutils_bn_sigma_clip'])).get()
             self.photutils_bn_exclude_percentile = getattr(gui_instance, 'photutils_bn_exclude_percentile_var', tk.DoubleVar(value=default_values_for_fallback['photutils_bn_exclude_percentile'])).get()
 
-            # Feathering (Expert)
             self.apply_feathering = getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar(value=default_values_for_fallback['apply_feathering'])).get()
             self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=default_values_for_fallback['feather_blur_px'])).get()
 
-            # Low WHT Mask (Expert)
             self.apply_low_wht_mask = getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar(value=default_values_for_fallback['apply_low_wht_mask'])).get()
             self.low_wht_percentile = getattr(gui_instance, 'low_wht_pct_var', tk.IntVar(value=default_values_for_fallback['low_wht_percentile'])).get()
             self.low_wht_soften_px = getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar(value=default_values_for_fallback['low_wht_soften_px'])).get()
 
+            # --- MODIFIÉ: Gestion pour astap_search_radius et autres settings des solveurs locaux ---
+            # Ces settings sont modifiés via LocalSolverSettingsWindow, qui met à jour self.settings directement.
+            # Donc, ici, on CONSERVE leur valeur actuelle sur self.settings.
+            params_from_modals = ['use_local_solver_priority', 'astap_path', 'astap_data_dir', 'local_ansvr_path', 'astap_search_radius']
+            for param_name in params_from_modals:
+                current_val = getattr(self, param_name, "NON_DEFINI_SUR_SELF_POUR_MODAL_PARAMS")
+                print(f"  DEBUG SM (update_from_ui): Paramètre modal '{param_name}': Conservation valeur actuelle: {current_val}")
+            # --- FIN MODIFICATION ---
+
+
             # --- Preview Settings ---
             self.preview_stretch_method = getattr(gui_instance, 'preview_stretch_method', tk.StringVar(value=default_values_for_fallback['preview_stretch_method'])).get()
+            # ... (autres pour Preview)
             self.preview_black_point = getattr(gui_instance, 'preview_black_point', tk.DoubleVar(value=default_values_for_fallback['preview_black_point'])).get()
             self.preview_white_point = getattr(gui_instance, 'preview_white_point', tk.DoubleVar(value=default_values_for_fallback['preview_white_point'])).get()
             self.preview_gamma = getattr(gui_instance, 'preview_gamma', tk.DoubleVar(value=default_values_for_fallback['preview_gamma'])).get()
@@ -183,21 +166,20 @@ class SettingsManager:
                  if isinstance(current_geo_ui, str) and 'x' in current_geo_ui and '+' in current_geo_ui:
                      self.window_geometry = current_geo_ui
 
-            print("DEBUG SM (update_from_ui V4 - GUI Settings): Fin lecture UI.")
+            print("DEBUG SM (update_from_ui V5): Fin lecture UI.")
 
         except AttributeError as ae:
-            print(f"Error SM (update_from_ui V4 - GUI Settings) (AttributeError): {ae}. Un widget/variable Tk est peut-être manquant sur gui_instance.")
+            print(f"Error SM (update_from_ui V5) (AttributeError): {ae}. Un widget/variable Tk est peut-être manquant sur gui_instance.")
             traceback.print_exc(limit=1)
         except tk.TclError as te:
-            print(f"Error SM (update_from_ui V4 - GUI Settings) (TclError): {te}. Un widget Tk est peut-être détruit.")
+            print(f"Error SM (update_from_ui V5) (TclError): {te}. Un widget Tk est peut-être détruit.")
         except Exception as e:
-            print(f"Unexpected error SM (update_from_ui V4 - GUI Settings): {e}")
+            print(f"Unexpected error SM (update_from_ui V5): {e}")
             traceback.print_exc(limit=2)
 
-# --- FIN de la méthode update_from_ui ---
 
 
-
+#######################################################################################################################################
 
 
     def apply_to_ui(self, gui_instance):
@@ -346,6 +328,9 @@ class SettingsManager:
             getattr(gui_instance, 'preview_g_gain', tk.DoubleVar()).set(self.preview_g_gain)
             getattr(gui_instance, 'preview_b_gain', tk.DoubleVar()).set(self.preview_b_gain)
 
+
+
+
             # --- UI Settings ---
             # ... (inchangé) ...
             getattr(gui_instance, 'language_var', tk.StringVar()).set(self.language)
@@ -362,6 +347,28 @@ class SettingsManager:
             # NOUVEAU: Mettre à jour l'état des options Low WHT Mask (si une telle méthode est créée)
             if hasattr(gui_instance, '_update_low_wht_mask_options_state'): # Sera créé à l'étape UI
                 gui_instance._update_low_wht_mask_options_state()
+
+            # --- NOUVEAU: Paramètres Solveurs Locaux Astrométriques ---
+            #defaults_dict['use_local_solver_priority'] = False # Si True, essayer solveurs locaux AVANT Astrometry.net
+            #defaults_dict['astap_path'] = ""                   # Chemin vers l'exécutable ASTAP
+            #defaults_dict['astap_data_dir'] = ""               # Chemin vers le dossier de données d'index ASTAP (ex: G17, H18)
+            # Pour Astrometry.net local, la configuration est plus complexe.
+            # On pourrait stocker le chemin vers un fichier de config ou un répertoire racine.
+            # Pour l'instant, on met un placeholder. On affinera si besoin.
+            #defaults_dict['local_ansvr_path'] = ""             # Chemin vers config/exécutable de ansvr local
+            # On pourrait aussi avoir des booléens pour activer spécifiquement chaque solveur si on veut
+            # les désactiver même si les chemins sont remplis, mais 'use_local_solver_priority' est un bon début.
+
+            #print(f"DEBUG (SettingsManager get_default_values): Ajout des défauts pour solveurs locaux.")
+            #return defaults_dict
+            # --- NOUVEAU: Application astap_search_radius à l'UI ---
+            # On suppose que gui_instance aura une variable 'astap_search_radius_var'
+            # Si elle n'existe pas, getattr retournera une DoubleVar temporaire qui ne sera pas utilisée.
+            # Si elle existe, sa valeur sera mise à jour.
+
+            getattr(gui_instance, 'astap_search_radius_var', tk.DoubleVar()).set(self.astap_search_radius)
+            print(f"DEBUG (Settings apply_to_ui): astap_search_radius appliqué à l'UI (valeur: {self.astap_search_radius})")
+            # --- FIN NOUVEAU ---
             print("DEBUG (Settings apply_to_ui): Fin application paramètres UI.") # <-- AJOUTÉ DEBUG
 
         # ... (gestion erreurs inchangée) ...
@@ -444,7 +451,13 @@ class SettingsManager:
         defaults_dict['apply_low_wht_mask'] = False   
         defaults_dict['low_wht_percentile'] = 5       
         defaults_dict['low_wht_soften_px'] = 128      
-
+        defaults_dict['use_local_solver_priority'] = False
+        defaults_dict['astap_path'] = ""                  
+        defaults_dict['astap_data_dir'] = ""              
+        defaults_dict['local_ansvr_path'] = ""
+        # ---  Rayon de recherche ASTAP ---
+        defaults_dict['astap_search_radius'] = 5.0 # Valeur par défaut en degrés
+        # ---  ---
         # --- Paramètres Mosaïque & Astrometry.net ---
         defaults_dict['mosaic_mode_active'] = False # Ce flag est pour l'UI principale
         
@@ -505,242 +518,286 @@ class SettingsManager:
 
 ###################################################################################################################################
 
+
     def validate_settings(self):
         """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
         messages = []
-        print("DEBUG (Settings validate_settings): DÉBUT de la validation.") # <-- DEBUG
+        print("DEBUG (Settings validate_settings): DÉBUT de la validation.")
 
         # Obtenir les valeurs par défaut pour fallback SANS modifier l'instance actuelle
         defaults_fallback = self.get_default_values()
-        print(f"DEBUG (Settings validate_settings): Valeur self.apply_photutils_bn AVANT TOUTE VALIDATION (lue de l'UI): {getattr(self, 'apply_photutils_bn', 'NON_DEFINI_ENCORE')}") # <-- DEBUG
+        # Log initial pour un paramètre spécifique afin de suivre son état
+        print(f"DEBUG (Settings validate_settings): Valeur self.apply_photutils_bn AVANT TOUTE VALIDATION (lue de l'UI): {getattr(self, 'apply_photutils_bn', 'NON_DEFINI_ENCORE')}")
 
         try:
-             # --- Processing Settings Validation ---
-             # ... (validation kappa, batch_size, etc. comme avant, mais utilise defaults_fallback) ...
-             self.kappa = float(self.kappa)
-             if not (1.0 <= self.kappa <= 5.0): 
-                 original = self.kappa; self.kappa = np.clip(self.kappa, 1.0, 5.0)
-                 messages.append(f"Kappa ({original:.1f}) ajusté à {self.kappa:.1f}")
-             self.batch_size = int(self.batch_size)
-             if self.batch_size < 0: 
-                 original = self.batch_size; self.batch_size = 0 # 0 sera estimé par le backend
-                 messages.append(f"Taille Lot ({original}) ajusté à {self.batch_size} (auto)")
-             self.hot_pixel_threshold = float(self.hot_pixel_threshold)
-             if not (0.5 <= self.hot_pixel_threshold <= 10.0): 
-                 original = self.hot_pixel_threshold; self.hot_pixel_threshold = np.clip(self.hot_pixel_threshold, 0.5, 10.0)
-                 messages.append(f"Seuil Px Chauds ({original:.1f}) ajusté à {self.hot_pixel_threshold:.1f}")
-             self.neighborhood_size = int(self.neighborhood_size)
-             if self.neighborhood_size < 3: 
-                 original = self.neighborhood_size; self.neighborhood_size = 3
-                 messages.append(f"Voisinage Px Chauds ({original}) ajusté à {self.neighborhood_size}")
-             if self.neighborhood_size % 2 == 0: 
-                 original = self.neighborhood_size; self.neighborhood_size += 1
-                 messages.append(f"Voisinage Px Chauds ({original}) ajusté à {self.neighborhood_size} (impair)")
+            # --- Processing Settings Validation ---
+            print("  -> Validating Processing Settings...")
+            try:
+                self.kappa = float(self.kappa)
+                if not (1.0 <= self.kappa <= 5.0):
+                    original = self.kappa; self.kappa = np.clip(self.kappa, 1.0, 5.0)
+                    messages.append(f"Kappa ({original:.1f}) ajusté à {self.kappa:.1f}")
+            except (ValueError, TypeError):
+                original = self.kappa; self.kappa = defaults_fallback['kappa']
+                messages.append(f"Kappa ('{original}') invalide, réinitialisé à {self.kappa:.1f}")
 
-             # --- Quality Weighting Validation ---
-             self.use_quality_weighting = bool(self.use_quality_weighting)
-             self.weight_by_snr = bool(self.weight_by_snr)
-             self.weight_by_stars = bool(self.weight_by_stars)
-             self.snr_exponent = float(self.snr_exponent)
-             self.stars_exponent = float(self.stars_exponent)
-             self.min_weight = float(self.min_weight)
-             if self.snr_exponent <= 0: 
-                 original = self.snr_exponent; self.snr_exponent = defaults_fallback['snr_exponent']
-                 messages.append(f"Exposant SNR ({original:.1f}) ajusté à {self.snr_exponent:.1f}")
-             if self.stars_exponent <= 0: 
-                 original = self.stars_exponent; self.stars_exponent = defaults_fallback['stars_exponent']
-                 messages.append(f"Exposant Étoiles ({original:.1f}) ajusté à {self.stars_exponent:.1f}")
-             if not (0 < self.min_weight <= 1.0): 
-                 original = self.min_weight; self.min_weight = np.clip(self.min_weight, 0.01, 1.0)
-                 messages.append(f"Poids Min ({original:.2f}) ajusté à {self.min_weight:.2f}")
-             if self.use_quality_weighting and not (self.weight_by_snr or self.weight_by_stars):
-                 self.weight_by_snr = True
-                 messages.append("Pondération activée mais aucune métrique choisie. SNR activé par défaut.")
+            try:
+                self.batch_size = int(self.batch_size)
+                if self.batch_size < 0: # 0 est permis pour auto-estimation
+                    original = self.batch_size; self.batch_size = 0
+                    messages.append(f"Taille Lot ({original}) ajusté à {self.batch_size} (auto)")
+            except (ValueError, TypeError):
+                original = self.batch_size; self.batch_size = defaults_fallback['batch_size']
+                messages.append(f"Taille Lot ('{original}') invalide, réinitialisé à {self.batch_size}")
 
-             # --- Drizzle Settings Validation ---
-             self.use_drizzle = bool(self.use_drizzle)
-             try:
-                 scale_num = int(float(self.drizzle_scale))
-                 if scale_num not in [2, 3, 4]:
-                     original = self.drizzle_scale; self.drizzle_scale = defaults_fallback['drizzle_scale']
-                     messages.append(f"Échelle Drizzle ({original}) invalide, réinitialisée à {self.drizzle_scale}")
-                 else: self.drizzle_scale = scale_num
-             except (ValueError, TypeError):
-                 original = self.drizzle_scale; self.drizzle_scale = defaults_fallback['drizzle_scale']
-                 messages.append(f"Échelle Drizzle invalide ({original}), réinitialisée à {self.drizzle_scale}")
-             try:
-                 self.drizzle_wht_threshold = float(self.drizzle_wht_threshold)
-                 if not (0.0 < self.drizzle_wht_threshold <= 1.0):
-                      original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = np.clip(self.drizzle_wht_threshold, 0.1, 1.0)
-                      messages.append(f"Seuil Drizzle WHT ({original:.2f}) ajusté à {self.drizzle_wht_threshold:.2f}")
-             except (ValueError, TypeError):
-                 original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = defaults_fallback['drizzle_wht_threshold']
-                 messages.append(f"Seuil Drizzle WHT invalide ({original}), réinitialisé à {self.drizzle_wht_threshold:.2f}")
-             
-             valid_drizzle_modes = ["Final", "Incremental"]
-             if not isinstance(self.drizzle_mode, str) or self.drizzle_mode not in valid_drizzle_modes:
-                 original = self.drizzle_mode # Stocker la valeur originale avant correction
-                 self.drizzle_mode = defaults_fallback['drizzle_mode'] # Utiliser le fallback pour corriger
-                 messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
+            try:
+                self.hot_pixel_threshold = float(self.hot_pixel_threshold)
+                if not (0.5 <= self.hot_pixel_threshold <= 10.0):
+                    original = self.hot_pixel_threshold; self.hot_pixel_threshold = np.clip(self.hot_pixel_threshold, 0.5, 10.0)
+                    messages.append(f"Seuil Px Chauds ({original:.1f}) ajusté à {self.hot_pixel_threshold:.1f}")
+            except (ValueError, TypeError):
+                original = self.hot_pixel_threshold; self.hot_pixel_threshold = defaults_fallback['hot_pixel_threshold']
+                messages.append(f"Seuil Px Chauds ('{original}') invalide, réinitialisé à {self.hot_pixel_threshold:.1f}")
 
+            try:
+                self.neighborhood_size = int(self.neighborhood_size)
+                if self.neighborhood_size < 3:
+                    original = self.neighborhood_size; self.neighborhood_size = 3
+                    messages.append(f"Voisinage Px Chauds ({original}) ajusté à {self.neighborhood_size}")
+                if self.neighborhood_size % 2 == 0:
+                    original = self.neighborhood_size; self.neighborhood_size += 1
+                    messages.append(f"Voisinage Px Chauds ({original}) ajusté à {self.neighborhood_size} (impair)")
+            except (ValueError, TypeError):
+                original = self.neighborhood_size; self.neighborhood_size = defaults_fallback['neighborhood_size']
+                messages.append(f"Voisinage Px Chauds ('{original}') invalide, réinitialisé à {self.neighborhood_size}")
 
-            ###  Validation Paramètres SCNR Final ###
-             self.apply_final_scnr = bool(self.apply_final_scnr)
-             self.final_scnr_target_channel = str(self.final_scnr_target_channel).lower()
-             if self.final_scnr_target_channel not in ['green', 'blue']:
-                 original_target = self.final_scnr_target_channel
-                 self.final_scnr_target_channel = defaults_fallback['final_scnr_target_channel']
-                 messages.append(f"Cible SCNR Final ('{original_target}') invalide, réinitialisée à '{self.final_scnr_target_channel}'.")
-             try:
-                 self.final_scnr_amount = float(self.final_scnr_amount)
-                 if not (0.0 <= self.final_scnr_amount <= 1.0):
-                     original_amount = self.final_scnr_amount
-                     self.final_scnr_amount = np.clip(self.final_scnr_amount, 0.0, 1.0)
-                     messages.append(f"Intensité SCNR Final ({original_amount:.2f}) hors limites [0.0, 1.0], ajustée à {self.final_scnr_amount:.2f}.")
-             except (ValueError, TypeError):
-                 original_amount = self.final_scnr_amount
-                 self.final_scnr_amount = defaults_fallback['final_scnr_amount']
-                 messages.append(f"Intensité SCNR Final ('{original_amount}') invalide, réinitialisée à {self.final_scnr_amount:.2f}.")
-             self.final_scnr_preserve_luminosity = bool(self.final_scnr_preserve_luminosity)
-            
-            ### Validation Paramètres Expert ###
-             print("DEBUG (Settings validate_settings): Validation des paramètres Expert...")
-             # BN
-             if not isinstance(self.bn_grid_size_str, str) or self.bn_grid_size_str not in ["8x8", "16x16", "24x24", "32x32", "64x64"]:
-                 messages.append(f"Taille grille BN invalide ('{self.bn_grid_size_str}'), réinitialisée."); self.bn_grid_size_str = defaults_fallback['bn_grid_size_str']
-             self.bn_perc_low = int(np.clip(self.bn_perc_low, 0, 40)); self.bn_perc_high = int(np.clip(self.bn_perc_high, self.bn_perc_low + 1, 90))
-             self.bn_std_factor = float(np.clip(self.bn_std_factor, 0.1, 10.0))
-             self.bn_min_gain = float(np.clip(self.bn_min_gain, 0.05, 5.0)); self.bn_max_gain = float(np.clip(self.bn_max_gain, self.bn_min_gain, 20.0))
-             # CB
-             self.cb_border_size = int(np.clip(self.cb_border_size, 5, 200))
-             self.cb_blur_radius = int(np.clip(self.cb_blur_radius, 0, 100))
-             self.cb_min_b_factor = float(np.clip(self.cb_min_b_factor, 0.1, 1.0))
-             self.cb_max_b_factor = float(np.clip(self.cb_max_b_factor, self.cb_min_b_factor, 5.0))
-             # Rognage
-             self.final_edge_crop_percent = float(np.clip(self.final_edge_crop_percent, 0.0, 25.0))
+            # --- Quality Weighting Validation ---
+            print("  -> Validating Quality Weighting Settings...")
+            self.use_quality_weighting = bool(getattr(self, 'use_quality_weighting', defaults_fallback['use_quality_weighting']))
+            self.weight_by_snr = bool(getattr(self, 'weight_by_snr', defaults_fallback['weight_by_snr']))
+            self.weight_by_stars = bool(getattr(self, 'weight_by_stars', defaults_fallback['weight_by_stars']))
+            try:
+                self.snr_exponent = float(self.snr_exponent)
+                if self.snr_exponent <= 0:
+                    original = self.snr_exponent; self.snr_exponent = defaults_fallback['snr_exponent']
+                    messages.append(f"Exposant SNR ({original:.1f}) ajusté à {self.snr_exponent:.1f}")
+            except (ValueError, TypeError):
+                original = self.snr_exponent; self.snr_exponent = defaults_fallback['snr_exponent']
+                messages.append(f"Exposant SNR ('{original}') invalide, réinitialisé à {self.snr_exponent:.1f}")
+            try:
+                self.stars_exponent = float(self.stars_exponent)
+                if self.stars_exponent <= 0:
+                    original = self.stars_exponent; self.stars_exponent = defaults_fallback['stars_exponent']
+                    messages.append(f"Exposant Étoiles ({original:.1f}) ajusté à {self.stars_exponent:.1f}")
+            except (ValueError, TypeError):
+                original = self.stars_exponent; self.stars_exponent = defaults_fallback['stars_exponent']
+                messages.append(f"Exposant Étoiles ('{original}') invalide, réinitialisé à {self.stars_exponent:.1f}")
+            try:
+                self.min_weight = float(self.min_weight)
+                if not (0 < self.min_weight <= 1.0):
+                    original = self.min_weight; self.min_weight = np.clip(self.min_weight, 0.01, 1.0)
+                    messages.append(f"Poids Min ({original:.2f}) ajusté à {self.min_weight:.2f}")
+            except (ValueError, TypeError):
+                original = self.min_weight; self.min_weight = defaults_fallback['min_weight']
+                messages.append(f"Poids Min ('{original}') invalide, réinitialisé à {self.min_weight:.2f}")
 
-             ### Validation Paramètres Photutils BN ###
-             print("DEBUG (Settings validate_settings): Début validation bloc Photutils BN.")
-             # La valeur self.apply_photutils_bn est celle qui a été définie par update_from_ui
-             # (qui l'a lue depuis l'UI). On s'assure juste que c'est un booléen.
-             # Ce cast est redondant si update_from_ui fait déjà bool(), mais ne nuit pas.
-             current_apply_photutils_bn_value = getattr(self, 'apply_photutils_bn', defaults_fallback['apply_photutils_bn'])
-             self.apply_photutils_bn = bool(current_apply_photutils_bn_value)
-             print(f"DEBUG (Settings validate_settings): self.apply_photutils_bn APRES cast en bool = {self.apply_photutils_bn} (venait de {current_apply_photutils_bn_value})")
+            if self.use_quality_weighting and not (self.weight_by_snr or self.weight_by_stars):
+                self.weight_by_snr = True
+                messages.append("Pondération activée mais aucune métrique choisie. SNR activé par défaut.")
 
-             self.photutils_bn_box_size = int(np.clip(getattr(self, 'photutils_bn_box_size', defaults_fallback['photutils_bn_box_size']), 8, 1024))
-             self.photutils_bn_filter_size = int(np.clip(getattr(self, 'photutils_bn_filter_size', defaults_fallback['photutils_bn_filter_size']), 1, 25))
-             if self.photutils_bn_filter_size % 2 == 0: self.photutils_bn_filter_size += 1
-             self.photutils_bn_sigma_clip = float(np.clip(getattr(self, 'photutils_bn_sigma_clip', defaults_fallback['photutils_bn_sigma_clip']), 0.5, 10.0))
-             self.photutils_bn_exclude_percentile = float(np.clip(getattr(self, 'photutils_bn_exclude_percentile', defaults_fallback['photutils_bn_exclude_percentile']), 0.0, 100.0))
-             print("DEBUG (Settings validate_settings): Fin validation bloc Photutils BN.")
-            
-             ### Validation Clé API Astrometry.net ###
-             if not isinstance(self.astrometry_api_key, str):
+            # --- Drizzle Settings Validation ---
+            print("  -> Validating Drizzle Settings...")
+            self.use_drizzle = bool(getattr(self, 'use_drizzle', defaults_fallback['use_drizzle']))
+            try:
+                scale_num = int(float(self.drizzle_scale)) # Tenter de convertir même si c'est un string
+                if scale_num not in [2, 3, 4]:
+                    original = self.drizzle_scale; self.drizzle_scale = defaults_fallback['drizzle_scale']
+                    messages.append(f"Échelle Drizzle ({original}) invalide, réinitialisée à {self.drizzle_scale}")
+                else: self.drizzle_scale = scale_num
+            except (ValueError, TypeError):
+                original = self.drizzle_scale; self.drizzle_scale = defaults_fallback['drizzle_scale']
+                messages.append(f"Échelle Drizzle invalide ('{original}'), réinitialisée à {self.drizzle_scale}")
+            try:
+                self.drizzle_wht_threshold = float(self.drizzle_wht_threshold)
+                if not (0.0 < self.drizzle_wht_threshold <= 1.0):
+                    original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = np.clip(self.drizzle_wht_threshold, 0.1, 1.0)
+                    messages.append(f"Seuil Drizzle WHT ({original:.2f}) ajusté à {self.drizzle_wht_threshold:.2f}")
+            except (ValueError, TypeError):
+                original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = defaults_fallback['drizzle_wht_threshold']
+                messages.append(f"Seuil Drizzle WHT invalide ('{original}'), réinitialisé à {self.drizzle_wht_threshold:.2f}")
+
+            valid_drizzle_modes = ["Final", "Incremental"]
+            current_driz_mode = getattr(self, 'drizzle_mode', defaults_fallback['drizzle_mode'])
+            if not isinstance(current_driz_mode, str) or current_driz_mode not in valid_drizzle_modes:
+                original = current_driz_mode; self.drizzle_mode = defaults_fallback['drizzle_mode']
+                messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
+            else:
+                self.drizzle_mode = current_driz_mode # S'assurer qu'il est bien sur self
+
+            valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
+            current_driz_kernel = getattr(self, 'drizzle_kernel', defaults_fallback['drizzle_kernel'])
+            if not isinstance(current_driz_kernel, str) or current_driz_kernel.lower() not in valid_kernels:
+                original = current_driz_kernel; self.drizzle_kernel = defaults_fallback['drizzle_kernel']
+                messages.append(f"Noyau Drizzle ('{original}') invalide, réinitialisé à '{self.drizzle_kernel}'")
+            else:
+                self.drizzle_kernel = current_driz_kernel.lower()
+            try:
+                self.drizzle_pixfrac = float(self.drizzle_pixfrac)
+                if not (0.01 <= self.drizzle_pixfrac <= 1.0):
+                    original = self.drizzle_pixfrac; self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 1.0)
+                    messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}")
+            except (ValueError, TypeError):
+                original = self.drizzle_pixfrac; self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']
+                messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
+
+            # --- SCNR Final Validation ---
+            print("  -> Validating SCNR Settings...")
+            self.apply_final_scnr = bool(getattr(self, 'apply_final_scnr', defaults_fallback['apply_final_scnr']))
+            self.final_scnr_target_channel = str(getattr(self, 'final_scnr_target_channel', defaults_fallback['final_scnr_target_channel'])).lower()
+            if self.final_scnr_target_channel not in ['green', 'blue']:
+                original_target = self.final_scnr_target_channel; self.final_scnr_target_channel = defaults_fallback['final_scnr_target_channel']
+                messages.append(f"Cible SCNR Final ('{original_target}') invalide, réinitialisée à '{self.final_scnr_target_channel}'.")
+            try:
+                self.final_scnr_amount = float(self.final_scnr_amount)
+                if not (0.0 <= self.final_scnr_amount <= 1.0):
+                    original_amount = self.final_scnr_amount; self.final_scnr_amount = np.clip(self.final_scnr_amount, 0.0, 1.0)
+                    messages.append(f"Intensité SCNR Final ({original_amount:.2f}) hors limites [0.0, 1.0], ajustée à {self.final_scnr_amount:.2f}.")
+            except (ValueError, TypeError):
+                original_amount = self.final_scnr_amount; self.final_scnr_amount = defaults_fallback['final_scnr_amount']
+                messages.append(f"Intensité SCNR Final ('{original_amount}') invalide, réinitialisée à {self.final_scnr_amount:.2f}.")
+            self.final_scnr_preserve_luminosity = bool(getattr(self, 'final_scnr_preserve_luminosity', defaults_fallback['final_scnr_preserve_luminosity']))
+
+            # --- Expert Settings Validation ---
+            print("  -> Validating Expert Settings...")
+            # BN
+            current_bn_grid = getattr(self, 'bn_grid_size_str', defaults_fallback['bn_grid_size_str'])
+            if not isinstance(current_bn_grid, str) or current_bn_grid not in ["8x8", "16x16", "24x24", "32x32", "64x64"]:
+                messages.append(f"Taille grille BN invalide ('{current_bn_grid}'), réinitialisée."); self.bn_grid_size_str = defaults_fallback['bn_grid_size_str']
+            else: self.bn_grid_size_str = current_bn_grid
+            self.bn_perc_low = int(np.clip(getattr(self, 'bn_perc_low', defaults_fallback['bn_perc_low']), 0, 40))
+            self.bn_perc_high = int(np.clip(getattr(self, 'bn_perc_high', defaults_fallback['bn_perc_high']), self.bn_perc_low + 1, 90))
+            self.bn_std_factor = float(np.clip(getattr(self, 'bn_std_factor', defaults_fallback['bn_std_factor']), 0.1, 10.0))
+            self.bn_min_gain = float(np.clip(getattr(self, 'bn_min_gain', defaults_fallback['bn_min_gain']), 0.05, 5.0))
+            self.bn_max_gain = float(np.clip(getattr(self, 'bn_max_gain', defaults_fallback['bn_max_gain']), self.bn_min_gain, 20.0))
+            # CB
+            self.cb_border_size = int(np.clip(getattr(self, 'cb_border_size', defaults_fallback['cb_border_size']), 5, 200))
+            self.cb_blur_radius = int(np.clip(getattr(self, 'cb_blur_radius', defaults_fallback['cb_blur_radius']), 0, 100))
+            self.cb_min_b_factor = float(np.clip(getattr(self, 'cb_min_b_factor', defaults_fallback['cb_min_b_factor']), 0.1, 1.0))
+            self.cb_max_b_factor = float(np.clip(getattr(self, 'cb_max_b_factor', defaults_fallback['cb_max_b_factor']), self.cb_min_b_factor, 5.0))
+            # Rognage
+            self.final_edge_crop_percent = float(np.clip(getattr(self, 'final_edge_crop_percent', defaults_fallback['final_edge_crop_percent']), 0.0, 25.0))
+
+            # Photutils BN
+            print("    -> Validating Photutils BN...")
+            self.apply_photutils_bn = bool(getattr(self, 'apply_photutils_bn', defaults_fallback['apply_photutils_bn']))
+            self.photutils_bn_box_size = int(np.clip(getattr(self, 'photutils_bn_box_size', defaults_fallback['photutils_bn_box_size']), 8, 1024))
+            self.photutils_bn_filter_size = int(np.clip(getattr(self, 'photutils_bn_filter_size', defaults_fallback['photutils_bn_filter_size']), 1, 25))
+            if self.photutils_bn_filter_size % 2 == 0: self.photutils_bn_filter_size += 1
+            self.photutils_bn_sigma_clip = float(np.clip(getattr(self, 'photutils_bn_sigma_clip', defaults_fallback['photutils_bn_sigma_clip']), 0.5, 10.0))
+            self.photutils_bn_exclude_percentile = float(np.clip(getattr(self, 'photutils_bn_exclude_percentile', defaults_fallback['photutils_bn_exclude_percentile']), 0.0, 100.0))
+
+            # Astrometry API Key
+            current_api_key = getattr(self, 'astrometry_api_key', defaults_fallback['astrometry_api_key'])
+            if not isinstance(current_api_key, str):
                 messages.append("Clé API Astrometry invalide (pas une chaîne), réinitialisée.")
                 self.astrometry_api_key = defaults_fallback['astrometry_api_key']
-                # --- Validation des paramètres de feathering ---
-                self.apply_feathering = bool(self.apply_feathering)
-                try:
-                    self.feather_blur_px = int(self.feather_blur_px)
-                    # Plage suggérée, par exemple 32 à 1024 (doit être positif)
-                    # Le kernel sera ajusté pour être impair, donc ici on valide juste la plage de base.
-                    min_blur = 32 
-                    max_blur = 1024 
-                    if not (min_blur <= self.feather_blur_px <= max_blur):
-                        original_blur = self.feather_blur_px
-                        self.feather_blur_px = int(np.clip(self.feather_blur_px, min_blur, max_blur))
-                        messages.append(f"Feather Blur Px ({original_blur}) hors limites [{min_blur}-{max_blur}], ajusté à {self.feather_blur_px}.")
-                except (ValueError, TypeError):
-                    original_blur = self.feather_blur_px
-                    self.feather_blur_px = defaults_fallback['feather_blur_px']
-                    messages.append(f"Feather Blur Px ('{original_blur}') invalide, réinitialisé à {self.feather_blur_px}.")
-                print(f"DEBUG (Settings validate_settings): Feathering validé -> Apply: {self.apply_feathering}, BlurPx: {self.feather_blur_px}")
+            else: self.astrometry_api_key = current_api_key.strip()
+
+
+            # Feathering
+            print("    -> Validating Feathering...")
+            self.apply_feathering = bool(getattr(self, 'apply_feathering', defaults_fallback['apply_feathering']))
+            try:
+                self.feather_blur_px = int(self.feather_blur_px)
+                min_blur, max_blur = 32, 1024
+                if not (min_blur <= self.feather_blur_px <= max_blur):
+                    original_blur = self.feather_blur_px; self.feather_blur_px = int(np.clip(self.feather_blur_px, min_blur, max_blur))
+                    messages.append(f"Feather Blur Px ({original_blur}) hors limites [{min_blur}-{max_blur}], ajusté à {self.feather_blur_px}.")
+            except (ValueError, TypeError):
+                original_blur = self.feather_blur_px; self.feather_blur_px = defaults_fallback['feather_blur_px']
+                messages.append(f"Feather Blur Px ('{original_blur}') invalide, réinitialisé à {self.feather_blur_px}.")
+
+            # Low WHT Mask
+            print("    -> Validating Low WHT Mask...")
+            self.apply_low_wht_mask = bool(getattr(self, 'apply_low_wht_mask', defaults_fallback['apply_low_wht_mask']))
+            try:
+                self.low_wht_percentile = int(self.low_wht_percentile)
+                min_pct, max_pct = 1, 100
+                if not (min_pct <= self.low_wht_percentile <= max_pct):
+                    original_pct = self.low_wht_percentile; self.low_wht_percentile = int(np.clip(self.low_wht_percentile, min_pct, max_pct))
+                    messages.append(f"Low WHT Percentile ({original_pct}) hors limites [{min_pct}-{max_pct}], ajusté à {self.low_wht_percentile}.")
+            except (ValueError, TypeError):
+                original_pct = self.low_wht_percentile; self.low_wht_percentile = defaults_fallback['low_wht_percentile']
+                messages.append(f"Low WHT Percentile ('{original_pct}') invalide, réinitialisé à {self.low_wht_percentile}.")
+            try:
+                self.low_wht_soften_px = int(self.low_wht_soften_px)
+                min_soften, max_soften = 32, 512
+                if not (min_soften <= self.low_wht_soften_px <= max_soften):
+                    original_soften = self.low_wht_soften_px; self.low_wht_soften_px = int(np.clip(self.low_wht_soften_px, min_soften, max_soften))
+                    messages.append(f"Low WHT Soften Px ({original_soften}) hors limites [{min_soften}-{max_soften}], ajusté à {self.low_wht_soften_px}.")
+            except (ValueError, TypeError):
+                original_soften = self.low_wht_soften_px; self.low_wht_soften_px = defaults_fallback['low_wht_soften_px']
+                messages.append(f"Low WHT Soften Px ('{original_soften}') invalide, réinitialisé à {self.low_wht_soften_px}.")
+
+            # --- Chroma Correction (simple booléen) ---
+            self.apply_chroma_correction = bool(getattr(self, 'apply_chroma_correction', defaults_fallback['apply_chroma_correction']))
+ # --- Local Solver Paths and ASTAP Search Radius ---
+            print("  -> Validating Local Solver Settings...")
+            # ... (validation des autres paramètres use_local_solver_priority, astap_path, etc. inchangée) ...
+            self.use_local_solver_priority = bool(getattr(self, 'use_local_solver_priority', defaults_fallback['use_local_solver_priority']))
+            self.astap_path = str(getattr(self, 'astap_path', defaults_fallback['astap_path'])).strip()
+            self.astap_data_dir = str(getattr(self, 'astap_data_dir', defaults_fallback['astap_data_dir'])).strip()
+            self.local_ansvr_path = str(getattr(self, 'local_ansvr_path', defaults_fallback['local_ansvr_path'])).strip()
+
+            # --- Validation spécifique et logging pour astap_search_radius ---
+            param_name_debug = 'astap_search_radius'
+            value_before_validation = getattr(self, param_name_debug, "ATTRIBUT_MANQUANT_SUR_SELF_POUR_VALIDATE")
+            print(f"    DEBUG VALIDATE: Valeur de self.{param_name_debug} AVANT float() et clip: '{value_before_validation}' (type: {type(value_before_validation)})")
+
+            try:
+                # Utiliser la valeur lue, ou le défaut du code si l'attribut n'existe pas pour une raison étrange
+                current_radius_val = getattr(self, param_name_debug, defaults_fallback[param_name_debug])
                 
-                # --- NOUVEAU : Validation Low WHT Mask ---
-                self.apply_low_wht_mask = bool(self.apply_low_wht_mask)
-                try:
-                    self.low_wht_percentile = int(self.low_wht_percentile)
-                    min_pct = 1; max_pct = 100
-                    if not (min_pct <= self.low_wht_percentile <= max_pct):
-                        original_pct = self.low_wht_percentile
-                        self.low_wht_percentile = int(np.clip(self.low_wht_percentile, min_pct, max_pct))
-                        messages.append(f"Low WHT Percentile ({original_pct}) hors limites [{min_pct}-{max_pct}], ajusté à {self.low_wht_percentile}.")
-                except (ValueError, TypeError):
-                    original_pct = self.low_wht_percentile; self.low_wht_percentile = defaults_fallback['low_wht_percentile']
-                    messages.append(f"Low WHT Percentile ('{original_pct}') invalide, réinitialisé à {self.low_wht_percentile}.")
+                # Essayer de convertir en float. Si cela échoue, on ira au bloc except.
+                validated_radius = float(current_radius_val)
                 
-                try:
-                    self.low_wht_soften_px = int(self.low_wht_soften_px)
-                    min_soften = 32; max_soften = 512
-                    if not (min_soften <= self.low_wht_soften_px <= max_soften):
-                        original_soften = self.low_wht_soften_px
-                        self.low_wht_soften_px = int(np.clip(self.low_wht_soften_px, min_soften, max_soften))
-                        messages.append(f"Low WHT Soften Px ({original_soften}) hors limites [{min_soften}-{max_soften}], ajusté à {self.low_wht_soften_px}.")
-                except (ValueError, TypeError):
-                    original_soften = self.low_wht_soften_px; self.low_wht_soften_px = defaults_fallback['low_wht_soften_px']
-                    messages.append(f"Low WHT Soften Px ('{original_soften}') invalide, réinitialisé à {self.low_wht_soften_px}.")
-                print(f"DEBUG (Settings validate_settings): Low WHT Mask validé -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
-                # --- FIN NOUVEAU -
+                min_r, max_r = 0.1, 90.0
+                if not (min_r <= validated_radius <= max_r):
+                    original_radius_str = f"{validated_radius:.1f}" # On sait que c'est un float ici
+                    self.astap_search_radius = np.clip(validated_radius, min_r, max_r)
+                    messages.append(f"Rayon recherche ASTAP ({original_radius_str}°) hors limites [{min_r}-{max_r}], ajusté à {self.astap_search_radius:.1f}°")
+                    print(f"    DEBUG VALIDATE: Rayon clippé à {self.astap_search_radius:.1f}°")
+                else:
+                    # La valeur est déjà un float et dans la bonne plage
+                    self.astap_search_radius = validated_radius
+                    print(f"    DEBUG VALIDATE: Rayon déjà valide: {self.astap_search_radius:.1f}°")
+            except (ValueError, TypeError) as e_val_rad:
+                original_radius_str = str(getattr(self, param_name_debug, 'N/A_DANS_EXCEPT'))
+                self.astap_search_radius = defaults_fallback[param_name_debug] # Réinitialiser au défaut du code
+                messages.append(f"Rayon recherche ASTAP ('{original_radius_str}') invalide (erreur: {e_val_rad}), réinitialisé à {self.astap_search_radius:.1f}°")
+                print(f"    DEBUG VALIDATE: Exception lors de la validation du rayon ('{original_radius_str}'), réinitialisé à {self.astap_search_radius:.1f}°")
+            
+            print(f"DEBUG (Settings validate_settings): {param_name_debug} FINAL après validation: {getattr(self, param_name_debug, 'ERREUR_ATTR_FINAL')}°")
 
-             # --- Drizzle Kernel and Pixfrac Validation ---
-             valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
-             if not isinstance(self.drizzle_kernel, str) or self.drizzle_kernel.lower() not in valid_kernels:
-                original = self.drizzle_kernel
-                self.drizzle_kernel = defaults_fallback['drizzle_kernel']
-                messages.append(f"Noyau Drizzle ('{original}') invalide, réinitialisé à '{self.drizzle_kernel}'")
-             else:
-                self.drizzle_kernel = self.drizzle_kernel.lower()
-             try:
-                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
-                 if not (0.01 <= self.drizzle_pixfrac <= 1.0):
-                      original = self.drizzle_pixfrac
-                      self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 1.0)
-                      messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}")
-             except (ValueError, TypeError):
-                 original = self.drizzle_pixfrac
-                 self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']
-                 messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
+        except Exception as e_global_val: # Attrape les erreurs non prévues pendant la validation
+            messages.append(f"Erreur générale de validation: {e_global_val}. Réinitialisation aux valeurs par défaut.")
+            print(f"FATAL Warning (Settings validate_settings): Erreur de validation globale -> {e_global_val}. Réinitialisation complète des settings.")
+            self.reset_to_defaults()
+            # Logguer la valeur de apply_photutils_bn APRES cette réinitialisation globale
+            print(f"DEBUG (Settings validate_settings): self.apply_photutils_bn APRES reset_to_defaults (global catch): {getattr(self, 'apply_photutils_bn', 'ATTRIBUT_MANQUANT_APRES_RESET')}")
 
-             # --- CORRECTION CHROMA ---
-             self.apply_chroma_correction = bool(self.apply_chroma_correction)
-
-             # --- Preview Settings Validation ---
-             self.preview_black_point = float(self.preview_black_point); self.preview_white_point = float(self.preview_white_point)
-             self.preview_gamma = float(self.preview_gamma)
-             self.preview_r_gain = float(self.preview_r_gain); self.preview_g_gain = float(self.preview_g_gain); self.preview_b_gain = float(self.preview_b_gain)
-             min_preview, max_preview = 0.0, 1.0
-             self.preview_black_point = np.clip(self.preview_black_point, min_preview, max_preview)
-             self.preview_white_point = np.clip(self.preview_white_point, min_preview, max_preview)
-             if self.preview_black_point >= self.preview_white_point: self.preview_black_point = max(min_preview, self.preview_white_point - 0.001)
-             self.preview_gamma = np.clip(self.preview_gamma, 0.1, 5.0)
-             gain_min, gain_max = 0.1, 10.0
-             self.preview_r_gain = np.clip(self.preview_r_gain, gain_min, gain_max)
-             self.preview_g_gain = np.clip(self.preview_g_gain, gain_min, gain_max)
-             self.preview_b_gain = np.clip(self.preview_b_gain, gain_min, gain_max)
-             valid_methods = ["Linear", "Asinh", "Log"]
-             if self.preview_stretch_method not in valid_methods: 
-                 self.preview_stretch_method = defaults_fallback['preview_stretch_method']
-                 messages.append(f"Méthode d'étirement invalide, réinitialisée à '{self.preview_stretch_method}'")
-
-        except (ValueError, TypeError) as e:
-             messages.append(f"Paramètre numérique invalide détecté: {e}. Vérifiez les valeurs.")
-             print(f"Warning (Settings validate_settings): Erreur de type/valeur -> {e}. Réinitialisation complète des settings.") # <-- DEBUG
-             # Réinitialiser l'instance actuelle aux valeurs par défaut complètes en cas d'erreur majeure
-             # Cela assure que l'état de self est cohérent après une exception ici.
-             self.reset_to_defaults() 
-             # Logguer la valeur de apply_photutils_bn APRES cette réinitialisation
-             print(f"DEBUG (Settings validate_settings): self.apply_photutils_bn APRES reset_to_defaults dû à une exception: {self.apply_photutils_bn}") # <-- DEBUG
-
-        print(f"DEBUG (Settings validate_settings): FIN de la validation. Valeur finale de self.apply_photutils_bn: {getattr(self, 'apply_photutils_bn', 'NON_DEFINI')}") # <-- DEBUG
+        print(f"DEBUG (Settings validate_settings): FIN de la validation. Nombre de messages: {len(messages)}. "
+              f"Valeur finale de self.apply_photutils_bn: {getattr(self, 'apply_photutils_bn', 'NON_DEFINI_A_LA_FIN')}")
         return messages
 
+
+###################################################################################################################################
 
     def save_settings(self):
         """ Sauvegarde les paramètres actuels dans le fichier JSON. """
         # S'assurer que les types sont corrects pour JSON
         settings_data = {
-            'version': "1.8.1", # Incrémenter la version si la structure change significativement
+            'version': "2.1.0", # Incrémenter la version si la structure change significativement
             # Processing
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
@@ -818,12 +875,19 @@ class SettingsManager:
             # --- Sauvegarder les paramètres de feathering ---
             'apply_feathering': bool(self.apply_feathering),
             'feather_blur_px': int(self.feather_blur_px),
-            # --- NOUVEAU : Sauvegarde Low WHT Mask ---
+            # --- Sauvegarde Low WHT Mask ---
             'apply_low_wht_mask': bool(self.apply_low_wht_mask),
             'low_wht_percentile': int(self.low_wht_percentile),
             'low_wht_soften_px': int(self.low_wht_soften_px),
-            # --- FIN NOUVEAU --
-
+            # --- --
+            # --- NOUVEAU: Sauvegarde Paramètres Solveurs Locaux ---
+            'use_local_solver_priority': bool(getattr(self, 'use_local_solver_priority', False)),
+            'astap_path': str(getattr(self, 'astap_path', "")),
+            'astap_data_dir': str(getattr(self, 'astap_data_dir', "")),
+            'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
+            
+            'astap_search_radius': float(getattr(self, 'astap_search_radius', 5.0)), # Assurer un float, avec un défaut au cas où
+        
 
         }
         try:
@@ -920,7 +984,9 @@ class SettingsManager:
                         final_value_to_set = default_value_from_dict # Revenir au défaut du code si le cast échoue
                 
                 setattr(self, key, final_value_to_set)
-        
+            # ---  Log spécifique radius ---
+            print(f"  Valeur chargée pour astap_search_radius: {getattr(self, 'astap_search_radius', 'Non trouvé/Défaut')}")
+            
             print(f"DEBUG (SettingsManager load_settings): Paramètres chargés et fusionnés depuis '{self.settings_file}'. Validation en cours...")
             # Exemple de log après chargement (ajoutez d'autres clés si besoin pour déboguer)
             print(f"  Exemple après chargement JSON - self.apply_low_wht_mask: {getattr(self, 'apply_low_wht_mask', 'NonTrouve')}, Pct: {getattr(self, 'low_wht_percentile', 'NonTrouve')}")

@@ -47,7 +47,7 @@ print("-" * 20)
 # Seestar imports
 from ..core.image_processing import load_and_validate_fits, debayer_image
 from ..localization import Localization
-
+from .local_solver_gui import LocalSolverSettingsWindow # 
 from ..core.utils import estimate_batch_size
 from ..enhancement.color_correction import ChromaticBalancer 
 # (Ajouter ceci avec les autres imports de gui)
@@ -870,6 +870,12 @@ class SeestarStackerGUI:
         self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED); self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(control_frame, text="Analyze Input Folder", command=self._launch_folder_analyzer, state=tk.DISABLED); self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.mosaic_options_button = ttk.Button(control_frame, text="Mosaic...", command=self._open_mosaic_settings_window); self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+                # --- NOUVEAU BOUTON POUR LES SOLVEURS LOCAUX ---
+        self.local_solver_button = ttk.Button(control_frame, 
+                                              text=self.tr("local_solver_button_text", default="Local Solvers..."), 
+                                              command=self._open_local_solver_settings_window)
+        self.local_solver_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        # --- FIN NOUVEAU BOUTON ---
         self.open_output_button = ttk.Button(control_frame, text="Open Output", command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text="Add Folder", command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.show_folders_button = ttk.Button(control_frame, text="View Inputs", command=self._show_input_folder_list, state=tk.DISABLED); self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
@@ -1540,6 +1546,7 @@ class SeestarStackerGUI:
             "start": 'start_button', "stop": 'stop_button', "add_folder_button": 'add_files_button',
             "show_folders_button_text": 'show_folders_button', "copy_log_button_text": 'copy_log_button',
             "open_output_button_text": 'open_output_button', "analyze_folder_button": 'analyze_folder_button',
+            "local_solver_button_text": 'local_solver_button',
             "Mosaic...": 'mosaic_options_button', "reset_expert_button": 'reset_expert_button'
         }
         for key, attr_name in buttons_keys.items():
@@ -2663,13 +2670,64 @@ class SeestarStackerGUI:
             self._mosaic_settings_window_instance = None
 
 
+##################################################################################################################################
+
+
+
+
+    def _open_local_solver_settings_window(self):
+        """
+        Ouvre la fenêtre modale pour configurer les options des solveurs locaux.
+        """
+        print("DEBUG (GUI): Clic sur bouton 'Local Solvers...' - Appel de _open_local_solver_settings_window.")
+        
+        # Optionnel: Vérifier si une instance existe déjà (pourrait être utile pour le développement)
+        if hasattr(self, '_local_solver_settings_window_instance') and \
+           self._local_solver_settings_window_instance and \
+           self._local_solver_settings_window_instance.winfo_exists():
+            print("DEBUG (GUI): Fenêtre de paramètres des solveurs locaux déjà ouverte. Mise au premier plan.")
+            try:
+                self._local_solver_settings_window_instance.lift()
+                self._local_solver_settings_window_instance.focus_force()
+            except tk.TclError: # Au cas où la fenêtre aurait été détruite entre-temps
+                self._local_solver_settings_window_instance = None # Réinitialiser
+                # Essayer de recréer ci-dessous
+            else:
+                return
+
+        # Créer et afficher la nouvelle fenêtre modale
+        try:
+            print("DEBUG (GUI): Création de l'instance LocalSolverSettingsWindow...")
+            solver_window = LocalSolverSettingsWindow(parent_gui=self)
+            self._local_solver_settings_window_instance = solver_window # Stocker référence (optionnel)
+            print("DEBUG (GUI): Instance LocalSolverSettingsWindow créée.")
+            # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.
+
+        except Exception as e:
+            error_msg_key = "local_solver_window_create_error" # Nouvelle clé de traduction
+            error_default_text = "Could not open Local Solvers settings window."
+            full_error_msg = self.tr(error_msg_key, default=error_default_text) + f"\n{e}"
+            
+            print(f"ERREUR (GUI): Erreur création fenêtre paramètres solveurs locaux: {e}")
+            traceback.print_exc(limit=2)
+            messagebox.showerror(
+                self.tr("error", default="Error"),
+                full_error_msg,
+                parent=self.root
+            )
+            self._local_solver_settings_window_instance = None
+
+##################################################################################################################################
 
     def _save_settings_and_destroy(self):
         try:
             if self.root.winfo_exists(): self.settings.window_geometry = self.root.geometry()
         except tk.TclError: pass
-        self.settings.update_from_ui(self); self.settings.save_settings()
-        print("Fermeture de l'application."); self.root.destroy()
+        self.settings.update_from_ui(self)
+        print(f"VÉRIF GUI: self.settings.astap_path AVANT save_settings = '{self.settings.astap_path}'") # <-- AJOUTER
+        self.settings.save_settings()
+        print("Fermeture de l'application.")
+        self.root.destroy()
 
     # --- NOUVELLES METHODES ---
     def _copy_log_to_clipboard(self):
@@ -3295,7 +3353,8 @@ class SeestarStackerGUI:
             'photutils_bn_sigma_clip', 'photutils_bn_exclude_percentile',
             'apply_feathering', 'feather_blur_px', 'apply_low_wht_mask',
             'low_wht_percentile', 'low_wht_soften_px',
-            'mosaic_mode_active', 'astrometry_api_key', 'mosaic_settings'
+            'mosaic_mode_active', 'astrometry_api_key', 'mosaic_settings',
+            'astap_search_radius'
         ]
         for param_name in params_to_log_for_backend:
             value = getattr(self.settings, param_name, f"ERREUR_ATTR_{param_name}")
@@ -3368,7 +3427,12 @@ class SeestarStackerGUI:
             low_wht_soften_px=self.settings.low_wht_soften_px,
             is_mosaic_run=self.settings.mosaic_mode_active,
             api_key=self.settings.astrometry_api_key,
-            mosaic_settings=self.settings.mosaic_settings # Transmettre le dictionnaire complet
+            mosaic_settings=self.settings.mosaic_settings, 
+            use_local_solver_priority=self.settings.use_local_solver_priority,
+            astap_path=self.settings.astap_path,
+            astap_data_dir=self.settings.astap_data_dir,
+            local_ansvr_path=self.settings.local_ansvr_path,
+            astap_search_radius_ui=self.settings.astap_search_radius
         )
         print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 

@@ -16,7 +16,9 @@ import shutil
 import concurrent.futures
 from functools import partial
 import traceback # Added for traceback printing
-
+from astropy.io import fits # Si pas déjà là
+try: from tqdm import tqdm # Optionnel, pour la barre de progression console
+except ImportError: tqdm = lambda x, **kwargs: x
 
 from .image_processing import (
     load_and_validate_fits, # Returns float32 0-1 or None
@@ -46,7 +48,9 @@ class SeestarAligner:
         self.neighborhood_size = 5
         self.stop_processing = False
         self.progress_callback = None
-
+        self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
+    
+    
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
         self.progress_callback = callback
@@ -118,83 +122,109 @@ class SeestarAligner:
 
 
 
+# DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py)
 
-# DANS seestar/core/alignment.py
-# DANS la classe SeestarAligner
-
-    def _get_reference_image(self, input_folder, files_to_scan):
+    def _get_reference_image(self, input_folder, files_to_scan, output_folder_for_saving_temp_ref):
         """
         Obtient l'image de référence (float32, 0-1) et son en-tête.
         Tente de charger une référence manuelle si spécifiée, sinon sélectionne
         automatiquement la meilleure parmi un sous-ensemble des 'files_to_scan'.
-        MODIFIED V3_FilterFix_SourcePathFix: Stocke uniquement le nom de base du fichier pour _SOURCE_PATH.
+        Sauvegarde l'image de référence traitée dans le dossier temporaire spécifié.
+
+        Args:
+            input_folder (str): Dossier principal pour la recherche auto si pas de réf manuelle.
+            files_to_scan (list): Liste des noms de fichiers dans input_folder pour la recherche auto.
+            output_folder_for_saving_temp_ref (str): Dossier de base où le sous-dossier
+                                                     "temp_processing" sera créé pour sauvegarder
+                                                     "reference_image.fit".
+
+        MODIFIED V3_FilterFix_SourcePathFix + Ajout output_folder_for_saving_temp_ref pour sauvegarde
         """
-        print(f"DEBUG ALIGNER [_get_reference_image V3_FilterFix_SourcePathFix]: Début. Dossier: '{os.path.basename(input_folder)}', Nb fichiers fournis pour scan: {len(files_to_scan)}")
+        print(f"DEBUG ALIGNER [_get_reference_image]: Début. Input: '{os.path.basename(input_folder)}', Nb fichiers scan: {len(files_to_scan)}")
+        print(f"  Output pour réf. temp: '{output_folder_for_saving_temp_ref}'")
         
         reference_image_data = None 
         reference_header = None     
+        best_file_name_auto = None # Pour le log de la source si sélection auto
+
+        # --- Étape 1: Essayer de Charger une Référence Manuelle si Spécifiée ---
+        if self.reference_image_path and os.path.isfile(self.reference_image_path):
+            manual_ref_basename = os.path.basename(self.reference_image_path)
+            if hasattr(self, 'update_progress'): self.update_progress(f"📌 Chargement référence manuelle: {manual_ref_basename}")
+            print(f"DEBUG ALIGNER [_get_reference_image]: Tentative chargement référence manuelle: {self.reference_image_path}")
+            try:
+                # --- 1.1 Chargement et validation ---
+                ref_img_tuple_manual = load_and_validate_fits(self.reference_image_path) # load_and_validate_fits doit être importé
+                if ref_img_tuple_manual is None or ref_img_tuple_manual[0] is None:
+                    raise ValueError(f"Échec chargement/validation (données None) de la référence manuelle: {manual_ref_basename}")
+                
+                ref_img_loaded_manual, ref_hdr_loaded_manual = ref_img_tuple_manual 
+                print(f"  Réf. Manuelle: Chargement OK. Shape brute: {ref_img_loaded_manual.shape}")
+
+                # --- 1.2 Pré-traitement (Debayer, Hot Pixels) ---
+                prepared_ref_manual = ref_img_loaded_manual.astype(np.float32) 
+                if prepared_ref_manual.ndim == 2: 
+                    bayer_pat_ref_manual = ref_hdr_loaded_manual.get('BAYERPAT', self.bayer_pattern)
+                    if isinstance(bayer_pat_ref_manual, str) and bayer_pat_ref_manual.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                        print(f"    Réf. Manuelle: Debayering avec {bayer_pat_ref_manual.upper()}...")
+                        try:
+                            prepared_ref_manual = debayer_image(prepared_ref_manual, bayer_pat_ref_manual.upper()) # debayer_image doit être importé
+                        except ValueError as deb_err_manual:
+                            if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Manuelle: Erreur Debayer ({deb_err_manual}). Utilisation N&B.")
+                
+                if self.correct_hot_pixels:
+                    print(f"    Réf. Manuelle: Correction pixels chauds (Seuil: {self.hot_pixel_threshold}, Voisinage: {self.neighborhood_size})...")
+                    try:
+                        # detect_and_correct_hot_pixels doit être importé
+                        prepared_ref_manual = detect_and_correct_hot_pixels(prepared_ref_manual, self.hot_pixel_threshold, self.neighborhood_size)
+                    except Exception as hp_err_manual:
+                        if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Manuelle: Erreur correction px chauds: {hp_err_manual}")
+
+                reference_image_data = prepared_ref_manual.astype(np.float32) 
+                reference_header = ref_hdr_loaded_manual.copy() # Travailler sur une copie
+                
+                if reference_header is not None:
+                    reference_header['_SOURCE_PATH'] = (str(manual_ref_basename), "Source filename of this reference (manual)")
+                
+                if hasattr(self, 'update_progress'): self.update_progress(f"✅ Référence manuelle chargée et pré-traitée: {manual_ref_basename} (dims {reference_image_data.shape})")
+                
+                # --- 1.3 Sauvegarde de la référence manuelle traitée ---
+                if output_folder_for_saving_temp_ref:
+                    print(f"  Réf. Manuelle: Appel à _save_reference_image avec base_output_folder='{output_folder_for_saving_temp_ref}'")
+                    self._save_reference_image(reference_image_data, reference_header, output_folder_for_saving_temp_ref)
+                else:
+                    print("  AVERTISSEMENT Réf. Manuelle: output_folder_for_saving_temp_ref non fourni, réf. manuelle traitée non sauvegardée par _get_reference_image.")
+
+                return reference_image_data, reference_header # Retourner la réf manuelle si succès
+
+            except Exception as e_manual_ref:
+                if hasattr(self, 'update_progress'): self.update_progress(f"❌ Erreur réf. manuelle ({manual_ref_basename}): {e_manual_ref}. Tentative sélection auto...")
+                print(f"ERREUR ALIGNER [_get_reference_image]: Échec réf. manuelle: {e_manual_ref}")
+                reference_image_data = None 
+                reference_header = None
+        else:
+            print("DEBUG ALIGNER [_get_reference_image]: Aucune référence manuelle spécifiée ou fichier non trouvé.")
+        
+        # --- Étape 2: Sélection Automatique si pas de Référence Manuelle Valide ---
+        if hasattr(self, 'update_progress'): self.update_progress("⚙️ Sélection auto de la meilleure image de référence...")
+        print("DEBUG ALIGNER [_get_reference_image]: Passage à la sélection automatique.")
+
+        if not files_to_scan: 
+             if hasattr(self, 'update_progress'): self.update_progress("❌ [GET_REF/Auto] Impossible sélectionner: aucun fichier fourni pour analyse.")
+             return None, None
+
+        best_image_data_auto = None   
+        best_header_data_auto = None  
+        # best_file_name_auto est déjà initialisé à None en haut
+        max_metric_auto = -np.inf     
 
         processed_candidates_auto = 0 
         rejected_candidates_auto = 0  
         rejection_reasons_auto = {'load': 0, 'variance': 0, 'preprocess': 0, 'metric': 0, 'filtered_name': 0, 'load_unpack_fail': 0, 'load_data_none': 0}
 
-        # --- Étape 1: Essayer de Charger une Référence Manuelle si Spécifiée ---
-        if self.reference_image_path and os.path.isfile(self.reference_image_path):
-            manual_ref_basename = os.path.basename(self.reference_image_path) # Nom de base pour les logs
-            self.update_progress(f"📌 Chargement référence manuelle: {manual_ref_basename}")
-            print(f"DEBUG ALIGNER [_get_reference_image V3_FilterFix_SourcePathFix]: Tentative chargement référence manuelle: {self.reference_image_path}")
-            try:
-                ref_img_tuple_manual = load_and_validate_fits(self.reference_image_path)
-                if ref_img_tuple_manual is None or ref_img_tuple_manual[0] is None:
-                    raise ValueError(f"Échec chargement/validation (données None) de la référence manuelle: {manual_ref_basename}")
-                
-                ref_img_loaded_manual, ref_hdr_loaded_manual = ref_img_tuple_manual 
-
-                prepared_ref_manual = ref_img_loaded_manual.astype(np.float32) 
-                if prepared_ref_manual.ndim == 2: 
-                    bayer_pat_ref_manual = ref_hdr_loaded_manual.get('BAYERPAT', self.bayer_pattern)
-                    if isinstance(bayer_pat_ref_manual, str) and bayer_pat_ref_manual.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
-                        try:
-                            prepared_ref_manual = debayer_image(prepared_ref_manual, bayer_pat_ref_manual.upper())
-                        except ValueError as deb_err_manual:
-                            self.update_progress(f"⚠️ Réf Manuelle: Erreur Debayer ({deb_err_manual}). Utilisation N&B.")
-                
-                if self.correct_hot_pixels:
-                    try:
-                        prepared_ref_manual = detect_and_correct_hot_pixels(prepared_ref_manual, self.hot_pixel_threshold, self.neighborhood_size)
-                    except Exception as hp_err_manual:
-                        self.update_progress(f"⚠️ Réf Manuelle: Erreur correction px chauds: {hp_err_manual}")
-
-                reference_image_data = prepared_ref_manual.astype(np.float32) 
-                reference_header = ref_hdr_loaded_manual
-                
-                # --- MODIFICATION POUR _SOURCE_PATH (Référence Manuelle) ---
-                if reference_header is not None:
-                    # Stocker UNIQUEMENT le nom de base du fichier
-                    reference_header['_SOURCE_PATH'] = (str(manual_ref_basename), "Source filename of this reference (manual)")
-                # --- FIN MODIFICATION ---
-
-                self.update_progress(f"✅ Référence manuelle chargée et pré-traitée: {manual_ref_basename} (dims {reference_image_data.shape})")
-                return reference_image_data, reference_header
-
-            except Exception as e_manual_ref:
-                self.update_progress(f"❌ Erreur chargement/préparation référence manuelle ({manual_ref_basename}): {e_manual_ref}. Tentative sélection auto...")
-                reference_image_data = None 
-                reference_header = None
+        num_to_analyze_initial_subset = min(getattr(self, 'NUM_IMAGES_FOR_AUTO_REF', 20), len(files_to_scan)) # NUM_IMAGES_FOR_AUTO_REF doit être un attribut de classe
         
-        # --- Étape 2: Sélection Automatique si pas de Référence Manuelle Valide ---
-        self.update_progress("⚙️ Sélection auto de la meilleure image de référence...")
-        if not files_to_scan: 
-             self.update_progress("❌ [GET_REF/Auto] Impossible sélectionner: aucun fichier fourni pour analyse.")
-             return None, None
-
-        best_image_data_auto = None   
-        best_header_data_auto = None  
-        best_file_name_auto = None    
-        max_metric_auto = -np.inf     
-
-        num_to_analyze_initial_subset = min(self.NUM_IMAGES_FOR_AUTO_REF, len(files_to_scan))
-        
+        # --- Filtrage des noms de fichiers candidats ---
         filtered_candidates_for_ref = []
         prefixes_to_skip_for_ref = ["stack_", "mosaic_final_", "aligned_", "drizzle_"] 
         substrings_to_skip_for_ref = [
@@ -220,99 +250,133 @@ class SeestarAligner:
         num_to_analyze_auto = len(iterable_candidates) 
         
         if num_to_analyze_auto == 0:
-             self.update_progress(f"❌ [GET_REF/Auto] Aucun fichier candidat valide après filtrage des noms (sur {num_to_analyze_initial_subset} scannés).")
+             if hasattr(self, 'update_progress'): self.update_progress(f"❌ [GET_REF/Auto] Aucun candidat valide après filtrage des noms (sur {num_to_analyze_initial_subset} scannés).")
              return None, None
+        
+        if hasattr(self, 'update_progress'): self.update_progress(f"🔍 [GET_REF/Auto] Analyse de {num_to_analyze_auto} images candidates pour référence...")
+        print(f"DEBUG ALIGNER [_get_reference_image]: Début boucle d'analyse auto pour {num_to_analyze_auto} candidats.")
+        
+        # Utiliser tqdm si disponible, sinon simple boucle
+        try: from tqdm import tqdm
+        except ImportError: tqdm = lambda x, **kwargs: x # Factice si tqdm n'est pas là
 
-        self.update_progress(f"🔍 [GET_REF/Auto] Analyse des {num_to_analyze_auto} premières images candidates pour référence...")
-        disable_tqdm_auto = self.progress_callback is not None 
+        disable_tqdm_auto = (hasattr(self, 'progress_callback') and self.progress_callback is not None) or \
+                            (hasattr(self, 'update_progress') and self.update_progress is not None and self.update_progress != print)
 
-        with tqdm(total=num_to_analyze_auto, desc="Analyse Réf. Auto", disable=disable_tqdm_auto, leave=False) as pbar_auto:
-            for i_cand, f_name_cand in enumerate(iterable_candidates):
-                if self.stop_processing: return None, None
-                current_file_path_cand = os.path.join(input_folder, f_name_cand)
-                processed_candidates_auto += 1 
-                rejection_reason_cand = None 
+
+        for i_cand, f_name_cand in enumerate(tqdm(iterable_candidates, desc="Analyse Réf. Auto", disable=disable_tqdm_auto, leave=False)):
+            if hasattr(self, 'stop_processing') and self.stop_processing: return None, None # Vérifier le flag d'arrêt
+            
+            current_file_path_cand = os.path.join(input_folder, f_name_cand)
+            processed_candidates_auto += 1 
+            rejection_reason_cand = None 
+            # print(f"  Auto Réf. Candidat {i_cand+1}: {f_name_cand}") # Peut être trop verbeux
+            
+            try:
+                # --- 2.1 Chargement et validation ---
+                img_data_tuple_cand = load_and_validate_fits(current_file_path_cand)
+                if img_data_tuple_cand is None or img_data_tuple_cand[0] is None:
+                    rejection_reason_cand = "load_unpack_fail"; raise ValueError("Load/Validate returned None")
+                img_cand, hdr_cand = img_data_tuple_cand
+                if img_cand is None: rejection_reason_cand = "load_data_none"; raise ValueError("Load/Validate data is None")
+                if hdr_cand is None: hdr_cand = fits.Header() # Créer un header vide si manquant
+
+                # --- 2.2 Vérification variance ---
+                std_dev_cand = np.std(img_cand) 
+                variance_threshold_cand = 0.0005 # Seuil bas pour éviter les images quasi-noires/plates
+                if std_dev_cand < variance_threshold_cand:
+                    rejection_reason_cand = "variance"; raise ValueError(f"Faible variance ({std_dev_cand:.6f})")
+
+                # --- 2.3 Pré-traitement ---
+                prepared_img_cand = img_cand.astype(np.float32, copy=True) # Assurer float32 et copie
+                if prepared_img_cand.ndim == 2: # Si N&B, essayer debayer
+                     bayer_pat_s_cand = hdr_cand.get('BAYERPAT', self.bayer_pattern)
+                     if isinstance(bayer_pat_s_cand, str) and bayer_pat_s_cand.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                          try: prepared_img_cand = debayer_image(prepared_img_cand, bayer_pat_s_cand.upper())
+                          except ValueError: pass # Ignorer erreur debayer, continuer avec N&B
                 
-                try:
-                    img_data_tuple_cand = load_and_validate_fits(current_file_path_cand)
-                    if img_data_tuple_cand is None or img_data_tuple_cand[0] is None:
-                        rejection_reason_cand = "load_unpack_fail"; raise ValueError("Load/Validate returned None")
-                    img_cand, hdr_cand = img_data_tuple_cand
-                    if img_cand is None: rejection_reason_cand = "load_data_none"; raise ValueError("Load/Validate data is None")
-                    if hdr_cand is None: hdr_cand = fits.Header() 
+                if self.correct_hot_pixels:
+                     try: prepared_img_cand = detect_and_correct_hot_pixels(prepared_img_cand, self.hot_pixel_threshold, self.neighborhood_size)
+                     except Exception: pass # Ignorer erreur correction HP, continuer
 
-                    std_dev_cand = np.std(img_cand) 
-                    variance_threshold_cand = 0.0005 
-                    if std_dev_cand < variance_threshold_cand:
-                        rejection_reason_cand = "variance"; raise ValueError(f"Low variance ({std_dev_cand:.6f})")
-
-                    prepared_img_cand = img_cand.astype(np.float32, copy=True)
-                    if prepared_img_cand.ndim == 2:
-                         bayer_pat_s_cand = hdr_cand.get('BAYERPAT', self.bayer_pattern)
-                         if isinstance(bayer_pat_s_cand, str) and bayer_pat_s_cand.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
-                              try: prepared_img_cand = debayer_image(prepared_img_cand, bayer_pat_s_cand.upper())
-                              except ValueError: pass 
-                    if self.correct_hot_pixels:
-                         try: prepared_img_cand = detect_and_correct_hot_pixels(prepared_img_cand, self.hot_pixel_threshold, self.neighborhood_size)
-                         except Exception: pass
-                    
-                    median_val_cand = np.median(prepared_img_cand)
-                    mad_val_cand = np.median(np.abs(prepared_img_cand - median_val_cand))
-                    approx_std_cand = mad_val_cand * 1.4826 
-                    metric_cand = median_val_cand / (approx_std_cand + 1e-9) if median_val_cand > 1e-9 and approx_std_cand > 1e-9 else -np.inf 
-                    if not np.isfinite(metric_cand) or metric_cand < -1e8: 
-                        rejection_reason_cand = "metric"; raise ValueError("Metric non-finite or too low")
-
-                    if metric_cand > max_metric_auto:
-                        max_metric_auto = metric_cand
-                        best_image_data_auto = prepared_img_cand.copy() 
-                        best_header_data_auto = hdr_cand.copy()
-                        best_file_name_auto = f_name_cand
+                # --- 2.4 Calcul métrique (SNR approximatif) ---
+                median_val_cand = np.median(prepared_img_cand)
+                mad_val_cand = np.median(np.abs(prepared_img_cand - median_val_cand)) # Plus robuste que std pour outliers
+                approx_std_cand = mad_val_cand * 1.4826 # Conversion MAD -> std pour distribution normale
+                metric_cand = median_val_cand / (approx_std_cand + 1e-9) if median_val_cand > 1e-9 and approx_std_cand > 1e-9 else -np.inf 
                 
-                except Exception as e_cand_loop:
-                    self.update_progress(f"⚠️ Erreur analyse réf. auto '{f_name_cand}': {type(e_cand_loop).__name__} - {e_cand_loop}")
-                    rejected_candidates_auto += 1
-                    if rejection_reason_cand: rejection_reasons_auto[rejection_reason_cand] += 1
-                    else: rejection_reasons_auto['preprocess'] += 1 
-                finally:
-                    pbar_auto.update(1) 
-                    if 'img_cand' in locals(): del img_cand
-                    if 'hdr_cand' in locals(): del hdr_cand
-                    if 'prepared_img_cand' in locals(): del prepared_img_cand
-                    if 'img_data_tuple_cand' in locals(): del img_data_tuple_cand
-                    if i_cand > 0 and i_cand % 10 == 0: gc.collect() 
+                if not np.isfinite(metric_cand) or metric_cand < -1e8: # Vérifier si la métrique est valide
+                    rejection_reason_cand = "metric"; raise ValueError(f"Métrique non finie ou trop basse: {metric_cand}")
 
-        if best_image_data_auto is not None:
+                # --- 2.5 Mise à jour du meilleur candidat ---
+                if metric_cand > max_metric_auto:
+                    max_metric_auto = metric_cand
+                    best_image_data_auto = prepared_img_cand.copy() # Faire une copie
+                    best_header_data_auto = hdr_cand.copy()         # Faire une copie
+                    best_file_name_auto = f_name_cand
+                    # print(f"    Nouvelle meilleure réf. auto: {f_name_cand} (Métrique: {max_metric_auto:.2f})")
+            
+            except Exception as e_cand_loop:
+                # Ne pas utiliser self.update_progress ici pour éviter de spammer l'UI pendant la boucle rapide
+                # print(f"    AVERTISSEMENT Réf. Auto '{f_name_cand}': {type(e_cand_loop).__name__} - {e_cand_loop}")
+                rejected_candidates_auto += 1
+                if rejection_reason_cand: rejection_reasons_auto[rejection_reason_cand] += 1
+                else: rejection_reasons_auto['preprocess'] += 1 
+            finally:
+                # Libérer la mémoire explicitement pour les gros tableaux dans la boucle
+                if 'img_cand' in locals(): del img_cand
+                if 'hdr_cand' in locals(): del hdr_cand
+                if 'prepared_img_cand' in locals(): del prepared_img_cand
+                if 'img_data_tuple_cand' in locals(): del img_data_tuple_cand
+                if i_cand > 0 and i_cand % 10 == 0: gc.collect() # GC occasionnel
+
+        # --- Fin de la boucle d'analyse auto ---
+
+        if best_image_data_auto is not None and best_header_data_auto is not None:
             reference_image_data = best_image_data_auto
             reference_header = best_header_data_auto
             
-            # --- MODIFICATION POUR _SOURCE_PATH (Sélection Auto) ---
             if reference_header is not None and best_file_name_auto is not None:
-                # Stocker UNIQUEMENT le nom de base du fichier
                  reference_header['_SOURCE_PATH'] = (str(best_file_name_auto), "Source filename of this reference (auto)")
-            # --- FIN MODIFICATION ---
-
-            self.update_progress(f"⭐ Référence auto sélectionnée: {best_file_name_auto} (Métrique: {max_metric_auto:.2f})")
+            
+            if hasattr(self, 'update_progress'): self.update_progress(f"⭐ Référence auto sélectionnée: {best_file_name_auto} (Métrique: {max_metric_auto:.2f})")
+            print(f"DEBUG ALIGNER [_get_reference_image]: Référence auto: {best_file_name_auto}, Métrique: {max_metric_auto:.2f}")
             if rejected_candidates_auto > 0:
                  reason_str_auto = ", ".join(f"{k}:{v}" for k,v in rejection_reasons_auto.items() if v > 0)
-                 self.update_progress(f"   (Info auto: {processed_candidates_auto} traités en détail, {rejected_candidates_auto} rejetés. Raisons: [{reason_str_auto}])")
+                 if hasattr(self, 'update_progress'): self.update_progress(f"   (Info auto: {processed_candidates_auto} traités en détail, {rejected_candidates_auto} rejetés. Raisons: [{reason_str_auto}])")
         else:
             reason_str_auto = ", ".join(f"{k}:{v}" for k,v in rejection_reasons_auto.items() if v > 0)
             final_msg_auto = f"❌ [GET_REF/Auto] Aucune référence valide après analyse de {num_to_analyze_auto} (sur {processed_candidates_auto} traités). "
             if reason_str_auto: final_msg_auto += f"Raisons: [{reason_str_auto}]."
-            self.update_progress(final_msg_auto)
-            return None, None 
+            if hasattr(self, 'update_progress'): self.update_progress(final_msg_auto)
+            print(f"ERREUR ALIGNER [_get_reference_image]: {final_msg_auto}")
+            return None, None # Aucun candidat auto trouvé
 
-        print(f"DEBUG ALIGNER [_get_reference_image V3_FilterFix_SourcePathFix]: Fin. Réf shape: {reference_image_data.shape if reference_image_data is not None else 'None'}")
+        # --- Étape 3: Sauvegarde de l'image de référence sélectionnée (manuelle ou auto) ---
+        if reference_image_data is not None and reference_header is not None:
+            if output_folder_for_saving_temp_ref and os.path.isdir(os.path.dirname(output_folder_for_saving_temp_ref)):
+                print(f"DEBUG ALIGNER [_get_reference_image]: Appel final à _save_reference_image avec base_output_folder='{output_folder_for_saving_temp_ref}'")
+                self._save_reference_image(reference_image_data, reference_header, output_folder_for_saving_temp_ref)
+            else:
+                warning_msg_save_final = f"Output_folder_for_saving_temp_ref ('{output_folder_for_saving_temp_ref}') non valide. " \
+                                         "L'image de référence finale en mémoire sera retournée, mais pas sauvegardée ici."
+                if hasattr(self, 'update_progress'): self.update_progress(warning_msg_save_final)
+                print(f"AVERTISSEMENT ALIGNER [_get_reference_image]: {warning_msg_save_final}")
+        else: # Ne devrait pas arriver si on a passé les étapes précédentes
+            print("DEBUG ALIGNER [_get_reference_image]: Données de référence ou header finaux manquants avant sauvegarde finale, étrange.")
+
+
+        ref_shape_log = reference_image_data.shape if reference_image_data is not None else 'None'
+        source_file_log = "Inconnue"
+        if reference_header and '_SOURCE_PATH' in reference_header:
+            source_file_log = reference_header['_SOURCE_PATH'][0] # Le nom de base
+        elif best_file_name_auto:
+             source_file_log = best_file_name_auto
+        elif self.reference_image_path:
+             source_file_log = os.path.basename(self.reference_image_path)
+
+        print(f"DEBUG ALIGNER [_get_reference_image]: Fin. Réf finale de '{source_file_log}', Shape: {ref_shape_log}")
         return reference_image_data, reference_header
-
-
-
-
-
-
-
-
 
 
 

@@ -312,8 +312,28 @@ FR_TRANSLATIONS = {
     'mosaic_error_reading_spinbox': "Erreur de lecture d'une valeur de Spinbox : {error_details}",
     'mosaic_error_converting_spinbox': "Erreur de conversion d'une valeur de Spinbox : {error_details}",
    
-   
-   
+    # --- LocalSolverSettingsWindow ---   
+    'local_solver_button_text': "Solveurs Locaux...",
+    'local_solver_window_create_error': "Impossible d'ouvrir la fenêtre de configuration des Solveurs Locaux.",
+    'local_solver_general_options_frame': "Options Générales des Solveurs Locaux",
+    'local_solver_use_priority_label': "Prioriser les solveurs locaux sur Astrometry.net (si chemins configurés)",
+    'local_solver_astap_frame_title': "Configuration ASTAP",
+    'local_solver_astap_path_label': "Chemin Exécutable ASTAP :",
+    'local_solver_astap_data_label': "Répertoire Données Index Stellaires ASTAP :",
+    'local_solver_ansvr_frame_title': "Configuration Astrometry.net Local (ansvr)",
+    'local_solver_ansvr_path_label': "Chemin Config/Données Ansvr :",
+    'local_solver_info_text': "Laissez les chemins vides si le solveur n'est pas utilisé ou est dans le PATH système.\nConsultez la documentation du solveur pour les chemins spécifiques requis.",
+    'executable_files': "Fichiers Exécutables",
+    'astap_executable_win': "Exécutable ASTAP", # Spécifique pour .exe Windows
+    'all_files': "Tous les Fichiers",
+    'select_astap_executable_title': "Sélectionner l'Exécutable ASTAP",
+    'select_astap_data_dir_title': "Sélectionner le Répertoire des Données d'Index Stellaires ASTAP",
+    'select_local_ansvr_path_title': "Sélectionner le Chemin Astrometry.net Local (ansvr)",
+    'astap_search_radius_label': "Rayon Recherche ASTAP (deg) :",
+    'tooltip_astap_search_radius': "Rayon de recherche ASTAP autour des coordonnées RA/DEC du header FITS. Une petite valeur est plus rapide si les coordonnées sont bonnes. Recommandé : 0.5 à 10 degrés. (0.1-90.0 permis).",
+    'invalid_astap_radius_range': "Le Rayon de Recherche ASTAP doit être entre 0.1 et 90.0 degrés.",
+    'invalid_astap_radius_value': "Valeur invalide pour le Rayon de Recherche ASTAP. Veuillez entrer un nombre.",
+    'settings_save_failed_on_ok': "Paramètres mis à jour en mémoire, mais échec de la sauvegarde vers le fichier depuis cette fenêtre. Ils seront sauvegardés à la fermeture de l'application principale s'ils ne sont pas écrasés.",
     #--- Tooltips pour Feathering ---
     'tooltip_apply_feathering': "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
     'tooltip_feather_blur_px': "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",
