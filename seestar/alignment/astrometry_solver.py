@@ -12,6 +12,7 @@ import traceback
 import subprocess # Pour appeler les solveurs locaux
 import shutil # Pour trouver les exécutables
 import gc
+import glob # <<< AJOUTER CET IMPORT EN HAUT DU FICHIER
 # --- Dépendances Astropy/Astroquery (comme avant) ---
 _ASTROQUERY_AVAILABLE = False
 _ASTROPY_AVAILABLE = False
@@ -37,6 +38,182 @@ except ImportError:
      print("ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
 
 
+
+
+def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default_focal_mm=250.0, solver_instance=None):
+    """
+    Estime l’échelle en arcsec/pixel à partir du header FITS.
+    Utilise des valeurs par défaut si XPIXSZ ou FOCALLEN sont absents.
+    Le paramètre solver_instance est optionnel et permet de loguer via self._log si fourni.
+    """
+    pixel_size_um = default_pixsize_um
+    focal_length_mm = default_focal_mm
+    source_of_pixsize = "default (func)" # Source par défaut si pas de header ou clé
+    source_of_focal = "default (func)"   # Source par défaut
+
+    log_func = print # Fallback sur print si pas de solver_instance pour loguer
+    if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
+        log_func = solver_instance._log
+    elif solver_instance : # Si solver_instance est passé mais n'a pas _log (ne devrait pas arriver)
+        def temp_log(msg, level="DEBUG"): print(f"TempLog (solver_instance sans _log): {msg}")
+        log_func = temp_log
+
+
+    log_func(f"CFG ScaleEst: Tentative lecture FITS '{os.path.basename(fits_path)}' pour échelle.", "DEBUG")
+    try:
+        # Utiliser memmap=False pour éviter de garder le fichier ouvert inutilement,
+        # surtout si cette fonction est appelée dans une boucle ou un contexte sensible.
+        with fits.open(fits_path, memmap=False) as hdul:
+            if hdul and len(hdul) > 0 and hdul[0].header: # Vérifier que le HDU et le header existent
+                hdr = hdul[0].header
+                # Chercher XPIXSZ (taille pixel en X)
+                if 'XPIXSZ' in hdr:
+                    try:
+                        val = float(hdr['XPIXSZ'])
+                        if val > 1e-3: # Accepter seulement si > 0.001 micron (valeur raisonnable)
+                            pixel_size_um = val
+                            source_of_pixsize = "header (XPIXSZ)"
+                        else:
+                            log_func(f"CFG ScaleEst: Valeur XPIXSZ ('{hdr['XPIXSZ']}') <= 0.001µm, fallback sur défaut.", "WARN")
+                    except (ValueError, TypeError):
+                        log_func(f"CFG ScaleEst: Valeur XPIXSZ ('{hdr['XPIXSZ']}') invalide dans header, fallback sur défaut.", "WARN")
+                elif 'PIXSIZE1' in hdr: # Clé alternative commune
+                    try:
+                        val = float(hdr['PIXSIZE1'])
+                        if val > 1e-3:
+                            pixel_size_um = val
+                            source_of_pixsize = "header (PIXSIZE1)"
+                        else:
+                            log_func(f"CFG ScaleEst: Valeur PIXSIZE1 ('{hdr['PIXSIZE1']}') <= 0.001µm, fallback sur défaut.", "WARN")
+                    except (ValueError, TypeError):
+                        log_func(f"CFG ScaleEst: Valeur PIXSIZE1 ('{hdr['PIXSIZE1']}') invalide, fallback sur défaut.", "WARN")
+                else:
+                    log_func(f"CFG ScaleEst: Clés XPIXSZ/PIXSIZE1 non trouvées pour '{os.path.basename(fits_path)}'. Utilisation défaut {default_pixsize_um}µm.", "DEBUG")
+
+
+                # Chercher FOCALLEN (longueur focale)
+                if 'FOCALLEN' in hdr:
+                    try:
+                        val = float(hdr['FOCALLEN'])
+                        if val > 1.0: # Accepter seulement si > 1 mm (valeur raisonnable)
+                            focal_length_mm = val
+                            source_of_focal = "header (FOCALLEN)"
+                        else:
+                            log_func(f"CFG ScaleEst: Valeur FOCALLEN ('{hdr['FOCALLEN']}') <= 1mm, fallback sur défaut.", "WARN")
+                    except (ValueError, TypeError):
+                        log_func(f"CFG ScaleEst: Valeur FOCALLEN ('{hdr['FOCALLEN']}') invalide dans header, fallback sur défaut.", "WARN")
+                else:
+                    log_func(f"CFG ScaleEst: Clé FOCALLEN non trouvée pour '{os.path.basename(fits_path)}'. Utilisation défaut {default_focal_mm}mm.", "DEBUG")
+            else:
+                log_func(f"CFG ScaleEst: Header FITS non trouvé ou invalide dans '{os.path.basename(fits_path)}'. Utilisation des défauts pour échelle.", "WARN")
+    except FileNotFoundError:
+        log_func(f"CFG ScaleEst: Fichier FITS '{os.path.basename(fits_path)}' non trouvé pour estimation échelle. Utilisation des défauts.", "ERROR")
+    except Exception as e:
+        log_func(f"CFG ScaleEst: Erreur lecture FITS '{os.path.basename(fits_path)}' pour échelle: {e}. Utilisation des défauts.", "ERROR")
+        # traceback.print_exc(limit=1) # Décommenter pour debug plus profond si besoin
+
+    # Sécurité pour éviter division par zéro ou focale absurde
+    if focal_length_mm <= 1e-3: # Si la focale est toujours invalide après lecture/fallback
+        log_func(f"CFG ScaleEst: Focale finale ({focal_length_mm}mm de {source_of_focal}) invalide ou trop petite, "
+                 f"forçage à la valeur par défaut de la fonction ({default_focal_mm}mm).", "WARN")
+        focal_length_mm = default_focal_mm # Utiliser le défaut de la fonction en dernier recours
+
+    # Formule: scale_arcsec_per_pix = (pixel_size_microns / focal_length_mm) * 206.265
+    scale_arcsec_per_pix = (pixel_size_um / focal_length_mm) * 206.265
+
+    log_func(f"CFG ScaleEst: Échelle finale estimée: {scale_arcsec_per_pix:.3f} arcsec/pix "
+             f"(PixSz: {pixel_size_um:.2f}µm [{source_of_pixsize}], "
+             f"Focale: {focal_length_mm:.1f}mm [{source_of_focal}])", "INFO") # INFO est plus visible
+    return scale_arcsec_per_pix
+
+
+
+
+
+def _generate_astrometry_cfg_auto(fits_file_for_scale_estimation,
+                                 index_directory_path,
+                                 output_cfg_path=None,
+                                 solver_instance=None):
+    """
+    Génère un fichier .cfg pour solve-field qui LISTE EXPLICITEMENT les fichiers d'index
+    trouvés dans le répertoire d'index fourni.
+    """
+    log_func = print
+    if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
+        log_func = solver_instance._log
+    # ... (logique temp_log)
+
+    log_func(f"CFG AutoGen (List Indexes V1): Début pour index_dir '{index_directory_path}'", "INFO")
+
+    if not os.path.isdir(index_directory_path):
+        log_func(f"CFG AutoGen: ERREUR - Répertoire d'index '{index_directory_path}' non trouvé.", "ERROR")
+        return None
+
+    # --- Lister les fichiers d'index ---
+    abs_index_dir = os.path.abspath(index_directory_path)
+    # Utiliser glob pour trouver les fichiers d'index. Le pattern peut être ajusté.
+    # On s'attend à des noms comme index-4207.fits, index-4207-00.fits, etc.
+    index_files_pattern = os.path.join(abs_index_dir, "index-*.fits")
+    found_index_files = glob.glob(index_files_pattern)
+
+    if not found_index_files:
+        log_func(f"CFG AutoGen: ERREUR - Aucun fichier d'index (pattern '{index_files_pattern}') trouvé dans '{abs_index_dir}'.", "ERROR")
+        log_func(f"  Vérifiez que le répertoire contient des fichiers comme 'index-4207.fits', etc.", "ERROR")
+        return None
+    
+    log_func(f"CFG AutoGen: {len(found_index_files)} fichier(s) d'index trouvé(s) dans '{abs_index_dir}'.", "DEBUG")
+
+    # --- Détermination du chemin de sortie du .cfg (inchangée) ---
+    if output_cfg_path is None:
+        # ... (logique pour app_specific_cfg_dir et fallback vers temp) ...
+        cfg_dir_base = os.path.expanduser("~"); app_specific_cfg_dir = os.path.join(cfg_dir_base, ".config", "zeseestarstacker_solver")
+        try: os.makedirs(app_specific_cfg_dir, exist_ok=True); output_cfg_path = os.path.join(app_specific_cfg_dir, "auto_generated_astrometry.cfg")
+        except OSError:
+            try: temp_dir_for_cfg = tempfile.mkdtemp(prefix="zss_cfg_"); output_cfg_path = os.path.join(temp_dir_for_cfg, "auto_generated_astrometry.cfg")
+            except Exception: log_func(f"CFG AutoGen: ERREUR CRITIQUE - Impossible de déterminer chemin .cfg", "ERROR"); return None
+    else: # ... (logique si output_cfg_path est fourni) ...
+        try: output_cfg_dir_parent = os.path.dirname(output_cfg_path); os.makedirs(output_cfg_dir_parent, exist_ok=True)
+        except OSError: log_func(f"CFG AutoGen: ERREUR création dir parent pour .cfg custom", "ERROR")
+
+
+    # --- Contenu du .cfg avec liste explicite des index ---
+    content_lines = [
+        f"# Astrometry.cfg auto-generated by ZeSeestarStacker (Explicit Index List V1)",
+        f"# Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# Based on image (for context): {os.path.basename(fits_file_for_scale_estimation)}",
+        f"# Index directory scanned: {abs_index_dir}",
+        "",
+        "# Explicitly list index files found:",
+    ]
+    for index_file_path in sorted(found_index_files): # Trier pour un ordre constant
+        content_lines.append(f"index {index_file_path}")
+    
+    content_lines.extend([
+        "",
+        "# Path to your Astrometry.net index files (gardé pour info, mais les 'index' ci-dessus sont prioritaires)",
+        f"add_path {abs_index_dir}",
+        "",
+        "inparallel",
+        
+        ""
+    ])
+
+    try:
+        with open(output_cfg_path, "w") as f:
+            for line in content_lines:
+                f.write(line + "\n")
+        log_func(f"CFG AutoGen: Fichier (Explicit Index List) '{output_cfg_path}' généré. {len(found_index_files)} index listés.", "INFO")
+        return output_cfg_path
+    except IOError as e_write:
+        log_func(f"CFG AutoGen: ERREUR CRITIQUE - Échec écriture fichier .cfg (Explicit Index List) '{output_cfg_path}': {e_write}", "ERROR")
+        return None
+
+
+
+
+
+
+
 class AstrometrySolver:
     """
     Classe pour orchestrer la résolution astrométrique en utilisant différents solveurs.
@@ -51,9 +228,16 @@ class AstrometrySolver:
         if not _ASTROPY_AVAILABLE:
             self._log("ERREUR CRITIQUE: Astropy n'est pas disponible. AstrometrySolver ne peut fonctionner.", "ERROR")
             raise ImportError("Astropy est requis pour AstrometrySolver.")
+        # Valeurs par défaut GLOBALES pour l'estimation d'échelle si FITS incomplet
+        # Ces valeurs seront écrasées par celles des 'settings' dans la méthode solve() si fournies.
+        self.default_pixel_size_um_for_cfg = 2.4  # Valeur Seestar S50 par défaut
+        self.default_focal_length_mm_for_cfg = 250.0 # Valeur Seestar S50 par défaut
+        self._settings_dict_from_solve = {} # Initialiser aussi pour ansvr_search_radius_deg
+
+
+
 
     def _log(self, message, level="INFO"):
-        """Helper interne pour la journalisation via le progress_callback ou print."""
         prefix_map = {
             "INFO": "   [AstrometrySolver]",
             "WARN": "   ⚠️ [AstrometrySolver WARN]",
@@ -62,22 +246,16 @@ class AstrometrySolver:
         }
         prefix = prefix_map.get(level.upper(), prefix_map["INFO"])
         
-        if self.progress_callback and callable(self.progress_callback):
-            try:
-                # Le progress_callback du QueuedStacker attend (message, progress_value)
-                # Pour les messages de ce module, on peut mettre progress_value à None.
-                self.progress_callback(f"{prefix} {message}", None)
-            except Exception:
-                print(f"{prefix} {message}") # Fallback si le callback échoue
-        else:
-            print(f"{prefix} {message}")
+        print(f"!!!! FORCED PRINT IN _log: {prefix} {message}") # FORCER PRINT ICI
 
+        # if self.progress_callback and callable(self.progress_callback): 
+        #     try:
+        #         self.progress_callback(f"{prefix} {message}", None)    
+        #     except Exception:
+        #         print(f"{prefix} {message}") 
+        # else:
+        #     print(f"{prefix} {message}")
 
-
-
-
-
-# --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
 
     def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
         """
@@ -102,6 +280,16 @@ class AstrometrySolver:
         self._log(f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')", "INFO")
         wcs_solution = None
 
+        # !!!!! TEST DE DÉBOGAGE IMMÉDIAT !!!!!
+        if hasattr(self, 'default_pixel_size_um_for_cfg'):
+            print(f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg EXISTS, valeur = {self.default_pixel_size_um_for_cfg}")
+        else:
+            print(f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg N'EXISTE PAS !!! dir(self) = {dir(self)}")
+            # Optionnel : lever une exception ici pour arrêter net si c'est le cas
+            # raise AttributeError("FORCED STOP: default_pixel_size_um_for_cfg manquant au début de solve()")
+        # !!!!! FIN TEST DE DÉBOGAGE !!!!!
+        
+        self._settings_dict_from_solve = settings.copy() # triche :-) Stocker une copie pour accès interne 
         # --- Récupération des paramètres depuis le dictionnaire settings ---
         solver_preference = settings.get('local_solver_preference', "none") 
         api_key = settings.get('api_key', None)
@@ -153,9 +341,11 @@ class AstrometrySolver:
         elif solver_preference == "ansvr":
             if ansvr_config_path: 
                 self._log("Priorité au solveur local: Astrometry.net Local (solve-field).", "INFO")
+                print(f"!!!!!! DEBUG AstrometrySolver.solve: PRÉPARATION APPEL _try_solve_local_ansvr pour {os.path.basename(image_path)}") 
                 wcs_solution = self._try_solve_local_ansvr(image_path, fits_header, ansvr_config_path,
                                                            scale_est, scale_tol, ansvr_timeout,
                                                            update_header_with_solution)
+                print(f"!!!!!! DEBUG AstrometrySolver.solve: RETOUR DE _try_solve_local_ansvr pour {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}") 
                 if wcs_solution:
                     self._log("Solution trouvée avec Astrometry.net Local (solve-field).", "INFO")
                     return wcs_solution
@@ -204,285 +394,313 @@ class AstrometrySolver:
 
 
 
-    def _try_solve_local_ansvr(self, image_path, fits_header, ansvr_solver_path_or_config,
-                               scale_est_arcsec_per_pix, scale_tolerance_percent, timeout_sec,
+# --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
+
+    def _try_solve_local_ansvr(self, image_path, fits_header,
+                               ansvr_user_provided_path,
+                               scale_est_arcsec_per_pix,
+                               scale_tolerance_percent,
+                               timeout_sec,
                                update_header_with_solution):
-        """
-        Tente de résoudre l'image en utilisant Astrometry.net local (solve-field).
-        ansvr_solver_path_or_config peut être le chemin vers 'solve-field' ou vers un 'astrometry.cfg'.
-        """
-        self._log(f"!!!!!! ENTRÉE DANS _try_solve_local_ansvr POUR {os.path.basename(image_path)} !!!!!!", "ERROR") # Log très visible
-        self._log(f"LocalAnsvr: Tentative de résolution pour {os.path.basename(image_path)}...", "INFO")
 
-        if not os.path.isfile(image_path):
-            self._log(f"LocalAnsvr: Fichier image source '{image_path}' non trouvé.", "ERROR")
+        # --- Section 0: Log d'entrée et validation initiale de image_path ---
+        base_img_name_for_log = os.path.basename(image_path) if image_path and isinstance(image_path, str) else "INVALID_IMAGE_PATH"
+        entry_msg = f"!!!!!! _try_solve_local_ansvr: ENTRÉE (Test SANS COPIE FITS V2) POUR {base_img_name_for_log} !!!!!!"
+        print(entry_msg) 
+        self._log(entry_msg, "ERROR")
+
+        self._log(f"LocalAnsvr (Test SANS COPIE FITS V2): Tentative résolution pour '{base_img_name_for_log}'.", "INFO")
+        self._log(f"  LocalAnsvr: image_path brut reçu: '{image_path}' (type: {type(image_path)})", "DEBUG")
+        self._log(f"  LocalAnsvr: ansvr_user_provided_path: '{ansvr_user_provided_path}'", "DEBUG")
+
+        if not image_path or not os.path.isfile(image_path):
+            self._log(f"LocalAnsvr: Fichier image source '{image_path}' invalide ou non trouvé. Échec.", "ERROR")
             return None
-
-        solve_field_exe = None
-        config_file_to_use = None
-
-        if os.path.isfile(ansvr_solver_path_or_config):
-            if ansvr_solver_path_or_config.lower().endswith(".cfg"):
-                config_file_to_use = ansvr_solver_path_or_config
-                solve_field_exe = shutil.which("solve-field") # Chercher dans le PATH
-                if not solve_field_exe:
-                    self._log(f"LocalAnsvr: Fichier config '{config_file_to_use}' fourni, mais 'solve-field' non trouvé dans le PATH.", "ERROR")
-                    return None
-            else: # Supposé être l'exécutable solve-field
-                solve_field_exe = ansvr_solver_path_or_config
-        elif os.path.isdir(ansvr_solver_path_or_config): # Si c'est un répertoire
-            # Vérifier s'il contient un astrometry.cfg
-            potential_cfg = os.path.join(ansvr_solver_path_or_config, "astrometry.cfg")
-            if os.path.isfile(potential_cfg):
-                config_file_to_use = potential_cfg
-                solve_field_exe = shutil.which("solve-field")
-                if not solve_field_exe:
-                    self._log(f"LocalAnsvr: Fichier config '{config_file_to_use}' trouvé dans le répertoire, mais 'solve-field' non trouvé dans le PATH.", "ERROR")
-                    return None
-            else: # Pas de config, on suppose que ansvr_solver_path_or_config est un dir d'index et solve-field est dans PATH
-                solve_field_exe = shutil.which("solve-field")
-                if not solve_field_exe:
-                    self._log(f"LocalAnsvr: 'solve-field' non trouvé dans le PATH (répertoire index sans config: '{ansvr_solver_path_or_config}').", "ERROR")
-                    return None
-                # On pourrait ajouter --index-dir ici, mais c'est souvent géré par un astrometry.cfg global.
-        else: # Non trouvé
-            solve_field_exe = shutil.which("solve-field")
-            if not solve_field_exe:
-                self._log(f"LocalAnsvr: Chemin/Config '{ansvr_solver_path_or_config}' non valide ET 'solve-field' non trouvé dans le PATH.", "ERROR")
-                return None
+        norm_image_path_original = os.path.normpath(image_path)
+        self._log(f"LocalAnsvr: Image à traiter (originale directe): '{norm_image_path_original}'.", "DEBUG")
         
-        if not os.access(solve_field_exe, os.X_OK):
-            self._log(f"LocalAnsvr: Exécutable 'solve-field' ('{solve_field_exe}') non exécutable.", "ERROR")
-            return None
+        temp_dir_ansvr_solve = None; wcs_object = None
+        solve_field_exe_final_path = None; config_file_to_use_for_cmd = None
+        user_provided_cfg_file = None 
         
-        self._log(f"LocalAnsvr: Utilisation de solve-field: '{solve_field_exe}'", "DEBUG")
-        if config_file_to_use:
-            self._log(f"LocalAnsvr: Utilisation du fichier de configuration: '{config_file_to_use}'", "DEBUG")
+        # On utilise directement le chemin original pour solve-field
+        path_to_pass_to_solve_field = norm_image_path_original
+        self._log(f"LocalAnsvr: Utilisation du fichier FITS original direct pour solve-field: '{path_to_pass_to_solve_field}'", "INFO")
 
-        temp_dir = None
-        wcs_object = None
         try:
-            temp_dir = tempfile.mkdtemp(prefix="ansvr_solve_")
-            self._log(f"LocalAnsvr: Répertoire temporaire créé: {temp_dir}", "DEBUG")
+            temp_dir_ansvr_solve = tempfile.mkdtemp(prefix="ansvr_solve_")
+            self._log(f"LocalAnsvr: Répertoire temp principal: {temp_dir_ansvr_solve}", "DEBUG")
 
-            output_base_name = "solved_image"
-            # Chemin pour le fichier FITS de sortie qui contiendra le WCS
-            output_fits_path = os.path.join(temp_dir, output_base_name + ".new")
+            # --- BLOC DE CRÉATION DE COPIE FITS "PROPRE" EST MAINTENANT COMMENTÉ/SUPPRIMÉ ---
+            # temp_fits_name = "cleaned_input_for_test_original_" + base_img_name_for_log
+            # temp_fits_for_solving_path = os.path.join(temp_dir_ansvr_solve, temp_fits_name)
+            # try:
+            #     # ... (code de copie) ...
+            # except Exception as e_copy_fits:
+            #     self._log(f"LocalAnsvr: WARN - Erreur création copie FITS 'propre': {e_copy_fits}. Utilisation original.", "WARN")
+            # --- FIN BLOC COMMENTÉ/SUPPRIMÉ ---
+
+            # --- Section 1: Déterminer exécutable et .cfg ---
+            self._log(f"LocalAnsvr: Section 1 - Interprétation ansvr_user_provided_path ('{ansvr_user_provided_path}').", "DEBUG")
+            if ansvr_user_provided_path and isinstance(ansvr_user_provided_path, str) and ansvr_user_provided_path.strip():
+                abs_user_path = os.path.abspath(os.path.normpath(ansvr_user_provided_path.strip()))
+                if os.path.exists(abs_user_path):
+                    if os.path.isfile(abs_user_path):
+                        if abs_user_path.lower().endswith(".cfg"):
+                            user_provided_cfg_file = abs_user_path; config_file_to_use_for_cmd = user_provided_cfg_file
+                            solve_field_exe_final_path = shutil.which("solve-field")
+                        else: solve_field_exe_final_path = abs_user_path
+                    elif os.path.isdir(abs_user_path):
+                        generated_cfg_path = _generate_astrometry_cfg_auto( # Utilise la version "Minimal V3"
+                            fits_file_for_scale_estimation=path_to_pass_to_solve_field, # Pour les commentaires du .cfg
+                            index_directory_path=abs_user_path, output_cfg_path=None, solver_instance=self
+                        )
+                        if generated_cfg_path and os.path.isfile(generated_cfg_path):
+                            config_file_to_use_for_cmd = generated_cfg_path
+                            solve_field_exe_final_path = shutil.which("solve-field")
+                        else: self._log(f"LocalAnsvr: ERREUR - Échec génération .cfg auto pour '{abs_user_path}'.", "ERROR"); raise RuntimeError("CFG Auto Gen Failed")
+                else: solve_field_exe_final_path = shutil.which("solve-field")
+            else: solve_field_exe_final_path = shutil.which("solve-field")
+
+            if not solve_field_exe_final_path or not os.path.isfile(solve_field_exe_final_path) or not os.access(solve_field_exe_final_path, os.X_OK):
+                self._log(f"LocalAnsvr: ERREUR - Exécutable ('{solve_field_exe_final_path}') non valide.", "ERROR"); raise RuntimeError("Solve-field Exe Invalid")
+            self._log(f"LocalAnsvr: Exe: '{solve_field_exe_final_path}'. Cfg: '{config_file_to_use_for_cmd if config_file_to_use_for_cmd else 'Aucun spécifique'}'.", "DEBUG")
+
+            # --- Section 2: Exécution de solve-field ---
+            output_base_name = "sfs_direct_" + os.path.splitext(os.path.basename(path_to_pass_to_solve_field))[0] # Nom de base pour les sorties
+            output_fits_path = os.path.join(temp_dir_ansvr_solve, output_base_name + ".new")
 
             cmd = [
-                solve_field_exe,
-                "--no-plots",
-                "--no-fits2fits",
-                "--overwrite",
-                "--dir", temp_dir, # Important pour que tous les fichiers auxiliaires aillent là
-                "--new-fits", output_fits_path,
-                # "--wcs", os.path.join(temp_dir, output_base_name + ".wcs"), # Fichier WCS autonome, pas crucial si on lit .new
-                "--corr", os.path.join(temp_dir, output_base_name + ".corr"), # Correspondances étoiles
-                "--match", os.path.join(temp_dir, output_base_name + ".match"), # Info match
-                "--rdls", os.path.join(temp_dir, output_base_name + ".rdls"), # RA/DEC list
-                "--axy", os.path.join(temp_dir, output_base_name + ".axy"),     # Liste des étoiles X,Y,Flux
-                "--crpix-center",
-                "--parity", "neg", # Très souvent nécessaire
-                "-v", # Un peu de verbosité
+                solve_field_exe_final_path, "--no-plots", "--overwrite", "--no-verify", "--guess-scale",
+                # "--downsample", "2", # Temporairement enlevé pour isoler l'effet du fichier original
+                "--dir", temp_dir_ansvr_solve, "--new-fits", output_fits_path,
+                "--corr", os.path.join(temp_dir_ansvr_solve, output_base_name + ".corr"),
+                "--match", os.path.join(temp_dir_ansvr_solve, output_base_name + ".match"),
+                "--rdls", os.path.join(temp_dir_ansvr_solve, output_base_name + ".rdls"),
+                "--axy", os.path.join(temp_dir_ansvr_solve, output_base_name + ".axy"),
+                "--crpix-center", "--parity", "neg", "-v"
             ]
 
-            if config_file_to_use and os.path.isfile(config_file_to_use):
-                cmd.extend(["--config", config_file_to_use])
+            if config_file_to_use_for_cmd: cmd.extend(["--config", config_file_to_use_for_cmd])
             
-            # Ajout des options d'échelle
-            if scale_est_arcsec_per_pix is not None and scale_est_arcsec_per_pix > 0:
-                try:
-                    scale_est_val = float(scale_est_arcsec_per_pix)
-                    tolerance_val = float(scale_tolerance_percent)
-                    scale_lower = scale_est_val * (1.0 - tolerance_val / 100.0)
-                    scale_upper = scale_est_val * (1.0 + tolerance_val / 100.0)
-                    cmd.extend([
-                        "--scale-units", "arcsecperpix",
-                        "--scale-low", str(scale_lower),
-                        "--scale-high", str(scale_upper)
-                    ])
-                    self._log(f"LocalAnsvr: Utilisation des bornes d'échelle: [{scale_lower:.2f} - {scale_upper:.2f}] arcsec/pix", "DEBUG")
-                except (ValueError, TypeError) as e_scale:
-                    self._log(f"LocalAnsvr: Erreur conversion paramètres d'échelle: {e_scale}. Options d'échelle ignorées.", "WARN")
-            
-            # Coordonnées RA/DEC du header (optionnel, pour accélérer la recherche)
+            # Les options d'échelle manuelles ne sont PAS ajoutées car on utilise --guess-scale
+            # if scale_est_arcsec_per_pix is not None and scale_est_arcsec_per_pix > 0:
+            #    ... (bloc commenté)
+
             if fits_header:
-                ra_deg_hdr = fits_header.get('RA', fits_header.get('CRVAL1')) # Essayez différentes clés
-                dec_deg_hdr = fits_header.get('DEC', fits_header.get('CRVAL2'))
-                # Il faudrait s'assurer que RA/DEC sont bien en degrés décimaux.
-                # Pour l'instant, on suppose qu'ils le sont s'ils sont numériques.
-                if isinstance(ra_deg_hdr, (int, float)) and isinstance(dec_deg_hdr, (int, float)):
-                    cmd.extend(["--ra", str(ra_deg_hdr), "--dec", str(dec_deg_hdr)])
-                    search_radius_deg_sf = 15 # Rayon de recherche par défaut si RA/DEC fourni
-                    # On pourrait rendre ce rayon configurable via le dict settings s'il est important
-                    # settings.get('ansvr_search_radius_deg', 15)
-                    cmd.extend(["--radius", str(search_radius_deg_sf)])
-                    self._log(f"LocalAnsvr: Utilisation RA/DEC du header: {ra_deg_hdr}, {dec_deg_hdr} avec rayon {search_radius_deg_sf} deg.", "DEBUG")
+                add_rd_cmd = True
+                if config_file_to_use_for_cmd and user_provided_cfg_file and self._cfg_contains_radec(config_file_to_use_for_cmd): add_rd_cmd = False
+                if add_rd_cmd:
+                    ra_h=fits_header.get('RA',fits_header.get('CRVAL1')); dec_h=fits_header.get('DEC',fits_header.get('CRVAL2'))
+                    if isinstance(ra_h,(int,float)) and isinstance(dec_h,(int,float)):
+                        rad_s=getattr(self,'_settings_dict_from_solve',{}).get('ansvr_search_radius_deg',15.0)
+                        cmd.extend(["--ra",str(ra_h),"--dec",str(dec_h),"--radius",str(max(0.1,rad_s))])
             
-            cmd.append(image_path) # Le fichier d'entrée en dernier
+            cmd.append(path_to_pass_to_solve_field) # C'est maintenant norm_image_path_original
+            self._log(f"LocalAnsvr (SANS COPIE FITS): Commande: {' '.join(cmd)}", "INFO")
+            self._log(f"LocalAnsvr: Exécution solve-field pour '{base_img_name_for_log}' (timeout={timeout_sec}s)...", "INFO")
 
-            self._log(f"LocalAnsvr: Commande construite: {' '.join(cmd)}", "DEBUG")
-            self._log(f"LocalAnsvr: Exécution avec timeout de {timeout_sec}s...", "INFO")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=False)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=False, cwd=None)
             
-            self._log(f"LocalAnsvr: Code de retour: {result.returncode}", "DEBUG")
-            if result.stdout: self._log(f"LocalAnsvr stdout (premiers 500 caractères):\n{result.stdout[:500]}", "DEBUG")
-            if result.stderr: self._log(f"LocalAnsvr stderr (premiers 500 caractères):\n{result.stderr[:500]}", "DEBUG")
+            self._log(f"LocalAnsvr: Code retour solve-field: {result.returncode}", "DEBUG")
+            if result.stdout and result.returncode != 0: self._log(f"LocalAnsvr stdout (échec):\n{result.stdout[:1000]}", "DEBUG")
+            if result.stderr: self._log(f"LocalAnsvr stderr:\n{result.stderr[:1000]}", "DEBUG")
 
             if result.returncode == 0:
                 if os.path.exists(output_fits_path) and os.path.getsize(output_fits_path) > 0:
-                    self._log(f"LocalAnsvr: Résolution semble réussie. Fichier '{output_fits_path}' trouvé.", "INFO")
+                    self._log(f"LocalAnsvr: Résolution RÉUSSIE pour '{base_img_name_for_log}'. Fichier solution: '{os.path.basename(output_fits_path)}'.", "INFO")
                     try:
-                        with fits.open(output_fits_path, memmap=False) as hdul_solved:
-                            solved_header = hdul_solved[0].header
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", FITSFixedWarning)
-                            wcs_object = WCS(solved_header, naxis=2) # Créer WCS depuis le header du fichier .new
-                        
+                        with fits.open(output_fits_path,memmap=False) as h_sol: solved_header=h_sol[0].header
+                        with warnings.catch_warnings(): warnings.simplefilter("ignore",FITSFixedWarning); wcs_object=WCS(solved_header,naxis=2)
                         if wcs_object and wcs_object.is_celestial:
-                            self._log("LocalAnsvr: Objet WCS créé avec succès depuis le FITS de sortie.", "INFO")
-                            # Assurer que pixel_shape est défini pour l'objet WCS
-                            # NAXIS1/NAXIS2 dans le header de sortie devraient refléter l'image originale
-                            nx_sol = solved_header.get('NAXIS1', fits_header.get('NAXIS1'))
-                            ny_sol = solved_header.get('NAXIS2', fits_header.get('NAXIS2'))
-                            if nx_sol and ny_sol:
-                                wcs_object.pixel_shape = (int(nx_sol), int(ny_sol))
-                            
-                            if update_header_with_solution and fits_header is not None:
-                                self._update_fits_header_with_wcs(fits_header, wcs_object, solver_name="LocalAnsvr")
-                        else:
-                            self._log("LocalAnsvr: Échec création objet WCS ou WCS non céleste.", "ERROR")
-                            wcs_object = None
-                    except Exception as e_parse:
-                        self._log(f"LocalAnsvr: Erreur lors du parsing du FITS de sortie '{output_fits_path}': {e_parse}", "ERROR")
-                        wcs_object = None
-                else:
-                    self._log(f"LocalAnsvr: Code retour 0 mais fichier FITS de sortie '{output_fits_path}' manquant ou vide.", "ERROR")
-                    wcs_object = None
-            else:
-                self._log(f"LocalAnsvr: Résolution échouée (code retour solve-field: {result.returncode}).", "WARN")
-                wcs_object = None
-
-        except subprocess.TimeoutExpired:
-            self._log(f"LocalAnsvr: Timeout de résolution ({timeout_sec}s) expiré pour {os.path.basename(image_path)}.", "ERROR")
-            wcs_object = None
-        except FileNotFoundError: # Si solve_field_exe n'est pas trouvé
-            self._log(f"LocalAnsvr: Exécutable 'solve-field' ('{solve_field_exe}') non trouvé. Vérifiez le chemin/PATH.", "ERROR")
-            wcs_object = None
-        except Exception as e:
-            self._log(f"LocalAnsvr: Erreur inattendue pendant exécution/traitement: {e}", "ERROR")
-            traceback.print_exc(limit=1)
-            wcs_object = None
+                            nx=solved_header.get('NAXIS1',fits_header.get('NAXIS1') if fits_header else None) 
+                            ny=solved_header.get('NAXIS2',fits_header.get('NAXIS2') if fits_header else None)
+                            if nx and ny: wcs_object.pixel_shape=(int(nx),int(ny)) 
+                            if update_header_with_solution and fits_header is not None: self._update_fits_header_with_wcs(fits_header,wcs_object,solver_name="LocalAnsvr_GuessDirect") # Nom du solveur mis à jour
+                        else: self._log(f"LocalAnsvr: ERREUR - WCS non céleste depuis '{os.path.basename(output_fits_path)}'.", "ERROR"); wcs_object=None
+                    except Exception as e_p: self._log(f"LocalAnsvr: ERREUR parsing FITS solution '{os.path.basename(output_fits_path)}': {e_p}","ERROR"); wcs_object=None
+                else: self._log(f"LocalAnsvr: ERREUR - solve-field code 0 mais FITS solution '{os.path.basename(output_fits_path)}' manquant/vide.", "ERROR"); wcs_object=None
+            else: self._log(f"LocalAnsvr: WARN - solve-field a échoué pour '{base_img_name_for_log}' (code: {result.returncode}).", "WARN"); wcs_object=None
+        except RuntimeError as rte_internal: self._log(f"LocalAnsvr: ERREUR (Runtime) interne: {rte_internal}", "ERROR"); wcs_object=None
+        except subprocess.TimeoutExpired: self._log(f"LocalAnsvr: ERREUR - Timeout ({timeout_sec}s) pour '{base_img_name_for_log}'.", "ERROR"); wcs_object=None
+        except FileNotFoundError: self._log(f"LocalAnsvr: ERREUR - Exécutable '{solve_field_exe_final_path}' non trouvé par subprocess.", "ERROR"); wcs_object=None
+        except Exception as e: self._log(f"LocalAnsvr: ERREUR inattendue: {e}", "ERROR"); traceback.print_exc(limit=1); wcs_object=None
         finally:
-            if temp_dir and os.path.isdir(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                    self._log(f"LocalAnsvr: Répertoire temporaire '{temp_dir}' supprimé.", "DEBUG")
-                except Exception as e_clean:
-                    self._log(f"LocalAnsvr: Avertissement - Impossible de supprimer le répertoire temporaire '{temp_dir}': {e_clean}", "WARN")
-        
+            if temp_dir_ansvr_solve and os.path.isdir(temp_dir_ansvr_solve):
+                try: shutil.rmtree(temp_dir_ansvr_solve, ignore_errors=True); self._log(f"LocalAnsvr: Répertoire temp '{temp_dir_ansvr_solve}' supprimé.", "DEBUG")
+                except Exception as e_cl: self._log(f"LocalAnsvr: WARN - Erreur nettoyage dir temp '{temp_dir_ansvr_solve}': {e_cl}", "WARN")
+            self._log(f"LocalAnsvr: Fin traitement pour '{base_img_name_for_log}'.", "DEBUG")
+
+        self._log(f"LocalAnsvr: Fin résolution pour {base_img_name_for_log}. Solution trouvée: {'Oui' if wcs_object else 'Non'}", "INFO")
         return wcs_object
 
+    # ... (le reste de la classe AstrometrySolver)
 
 
 
 
 
 
-# --- DANS LA CLASSE AstrometrySolver ---
+
+    # --- AJOUT D'UNE MÉTHODE HELPER POUR VÉRIFIER LE CONTENU DU .CFG ---
+    def _cfg_contains_radec(self, cfg_path):
+        """Vérifie si un fichier .cfg semble contenir des options RA/DEC."""
+        if not cfg_path or not os.path.isfile(cfg_path):
+            return False
+        try:
+            with open(cfg_path, 'r') as f_cfg:
+                for line in f_cfg:
+                    line_low = line.strip().lower()
+                    if line_low.startswith("ra ") or line_low.startswith("dec ") or line_low.startswith("radius "):
+                        return True
+        except Exception:
+            return False # Prudence
+        return False
+
+    # ... (méthodes _try_solve_astap, _solve_astrometry_net_web, _parse_wcs_file_content, _update_fits_header_with_wcs existantes) ...
+    # Note: la méthode _try_solve_astap est celle que tu as déjà modifiée pour le nettoyage.
+
+# --- END OF FILE seestar/alignment/astrometry_solver.py ---
+
+
+
+# --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
 
     def _try_solve_astap(self, image_path, fits_header, astap_exe_path, astap_data_dir,
-                         astap_search_radius_deg, 
-                         scale_est_arcsec_per_pix_from_solver_UNUSED, 
-                         scale_tolerance_percent_UNUSED,  
+                         astap_search_radius_deg,
+                         scale_est_arcsec_per_pix_from_solver_UNUSED,
+                         scale_tolerance_percent_UNUSED,
                          timeout_sec,
                          update_header_with_solution):
-        self._log(f"!!!!!! ENTRÉE DANS _try_solve_astap POUR {os.path.basename(image_path)} !!!!!!", "ERROR") 
+        self._log(f"!!!!!! ENTRÉE DANS _try_solve_astap (Nettoyage Fichiers V1) POUR {os.path.basename(image_path)} !!!!!!", "ERROR")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
-        
+
         image_dir = os.path.dirname(image_path)
         base_image_name_no_ext = os.path.splitext(os.path.basename(image_path))[0]
+
+        # --- NOMS DES FICHIERS ATTENDUS ---
         expected_wcs_file = os.path.join(image_dir, base_image_name_no_ext + ".wcs")
         expected_ini_file = os.path.join(image_dir, base_image_name_no_ext + ".ini")
-        astap_log_file_generated = os.path.join(image_dir, base_image_name_no_ext + ".log") 
+        # Le fichier .log généré par l'option -log d'ASTAP aura le même nom de base que l'image
+        astap_log_file_generated = os.path.join(image_dir, base_image_name_no_ext + ".log")
 
-        for f_to_clean in [expected_wcs_file, expected_ini_file, astap_log_file_generated]:
-            if os.path.exists(f_to_clean):
-                try: os.remove(f_to_clean); self._log(f"ASTAP: Ancien fichier '{os.path.basename(f_to_clean)}' supprimé.", "DEBUG")
-                except Exception as e_del: self._log(f"ASTAP: Avertissement - Échec suppression '{os.path.basename(f_to_clean)}': {e_del}", "WARN")
+        files_to_cleanup = [expected_wcs_file, expected_ini_file, astap_log_file_generated]
 
-        cmd = [astap_exe_path, "-f", image_path, "-log"] 
+        # --- NETTOYAGE PRÉ-EXÉCUTION ---
+        self._log(f"ASTAP: Nettoyage pré-exécution des fichiers temporaires potentiels...", "DEBUG")
+        for f_to_clean_pre in files_to_cleanup:
+            if os.path.exists(f_to_clean_pre):
+                try:
+                    os.remove(f_to_clean_pre)
+                    self._log(f"ASTAP: Ancien fichier '{os.path.basename(f_to_clean_pre)}' supprimé avant exécution.", "DEBUG")
+                except Exception as e_del_pre:
+                    self._log(f"ASTAP: Avertissement - Échec suppression pré-exécution de '{os.path.basename(f_to_clean_pre)}': {e_del_pre}", "WARN")
+        # --- FIN NETTOYAGE PRÉ-EXÉCUTION ---
+
+        cmd = [astap_exe_path, "-f", image_path, "-log"] # Option -log pour générer le .log
         if astap_data_dir and os.path.isdir(astap_data_dir):
             cmd.extend(["-d", astap_data_dir])
-        
-        cmd.extend(["-z", "2"]) 
-        cmd.extend(["-sens", "100"]) 
 
-        # --- TEST FORÇAGE RAYON ---
-        # On force un rayon spécifique, sans RA/DEC, sans -fov, sans -pxscale
-        # pour voir si ASTAP respecte ce -r
-        forced_radius_test = "3.0" # ou str(astap_search_radius_deg) si vous voulez être sûr de la valeur reçue
-        cmd.extend(["-r", forced_radius_test])
-        self._log(f"ASTAP: TEST FORÇAGE -r {forced_radius_test} SANS AUTRES OPTIONS DE POSITION/ÉCHELLE.", "WARN")
-        # --- FIN TEST FORÇAGE RAYON ---
+        # Options de résolution (z, sens)
+        cmd.extend(["-z", "2"]) # Downsample pour accélérer (0=aucun, 1=x2, 2=x4)
+        cmd.extend(["-sens", "100"]) # Seuil de détection (plus bas = plus sensible)
+
+        # Gestion du rayon de recherche
+        # astap_search_radius_deg est la valeur float reçue de settings
+        if astap_search_radius_deg is not None and astap_search_radius_deg > 0:
+            # ASTAP attend un rayon en degrés, ce que nous avons.
+            # Si RA/DEC sont aussi fournis, ce rayon est centré.
+            # Si pas de RA/DEC, ASTAP utilise ce rayon autour du centre de l'image (s'il ne trouve pas avec -fov 0).
+            # L'option -fov 0 demande à ASTAP d'estimer lui-même le champ.
+            # On peut soit utiliser -fov 0 (et laisser ASTAP décider), soit passer -r si on a une bonne estimation.
+            # Pour l'instant, on passe -r si fourni, sinon on laisse ASTAP gérer.
+            # Le comportement exact de -r sans -ra -dec est à confirmer via les logs ASTAP.
+            # Le log d'ASTAP devrait indiquer "Search an area of X degrees around image center"
+            cmd.extend(["-r", str(astap_search_radius_deg)])
+            self._log(f"ASTAP: Utilisation rayon de recherche: {astap_search_radius_deg}°", "DEBUG")
+        else:
+            # Si astap_search_radius_deg est 0 ou non fourni, ASTAP utilisera -fov 0
+            # ce qui est généralement recommandé pour une recherche "aveugle".
+            cmd.extend(["-fov", "0"])
+            self._log(f"ASTAP: Utilisation -fov 0 (recherche automatique du champ).", "DEBUG")
         
-        self._log(f"ASTAP: Commande finale (test forçage rayon): {' '.join(cmd)}", "DEBUG")
-        wcs_object = None 
-        
+        self._log(f"ASTAP: Commande finale: {' '.join(cmd)}", "DEBUG")
+        wcs_object = None
+
         try:
-            # ... (le reste de la méthode : subprocess.run, parsing .wcs, etc. est inchangé) ...
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=False, cwd=image_dir)
             self._log(f"ASTAP: Code de retour: {result.returncode}", "DEBUG")
             if result.stdout: self._log(f"ASTAP stdout (premiers 500 caractères):\n{result.stdout[:500]}", "DEBUG")
             if result.stderr: self._log(f"ASTAP stderr (premiers 500 caractères):\n{result.stderr[:500]}", "DEBUG")
 
-            if result.returncode == 0: 
+            if result.returncode == 0:
                 if os.path.exists(expected_wcs_file) and os.path.getsize(expected_wcs_file) > 0:
-                    # ... (parsing du .wcs file) ...
+                    self._log(f"ASTAP: Résolution réussie. Fichier '{expected_wcs_file}' trouvé.", "INFO")
                     img_shape_hw_for_wcs = None
                     try:
                         with fits.open(image_path, memmap=False) as hdul_img_shape:
-                            img_data_shape = hdul_img_shape[0].shape 
-                            if len(img_data_shape) >= 2: img_shape_hw_for_wcs = img_data_shape[-2:] 
+                            img_data_shape = hdul_img_shape[0].shape
+                            if len(img_data_shape) >= 2: img_shape_hw_for_wcs = img_data_shape[-2:] # Prendre (H, W)
                             else: raise ValueError(f"Shape image inattendue: {img_data_shape}")
                     except Exception as e_shape:
                         self._log(f"ASTAP: Erreur lecture shape image ('{image_path}') pour WCS parsing: {e_shape}. Utilisation fallback header.", "WARN")
                         h_fallback = fits_header.get('NAXIS2', 1000) if fits_header else 1000
                         w_fallback = fits_header.get('NAXIS1', 1000) if fits_header else 1000
                         img_shape_hw_for_wcs = (int(h_fallback), int(w_fallback))
+
                     wcs_object = self._parse_wcs_file_content(expected_wcs_file, img_shape_hw_for_wcs)
+
                     if wcs_object and wcs_object.is_celestial:
                         self._log("ASTAP: Objet WCS créé avec succès.", "INFO")
                         if update_header_with_solution and fits_header is not None:
                             self._update_fits_header_with_wcs(fits_header, wcs_object, solver_name="ASTAP")
                     else:
-                        self._log("ASTAP: Échec création objet WCS ou WCS non céleste.", "ERROR"); wcs_object = None 
+                        self._log("ASTAP: Échec création objet WCS ou WCS non céleste.", "ERROR")
+                        wcs_object = None
                 else:
-                    self._log("ASTAP: Code retour 0 mais .wcs manquant/vide. Échec.", "ERROR"); wcs_object = None
-            else: 
+                    self._log("ASTAP: Code retour 0 mais .wcs manquant/vide. Échec.", "ERROR")
+                    wcs_object = None
+            else:
                 log_msg_echec = f"ASTAP: Résolution échouée (code {result.returncode}"
                 if not os.path.exists(expected_wcs_file): log_msg_echec += ", fichier .wcs NON trouvé"
                 elif os.path.exists(expected_wcs_file) and os.path.getsize(expected_wcs_file) == 0: log_msg_echec += ", fichier .wcs vide"
                 else: log_msg_echec += ", .wcs trouvé mais autre problème possible"
+
                 if os.path.exists(astap_log_file_generated):
                     try:
-                        with open(astap_log_file_generated, "r", errors='ignore') as f_log_astap: astap_log_content = f_log_astap.read(1000) 
-                        log_msg_echec += f". Extrait ASTAP Log: ...{astap_log_content[-400:]}" 
-                    except Exception as e_log_read: log_msg_echec += f". (Erreur lecture log ASTAP: {e_log_read})"
+                        with open(astap_log_file_generated, "r", errors='ignore') as f_log_astap:
+                            astap_log_content = f_log_astap.read(1000) # Lire un extrait
+                        log_msg_echec += f". Extrait ASTAP Log: ...{astap_log_content[-400:]}" # Afficher la fin
+                    except Exception as e_log_read:
+                        log_msg_echec += f". (Erreur lecture log ASTAP: {e_log_read})"
                 log_msg_echec += ")."
-                self._log(log_msg_echec, "WARN"); wcs_object = None
+                self._log(log_msg_echec, "WARN")
+                wcs_object = None
+
         except subprocess.TimeoutExpired:
-            self._log(f"ASTAP: Timeout ({timeout_sec}s) expiré.", "ERROR"); wcs_object = None
-        except FileNotFoundError: 
-            self._log(f"ASTAP: Exécutable '{astap_exe_path}' non trouvé.", "ERROR"); wcs_object = None
+            self._log(f"ASTAP: Timeout ({timeout_sec}s) expiré.", "ERROR")
+            wcs_object = None
+        except FileNotFoundError:
+            self._log(f"ASTAP: Exécutable '{astap_exe_path}' non trouvé.", "ERROR")
+            wcs_object = None
         except Exception as e:
-            self._log(f"ASTAP: Erreur inattendue: {e}", "ERROR"); traceback.print_exc(limit=1); wcs_object = None
+            self._log(f"ASTAP: Erreur inattendue: {e}", "ERROR")
+            traceback.print_exc(limit=1)
+            wcs_object = None
         finally:
-            if os.path.exists(expected_ini_file):
-                try: os.remove(expected_ini_file)
-                except Exception: pass
+            # --- NETTOYAGE POST-EXÉCUTION ---
+            self._log(f"ASTAP: Nettoyage post-exécution des fichiers temporaires...", "DEBUG")
+            for f_to_clean_post in files_to_cleanup:
+                if os.path.exists(f_to_clean_post):
+                    try:
+                        os.remove(f_to_clean_post)
+                        self._log(f"ASTAP: Fichier '{os.path.basename(f_to_clean_post)}' nettoyé.", "DEBUG")
+                    except Exception as e_del_post:
+                        self._log(f"ASTAP: Avertissement - Échec nettoyage de '{os.path.basename(f_to_clean_post)}': {e_del_post}", "WARN")
+            # --- FIN NETTOYAGE POST-EXÉCUTION ---
+
         return wcs_object
+
 
 
 

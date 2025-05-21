@@ -2939,9 +2939,6 @@ class SeestarQueuedStacker:
                 fa_success = False 
                 
                 if self.local_aligner_instance is not None and reference_image_data_for_alignment is not None:
-                    # reference_image_data_for_alignment est l'image de l'ANCRE (prétraitée)
-                    # prepared_img_apres_pretraitement est l'image du PANNEAU ACTUEL (prétraitée)
-                    
                     _image_alignee_par_fa, M_par_fa, fa_success_interne = self.local_aligner_instance._align_image(
                         src_img=prepared_img_apres_pretraitement,
                         ref_img=reference_image_data_for_alignment,
@@ -2960,9 +2957,7 @@ class SeestarQueuedStacker:
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) RÉUSSI pour '{file_name}'.", "INFO")
                         align_method_log_msg = "FastAligner_Success"
                         matrice_M_calculee = M_par_fa
-                        # Le WCS du panneau sera celui de l'ancre, car M transforme les pixels du panneau vers le système de l'ancre.
                         wcs_final_pour_retour = self.reference_wcs_object 
-                        # data_final_pour_retour reste prepared_img_apres_pretraitement (non-warpé par FastAligner ici)
                     else: 
                         fa_success = False 
                         self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}'.", "WARN")
@@ -2971,60 +2966,56 @@ class SeestarQueuedStacker:
                     self.update_progress(f"   [ProcessFile] Alignement Local non tenté pour '{file_name}' (local_aligner ou ancre manquants).", "WARN")
                     align_method_log_msg = "LocalAlign_Not_Attempted"
                 
-                # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
-                # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback" (défini dans start_processing)
-                # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
-                # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback" (défini dans start_processing)
                 if not fa_success and self.use_wcs_fallback_for_mosaic: 
                     self.update_progress(f"     -> Tentative Fallback (via AstrometrySolver) pour '{file_name}'...", None)
                     align_method_log_msg += "_Fallback_Attempted" 
                     
                     if self.astrometry_solver: 
                         print(f"DEBUG QM (_process_file - FallbackWCS): Construction du dictionnaire 'settings' pour panneau '{file_name}'...")
-                        
-                        # Utiliser directement l'échelle de l'ancre si elle a été résolue
-                        # self.reference_pixel_scale_arcsec est mis à jour dans _worker après le solving de l'ancre.
-                        # Si l'ancre n'a pas pu être résolue, self.reference_pixel_scale_arcsec pourrait être None 
-                        # ou sa valeur initiale (qui pourrait aussi être None).
                         scale_to_use_for_panel_fallback = self.reference_pixel_scale_arcsec 
-                        
                         print(f"    DEBUG QM (_process_file - FallbackWCS): Scale estimée (depuis self.reference_pixel_scale_arcsec) pour fallback panneau '{file_name}': {scale_to_use_for_panel_fallback}")
-                    
                         solver_settings_for_panel_fallback = {
-                            'local_solver_preference': self.local_solver_preference, # <<< UTILISER LA NOUVELLE PRÉFÉRENCE
+                            'local_solver_preference': self.local_solver_preference,
                             'api_key': self.api_key,
-                            'astap_path': self.astap_path,                           # Utiliser self.astap_path
-                            'astap_data_dir': self.astap_data_dir,                     # Utiliser self.astap_data_dir
-                            'astap_search_radius': self.astap_search_radius,           # <<< UTILISER self.astap_search_radius
-                            'local_ansvr_path': self.local_ansvr_path,                 # Utiliser self.local_ansvr_path
-                            'scale_est_arcsec_per_pix': scale_to_use_for_panel_fallback, # <<< UTILISER LA VARIABLE DÉFINIE CI-DESSUS
+                            'astap_path': self.astap_path,
+                            'astap_data_dir': self.astap_data_dir,
+                            'astap_search_radius': self.astap_search_radius,
+                            'local_ansvr_path': self.local_ansvr_path,
+                            'scale_est_arcsec_per_pix': scale_to_use_for_panel_fallback,
                             'scale_tolerance_percent': 20, 
                             'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
                             'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
                             'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
-                            # La ligne "use_local_solver_priority" est supprimée
-                            # La ligne "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0) est supprimée
                         }
-                        # DEBUG pour vérifier le dictionnaire
                         print(f"DEBUG QM (_process_file - FallbackWCS): Contenu de solver_settings_for_panel_fallback pour '{file_name}':")
                         for k_fb, v_fb in solver_settings_for_panel_fallback.items():
                             if k_fb == 'api_key': print(f"    '{k_fb}': '{'Présente' if v_fb else 'Absente'}'")
                             else: print(f"    '{k_fb}': '{v_fb}'")
-                        # --- FIN DEBUG ---
-                        # --- FIN MODIFICATION DU DICTIONNAIRE ---
 
-                        wcs_panel_solved_by_solver = self.astrometry_solver.solve(
-                            image_path=file_path, 
-                            fits_header=header_final_pour_retour, 
-                            settings=solver_settings_for_panel_fallback, # Utilise le dictionnaire corrigé
-                            update_header_with_solution=True 
-                        )
+                        # --- DÉBUT DU BLOC TRY/EXCEPT AJOUTÉ ---
+                        wcs_panel_solved_by_solver = None # Initialiser avant le try
+                        try:
+                            print(f"!!!!!! DEBUG _process_file: APPEL à AstrometrySolver.solve pour fallback panneau '{file_name}'")
+                            wcs_panel_solved_by_solver = self.astrometry_solver.solve(
+                                image_path=file_path, 
+                                fits_header=header_final_pour_retour, 
+                                settings=solver_settings_for_panel_fallback,
+                                update_header_with_solution=True 
+                            )
+                            print(f"!!!!!! DEBUG _process_file: RETOUR de AstrometrySolver.solve pour '{file_name}'. Solution: {'Oui' if wcs_panel_solved_by_solver else 'Non'}")
+
+                        except Exception as e_solve_fallback:
+                            self.update_progress(f"       -> ERREUR CRITIQUE pendant appel AstrometrySolver.solve (fallback) pour '{file_name}': {e_solve_fallback}", "ERROR")
+                            print(f"ERREUR QM (_process_file - Fallback Solve Call): {e_solve_fallback}")
+                            traceback.print_exc(limit=5) # Afficher plus de détails
+                            wcs_panel_solved_by_solver = None # S'assurer qu'il est None en cas d'erreur ici
+                            align_method_log_msg += f"_SolveError_{type(e_solve_fallback).__name__}"
+                        # --- FIN DU BLOC TRY/EXCEPT AJOUTÉ ---
 
                         if wcs_panel_solved_by_solver and wcs_panel_solved_by_solver.is_celestial:
                             self.update_progress(f"       -> Fallback (via AstrometrySolver) RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
-                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success" # Mettre à jour le log de la méthode
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
                             wcs_final_pour_retour = wcs_panel_solved_by_solver 
-                            
                             matrice_M_calculee = self._calculate_M_from_wcs(
                                 wcs_panel_solved_by_solver,      
                                 self.reference_wcs_object,       
@@ -3035,22 +3026,23 @@ class SeestarQueuedStacker:
                                 align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
                                 wcs_final_pour_retour = None 
                         else:
+                            # Si wcs_panel_solved_by_solver est None (soit parce que solve a retourné None, soit à cause d'une exception ci-dessus)
                             self.update_progress(f"       -> Fallback (via AstrometrySolver) ÉCHOUÉ pour '{file_name}'.", "WARN")
-                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail" # Mettre à jour le log
+                            if "_SolveError_" not in align_method_log_msg: # N'écrase pas un log d'erreur plus spécifique
+                                align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
                             wcs_final_pour_retour = None 
                             matrice_M_calculee = None
                     else: 
                         self.update_progress(f"     -> AstrometrySolver non disponible pour fallback WCS pour '{file_name}'.", "ERROR")
-                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver" # Mettre à jour le log
+                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
                         wcs_final_pour_retour = None
                         matrice_M_calculee = None
                 
-                elif not fa_success and not self.use_wcs_fallback_for_mosaic: # FastAligner a échoué et pas de fallback (mode "local_fast_only")
+                elif not fa_success and not self.use_wcs_fallback_for_mosaic:
                     self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}' et pas de fallback WCS (mode 'local_fast_only').", "WARN")
                     align_method_log_msg = "FastAligner_Fail_No_Fallback"
                     wcs_final_pour_retour = None 
                     matrice_M_calculee = None
-
 
             # --- CAS B : Mosaïque Astrometry.net par Panneau ---
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
