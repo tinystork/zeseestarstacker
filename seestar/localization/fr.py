@@ -123,6 +123,14 @@ FR_TRANSLATIONS = {
     'apply_low_wht_mask_label': "Appliquer Masque Bas WHT (Anti-Bandes)",
     'low_wht_percentile_label': "Percentile Bas WHT :",
     'low_wht_soften_px_label': "Adoucir Masque (px) :",
+    
+    
+    # --- Section Format de Sortie FITS ---
+    'output_format_frame_title': "Format FITS de Sortie",
+    'save_as_float32_label': "Sauvegarder FITS final en float32 (fichiers +gros, précision max)",
+
+    
+    
     ### FIN onglet expert ###
     
     ### Tooltips pour Onglet Expert ###
@@ -151,6 +159,11 @@ FR_TRANSLATIONS = {
     'tooltip_apply_low_wht_mask': "Masque Bas WHT: Atténue les zones de l'image où la carte de poids (WHT) est très faible (typiquement les bords avec peu de signal). Aide à réduire les bandes et les dérives de couleur dans ces zones. Agit après le Feathering et avant la soustraction de fond Photutils.",
     'tooltip_low_wht_percentile': "Percentile Bas WHT: Définit le seuil pour considérer un poids comme 'faible'. Par exemple, 5% signifie que les 5% de pixels ayant les plus faibles poids (non-nuls) seront ciblés. Plage: 1-20. Défaut: 5.",
     'tooltip_low_wht_soften_px': "Adoucir Masque Bas WHT (px): Rayon de flou gaussien appliqué au masque binaire des zones de faible poids. Permet une transition plus douce de la correction. Plage: 32-512. Défaut: 128.",
+    
+    # Tooltips save flaot32
+    'tooltip_save_as_float32': "Si coché, le fichier FITS final sera sauvegardé en utilisant des nombres flottants 32 bits, préservant la précision numérique maximale du traitement mais résultant en des fichiers plus volumineux (env. 2x). Si décoché (défaut), le fichier sera sauvegardé en entiers non signés 16 bits (plage 0-65535 après mise à l'échelle depuis 0-1), réduisant significativement la taille du fichier.",
+
+    
     # --- FIN NOUVEAU ---
 
     

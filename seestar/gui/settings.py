@@ -45,28 +45,25 @@ class SettingsManager:
 
 
 
-
 # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
     def update_from_ui(self, gui_instance):
         """
         Met à jour les paramètres de CETTE instance SettingsManager.
+        MODIFIED: Ajout de la lecture pour save_final_as_float32.
         """
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning (SM update_from_ui): Cannot update settings from invalid GUI instance.")
             return
-        print("DEBUG SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2): Lecture des paramètres...")
+        print("DEBUG SM (update_from_ui V_SaveAsFloat32_1): Lecture des paramètres...") # Version Log
 
-        # Obtenir les valeurs par défaut du code est toujours une bonne pratique pour les types et les fallbacks.
         default_values_from_code = self.get_default_values() 
 
         try:
             # --- Paramètres lus depuis les Tk Variables du GUI principal ---
-            # ... (toutes les autres assignations comme self.input_folder, etc. restent identiques) ...
+            # ... (toutes les lectures existantes pour les autres paramètres restent ici, inchangées) ...
             self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar(value=default_values_from_code.get('input_folder', ''))).get()
             self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar(value=default_values_from_code.get('output_folder', ''))).get()
-            # ... (copiez TOUTES vos autres assignations qui lisent depuis gui_instance.NOM_DE_VAR.get()) ...
-            # ... jusqu'à juste avant la gestion de mosaic_mode_active ...
             self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar(value=default_values_from_code.get('reference_image_path', ''))).get()
             self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=default_values_from_code.get('stacking_mode', 'kappa-sigma'))).get()
             self.kappa = getattr(gui_instance, 'kappa', tk.DoubleVar(value=default_values_from_code.get('kappa', 2.5))).get()
@@ -129,57 +126,52 @@ class SettingsManager:
                  current_geo_ui = gui_instance.root.geometry()
                  if isinstance(current_geo_ui, str) and 'x' in current_geo_ui and '+' in current_geo_ui:
                      self.window_geometry = current_geo_ui
+            
+            # --- NOUVEAU : Lecture du setting pour la sauvegarde en float32 ---
+            # Anticipe que gui_instance aura une variable Tkinter nommée 'save_as_float32_var'
+            # Si la variable n'existe pas sur gui_instance, getattr utilisera une tk.BooleanVar temporaire
+            # initialisée avec la valeur par défaut de default_values_from_code.
+            self.save_final_as_float32 = getattr(gui_instance, 'save_as_float32_var', 
+                                                 tk.BooleanVar(value=default_values_from_code.get('save_final_as_float32', False))
+                                                ).get()
+            print(f"DEBUG SM (update_from_ui): self.save_final_as_float32 lu (attribut UI ou défaut): {self.save_final_as_float32}")
+            # --- FIN NOUVEAU ---
 
-
-            # --- Gestion de mosaic_mode_active ---
-            # Lire depuis l'attribut direct de gui_instance (SeestarStackerGUI)
-            # car c'est là qu'il est setté par MosaicSettingsWindow
-            # Utiliser une valeur par défaut explicite si getattr échoue ou si la clé manque dans default_values_from_code
             default_mma = default_values_from_code.get('mosaic_mode_active', False)
             self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_mma))
             print(f"DEBUG SM (update_from_ui): self.mosaic_mode_active (lu depuis gui_instance ou défaut): {self.mosaic_mode_active}")
 
-
-            # --- Gestion de mosaic_settings (le dictionnaire) ---
-            # Cet attribut est sur `self` (qui est `gui_instance.settings`) et est mis à jour
-            # par MosaicSettingsWindow._on_ok() directement sur `gui_instance.settings.mosaic_settings`.
-            # On s'assure juste qu'il existe et est un dict, sinon on prend le défaut du code.
             default_ms_dict = default_values_from_code.get('mosaic_settings', {})
             current_ms_on_self = getattr(self, 'mosaic_settings', None)
             if isinstance(current_ms_on_self, dict):
-                self.mosaic_settings = current_ms_on_self # Conserver la valeur déjà sur self
+                self.mosaic_settings = current_ms_on_self 
                 print(f"DEBUG SM (update_from_ui): self.mosaic_settings (conservé depuis self): {self.mosaic_settings}")
             else:
-                self.mosaic_settings = default_ms_dict.copy() # Utiliser une copie du défaut
+                self.mosaic_settings = default_ms_dict.copy() 
                 print(f"DEBUG SM (update_from_ui): self.mosaic_settings réinitialisé aux défauts car non trouvé/invalide sur self.")
 
-
-            # --- Paramètres spécifiques aux solveurs locaux ---
-            # Ceux-ci sont aussi sur `self` (qui est `gui_instance.settings`) et mis à jour par LocalSolverSettingsWindow.
             self.local_solver_preference = getattr(self, 'local_solver_preference', default_values_from_code.get('local_solver_preference', 'none'))
             self.astap_path = getattr(self, 'astap_path', default_values_from_code.get('astap_path', ''))
             self.astap_data_dir = getattr(self, 'astap_data_dir', default_values_from_code.get('astap_data_dir', ''))
             self.astap_search_radius = getattr(self, 'astap_search_radius', default_values_from_code.get('astap_search_radius', 30.0))
             self.local_ansvr_path = getattr(self, 'local_ansvr_path', default_values_from_code.get('local_ansvr_path', ''))
             
-            print(f"DEBUG SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2): Valeurs solveurs locaux (après lecture/conservation de self): "
+            print(f"DEBUG SM (update_from_ui V_SaveAsFloat32_1): Valeurs solveurs locaux (après lecture/conservation de self): " # Version Log
                   f"Pref='{self.local_solver_preference}', ASTAP Path='{self.astap_path}', ASTAP Radius={self.astap_search_radius}")
 
-            print("DEBUG SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2): Fin lecture des paramètres.")
+            print("DEBUG SM (update_from_ui V_SaveAsFloat32_1): Fin lecture des paramètres.") # Version Log
 
         except AttributeError as ae:
-            print(f"Error SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2) (AttributeError): {ae}.")
+            print(f"Error SM (update_from_ui V_SaveAsFloat32_1) (AttributeError): {ae}.") # Version Log
             traceback.print_exc(limit=1)
         except tk.TclError as te: 
-            print(f"Error SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2) (TclError - GUI détruite?): {te}.")
-        except KeyError as ke: # Intercepter le KeyError specificement
-            print(f"Error SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2) (KeyError - probablement dans default_values_from_code.get()): {ke}.")
+            print(f"Error SM (update_from_ui V_SaveAsFloat32_1) (TclError - GUI détruite?): {te}.") # Version Log
+        except KeyError as ke: 
+            print(f"Error SM (update_from_ui V_SaveAsFloat32_1) (KeyError - probablement dans default_values_from_code.get()): {ke}.") # Version Log
             traceback.print_exc(limit=1)
         except Exception as e:
-            print(f"Unexpected error SM (update_from_ui V_LocalSolverPref_FixMosaicActive_V2): {e}")
+            print(f"Unexpected error SM (update_from_ui V_SaveAsFloat32_1): {e}") # Version Log
             traceback.print_exc(limit=2)
-
-
 
 
 
@@ -194,17 +186,23 @@ class SettingsManager:
 #######################################################################################################################################
 
 
+
+
+# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
+
     def apply_to_ui(self, gui_instance):
-        """ Applique les paramètres chargés/actuels aux variables Tkinter. """
-        # ... (validation gui_instance inchangée) ...
+        """ 
+        Applique les paramètres chargés/actuels aux variables Tkinter.
+        MODIFIED: Ajout de l'application pour save_final_as_float32.
+        """
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning: Cannot apply settings to invalid GUI instance.")
             return
         try:
-            print("DEBUG (Settings apply_to_ui): Application des paramètres à l'UI...") # <-- AJOUTÉ DEBUG
+            print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Application des paramètres à l'UI...") # Version Log
 
             # --- Processing Settings ---
-            # ... (inchangé) ...
+            # ... (toutes les applications existantes pour les autres paramètres restent ici, inchangées) ...
             getattr(gui_instance, 'input_path', tk.StringVar()).set(self.input_folder or "")
             getattr(gui_instance, 'output_path', tk.StringVar()).set(self.output_folder or "")
             getattr(gui_instance, 'reference_image_path', tk.StringVar()).set(self.reference_image_path or "")
@@ -215,20 +213,13 @@ class SettingsManager:
             getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar()).set(self.hot_pixel_threshold)
             getattr(gui_instance, 'neighborhood_size', tk.IntVar()).set(self.neighborhood_size)
             getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar()).set(self.cleanup_temp)
-            # --- Paramètres spécifiques aux solveurs locaux ---
-            # Ces paramètres n'ont pas de widgets directs sur l'UI principale.
-            # LocalSolverSettingsWindow les lira depuis CETTE instance (self.settings de gui_instance)
-            # lors de son initialisation. Il n'y a donc rien de spécifique à "appliquer à l'UI principale" ici
-            # pour local_solver_preference, astap_path, etc.
-            # On s'assure juste que les attributs existent sur `self` (ce qui est fait par load_settings ou reset_to_defaults).
+            
             if not hasattr(self, 'local_solver_preference'): self.local_solver_preference = self.get_default_values()['local_solver_preference']
             if not hasattr(self, 'astap_path'): self.astap_path = self.get_default_values()['astap_path']
             if not hasattr(self, 'astap_data_dir'): self.astap_data_dir = self.get_default_values()['astap_data_dir']
             if not hasattr(self, 'astap_search_radius'): self.astap_search_radius = self.get_default_values()['astap_search_radius']
             if not hasattr(self, 'local_ansvr_path'): self.local_ansvr_path = self.get_default_values()['local_ansvr_path']
             
-            # --- Quality Weighting Settings ---
-            # ... (inchangé) ...
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
             getattr(gui_instance, 'weight_snr_var', tk.BooleanVar()).set(self.weight_by_snr)
             getattr(gui_instance, 'weight_stars_var', tk.BooleanVar()).set(self.weight_by_stars)
@@ -236,71 +227,51 @@ class SettingsManager:
             getattr(gui_instance, 'stars_exponent_var', tk.DoubleVar()).set(self.stars_exponent)
             getattr(gui_instance, 'min_weight_var', tk.DoubleVar()).set(self.min_weight)
 
-            # --- Drizzle Settings ---
             getattr(gui_instance, 'use_drizzle_var', tk.BooleanVar()).set(self.use_drizzle)
             getattr(gui_instance, 'drizzle_scale_var', tk.StringVar()).set(str(self.drizzle_scale))
 
-            # --- MODIFIÉ: Application Seuil WHT ---
-            # 1. Définir la variable de stockage (0.0-1.0)
             wht_value_01 = self.drizzle_wht_threshold
             getattr(gui_instance, 'drizzle_wht_threshold_var', tk.DoubleVar()).set(wht_value_01)
-            print(f"DEBUG (Settings apply_to_ui): WHT Threshold (0-1) appliqué: {wht_value_01}") # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (Settings apply_to_ui): WHT Threshold (0-1) appliqué: {wht_value_01}")
 
-            # 2. Calculer et définir la variable d'affichage (0-100)
             try:
                  wht_value_percent = round(wht_value_01 * 100.0)
-                 # S'assurer que la valeur est dans la plage du Spinbox (10-100)
                  wht_display_value = np.clip(wht_value_percent, 10, 100)
-                 wht_display_str = f"{wht_display_value:.0f}" # Format string pour le Spinbox
+                 wht_display_str = f"{wht_display_value:.0f}"
                  getattr(gui_instance, 'drizzle_wht_display_var', tk.StringVar()).set(wht_display_str)
-                 print(f"DEBUG (Settings apply_to_ui): WHT Display (%) appliqué: {wht_display_str}") # <-- AJOUTÉ DEBUG
+                 print(f"DEBUG (Settings apply_to_ui): WHT Display (%) appliqué: {wht_display_str}")
             except Exception as e_conv:
                  print(f"ERREUR (Settings apply_to_ui): Échec conversion/application WHT display: {e_conv}")
-                 # Fallback: essayer de mettre une valeur par défaut sûre à l'affichage
                  getattr(gui_instance, 'drizzle_wht_display_var', tk.StringVar()).set("70")
-            # --- FIN MODIFICATION ---
 
             getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
             getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
             getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
-            # --- juste définir les attributs du GUI) ---
-            setattr(gui_instance, 'mosaic_mode_active', bool(self.mosaic_mode_active)) # Assurer booléen
-            setattr(gui_instance, 'mosaic_settings', self.mosaic_settings.copy() if isinstance(self.mosaic_settings, dict) else {}) # Assurer dict, passer copie
-            # Pas besoin de mettre à jour l'UI de la fenêtre modale ici, elle lira à son ouverture
-            # On pourrait mettre à jour l'indicateur visuel sur le GUI principal ici
+            
+            setattr(gui_instance, 'mosaic_mode_active', bool(self.mosaic_mode_active))
+            setattr(gui_instance, 'mosaic_settings', self.mosaic_settings.copy() if isinstance(self.mosaic_settings, dict) else {})
             if hasattr(gui_instance, '_update_mosaic_status_indicator'): gui_instance._update_mosaic_status_indicator()
-            # --- ---
 
-            # Application Paramètres SCNR Final à l'UI ###
             getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar()).set(self.apply_final_scnr)
-            # Pas d'UI pour final_scnr_target_channel pour l'instant
             getattr(gui_instance, 'final_scnr_amount_var', tk.DoubleVar()).set(self.final_scnr_amount)
             getattr(gui_instance, 'final_scnr_preserve_lum_var', tk.BooleanVar()).set(self.final_scnr_preserve_luminosity)
-            # Mettre à jour l'état des widgets SCNR si la méthode existe dans le GUI
             if hasattr(gui_instance, '_update_final_scnr_options_state'):
                 gui_instance._update_final_scnr_options_state()
             print(f"DEBUG (Settings apply_to_ui): SCNR Final appliqué à UI -> Apply: {self.apply_final_scnr}, Amount: {self.final_scnr_amount:.2f}, PreserveLum: {self.final_scnr_preserve_luminosity}")
             
-            ### Application Paramètres Expert à l'UI ###
             print("DEBUG (Settings apply_to_ui): Application des paramètres Expert...")
-            # BN
             getattr(gui_instance, 'bn_grid_size_str_var', tk.StringVar()).set(self.bn_grid_size_str)
             getattr(gui_instance, 'bn_perc_low_var', tk.IntVar()).set(self.bn_perc_low)
             getattr(gui_instance, 'bn_perc_high_var', tk.IntVar()).set(self.bn_perc_high)
             getattr(gui_instance, 'bn_std_factor_var', tk.DoubleVar()).set(self.bn_std_factor)
             getattr(gui_instance, 'bn_min_gain_var', tk.DoubleVar()).set(self.bn_min_gain)
             getattr(gui_instance, 'bn_max_gain_var', tk.DoubleVar()).set(self.bn_max_gain)
-
-            # CB
             getattr(gui_instance, 'cb_border_size_var', tk.IntVar()).set(self.cb_border_size)
             getattr(gui_instance, 'cb_blur_radius_var', tk.IntVar()).set(self.cb_blur_radius)
             getattr(gui_instance, 'cb_min_b_factor_var', tk.DoubleVar()).set(self.cb_min_b_factor)
             getattr(gui_instance, 'cb_max_b_factor_var', tk.DoubleVar()).set(self.cb_max_b_factor)
-
-            # Rognage
             getattr(gui_instance, 'final_edge_crop_percent_var', tk.DoubleVar()).set(self.final_edge_crop_percent)
 
-            ### Application Paramètres Photutils BN à l'UI ###
             print("DEBUG (Settings apply_to_ui): Application des paramètres Photutils BN...")
             getattr(gui_instance, 'apply_photutils_bn_var', tk.BooleanVar()).set(self.apply_photutils_bn)
             getattr(gui_instance, 'photutils_bn_box_size_var', tk.IntVar()).set(self.photutils_bn_box_size)
@@ -308,41 +279,35 @@ class SettingsManager:
             getattr(gui_instance, 'photutils_bn_sigma_clip_var', tk.DoubleVar()).set(self.photutils_bn_sigma_clip)
             getattr(gui_instance, 'photutils_bn_exclude_percentile_var', tk.DoubleVar()).set(self.photutils_bn_exclude_percentile)
             
-            # Appel pour mettre à jour l'état des widgets enfants
-            if hasattr(gui_instance, '_update_photutils_bn_options_state'): # CETTE LIGNE EST CELLE QUE VOUS AVEZ MONTREE
-            ### Application Clé API Astrometry.net à l'UI ###
-            # La variable Tkinter est dans gui_instance
-                getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar()).set(self.astrometry_api_key or "") # Assurer string
-            # --- Appliquer les paramètres de feathering à l'UI ---
-            # Assurez-vous que gui_instance a des variables apply_feathering_var et feather_blur_px_var
+            if hasattr(gui_instance, '_update_photutils_bn_options_state'):
+                 getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar()).set(self.astrometry_api_key or "")
+            
             if hasattr(gui_instance, 'apply_feathering_var'):
                 getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar()).set(self.apply_feathering)
                 print(f"DEBUG (Settings apply_to_ui): Apply Feathering appliqué à UI: {self.apply_feathering}")
-            else:
-                print("DEBUG (Settings apply_to_ui): gui_instance n'a pas apply_feathering_var")
-
             if hasattr(gui_instance, 'feather_blur_px_var'):
                 getattr(gui_instance, 'feather_blur_px_var', tk.IntVar()).set(self.feather_blur_px)
                 print(f"DEBUG (Settings apply_to_ui): Feather Blur Px appliqué à UI: {self.feather_blur_px}")
-                # --- NOUVEAU : Application Low WHT Mask à l'UI ---
+            
             if hasattr(gui_instance, 'apply_low_wht_mask_var'):
                 getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar()).set(self.apply_low_wht_mask)
             if hasattr(gui_instance, 'low_wht_pct_var'):
                 getattr(gui_instance, 'low_wht_pct_var', tk.IntVar()).set(self.low_wht_percentile)
-            if hasattr(gui_instance, 'low_wht_soften_px_var'): # Sera ajouté à l'étape UI
+            if hasattr(gui_instance, 'low_wht_soften_px_var'):
                 getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar()).set(self.low_wht_soften_px)
                 print(f"DEBUG (Settings apply_to_ui): LowWHT Mask appliqué à UI -> Apply: {self.apply_low_wht_mask}, Pct: {self.low_wht_percentile}, Soften: {self.low_wht_soften_px}")
-            # --- FIN NOUVEAU ---
-            else:
-                print("DEBUG (Settings apply_to_ui): gui_instance n'a pas feather_blur_px_var")
             
-            # Appeler la méthode pour mettre à jour l'état des widgets feathering si elle existe
             if hasattr(gui_instance, '_update_feathering_options_state'):
                 gui_instance._update_feathering_options_state()
-            ### FIN paramètres expert ###            
 
-            # --- Preview Settings ---
-            # ... (inchangé) ...
+            # --- NOUVEAU : Application du setting save_final_as_float32 à l'UI ---
+            # Anticipe que gui_instance aura une variable Tkinter nommée 'save_as_float32_var'
+            # Si elle n'est pas encore créée dans l'UI, getattr retournera une BooleanVar temporaire qui sera mise à jour,
+            # mais cela n'affectera pas l'UI tant que le widget n'est pas créé et lié à cette variable.
+            getattr(gui_instance, 'save_as_float32_var', tk.BooleanVar()).set(self.save_final_as_float32)
+            print(f"DEBUG (Settings apply_to_ui): save_final_as_float32 appliqué à l'UI (valeur: {self.save_final_as_float32})")
+            # --- FIN NOUVEAU ---
+            
             getattr(gui_instance, 'preview_stretch_method', tk.StringVar()).set(self.preview_stretch_method)
             getattr(gui_instance, 'preview_black_point', tk.DoubleVar()).set(self.preview_black_point)
             getattr(gui_instance, 'preview_white_point', tk.DoubleVar()).set(self.preview_white_point)
@@ -351,58 +316,32 @@ class SettingsManager:
             getattr(gui_instance, 'preview_g_gain', tk.DoubleVar()).set(self.preview_g_gain)
             getattr(gui_instance, 'preview_b_gain', tk.DoubleVar()).set(self.preview_b_gain)
 
-
-
-
-            # --- UI Settings ---
-            # ... (inchangé) ...
             getattr(gui_instance, 'language_var', tk.StringVar()).set(self.language)
             if isinstance(self.window_geometry, str) and 'x' in self.window_geometry and '+' in self.window_geometry:
                 try: gui_instance.root.geometry(self.window_geometry)
                 except tk.TclError: print(f"Warning: Could not apply window geometry '{self.window_geometry}'.")
 
-            # Mettre à jour l'état des widgets dépendants
             if hasattr(gui_instance, '_update_weighting_options_state'): gui_instance._update_weighting_options_state()
             if hasattr(gui_instance, '_update_drizzle_options_state'): gui_instance._update_drizzle_options_state()
             if hasattr(gui_instance, '_update_final_scnr_options_state'): gui_instance._update_final_scnr_options_state()
             if hasattr(gui_instance, '_update_photutils_bn_options_state'): gui_instance._update_photutils_bn_options_state()
             if hasattr(gui_instance, '_update_feathering_options_state'): gui_instance._update_feathering_options_state()
-            # NOUVEAU: Mettre à jour l'état des options Low WHT Mask (si une telle méthode est créée)
-            if hasattr(gui_instance, '_update_low_wht_mask_options_state'): # Sera créé à l'étape UI
+            if hasattr(gui_instance, '_update_low_wht_mask_options_state'): 
                 gui_instance._update_low_wht_mask_options_state()
-
-            # --- NOUVEAU: Paramètres Solveurs Locaux Astrométriques ---
-            #defaults_dict['use_local_solver_priority'] = False # Si True, essayer solveurs locaux AVANT Astrometry.net
-            #defaults_dict['astap_path'] = ""                   # Chemin vers l'exécutable ASTAP
-            #defaults_dict['astap_data_dir'] = ""               # Chemin vers le dossier de données d'index ASTAP (ex: G17, H18)
-            # Pour Astrometry.net local, la configuration est plus complexe.
-            # On pourrait stocker le chemin vers un fichier de config ou un répertoire racine.
-            # Pour l'instant, on met un placeholder. On affinera si besoin.
-            #defaults_dict['local_ansvr_path'] = ""             # Chemin vers config/exécutable de ansvr local
-            # On pourrait aussi avoir des booléens pour activer spécifiquement chaque solveur si on veut
-            # les désactiver même si les chemins sont remplis, mais 'use_local_solver_priority' est un bon début.
-
-            #print(f"DEBUG (SettingsManager get_default_values): Ajout des défauts pour solveurs locaux.")
-            #return defaults_dict
-            # --- NOUVEAU: Application astap_search_radius à l'UI ---
-            # On suppose que gui_instance aura une variable 'astap_search_radius_var'
-            # Si elle n'existe pas, getattr retournera une DoubleVar temporaire qui ne sera pas utilisée.
-            # Si elle existe, sa valeur sera mise à jour.
 
             getattr(gui_instance, 'astap_search_radius_var', tk.DoubleVar()).set(self.astap_search_radius)
             print(f"DEBUG (Settings apply_to_ui): astap_search_radius appliqué à l'UI (valeur: {self.astap_search_radius})")
-            # --- FIN NOUVEAU ---
-            print("DEBUG (Settings apply_to_ui): Fin application paramètres UI.") # <-- AJOUTÉ DEBUG
-            print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # DEBUG
+            
+            print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
+            print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # Version Log (ancienne)
 
-        # ... (gestion erreurs inchangée) ...
         except AttributeError as ae: print(f"Error applying settings to UI (AttributeError): {ae}")
         except tk.TclError as te: print(f"Error applying settings to UI (TclError - widget likely destroyed?): {te}")
         except Exception as e: print(f"Unexpected error applying settings to UI: {e}"); traceback.print_exc(limit=2)
 
+
+
 #################################################################################################################################
-
-
 
 
 
@@ -413,9 +352,9 @@ class SettingsManager:
     def get_default_values(self):
         """ 
         Retourne un dictionnaire des valeurs par défaut de tous les paramètres.
-        MAJ: Ajout des nouveaux paramètres pour les modes d'alignement mosaïque et FastAligner.
+        MODIFIED: Ajout de save_final_as_float32.
         """
-        print("DEBUG (SettingsManager get_default_values): Récupération des valeurs par défaut...") # Log mis à jour
+        print("DEBUG (SettingsManager get_default_values V_SaveAsFloat32_1): Récupération des valeurs par défaut...") # Version Log
         defaults_dict = {}
 
         
@@ -441,15 +380,14 @@ class SettingsManager:
         defaults_dict['min_weight'] = 0.01      
 
         # --- Paramètres Drizzle (Globaux) ---
-        defaults_dict['use_drizzle'] = False # Drizzle global, pas spécifique mosaïque
+        defaults_dict['use_drizzle'] = False 
         defaults_dict['drizzle_scale'] = 2
         defaults_dict['drizzle_wht_threshold'] = 0.7 
         defaults_dict['drizzle_mode'] = "Final" 
-        defaults_dict['drizzle_kernel'] = "square" # Kernel Drizzle global
-        defaults_dict['drizzle_pixfrac'] = 1.0    # Pixfrac Drizzle global
+        defaults_dict['drizzle_kernel'] = "square" 
+        defaults_dict['drizzle_pixfrac'] = 1.0    
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
-        # (Ceux-ci sont globaux, pas spécifiques à la mosaïque)
         defaults_dict['apply_chroma_correction'] = True 
         defaults_dict['apply_final_scnr'] = True        
         defaults_dict['final_scnr_target_channel'] = 'green'
@@ -476,52 +414,36 @@ class SettingsManager:
         defaults_dict['apply_low_wht_mask'] = False   
         defaults_dict['low_wht_percentile'] = 5       
         defaults_dict['low_wht_soften_px'] = 128      
-        defaults_dict['use_local_solver_priority'] = False
-        defaults_dict['astap_path'] = ""                  
-        defaults_dict['astap_data_dir'] = ""              
-        defaults_dict['local_ansvr_path'] = ""
-                
+        
+        # --- NOUVEAU : Paramètre de sauvegarde float32 ---
+        defaults_dict['save_final_as_float32'] = False # Défaut à False (donc uint16 après mise à l'échelle par défaut)
+        print(f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}")
+        # --- FIN NOUVEAU ---
+
         # --- Paramètres Solveurs Locaux ---
-        # defaults_dict['use_local_solver_priority'] = False # Supprimé
-        defaults_dict['local_solver_preference'] = "none" # "none", "astap", "ansvr"
+        defaults_dict['local_solver_preference'] = "none" 
         defaults_dict['astap_path'] = ""                   
         defaults_dict['astap_data_dir'] = ""  
-        defaults_dict['astap_search_radius'] = 3.0 # En degrés, 0 pour auto dans ASTAP via -fov 0
+        defaults_dict['astap_search_radius'] = 3.0 
         defaults_dict['local_ansvr_path'] = ""            
-        print("DEBUG (SettingsManager get_default_values): Ajout des défauts pour nouveaux paramètres solveurs locaux.") # DEBUG
-
-        # Le dictionnaire `mosaic_settings` contiendra TOUS les paramètres spécifiques à la mosaïque
-        # y compris ceux pour Drizzle ET ceux pour l'alignement des panneaux.
+        
         defaults_dict['mosaic_mode_active'] = False
         defaults_dict['mosaic_settings'] = {
-            # Paramètres Drizzle spécifiques à la mosaïque (ceux que vous aviez déjà)
-            "kernel": "square",  # Valeur par défaut pour le kernel Drizzle de la mosaïque
-            "pixfrac": 0.8,      # Valeur par défaut pour le pixfrac Drizzle de la mosaïque
-            # "fillval" et "wht_threshold" peuvent être ajoutés ici aussi si vous les exposez dans MosaicSettingsWindow pour Drizzle
-            "fillval": "0.0",       # Ajouté, valeur par défaut
-            "wht_threshold": 0.01,  # Ajouté, valeur par défaut (0-1)
-            # NOUVEAU: Paramètres pour le mode d'alignement de la mosaïque
-            "alignment_mode": "local_fast_fallback", # Valeurs possibles: "local_fast_fallback", "local_fast_only", "astrometry_per_panel"
-            
-            # NOUVEAU: Paramètres pour FastAligner (utilisés si alignment_mode est local*)
+            "kernel": "square", 
+            "pixfrac": 0.8,      
+            "fillval": "0.0",       
+            "wht_threshold": 0.01,  
+            "alignment_mode": "local_fast_fallback", 
             "fastalign_orb_features": 3000,
             "fastalign_min_abs_matches": 8,
-            "fastalign_min_ransac": 4, # La valeur brute (ex: 4, pas le calcul max(...))
+            "fastalign_min_ransac": 4, 
             "fastalign_ransac_thresh": 2.5,
-            "fastalign_dao_fwhm": 3.5,       # Valeur par défaut pour FWHM DAO
-            "fastalign_dao_thr_sig": 8.0,    # NOUVELLE VALEUR PAR DÉFAUT PLUS ÉLEVÉE pour le facteur sigma
-            "fastalign_dao_max_stars": 750,  # Valeur par défaut pour max étoiles DAO
-            # --- FIN AJOUT ---
-            # 
-            #     
-            # Clé API est stockée séparément au niveau global mais aussi ici pour la fenêtre mosaïque
-            # Si on veut que MosaicSettingsWindow ait sa propre copie de la clé utilisée lors de sa dernière validation "OK"
-            # Cela peut être redondant avec self.astrometry_api_key global.
-            # Pour l'instant, on peut se fier à la clé API globale et ne pas la dupliquer ici.
-            # "api_key": "" # Optionnel: si on veut que MosaicSettingsWindow se souvienne de sa propre clé
+            "fastalign_dao_fwhm": 3.5,       
+            "fastalign_dao_thr_sig": 8.0,    
+            "fastalign_dao_max_stars": 750,  
         }
         
-        defaults_dict['astrometry_api_key'] = "" # Clé API globale
+        defaults_dict['astrometry_api_key'] = "" 
 
         # --- Paramètres de Prévisualisation ---
         defaults_dict['preview_stretch_method'] = "Asinh"
@@ -536,31 +458,31 @@ class SettingsManager:
         defaults_dict['language'] = 'en' 
         defaults_dict['window_geometry'] = "1200x750" 
 
-        print(f"DEBUG (SettingsManager get_default_values): Dictionnaire de défauts créé.")
-        # print(f"  Exemple mosaic_settings par défaut: {defaults_dict['mosaic_settings']}") # Pour vérifier
+        print(f"DEBUG (SettingsManager get_default_values V_SaveAsFloat32_1): Dictionnaire de défauts créé.") # Version Log
         return defaults_dict
-
-
-
 
 
 
 ###################################################################################################################################
 
 
-    def validate_settings(self):
-        """Valide et corrige les paramètres si nécessaire. Retourne les messages de correction."""
-        messages = []
-        print("DEBUG (Settings validate_settings): DÉBUT de la validation.")
+# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
-        # Obtenir les valeurs par défaut pour fallback SANS modifier l'instance actuelle
+    def validate_settings(self):
+        """
+        Valide et corrige les paramètres si nécessaire. Retourne les messages de correction.
+        MODIFIED: Ajout de la validation pour save_final_as_float32.
+        """
+        messages = []
+        print("DEBUG (Settings validate_settings V_SaveAsFloat32_1): DÉBUT de la validation.") # Version Log
+
         defaults_fallback = self.get_default_values()
-        # Log initial pour un paramètre spécifique afin de suivre son état
         print(f"DEBUG (Settings validate_settings): Valeur self.apply_photutils_bn AVANT TOUTE VALIDATION (lue de l'UI): {getattr(self, 'apply_photutils_bn', 'NON_DEFINI_ENCORE')}")
 
         try:
             # --- Processing Settings Validation ---
             print("  -> Validating Processing Settings...")
+            # ... (toutes les validations existantes pour kappa, batch_size, etc. restent ici) ...
             try:
                 self.kappa = float(self.kappa)
                 if not (1.0 <= self.kappa <= 5.0):
@@ -572,7 +494,7 @@ class SettingsManager:
 
             try:
                 self.batch_size = int(self.batch_size)
-                if self.batch_size < 0: # 0 est permis pour auto-estimation
+                if self.batch_size < 0: 
                     original = self.batch_size; self.batch_size = 0
                     messages.append(f"Taille Lot ({original}) ajusté à {self.batch_size} (auto)")
             except (ValueError, TypeError):
@@ -600,7 +522,9 @@ class SettingsManager:
                 original = self.neighborhood_size; self.neighborhood_size = defaults_fallback['neighborhood_size']
                 messages.append(f"Voisinage Px Chauds ('{original}') invalide, réinitialisé à {self.neighborhood_size}")
 
+
             # --- Quality Weighting Validation ---
+            # ... (inchangé) ...
             print("  -> Validating Quality Weighting Settings...")
             self.use_quality_weighting = bool(getattr(self, 'use_quality_weighting', defaults_fallback['use_quality_weighting']))
             self.weight_by_snr = bool(getattr(self, 'weight_by_snr', defaults_fallback['weight_by_snr']))
@@ -634,11 +558,13 @@ class SettingsManager:
                 self.weight_by_snr = True
                 messages.append("Pondération activée mais aucune métrique choisie. SNR activé par défaut.")
 
+
             # --- Drizzle Settings Validation ---
+            # ... (inchangé) ...
             print("  -> Validating Drizzle Settings...")
             self.use_drizzle = bool(getattr(self, 'use_drizzle', defaults_fallback['use_drizzle']))
             try:
-                scale_num = int(float(self.drizzle_scale)) # Tenter de convertir même si c'est un string
+                scale_num = int(float(self.drizzle_scale)) 
                 if scale_num not in [2, 3, 4]:
                     original = self.drizzle_scale; self.drizzle_scale = defaults_fallback['drizzle_scale']
                     messages.append(f"Échelle Drizzle ({original}) invalide, réinitialisée à {self.drizzle_scale}")
@@ -661,7 +587,7 @@ class SettingsManager:
                 original = current_driz_mode; self.drizzle_mode = defaults_fallback['drizzle_mode']
                 messages.append(f"Mode Drizzle ({original}) invalide, réinitialisé à '{self.drizzle_mode}'")
             else:
-                self.drizzle_mode = current_driz_mode # S'assurer qu'il est bien sur self
+                self.drizzle_mode = current_driz_mode 
 
             valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
             current_driz_kernel = getattr(self, 'drizzle_kernel', defaults_fallback['drizzle_kernel'])
@@ -679,7 +605,9 @@ class SettingsManager:
                 original = self.drizzle_pixfrac; self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']
                 messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
 
+
             # --- SCNR Final Validation ---
+            # ... (inchangé) ...
             print("  -> Validating SCNR Settings...")
             self.apply_final_scnr = bool(getattr(self, 'apply_final_scnr', defaults_fallback['apply_final_scnr']))
             self.final_scnr_target_channel = str(getattr(self, 'final_scnr_target_channel', defaults_fallback['final_scnr_target_channel'])).lower()
@@ -696,9 +624,10 @@ class SettingsManager:
                 messages.append(f"Intensité SCNR Final ('{original_amount}') invalide, réinitialisée à {self.final_scnr_amount:.2f}.")
             self.final_scnr_preserve_luminosity = bool(getattr(self, 'final_scnr_preserve_luminosity', defaults_fallback['final_scnr_preserve_luminosity']))
 
+
             # --- Expert Settings Validation ---
+            # ... (inchangé) ...
             print("  -> Validating Expert Settings...")
-            # BN
             current_bn_grid = getattr(self, 'bn_grid_size_str', defaults_fallback['bn_grid_size_str'])
             if not isinstance(current_bn_grid, str) or current_bn_grid not in ["8x8", "16x16", "24x24", "32x32", "64x64"]:
                 messages.append(f"Taille grille BN invalide ('{current_bn_grid}'), réinitialisée."); self.bn_grid_size_str = defaults_fallback['bn_grid_size_str']
@@ -708,15 +637,11 @@ class SettingsManager:
             self.bn_std_factor = float(np.clip(getattr(self, 'bn_std_factor', defaults_fallback['bn_std_factor']), 0.1, 10.0))
             self.bn_min_gain = float(np.clip(getattr(self, 'bn_min_gain', defaults_fallback['bn_min_gain']), 0.05, 5.0))
             self.bn_max_gain = float(np.clip(getattr(self, 'bn_max_gain', defaults_fallback['bn_max_gain']), self.bn_min_gain, 20.0))
-            # CB
             self.cb_border_size = int(np.clip(getattr(self, 'cb_border_size', defaults_fallback['cb_border_size']), 5, 200))
             self.cb_blur_radius = int(np.clip(getattr(self, 'cb_blur_radius', defaults_fallback['cb_blur_radius']), 0, 100))
             self.cb_min_b_factor = float(np.clip(getattr(self, 'cb_min_b_factor', defaults_fallback['cb_min_b_factor']), 0.1, 1.0))
             self.cb_max_b_factor = float(np.clip(getattr(self, 'cb_max_b_factor', defaults_fallback['cb_max_b_factor']), self.cb_min_b_factor, 5.0))
-            # Rognage
             self.final_edge_crop_percent = float(np.clip(getattr(self, 'final_edge_crop_percent', defaults_fallback['final_edge_crop_percent']), 0.0, 25.0))
-
-            # Photutils BN
             print("    -> Validating Photutils BN...")
             self.apply_photutils_bn = bool(getattr(self, 'apply_photutils_bn', defaults_fallback['apply_photutils_bn']))
             self.photutils_bn_box_size = int(np.clip(getattr(self, 'photutils_bn_box_size', defaults_fallback['photutils_bn_box_size']), 8, 1024))
@@ -724,16 +649,11 @@ class SettingsManager:
             if self.photutils_bn_filter_size % 2 == 0: self.photutils_bn_filter_size += 1
             self.photutils_bn_sigma_clip = float(np.clip(getattr(self, 'photutils_bn_sigma_clip', defaults_fallback['photutils_bn_sigma_clip']), 0.5, 10.0))
             self.photutils_bn_exclude_percentile = float(np.clip(getattr(self, 'photutils_bn_exclude_percentile', defaults_fallback['photutils_bn_exclude_percentile']), 0.0, 100.0))
-
-            # Astrometry API Key
             current_api_key = getattr(self, 'astrometry_api_key', defaults_fallback['astrometry_api_key'])
             if not isinstance(current_api_key, str):
                 messages.append("Clé API Astrometry invalide (pas une chaîne), réinitialisée.")
                 self.astrometry_api_key = defaults_fallback['astrometry_api_key']
             else: self.astrometry_api_key = current_api_key.strip()
-
-
-            # Feathering
             print("    -> Validating Feathering...")
             self.apply_feathering = bool(getattr(self, 'apply_feathering', defaults_fallback['apply_feathering']))
             try:
@@ -745,8 +665,6 @@ class SettingsManager:
             except (ValueError, TypeError):
                 original_blur = self.feather_blur_px; self.feather_blur_px = defaults_fallback['feather_blur_px']
                 messages.append(f"Feather Blur Px ('{original_blur}') invalide, réinitialisé à {self.feather_blur_px}.")
-
-            # Low WHT Mask
             print("    -> Validating Low WHT Mask...")
             self.apply_low_wht_mask = bool(getattr(self, 'apply_low_wht_mask', defaults_fallback['apply_low_wht_mask']))
             try:
@@ -767,50 +685,47 @@ class SettingsManager:
             except (ValueError, TypeError):
                 original_soften = self.low_wht_soften_px; self.low_wht_soften_px = defaults_fallback['low_wht_soften_px']
                 messages.append(f"Low WHT Soften Px ('{original_soften}') invalide, réinitialisé à {self.low_wht_soften_px}.")
-
-            # --- Chroma Correction (simple booléen) ---
             self.apply_chroma_correction = bool(getattr(self, 'apply_chroma_correction', defaults_fallback['apply_chroma_correction']))
- # --- Local Solver Paths and ASTAP Search Radius ---
+ 
+            # --- NOUVEAU : Validation du setting save_final_as_float32 ---
+            print("    -> Validating Save as float32...")
+            # Assure que la valeur est un booléen. Si l'attribut n'existe pas ou n'est pas un booléen,
+            # il prendra la valeur par défaut de defaults_fallback['save_final_as_float32'] (qui est False).
+            current_save_float32_val = getattr(self, 'save_final_as_float32', defaults_fallback['save_final_as_float32'])
+            if not isinstance(current_save_float32_val, bool):
+                messages.append(f"Option 'Sauvegarder en float32' ('{current_save_float32_val}') invalide, réinitialisée à {defaults_fallback['save_final_as_float32']}.")
+                self.save_final_as_float32 = defaults_fallback['save_final_as_float32']
+            else:
+                self.save_final_as_float32 = current_save_float32_val
+            # --- FIN NOUVEAU ---
+
+            # --- Local Solver Paths and ASTAP Search Radius ---
+            # ... (inchangé) ...
             print("  -> Validating Local Solver Settings...")
-            # ... (validation des autres paramètres use_local_solver_priority, astap_path, etc. inchangée) ...
-            self.use_local_solver_priority = bool(getattr(self, 'use_local_solver_priority', defaults_fallback['use_local_solver_priority']))
             self.astap_path = str(getattr(self, 'astap_path', defaults_fallback['astap_path'])).strip()
             self.astap_data_dir = str(getattr(self, 'astap_data_dir', defaults_fallback['astap_data_dir'])).strip()
             self.local_ansvr_path = str(getattr(self, 'local_ansvr_path', defaults_fallback['local_ansvr_path'])).strip()
-
-            # --- Validation spécifique et logging pour astap_search_radius ---
             param_name_debug = 'astap_search_radius'
             value_before_validation = getattr(self, param_name_debug, "ATTRIBUT_MANQUANT_SUR_SELF_POUR_VALIDATE")
             print(f"    DEBUG VALIDATE: Valeur de self.{param_name_debug} AVANT float() et clip: '{value_before_validation}' (type: {type(value_before_validation)})")
-
             try:
-                # Utiliser la valeur lue, ou le défaut du code si l'attribut n'existe pas pour une raison étrange
                 current_radius_val = getattr(self, param_name_debug, defaults_fallback[param_name_debug])
-                
-                # Essayer de convertir en float. Si cela échoue, on ira au bloc except.
                 validated_radius = float(current_radius_val)
-                
                 min_r, max_r = 0.1, 90.0
                 if not (min_r <= validated_radius <= max_r):
-                    original_radius_str = f"{validated_radius:.1f}" # On sait que c'est un float ici
+                    original_radius_str = f"{validated_radius:.1f}"
                     self.astap_search_radius = np.clip(validated_radius, min_r, max_r)
                     messages.append(f"Rayon recherche ASTAP ({original_radius_str}°) hors limites [{min_r}-{max_r}], ajusté à {self.astap_search_radius:.1f}°")
                     print(f"    DEBUG VALIDATE: Rayon clippé à {self.astap_search_radius:.1f}°")
                 else:
-                    # La valeur est déjà un float et dans la bonne plage
                     self.astap_search_radius = validated_radius
                     print(f"    DEBUG VALIDATE: Rayon déjà valide: {self.astap_search_radius:.1f}°")
             except (ValueError, TypeError) as e_val_rad:
                 original_radius_str = str(getattr(self, param_name_debug, 'N/A_DANS_EXCEPT'))
-                self.astap_search_radius = defaults_fallback[param_name_debug] # Réinitialiser au défaut du code
+                self.astap_search_radius = defaults_fallback[param_name_debug]
                 messages.append(f"Rayon recherche ASTAP ('{original_radius_str}') invalide (erreur: {e_val_rad}), réinitialisé à {self.astap_search_radius:.1f}°")
                 print(f"    DEBUG VALIDATE: Exception lors de la validation du rayon ('{original_radius_str}'), réinitialisé à {self.astap_search_radius:.1f}°")
-            
             print(f"DEBUG (Settings validate_settings): {param_name_debug} FINAL après validation: {getattr(self, param_name_debug, 'ERREUR_ATTR_FINAL')}°")
-
-
-
-            # --- NOUVEAU : Validation des Paramètres Solveurs Locaux ---
             valid_solver_prefs = ["none", "astap", "ansvr"]
             current_pref = getattr(self, 'local_solver_preference', defaults_fallback['local_solver_preference'])
             if not isinstance(current_pref, str) or current_pref not in valid_solver_prefs:
@@ -818,24 +733,21 @@ class SettingsManager:
                 self.local_solver_preference = defaults_fallback['local_solver_preference']
             else:
                 self.local_solver_preference = current_pref
-
             current_astap_path = getattr(self, 'astap_path', defaults_fallback['astap_path'])
             if not isinstance(current_astap_path, str):
                 messages.append("Chemin ASTAP invalide (type), réinitialisé.")
                 self.astap_path = defaults_fallback['astap_path']
             else:
-                 self.astap_path = current_astap_path.strip() # Conserver même si vide
-
+                 self.astap_path = current_astap_path.strip() 
             current_astap_data_dir = getattr(self, 'astap_data_dir', defaults_fallback['astap_data_dir'])
             if not isinstance(current_astap_data_dir, str):
                 messages.append("Chemin données ASTAP invalide (type), réinitialisé.")
                 self.astap_data_dir = defaults_fallback['astap_data_dir']
             else:
                 self.astap_data_dir = current_astap_data_dir.strip()
-
             try:
                 current_astap_radius = float(getattr(self, 'astap_search_radius', defaults_fallback['astap_search_radius']))
-                if not (0.0 <= current_astap_radius <= 180.0): # 0 est valide pour -fov 0
+                if not (0.0 <= current_astap_radius <= 180.0): 
                     original_radius = current_astap_radius
                     self.astap_search_radius = np.clip(current_astap_radius, 0.0, 180.0)
                     messages.append(f"Rayon recherche ASTAP ({original_radius:.1f}°) hors limites [0, 180], ajusté à {self.astap_search_radius:.1f}°.")
@@ -845,37 +757,39 @@ class SettingsManager:
                 original_radius_str = str(getattr(self, 'astap_search_radius', defaults_fallback['astap_search_radius']))
                 self.astap_search_radius = defaults_fallback['astap_search_radius']
                 messages.append(f"Rayon recherche ASTAP ('{original_radius_str}') invalide, réinitialisé à {self.astap_search_radius:.1f}°.")
-
             current_local_ansvr_path = getattr(self, 'local_ansvr_path', defaults_fallback['local_ansvr_path'])
             if not isinstance(current_local_ansvr_path, str):
                 messages.append("Chemin Ansvr Local invalide (type), réinitialisé.")
                 self.local_ansvr_path = defaults_fallback['local_ansvr_path']
             else:
                 self.local_ansvr_path = current_local_ansvr_path.strip()
-            print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}") # DEBUG
-            # --- FIN NOUVEAU ---
+            print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}") 
 
 
-        except Exception as e_global_val: # Attrape les erreurs non prévues pendant la validation
+        except Exception as e_global_val: 
             messages.append(f"Erreur générale de validation: {e_global_val}. Réinitialisation aux valeurs par défaut.")
             print(f"FATAL Warning (Settings validate_settings): Erreur de validation globale -> {e_global_val}. Réinitialisation complète des settings.")
             self.reset_to_defaults()
-            # Logguer la valeur de apply_photutils_bn APRES cette réinitialisation globale
             print(f"DEBUG (Settings validate_settings): self.apply_photutils_bn APRES reset_to_defaults (global catch): {getattr(self, 'apply_photutils_bn', 'ATTRIBUT_MANQUANT_APRES_RESET')}")
 
-        print(f"DEBUG (Settings validate_settings): FIN de la validation. Nombre de messages: {len(messages)}. "
-              f"Valeur finale de self.apply_photutils_bn: {getattr(self, 'apply_photutils_bn', 'NON_DEFINI_A_LA_FIN')}")
+        print(f"DEBUG (Settings validate_settings V_SaveAsFloat32_1): FIN de la validation. Nombre de messages: {len(messages)}. " # Version Log
+              f"Valeur finale de self.save_final_as_float32: {getattr(self, 'save_final_as_float32', 'NON_DEFINI_A_LA_FIN')}")
         return messages
+
 
 
 ###################################################################################################################################
 
+# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
+
     def save_settings(self):
-        """ Sauvegarde les paramètres actuels dans le fichier JSON. """
-        # S'assurer que les types sont corrects pour JSON
+        """ 
+        Sauvegarde les paramètres actuels dans le fichier JSON.
+        MODIFIED: Ajout de save_final_as_float32.
+        """
         settings_data = {
-            'version': "2.2.0", # Incrémenter la version si la structure change significativement
-            # Processing
+            'version': "2.3.1", # Version mise à jour pour refléter l'ajout
+            # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
             'reference_image_path': str(self.reference_image_path),
@@ -887,36 +801,25 @@ class SettingsManager:
             'hot_pixel_threshold': float(self.hot_pixel_threshold),
             'neighborhood_size': int(self.neighborhood_size),
             'cleanup_temp': bool(self.cleanup_temp),
-            # Quality Weighting
             'use_quality_weighting': bool(self.use_quality_weighting),
             'weight_by_snr': bool(self.weight_by_snr),
             'weight_by_stars': bool(self.weight_by_stars),
             'snr_exponent': float(self.snr_exponent),
             'stars_exponent': float(self.stars_exponent),
             'min_weight': float(self.min_weight),
-            # Drizzle
             'use_drizzle': bool(self.use_drizzle),
-            'drizzle_scale': int(self.drizzle_scale), # Stocker comme int
+            'drizzle_scale': int(self.drizzle_scale),
             'drizzle_wht_threshold': float(self.drizzle_wht_threshold),
             'drizzle_mode': str(self.drizzle_mode),
             'drizzle_kernel': str(self.drizzle_kernel),
             'drizzle_pixfrac': float(self.drizzle_pixfrac),
-             # ---  ---
             'mosaic_mode_active': bool(self.mosaic_mode_active),
-            'mosaic_settings': self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {}, # Sauvegarder le dict
-            # --- Fin msaique ---
-
-            # --- CORRECTION CHROMA ---
-            'apply_chroma_correction': bool(self.apply_chroma_correction), # Sauvegarder comme booléen
-            # ---  ---
-            
-            ### Sauvegarde Paramètres SCNR Final ###
+            'mosaic_settings': self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {},
+            'apply_chroma_correction': bool(self.apply_chroma_correction),
             'apply_final_scnr': bool(self.apply_final_scnr),
             'final_scnr_target_channel': str(self.final_scnr_target_channel),
             'final_scnr_amount': float(self.final_scnr_amount),
             'final_scnr_preserve_luminosity': bool(self.final_scnr_preserve_luminosity),
-
-            ###  Sauvegarde Paramètres Expert ###
             'bn_grid_size_str': str(self.bn_grid_size_str),
             'bn_perc_low': int(self.bn_perc_low),
             'bn_perc_high': int(self.bn_perc_high),
@@ -928,17 +831,12 @@ class SettingsManager:
             'cb_min_b_factor': float(self.cb_min_b_factor),
             'cb_max_b_factor': float(self.cb_max_b_factor),
             'final_edge_crop_percent': float(self.final_edge_crop_percent),
-            ### Sauvegarde Paramètres Photutils BN ###
             'apply_photutils_bn': bool(self.apply_photutils_bn),
             'photutils_bn_box_size': int(self.photutils_bn_box_size),
             'photutils_bn_filter_size': int(self.photutils_bn_filter_size),
             'photutils_bn_sigma_clip': float(self.photutils_bn_sigma_clip),
             'photutils_bn_exclude_percentile': float(self.photutils_bn_exclude_percentile),
-            ### Sauvegarde Clé API Astrometry.net ###
             'astrometry_api_key': str(self.astrometry_api_key),
-            ### FIN expert ###            
-
-            # Preview
             'preview_stretch_method': str(self.preview_stretch_method),
             'preview_black_point': float(self.preview_black_point),
             'preview_white_point': float(self.preview_white_point),
@@ -946,49 +844,42 @@ class SettingsManager:
             'preview_r_gain': float(self.preview_r_gain),
             'preview_g_gain': float(self.preview_g_gain),
             'preview_b_gain': float(self.preview_b_gain),
-            # UI
             'language': str(self.language),
             'window_geometry': str(self.window_geometry),
-            # --- Sauvegarder les paramètres de feathering ---
             'apply_feathering': bool(self.apply_feathering),
             'feather_blur_px': int(self.feather_blur_px),
-            # --- Sauvegarde Low WHT Mask ---
             'apply_low_wht_mask': bool(self.apply_low_wht_mask),
             'low_wht_percentile': int(self.low_wht_percentile),
             'low_wht_soften_px': int(self.low_wht_soften_px),
-            # --- --
-            # --- Sauvegarde Paramètres Solveurs Locaux ---
-            'use_local_solver_priority': bool(getattr(self, 'use_local_solver_priority', False)),
-            'astap_path': str(getattr(self, 'astap_path', "")),
-            'astap_data_dir': str(getattr(self, 'astap_data_dir', "")),
-            'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
             
-            # --- NOUVEAU : Sauvegarde des Paramètres Solveurs Locaux ---
+            # --- NOUVEAU : Sauvegarde du setting save_final_as_float32 ---
+            'save_final_as_float32': bool(getattr(self, 'save_final_as_float32', False)),
+            # --- FIN NOUVEAU ---
+            
             'local_solver_preference': str(getattr(self, 'local_solver_preference', 'none')),
             'astap_path': str(getattr(self, 'astap_path', "")),
             'astap_data_dir': str(getattr(self, 'astap_data_dir', "")),
-            'astap_search_radius': float(getattr(self, 'astap_search_radius', 30.0)),
+            'astap_search_radius': float(getattr(self, 'astap_search_radius', 30.0)), # Maintenu comme avant
             'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
-            # --- ---
-        
-
         }
 
-                # Supprimer l'ancienne clé si elle traîne (ne devrait plus être sur self après reset/load)
-        if 'use_local_solver_priority' in settings_data:
+        if 'use_local_solver_priority' in settings_data: # Nettoyage de l'ancienne clé si elle existait par erreur
             del settings_data['use_local_solver_priority']
-            print("DEBUG (SettingsManager save_settings): Ancienne clé 'use_local_solver_priority' supprimée des données de sauvegarde.") #DEBUG
+            print("DEBUG (SettingsManager save_settings): Ancienne clé 'use_local_solver_priority' supprimée des données de sauvegarde.")
 
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                  json.dump(settings_data, f, indent=4, ensure_ascii=False)
-            print(f"DEBUG (SettingsManager save_settings V_LocalSolverPref): Paramètres sauvegardés dans '{self.settings_file}'.") # DEBUG
+            print(f"DEBUG (SettingsManager save_settings V_SaveAsFloat32_1): Paramètres sauvegardés dans '{self.settings_file}'.") # Version Log
 
         except TypeError as te: print(f"Error saving settings: Data not JSON serializable - {te}")
         except IOError as ioe: print(f"Error saving settings: I/O error writing to {self.settings_file} - {ioe}")
         except Exception as e: print(f"Unexpected error saving settings: {e}")
 
+
+
 ###################################################################################################################################
+
 
 
 # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
@@ -996,139 +887,116 @@ class SettingsManager:
     def load_settings(self):
         """ 
         Charge les paramètres depuis le fichier JSON.
-        Si le fichier n'existe pas ou est corrompu, les valeurs par défaut sont utilisées
-        et un nouveau fichier de settings est créé.
-        Gère la transition de l'ancienne clé 'use_local_solver_priority'.
+        MODIFIED: Ajout de logs de debug spécifiques pour save_final_as_float32.
+        La logique de chargement générique devrait déjà le gérer.
         """
-        print(f"DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Tentative chargement depuis {self.settings_file}...")
+        print(f"DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Tentative chargement depuis {self.settings_file}...") # Version Log
         
-        # Obtenir d'abord un dictionnaire de valeurs par défaut propres et complètes
-        # pour fallback et pour s'assurer que tous les attributs sont initialisés sur self.
         default_values_dict = self.get_default_values()
         
-        # Si le fichier n'existe pas, appliquer les défauts et sauvegarder.
         if not os.path.exists(self.settings_file):
-            print(f"DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Fichier '{self.settings_file}' non trouvé. Application des valeurs par défaut.")
-            # Appliquer tous les défauts à l'instance 'self'
+            print(f"DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Fichier '{self.settings_file}' non trouvé. Application des valeurs par défaut.")
             for key, value in default_values_dict.items():
                 setattr(self, key, value)
             
-            print(f"DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Tentative de sauvegarde du fichier settings avec les valeurs par défaut.")
-            self.save_settings() # Crée le fichier avec les valeurs par défaut actuelles de self
-            _ = self.validate_settings() # Valider et ignorer les messages pour ce cas
-            print(f"DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Valeur local_solver_preference après reset (fichier non trouvé): '{getattr(self, 'local_solver_preference', 'ERREUR_ATTR')}'")
-            return False # Indiquer qu'on a utilisé les défauts car fichier absent
+            print(f"DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Tentative de sauvegarde du fichier settings avec les valeurs par défaut.")
+            self.save_settings() 
+            _ = self.validate_settings() 
+            print(f"DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Valeur save_final_as_float32 après reset (fichier non trouvé): '{getattr(self, 'save_final_as_float32', 'ERREUR_ATTR')}'")
+            return False 
         
-        settings_data = {} # Initialiser au cas où la lecture échouerait avant json.load
+        settings_data = {} 
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                  settings_data = json.load(f)
         except json.JSONDecodeError as e:
-            print(f"ERREUR (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Décodage JSON échoué pour {self.settings_file}: {e}. Utilisation des défauts et réinitialisation du fichier.")
-            for key, value in default_values_dict.items(): setattr(self, key, value) # Appliquer défauts à self
-            self.save_settings() # Écrase le fichier corrompu
+            print(f"ERREUR (SettingsManager load_settings V_SaveAsFloat32_1): Décodage JSON échoué pour {self.settings_file}: {e}. Utilisation des défauts et réinitialisation du fichier.")
+            for key, value in default_values_dict.items(): setattr(self, key, value) 
+            self.save_settings() 
             _ = self.validate_settings()
-            return False # Indiquer échec chargement et reset
+            return False 
         except Exception as e_open: 
-            print(f"ERREUR (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Lecture de {self.settings_file} échouée: {e_open}. Utilisation des défauts et réinitialisation du fichier.")
+            print(f"ERREUR (SettingsManager load_settings V_SaveAsFloat32_1): Lecture de {self.settings_file} échouée: {e_open}. Utilisation des défauts et réinitialisation du fichier.")
             traceback.print_exc(limit=2)
             for key, value in default_values_dict.items(): setattr(self, key, value)
             self.save_settings()
             _ = self.validate_settings()
             return False
 
-        print("DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Application des valeurs du JSON (avec fallback sur défauts)...")
+        print("DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Application des valeurs du JSON (avec fallback sur défauts)...")
         
-        # --- Gestion de la transition pour l'ancienne clé 'use_local_solver_priority' ---
-        # On lit l'ancienne clé et on la retire du dictionnaire `settings_data` pour qu'elle ne soit pas traitée
-        # par la boucle générique ci-dessous.
         old_use_local_priority_val = settings_data.pop('use_local_solver_priority', None) 
         
         if old_use_local_priority_val is not None:
-            # Si l'ancienne clé existait ET que la NOUVELLE clé 'local_solver_preference' N'EST PAS dans le JSON
             if 'local_solver_preference' not in settings_data:
-                print(f"  INFO (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Ancienne clé 'use_local_solver_priority' ({old_use_local_priority_val}) trouvée. Conversion vers 'local_solver_preference'.")
+                print(f"  INFO (SettingsManager load_settings): Ancienne clé 'use_local_solver_priority' ({old_use_local_priority_val}) trouvée. Conversion vers 'local_solver_preference'.")
                 if bool(old_use_local_priority_val):
-                    # Si c'était True, on ne sait pas si c'était pour ASTAP ou Ansvr.
-                    # On met "astap" par défaut, car c'était le premier solveur local qu'on avait plus en vue.
                     settings_data['local_solver_preference'] = "astap" 
-                    print(f"     -> Converti en 'local_solver_preference': 'astap' (supposition par défaut pour ancienne config)")
+                    print(f"     -> Converti en 'local_solver_preference': 'astap'")
                 else:
                     settings_data['local_solver_preference'] = "none"
                     print(f"     -> Converti en 'local_solver_preference': 'none'")
             else:
-                 print(f"  INFO (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Ancienne clé 'use_local_solver_priority' ({old_use_local_priority_val}) trouvée mais ignorée car 'local_solver_preference' ('{settings_data['local_solver_preference']}') est déjà présente dans le JSON.")
-        # --- Fin de la gestion de la transition ---
+                 print(f"  INFO (SettingsManager load_settings): Ancienne clé 'use_local_solver_priority' ({old_use_local_priority_val}) trouvée mais ignorée car 'local_solver_preference' ('{settings_data['local_solver_preference']}') est déjà présente.")
 
         # Boucle sur TOUTES les clés attendues (celles de default_values_dict) pour peupler `self`
         for key, default_value_from_code in default_values_dict.items():
-            # Obtenir la valeur du JSON. Si la clé n'y est pas (ou a été .pop()-ed),
-            # `settings_data.get(key, ...)` utilisera `default_value_from_code`.
             loaded_value_from_json = settings_data.get(key, default_value_from_code)
-            
             final_value_to_set = loaded_value_from_json 
 
-            # Si la clé n'était PAS DU TOUT dans le JSON (settings_data.get a renvoyé default_value_from_code),
-            # alors final_value_to_set est déjà la valeur par défaut du code.
-            if key not in settings_data and loaded_value_from_json is default_value_from_code: # Vérifie si c'est bien le fallback qui a été pris
-                print(f"  INFO (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Clé '{key}' non trouvée dans JSON. Utilisation de la valeur par défaut du code: {default_value_from_code}")
-                # `final_value_to_set` est déjà `default_value_from_code`
+            if key not in settings_data and loaded_value_from_json is default_value_from_code: 
+                if key == 'save_final_as_float32': # DEBUG SPÉCIFIQUE
+                    print(f"  INFO LOAD (save_final_as_float32): Clé '{key}' non trouvée dans JSON. Utilisation défaut du code: {default_value_from_code}")
             else:
-                # La clé existait dans le JSON. On essaie de caster la valeur lue du JSON vers le type attendu (celui de default_value_from_code).
                 try:
                     type_of_default = type(default_value_from_code)
                     
-                    # Si le type est déjà correct, pas besoin de caster
                     if type(loaded_value_from_json) == type_of_default:
                         final_value_to_set = loaded_value_from_json
-                    # Gestion spécifique pour les booléens (peut être "true"/"false" dans le JSON)
                     elif type_of_default == bool:
                         if isinstance(loaded_value_from_json, str):
                             if loaded_value_from_json.lower() == 'true': final_value_to_set = True
                             elif loaded_value_from_json.lower() == 'false': final_value_to_set = False
-                            else: final_value_to_set = bool(int(loaded_value_from_json)) # Essayer via int (0 ou 1)
+                            else: final_value_to_set = bool(int(loaded_value_from_json)) 
                         else:
                             final_value_to_set = bool(loaded_value_from_json)
-                    # Pour int et float, éviter de caster True/False en 1/0 si le type par défaut est numérique
                     elif type_of_default == int and not isinstance(loaded_value_from_json, bool):
-                        final_value_to_set = int(float(loaded_value_from_json)) # float() d'abord pour les str "30.0"
+                        final_value_to_set = int(float(loaded_value_from_json)) 
                     elif type_of_default == float and not isinstance(loaded_value_from_json, bool):
                         final_value_to_set = float(loaded_value_from_json)
                     elif type_of_default == str:
                         final_value_to_set = str(loaded_value_from_json)
-                    # Cas spécial pour les dictionnaires (ex: mosaic_settings)
                     elif type_of_default == dict and isinstance(loaded_value_from_json, dict):
-                        merged_dict = default_value_from_code.copy() # Commencer avec les clés par défaut du code
-                        merged_dict.update(loaded_value_from_json)   # Écraser/ajouter avec les clés du JSON
+                        merged_dict = default_value_from_code.copy() 
+                        merged_dict.update(loaded_value_from_json)   
                         final_value_to_set = merged_dict
-                    # Si le type par défaut est None, on accepte ce qui est chargé
                     elif default_value_from_code is None:
                         final_value_to_set = loaded_value_from_json
-                    # Tentative de cast générique si les types diffèrent et non explicitement gérés ci-dessus
                     else: 
-                        print(f"  WARN (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Tentative de cast générique pour la clé '{key}' du type {type(loaded_value_from_json)} vers {type_of_default}.")
+                        print(f"  WARN (SettingsManager load_settings): Tentative de cast générique pour la clé '{key}' du type {type(loaded_value_from_json)} vers {type_of_default}.")
                         final_value_to_set = type_of_default(loaded_value_from_json)
 
                 except (ValueError, TypeError) as e_cast:
-                    print(f"  WARN (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Impossible de caster la valeur JSON '{loaded_value_from_json}' (type {type(loaded_value_from_json)}) pour la clé '{key}' vers le type attendu ({type(default_value_from_code)}). Erreur: {e_cast}. Utilisation de la valeur par défaut du code: {default_value_from_code}")
-                    final_value_to_set = default_value_from_code # Revenir au défaut du code si le cast échoue
+                    log_prefix = f"  WARN LOAD ({key})" if key == 'save_final_as_float32' else "  WARN (SettingsManager load_settings)"
+                    print(f"{log_prefix}: Impossible de caster la valeur JSON '{loaded_value_from_json}' (type {type(loaded_value_from_json)}) pour la clé '{key}' vers le type attendu ({type(default_value_from_code)}). Erreur: {e_cast}. Utilisation de la valeur par défaut du code: {default_value_from_code}")
+                    final_value_to_set = default_value_from_code 
             
             setattr(self, key, final_value_to_set)
     
-        print(f"DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Paramètres chargés et fusionnés depuis '{self.settings_file}'. Validation en cours...")
-        print(f"  Exemple après chargement JSON - self.local_solver_preference: '{getattr(self, 'local_solver_preference', 'NonTrouve')}', self.astap_search_radius: {getattr(self, 'astap_search_radius', 'NonTrouve')}")
+        print(f"DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Paramètres chargés et fusionnés depuis '{self.settings_file}'. Validation en cours...")
+        print(f"  Exemple après chargement JSON - self.save_final_as_float32: '{getattr(self, 'save_final_as_float32', 'NonTrouve')}'")
 
-        # La validation est TOUJOURS exécutée après le chargement (ou l'application des défauts)
         validation_messages = self.validate_settings() 
         if validation_messages:
-             print("DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Settings chargés/fusionnés ont été ajustés après validation:")
+             print("DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Settings chargés/fusionnés ont été ajustés après validation:")
              for msg in validation_messages: print(f"  - {msg}")
-             # Sauvegarder les settings corrigés pour qu'ils soient corrects au prochain lancement
-             # et pour supprimer l'ancienne clé 'use_local_solver_priority' du fichier si elle y était.
-             print("DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Sauvegarde des settings validés (car des ajustements ont été faits ou pour nettoyer ancienne clé).")
+             print("DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Sauvegarde des settings validés (car des ajustements ont été faits ou pour nettoyer ancienne clé).")
              self.save_settings() 
         
-        print("DEBUG (SettingsManager load_settings V_LocalSolverPref_CorrectedLoad): Fin de la méthode load_settings.")
+        print("DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Fin de la méthode load_settings.")
         return True
+
+    #Fin settings.py
+
 
     #Fin settings.py

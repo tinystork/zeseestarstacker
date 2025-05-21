@@ -307,32 +307,35 @@ class SeestarStackerGUI:
         self._folder_for_immediate_stack = None
 
 
+
+# --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
+
     def init_variables(self):
-        """Initialise les variables Tkinter."""
-        print("DEBUG (GUI init_variables): Initialisation des variables Tkinter...")
-        # ... (autres variables input_path, output_path, etc. inchangées) ...
+        """
+        Initialise les variables Tkinter.
+        MODIFIED: Ajout de save_as_float32_var.
+        """
+        print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Initialisation des variables Tkinter...") # Version Log
+        
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.reference_image_path = tk.StringVar()
-        self.stacking_mode = tk.StringVar(value="kappa-sigma") # Default value
+        self.stacking_mode = tk.StringVar(value="kappa-sigma") 
         self.kappa = tk.DoubleVar(value=2.5)
-        self.batch_size = tk.IntVar(value=10) # Default batch size (0 was ambiguous)
+        self.batch_size = tk.IntVar(value=10) 
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
         self.neighborhood_size = tk.IntVar(value=5)
-        self.cleanup_temp_var = tk.BooleanVar(value=True) # Renamed from remove_aligned
+        self.cleanup_temp_var = tk.BooleanVar(value=True) 
 
-        # --- Drizzle Variables --- #
         self.use_drizzle_var = tk.BooleanVar(value=False)
         self.drizzle_scale_var = tk.StringVar(value="2")
-        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7) # La variable 0.0-1.0 (INCHANGÉE)
-        self.drizzle_wht_display_var = tk.StringVar(value="70") # <-- AJOUTÉ: Variable pour l'affichage % (String pour .set())
+        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7) 
+        self.drizzle_wht_display_var = tk.StringVar(value="70") 
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
-        # --- FIN MODIFICATION ---
 
-        # ... (variables Preview inchangées) ...
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
         self.preview_white_point = tk.DoubleVar(value=0.99)
@@ -344,70 +347,66 @@ class SeestarStackerGUI:
         self.preview_contrast = tk.DoubleVar(value=1.0)
         self.preview_saturation = tk.DoubleVar(value=1.0)
 
-        # ... (variables UI State inchangées) ...
         self.language_var = tk.StringVar(value='en')
         self.remaining_files_var = tk.StringVar(value=self.tr("no_files_waiting", default="No files waiting"))
         self.additional_folders_var = tk.StringVar(value=self.tr("no_additional_folders", default="None"))
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var = tk.StringVar(value=default_aligned_fmt.format(count="--"))
-        self.remaining_time_var = tk.StringVar(value="--:--:--") # ETA
+        self.remaining_time_var = tk.StringVar(value="--:--:--") 
         self.elapsed_time_var = tk.StringVar(value="00:00:00")
         self._after_id_resize = None
-        # La ligne suivante n'est plus nécessaire car le trace a été enlevé, on peut la supprimer si elle existe
-        # self._trace_id_wht = None # <-- SUPPRIMER SI PRÉSENT
-
-        # ---  VARIABLE pour la correction chroma ---
-        # Default value is True, can be changed later based on user preference or settings load
+        
         self.apply_chroma_correction_var = tk.BooleanVar(value=True)
         print("DEBUG (GUI init_variables): Variable apply_chroma_correction_var créée.") 
         
-        ### NOUVEAU : Variables Tkinter pour SCNR Final ###
-        self.apply_final_scnr_var = tk.BooleanVar(value=False) # SCNR désactivé par défaut
-        self.final_scnr_amount_var = tk.DoubleVar(value=0.8)  # Intensité par défaut
-        self.final_scnr_preserve_lum_var = tk.BooleanVar(value=True) # Préserver luminance par défaut
-        # Pas de variable pour target_channel pour l'instant, on le fixe à 'green'
+        self.apply_final_scnr_var = tk.BooleanVar(value=False) 
+        self.final_scnr_amount_var = tk.DoubleVar(value=0.8)  
+        self.final_scnr_preserve_lum_var = tk.BooleanVar(value=True) 
         print("DEBUG (GUI init_variables): Variables SCNR Final créées.")
                 
-        # Neutralisation du Fond (BN)
-        self.bn_grid_size_str_var = tk.StringVar(value="16x16") # Ex: "8x8", "16x16", "32x32"
+        self.bn_grid_size_str_var = tk.StringVar(value="16x16") 
         self.bn_perc_low_var = tk.IntVar(value=5)
         self.bn_perc_high_var = tk.IntVar(value=30)
         self.bn_std_factor_var = tk.DoubleVar(value=1.0)
         self.bn_min_gain_var = tk.DoubleVar(value=0.2)
         self.bn_max_gain_var = tk.DoubleVar(value=7.0)
 
-        # ChromaticBalancer (CB)
         self.cb_border_size_var = tk.IntVar(value=25)
         self.cb_blur_radius_var = tk.IntVar(value=8)
-        self.cb_min_b_factor_var = tk.DoubleVar(value=0.4) # Pour le facteur B de CB
-        self.cb_max_b_factor_var = tk.DoubleVar(value=1.5) # Pour le facteur B de CB
-        # self.cb_intensity_var = tk.DoubleVar(value=1.0) # Optionnel, pour moduler la correction
+        self.cb_min_b_factor_var = tk.DoubleVar(value=0.4) 
+        self.cb_max_b_factor_var = tk.DoubleVar(value=1.5) 
 
-        # Rognage Final
-        self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0) # En %, ex: 2.0 pour 2%
+        self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0) 
 
         print("DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées.")
 
-        ###  Variables Tkinter pour Soustraction Fond 2D (Photutils) ###
-        self.apply_photutils_bn_var = tk.BooleanVar(value=False) # Désactivé par défaut
-        self.photutils_bn_box_size_var = tk.IntVar(value=128)     # Défaut: 128
-        self.photutils_bn_filter_size_var = tk.IntVar(value=5)    # Défaut: 5 (doit être impair)
-        self.photutils_bn_sigma_clip_var = tk.DoubleVar(value=3.0) # Défaut: 3.0
-        self.photutils_bn_exclude_percentile_var = tk.DoubleVar(value=98.0) # Défaut: 98.0
+        self.apply_photutils_bn_var = tk.BooleanVar(value=False) 
+        self.photutils_bn_box_size_var = tk.IntVar(value=128)     
+        self.photutils_bn_filter_size_var = tk.IntVar(value=5)    
+        self.photutils_bn_sigma_clip_var = tk.DoubleVar(value=3.0) 
+        self.photutils_bn_exclude_percentile_var = tk.DoubleVar(value=98.0) 
 
-        # --- NOUVELLES VARIABLES TKINTER POUR FEATHERING ---
-        self.apply_feathering_var = tk.BooleanVar(value=False)  # Désactivé par défaut
-        self.feather_blur_px_var = tk.IntVar(value=256)      # Valeur de flou par défaut
+        self.apply_feathering_var = tk.BooleanVar(value=False)  
+        self.feather_blur_px_var = tk.IntVar(value=256)      
         print("DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var).")
-        # --- FIN NOUVELLES VARIABLES ---
+        
         print("DEBUG (GUI init_variables): Variables pour Photutils Background Subtraction créées.")
         
-        # --- VARIABLES POUR LOW WHT MASK ---
-        self.apply_low_wht_mask_var = tk.BooleanVar(value=False) # Désactivé par défaut
-        self.low_wht_pct_var = tk.IntVar(value=5)                # Valeur par défaut pour le percentile
-        self.low_wht_soften_px_var = tk.IntVar(value=128)        # Valeur par défaut pour le rayon de flou
+        self.apply_low_wht_mask_var = tk.BooleanVar(value=False) 
+        self.low_wht_pct_var = tk.IntVar(value=5)                
+        self.low_wht_soften_px_var = tk.IntVar(value=128)        
         print("DEBUG (GUI init_variables): Variables Low WHT Mask créées.")
-        # --- FIN NOUVELLES VARIABLES ---
+
+        # --- NOUVELLE VARIABLE TKINTER POUR L'OPTION DE SAUVEGARDE ---
+        self.save_as_float32_var = tk.BooleanVar(value=False) # Défaut à False (donc uint16)
+        print(f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()}).")
+        # --- FIN NOUVELLE VARIABLE ---
+
+        print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter.") # Version Log
+
+
+
+
 #######################################################################################################################
 
 
@@ -645,13 +644,11 @@ class SeestarStackerGUI:
 
 
 
-
-
 # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def create_layout(self):
         """Crée la disposition des widgets avec la scrollbar pour le panneau gauche et le SCNR réorganisé."""
-        print("DEBUG (GUI create_layout): Début création layout...")
+        print("DEBUG (GUI create_layout V_SaveAsFloat32_1): Début création layout...") # Version Log
 
         # --- Cadre Principal et PanedWindow ---
         main_frame = ttk.Frame(self.root)
@@ -661,11 +658,12 @@ class SeestarStackerGUI:
         print("DEBUG (GUI create_layout): Cadre principal et PanedWindow créés.")
 
         # --- Panneau Gauche avec Scrollbar Intégrée ---
+        # ... (code inchangé pour le panneau gauche scrollable) ...
         left_canvas_container = ttk.Frame(paned_window, width=450)
         paned_window.add(left_canvas_container, weight=1)
         self.left_scrollbar = ttk.Scrollbar(left_canvas_container, orient="vertical")
         self.left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas_background_color = self.root.cget('bg') # Utiliser la couleur de fond de la racine pour cohérence
+        canvas_background_color = self.root.cget('bg') 
         self.left_scrollable_canvas = tk.Canvas(left_canvas_container,
                                                 highlightthickness=0,
                                                 bg=canvas_background_color,
@@ -676,17 +674,14 @@ class SeestarStackerGUI:
         self.left_content_frame_id_on_canvas = self.left_scrollable_canvas.create_window(
             (0, 0), window=self.left_content_frame, anchor="nw", tags="self.left_content_frame_tag"
         )
-        def _on_left_content_frame_configure(event): # Fonction locale
-            # Mettre à jour la largeur du frame interne AVANT de calculer la scrollregion
+        def _on_left_content_frame_configure(event): 
             if self.left_scrollable_canvas.winfo_width() > 1:
                  self.left_scrollable_canvas.itemconfig(self.left_content_frame_id_on_canvas, width=self.left_scrollable_canvas.winfo_width())
             self.left_scrollable_canvas.config(scrollregion=self.left_scrollable_canvas.bbox("all"))
         self.left_content_frame.bind("<Configure>", _on_left_content_frame_configure)
-        # Ajuster la largeur du frame interne quand le canvas est redimensionné
         self.left_scrollable_canvas.bind("<Configure>", lambda e, c=self.left_scrollable_canvas, i=self.left_content_frame_id_on_canvas: \
                                          c.itemconfig(i, width=e.width) if e.width > 1 else None)
         print("DEBUG (GUI create_layout): Panneau gauche scrollable configuré.")
-        # --- Fin de la Configuration du Panneau Gauche Scrollable ---
 
         # --- Panneau Droit (pour Aperçu, Histogramme, Boutons de Contrôle) ---
         right_frame = ttk.Frame(paned_window, width=750)
@@ -698,7 +693,8 @@ class SeestarStackerGUI:
         # =======================================================================
         print("DEBUG (GUI create_layout): Début remplissage panneau gauche...")
 
-        # 1. Sélection Langue (en haut de self.left_content_frame)
+        # 1. Sélection Langue 
+        # ... (inchangé) ...
         lang_frame = ttk.Frame(self.left_content_frame)
         lang_frame.pack(side=tk.TOP, fill=tk.X, pady=(5, 5), padx=5)
         ttk.Label(lang_frame, text="Language/Langue:").pack(side=tk.LEFT, padx=(0, 5))
@@ -707,16 +703,16 @@ class SeestarStackerGUI:
         self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
         print("DEBUG (GUI create_layout): Sélection langue créée.")
 
-        # 2. Notebook pour les Onglets d'Options (juste en dessous de la langue)
+        # 2. Notebook pour les Onglets d'Options
         self.control_notebook = ttk.Notebook(self.left_content_frame)
-        self.control_notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5), padx=5) # fill=tk.BOTH et expand=True
+        self.control_notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5), padx=5)
         print("DEBUG (GUI create_layout): Notebook de contrôle créé.")
 
         # --- Onglet Empilement (Index 0) ---
         tab_stacking = ttk.Frame(self.control_notebook)
         print("DEBUG (GUI create_layout): Frame pour onglet Empilement créé.")
         # ... (Votre code complet pour le contenu de tab_stacking ici, inchangé) ...
-        self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders")) # Note: self.tr() fonctionnera après init localisation
+        self.folders_frame = ttk.LabelFrame(tab_stacking, text=self.tr("Folders")) 
         self.folders_frame.pack(fill=tk.X, pady=5, padx=5)
         in_subframe = ttk.Frame(self.folders_frame); in_subframe.pack(fill=tk.X, padx=5, pady=(5, 2)); self.input_label = ttk.Label(in_subframe, text="Input:", width=10, anchor="w"); self.input_label.pack(side=tk.LEFT); self.browse_input_button = ttk.Button(in_subframe, text="Browse...", command=self.file_handler.browse_input, width=10); self.browse_input_button.pack(side=tk.RIGHT); self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path); self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)); self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state); self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state)
         out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5)); self.output_label = ttk.Label(out_subframe, text="Output:", width=10, anchor="w"); self.output_label.pack(side=tk.LEFT); self.browse_output_button = ttk.Button(out_subframe, text="Browse...", command=self.file_handler.browse_output, width=10); self.browse_output_button.pack(side=tk.RIGHT); self.output_entry = ttk.Entry(out_subframe, textvariable=self.output_path); self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
@@ -740,7 +736,7 @@ class SeestarStackerGUI:
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction"); self.hp_frame.pack(fill=tk.X, pady=5, padx=5); hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text="Correct hot pixels", variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text="Threshold:"); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text="Neighborhood:"); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
         self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Quality Weighting"); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5); self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text="Enable weighting", variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text="Metrics:"); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text="SNR", variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text="Star Count", variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text="SNR Exp.:"); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text="Stars Exp.:"); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text="Min Weight:"); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text="Post-Processing Options"); self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5); self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Cleanup temporary files", variable=self.cleanup_temp_var); self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5); self.chroma_correction_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Edge Enhance", variable=self.apply_chroma_correction_var); self.chroma_correction_check.pack(side=tk.LEFT, padx=5, pady=5)
-        # ---
+        
         self.control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking", default=" Stacking ")} ')
         print("DEBUG (GUI create_layout): Onglet Empilement créé et ajouté.")
 
@@ -755,15 +751,13 @@ class SeestarStackerGUI:
         expert_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         expert_content_frame = ttk.Frame(expert_scroll_canvas) 
-        expert_content_frame_id = expert_scroll_canvas.create_window((0,0), window=expert_content_frame, anchor="nw", tags="expert_content_frame_tag_v2") # Tag unique
+        expert_content_frame_id = expert_scroll_canvas.create_window((0,0), window=expert_content_frame, anchor="nw", tags="expert_content_frame_tag_v2") 
 
-        # Callback pour le scroll de l'onglet Expert
-        def _on_expert_content_configure_local(event): # Nom unique pour la fonction locale
-            # Mettre à jour la largeur du frame interne AVANT de calculer la scrollregion
-            if expert_scroll_canvas.winfo_exists() and expert_scroll_canvas.winfo_width() > 1: # Vérifier existence
+        def _on_expert_content_configure_local(event): 
+            if expert_scroll_canvas.winfo_exists() and expert_scroll_canvas.winfo_width() > 1: 
                  try: expert_scroll_canvas.itemconfig(expert_content_frame_id, width=expert_scroll_canvas.winfo_width())
-                 except tk.TclError: pass # Au cas où l'item est détruit
-            if expert_scroll_canvas.winfo_exists(): # Vérifier existence
+                 except tk.TclError: pass 
+            if expert_scroll_canvas.winfo_exists(): 
                  try: expert_scroll_canvas.config(scrollregion=expert_scroll_canvas.bbox("all"))
                  except tk.TclError: pass
         
@@ -798,71 +792,84 @@ class SeestarStackerGUI:
         self.bn_frame.pack(fill=tk.X, padx=5, pady=5)
         self.bn_frame.columnconfigure(1, weight=0); self.bn_frame.columnconfigure(3, weight=0)
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text="Grid Size:"); self.bn_grid_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2); self.bn_grid_size_combo = ttk.Combobox(self.bn_frame, textvariable=self.bn_grid_size_str_var, values=["8x8", "16x16", "24x24", "32x32", "64x64"], width=7, state="readonly"); self.bn_grid_size_combo.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
-        self.bn_perc_low_actual_label = ttk.Label(self.bn_frame, text="BG Perc. Low:"); self.bn_perc_low_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.bn_perc_low_spinbox = ttk.Spinbox(self.bn_frame, from_=0, to=40, increment=1, width=5, textvariable=self.bn_perc_low_var); self.bn_perc_low_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text="BG Perc. High:"); self.bn_perc_high_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2); self.bn_perc_high_spinbox = ttk.Spinbox(self.bn_frame, from_=10, to=95, increment=1, width=5, textvariable=self.bn_perc_high_var); self.bn_perc_high_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.bn_std_factor_actual_label = ttk.Label(self.bn_frame, text="BG Std Factor:"); self.bn_std_factor_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2); self.bn_std_factor_spinbox = ttk.Spinbox(self.bn_frame, from_=0.5, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_std_factor_var); self.bn_std_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.bn_min_gain_actual_label = ttk.Label(self.bn_frame, text="Min Gain:"); self.bn_min_gain_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2); self.bn_min_gain_spinbox = ttk.Spinbox(self.bn_frame, from_=0.1, to=2.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_min_gain_var); self.bn_min_gain_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.bn_max_gain_actual_label = ttk.Label(self.bn_frame, text="Max Gain:"); self.bn_max_gain_actual_label.grid(row=3, column=2, sticky=tk.W, padx=2, pady=2); self.bn_max_gain_spinbox = ttk.Spinbox(self.bn_frame, from_=1.0, to=10.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_max_gain_var); self.bn_max_gain_spinbox.grid(row=3, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
+        self.bn_perc_low_actual_label = ttk.Label(self.bn_frame, text="BG Perc. Low:"); self.bn_perc_low_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.bn_perc_low_spinbox = ttk.Spinbox(self.bn_frame, from_=0, to=40, increment=1, width=5, textvariable=self.bn_perc_low_var); self.bn_perc_low_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text="BG Perc. High:"); self.bn_perc_high_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2); self.bn_perc_high_spinbox = ttk.Spinbox(self.bn_frame, from_=10, to=95, increment=1, width=5, textvariable=self.bn_perc_high_var); self.bn_perc_high_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) 
+        self.bn_std_factor_actual_label = ttk.Label(self.bn_frame, text="BG Std Factor:"); self.bn_std_factor_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2); self.bn_std_factor_spinbox = ttk.Spinbox(self.bn_frame, from_=0.5, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_std_factor_var); self.bn_std_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.bn_min_gain_actual_label = ttk.Label(self.bn_frame, text="Min Gain:"); self.bn_min_gain_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2); self.bn_min_gain_spinbox = ttk.Spinbox(self.bn_frame, from_=0.1, to=2.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_min_gain_var); self.bn_min_gain_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.bn_max_gain_actual_label = ttk.Label(self.bn_frame, text="Max Gain:"); self.bn_max_gain_actual_label.grid(row=3, column=2, sticky=tk.W, padx=2, pady=2); self.bn_max_gain_spinbox = ttk.Spinbox(self.bn_frame, from_=1.0, to=10.0, increment=0.1, width=5, format="%.1f", textvariable=self.bn_max_gain_var); self.bn_max_gain_spinbox.grid(row=3, column=3, sticky=tk.W, padx=2, pady=2) 
         print("DEBUG (GUI create_layout): Cadre BN créé.")
 
         self.cb_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("cb_frame_title", default="Edge/Chroma Correction"), padding=5)
         self.cb_frame.pack(fill=tk.X, padx=5, pady=5)
         self.cb_frame.columnconfigure(1, weight=0); self.cb_frame.columnconfigure(3, weight=0)
-        self.cb_border_size_actual_label = ttk.Label(self.cb_frame, text="Border Size (px):"); self.cb_border_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2); self.cb_border_size_spinbox = ttk.Spinbox(self.cb_frame, from_=5, to=150, increment=5, width=5, textvariable=self.cb_border_size_var); self.cb_border_size_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.cb_blur_radius_actual_label = ttk.Label(self.cb_frame, text="Blur Radius (px):"); self.cb_blur_radius_actual_label.grid(row=0, column=2, sticky=tk.W, padx=2, pady=2); self.cb_blur_radius_spinbox = ttk.Spinbox(self.cb_frame, from_=0, to=50, increment=1, width=5, textvariable=self.cb_blur_radius_var); self.cb_blur_radius_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.cb_min_b_factor_actual_label = ttk.Label(self.cb_frame, text="Min Blue Factor:"); self.cb_min_b_factor_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.cb_min_b_factor_spinbox = ttk.Spinbox(self.cb_frame, from_=0.1, to=1.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_min_b_factor_var); self.cb_min_b_factor_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.cb_max_b_factor_actual_label = ttk.Label(self.cb_frame, text="Max Blue Factor:"); self.cb_max_b_factor_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2); self.cb_max_b_factor_spinbox = ttk.Spinbox(self.cb_frame, from_=1.0, to=3.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_max_b_factor_var); self.cb_max_b_factor_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
+        self.cb_border_size_actual_label = ttk.Label(self.cb_frame, text="Border Size (px):"); self.cb_border_size_actual_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2); self.cb_border_size_spinbox = ttk.Spinbox(self.cb_frame, from_=5, to=150, increment=5, width=5, textvariable=self.cb_border_size_var); self.cb_border_size_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.cb_blur_radius_actual_label = ttk.Label(self.cb_frame, text="Blur Radius (px):"); self.cb_blur_radius_actual_label.grid(row=0, column=2, sticky=tk.W, padx=2, pady=2); self.cb_blur_radius_spinbox = ttk.Spinbox(self.cb_frame, from_=0, to=50, increment=1, width=5, textvariable=self.cb_blur_radius_var); self.cb_blur_radius_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2) 
+        self.cb_min_b_factor_actual_label = ttk.Label(self.cb_frame, text="Min Blue Factor:"); self.cb_min_b_factor_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.cb_min_b_factor_spinbox = ttk.Spinbox(self.cb_frame, from_=0.1, to=1.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_min_b_factor_var); self.cb_min_b_factor_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.cb_max_b_factor_actual_label = ttk.Label(self.cb_frame, text="Max Blue Factor:"); self.cb_max_b_factor_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2); self.cb_max_b_factor_spinbox = ttk.Spinbox(self.cb_frame, from_=1.0, to=3.0, increment=0.05, width=5, format="%.2f", textvariable=self.cb_max_b_factor_var); self.cb_max_b_factor_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) 
         print("DEBUG (GUI create_layout): Cadre CB créé.")
 
         self.crop_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("crop_frame_title", default="Final Cropping"), padding=5)
         self.crop_frame.pack(fill=tk.X, padx=5, pady=5)
         self.final_edge_crop_actual_label = ttk.Label(self.crop_frame, text="Edge Crop (%):"); self.final_edge_crop_actual_label.pack(side=tk.LEFT, padx=(2,5), pady=2)
-        self.final_edge_crop_spinbox = ttk.Spinbox(self.crop_frame, from_=0.0, to=25.0, increment=0.5, width=6, format="%.1f", textvariable=self.final_edge_crop_percent_var); self.final_edge_crop_spinbox.pack(side=tk.LEFT, padx=2, pady=2) # Stocker spinbox
+        self.final_edge_crop_spinbox = ttk.Spinbox(self.crop_frame, from_=0.0, to=25.0, increment=0.5, width=6, format="%.1f", textvariable=self.final_edge_crop_percent_var); self.final_edge_crop_spinbox.pack(side=tk.LEFT, padx=2, pady=2) 
         print("DEBUG (GUI create_layout): Cadre Crop créé.")
 
         self.photutils_bn_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("photutils_bn_frame_title", default="2D Background Subtraction (Photutils)"), padding=5)
         self.photutils_bn_frame.pack(fill=tk.X, padx=5, pady=5)
         self.apply_photutils_bn_check = ttk.Checkbutton(self.photutils_bn_frame, text="Enable Photutils 2D Bkg Subtraction", variable=self.apply_photutils_bn_var, command=self._update_photutils_bn_options_state); self.apply_photutils_bn_check.pack(anchor=tk.W, padx=5, pady=(5,2))
         self.photutils_params_frame = ttk.Frame(self.photutils_bn_frame); self.photutils_params_frame.pack(fill=tk.X, padx=(20,0), pady=2); self.photutils_params_frame.columnconfigure(1, weight=0); self.photutils_params_frame.columnconfigure(3, weight=0)
-        self.photutils_bn_box_size_label = ttk.Label(self.photutils_params_frame, text="Box Size (px):"); self.photutils_bn_box_size_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2); self.pb_box_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=16, to=1024, increment=16, width=6, textvariable=self.photutils_bn_box_size_var); self.pb_box_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.photutils_bn_filter_size_label = ttk.Label(self.photutils_params_frame, text="Filter Size (px, odd):"); self.photutils_bn_filter_size_label.grid(row=0, column=2, sticky=tk.W, padx=(10,2), pady=2); self.pb_filt_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=1, to=15, increment=2, width=5, textvariable=self.photutils_bn_filter_size_var); self.pb_filt_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.photutils_bn_sigma_clip_label = ttk.Label(self.photutils_params_frame, text="Sigma Clip Value:"); self.photutils_bn_sigma_clip_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.pb_sig_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=1.0, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.photutils_bn_sigma_clip_var); self.pb_sig_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
-        self.photutils_bn_exclude_percentile_label = ttk.Label(self.photutils_params_frame, text="Exclude Brightest (%):"); self.photutils_bn_exclude_percentile_label.grid(row=1, column=2, sticky=tk.W, padx=(10,2), pady=2); self.pb_excl_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=0.0, to=100.0, increment=1.0, width=6, format="%.1f", textvariable=self.photutils_bn_exclude_percentile_var); self.pb_excl_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) # Stocker spinbox
+        self.photutils_bn_box_size_label = ttk.Label(self.photutils_params_frame, text="Box Size (px):"); self.photutils_bn_box_size_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2); self.pb_box_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=16, to=1024, increment=16, width=6, textvariable=self.photutils_bn_box_size_var); self.pb_box_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.photutils_bn_filter_size_label = ttk.Label(self.photutils_params_frame, text="Filter Size (px, odd):"); self.photutils_bn_filter_size_label.grid(row=0, column=2, sticky=tk.W, padx=(10,2), pady=2); self.pb_filt_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=1, to=15, increment=2, width=5, textvariable=self.photutils_bn_filter_size_var); self.pb_filt_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2) 
+        self.photutils_bn_sigma_clip_label = ttk.Label(self.photutils_params_frame, text="Sigma Clip Value:"); self.photutils_bn_sigma_clip_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2); self.pb_sig_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=1.0, to=5.0, increment=0.1, width=5, format="%.1f", textvariable=self.photutils_bn_sigma_clip_var); self.pb_sig_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2) 
+        self.photutils_bn_exclude_percentile_label = ttk.Label(self.photutils_params_frame, text="Exclude Brightest (%):"); self.photutils_bn_exclude_percentile_label.grid(row=1, column=2, sticky=tk.W, padx=(10,2), pady=2); self.pb_excl_spinbox = ttk.Spinbox(self.photutils_params_frame, from_=0.0, to=100.0, increment=1.0, width=6, format="%.1f", textvariable=self.photutils_bn_exclude_percentile_var); self.pb_excl_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2) 
         print("DEBUG (GUI create_layout): Cadre Photutils BN créé.")
+
+        # --- NOUVEAU : Cadre pour les options de format de sortie FITS ---
+        self.output_format_frame = ttk.LabelFrame(expert_content_frame, text=self.tr("output_format_frame_title", default="Output FITS Format"), padding=5)
+        self.output_format_frame.pack(fill=tk.X, padx=5, pady=5)
+        print("DEBUG (GUI create_layout): Output Format Frame créé.")
+
+        self.save_as_float32_check = ttk.Checkbutton(
+            self.output_format_frame, 
+            text=self.tr("save_as_float32_label", default="Save final FITS as float32 (larger files, max precision)"), 
+            variable=self.save_as_float32_var # Variable Tkinter créée dans init_variables
+        )
+        self.save_as_float32_check.pack(anchor=tk.W, padx=5, pady=5)
+        # Pas besoin de command ici, la valeur sera lue par SettingsManager.update_from_ui()
+        print("DEBUG (GUI create_layout): Checkbutton save_as_float32 créé.")
+        # --- FIN NOUVEAU ---
         
         self.reset_expert_button = ttk.Button(expert_content_frame, text=self.tr("reset_expert_button", default="Reset Expert Settings"), command=self._reset_expert_settings)
-        self.reset_expert_button.pack(pady=(10,5))
+        self.reset_expert_button.pack(pady=(10,5)) # Packé APRÈS le nouveau cadre
         print("DEBUG (GUI create_layout): Bouton Reset Expert créé.")
         
-        # Ajout de l'onglet Expert au Notebook (CORRECTION: s'assurer qu'il a un texte)
         expert_tab_title_text = self.tr("tab_expert_title", default=" Expert ")
-        self.control_notebook.add(tab_expert, text=f' {expert_tab_title_text} ') # text ne peut pas être vide
+        self.control_notebook.add(tab_expert, text=f' {expert_tab_title_text} ') 
         print("DEBUG (GUI create_layout): Onglet Expert ajouté au Notebook.")
 
         # --- Onglet Aperçu (Index 2) ---
+        # ... (inchangé) ...
         tab_preview = ttk.Frame(self.control_notebook)
-        # ... (Contenu de l'onglet Aperçu - comme avant) ...
         self.wb_frame = ttk.LabelFrame(tab_preview, text="White Balance (Preview)"); self.wb_frame.pack(fill=tk.X, pady=5, padx=5); self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain); self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain); self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain); wb_btn_frame = ttk.Frame(self.wb_frame); wb_btn_frame.pack(fill=tk.X, pady=5); self.auto_wb_button = ttk.Button(wb_btn_frame, text="Auto WB", command=self.apply_auto_white_balance, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_wb_button.pack(side=tk.LEFT, padx=5); self.reset_wb_button = ttk.Button(wb_btn_frame, text="Reset WB", command=self.reset_white_balance); self.reset_wb_button.pack(side=tk.LEFT, padx=5)
         self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text="Stretch (Preview)"); self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5); stretch_method_frame = ttk.Frame(self.stretch_frame_controls); stretch_method_frame.pack(fill=tk.X, pady=2); self.stretch_method_label = ttk.Label(stretch_method_frame, text="Method:"); self.stretch_method_label.pack(side=tk.LEFT, padx=(5,5)); self.stretch_combo = ttk.Combobox(stretch_method_frame, textvariable=self.preview_stretch_method, values=("Linear", "Asinh", "Log"), width=15, state="readonly"); self.stretch_combo.pack(side=tk.LEFT); self.stretch_combo.bind("<<ComboboxSelected>>", self._debounce_refresh_preview); self.stretch_bp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_bp", 0.0, 1.0, 0.001, self.preview_black_point, callback=self.update_histogram_lines_from_sliders); self.stretch_wp_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_wp", 0.0, 1.0, 0.001, self.preview_white_point, callback=self.update_histogram_lines_from_sliders); self.stretch_gamma_ctrls = self._create_slider_spinbox_group(self.stretch_frame_controls, "stretch_gamma", 0.1, 5.0, 0.01, self.preview_gamma); stretch_btn_frame = ttk.Frame(self.stretch_frame_controls); stretch_btn_frame.pack(fill=tk.X, pady=5); self.auto_stretch_button = ttk.Button(stretch_btn_frame, text="Auto Stretch", command=self.apply_auto_stretch, state=tk.NORMAL if _tools_available else tk.DISABLED); self.auto_stretch_button.pack(side=tk.LEFT, padx=5); self.reset_stretch_button = ttk.Button(stretch_btn_frame, text="Reset Stretch", command=self.reset_stretch); self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
         self.bcs_frame = ttk.LabelFrame(tab_preview, text="Image Adjustments"); self.bcs_frame.pack(fill=tk.X, pady=5, padx=5); self.brightness_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "brightness", 0.1, 3.0, 0.01, self.preview_brightness); self.contrast_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "contrast", 0.1, 3.0, 0.01, self.preview_contrast); self.saturation_ctrls = self._create_slider_spinbox_group(self.bcs_frame, "saturation", 0.0, 3.0, 0.01, self.preview_saturation); bcs_btn_frame = ttk.Frame(self.bcs_frame); bcs_btn_frame.pack(fill=tk.X, pady=5); self.reset_bcs_button = ttk.Button(bcs_btn_frame, text="Reset Adjust.", command=self.reset_brightness_contrast_saturation); self.reset_bcs_button.pack(side=tk.LEFT, padx=5)
         preview_tab_title_text = self.tr("tab_preview", default=" Preview ")
         self.control_notebook.add(tab_preview, text=f' {preview_tab_title_text} ')
         print("DEBUG (GUI create_layout): Onglet Aperçu créé et ajouté.")
-        # --- Fin du Notebook ---
         
         # --- Zone Progression (ENFANT DE self.left_content_frame, packé EN BAS) ---
+        # ... (inchangé) ...
         self.progress_frame = ttk.LabelFrame(self.left_content_frame, text=self.tr("progress", default="Progress"))
         self.progress_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(10, 5))
-        # ... (contenu de progress_frame comme avant) ...
         self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode='determinate'); self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2)); time_frame = ttk.Frame(self.progress_frame); time_frame.pack(fill=tk.X, padx=5, pady=2); time_frame.columnconfigure(0, weight=0); time_frame.columnconfigure(1, weight=1); time_frame.columnconfigure(2, weight=0); time_frame.columnconfigure(3, weight=0); self.remaining_time_label = ttk.Label(time_frame, text="ETA:"); self.remaining_time_label.grid(row=0, column=0, sticky='w'); self.remaining_time_value = ttk.Label(time_frame, textvariable=self.remaining_time_var, font=tkFont.Font(weight='bold'), anchor='w'); self.remaining_time_value.grid(row=0, column=1, sticky='w', padx=(2, 10)); self.elapsed_time_label = ttk.Label(time_frame, text="Elapsed:"); self.elapsed_time_label.grid(row=0, column=2, sticky='e', padx=(5,0)); self.elapsed_time_value = ttk.Label(time_frame, textvariable=self.elapsed_time_var, font=tkFont.Font(weight='bold'), width=9, anchor='e'); self.elapsed_time_value.grid(row=0, column=3, sticky='e', padx=(2,0)); files_info_frame = ttk.Frame(self.progress_frame); files_info_frame.pack(fill=tk.X, padx=5, pady=2); self.remaining_static_label = ttk.Label(files_info_frame, text="Remaining:"); self.remaining_static_label.pack(side=tk.LEFT); self.remaining_value_label = ttk.Label(files_info_frame, textvariable=self.remaining_files_var, width=12, anchor='w'); self.remaining_value_label.pack(side=tk.LEFT, padx=(2,10)); self.aligned_files_label = ttk.Label(files_info_frame, textvariable=self.aligned_files_var, width=12, anchor='w'); self.aligned_files_label.pack(side=tk.LEFT, padx=(10,0)); self.additional_value_label = ttk.Label(files_info_frame, textvariable=self.additional_folders_var, anchor='e'); self.additional_value_label.pack(side=tk.RIGHT); self.additional_static_label = ttk.Label(files_info_frame, text="Additional:"); self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2)); status_text_frame = ttk.Frame(self.progress_frame); status_text_font = tkFont.Font(family="Arial", size=8); status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5)); self.copy_log_button = ttk.Button(status_text_frame, text="Copy", command=self._copy_log_to_clipboard, width=5); self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor='ne'); self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical"); self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0); self.status_text = tk.Text(status_text_frame, height=6, wrap=tk.WORD, bd=0, font=status_text_font, relief=tk.FLAT, state=tk.DISABLED, yscrollcommand=self.status_scrollbar.set); self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=0); self.status_scrollbar.config(command=self.status_text.yview)
         print("DEBUG (GUI create_layout): Zone de progression créée.")
-        # --- Fin Panneau Gauche ---
+        
         print("DEBUG (GUI create_layout): Fin remplissage panneau gauche.")
 
         # =====================================================================
         # --- Panneau Droit (Aperçu, Boutons de Contrôle, Histogramme) ---
         # =====================================================================
-        # ... (Contenu panneau droit comme avant - inchangé) ...
+        # ... (inchangé) ...
         control_frame = ttk.Frame(right_frame)
         try: style = ttk.Style(); accent_style = 'Accent.TButton' if 'Accent.TButton' in style.element_names() else 'TButton'
         except tk.TclError: accent_style = 'TButton' 
@@ -870,12 +877,7 @@ class SeestarStackerGUI:
         self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED); self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(control_frame, text="Analyze Input Folder", command=self._launch_folder_analyzer, state=tk.DISABLED); self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.mosaic_options_button = ttk.Button(control_frame, text="Mosaic...", command=self._open_mosaic_settings_window); self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-                # --- NOUVEAU BOUTON POUR LES SOLVEURS LOCAUX ---
-        self.local_solver_button = ttk.Button(control_frame, 
-                                              text=self.tr("local_solver_button_text", default="Local Solvers..."), 
-                                              command=self._open_local_solver_settings_window)
-        self.local_solver_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        # --- FIN NOUVEAU BOUTON ---
+        self.local_solver_button = ttk.Button(control_frame, text=self.tr("local_solver_button_text", default="Local Solvers..."), command=self._open_local_solver_settings_window); self.local_solver_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.open_output_button = ttk.Button(control_frame, text="Open Output", command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text="Add Folder", command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.show_folders_button = ttk.Button(control_frame, text="View Inputs", command=self._show_input_folder_list, state=tk.DISABLED); self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
@@ -891,18 +893,14 @@ class SeestarStackerGUI:
         control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))
         self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
         print("DEBUG (GUI create_layout): Panneau droit rempli.")
-        # --- Fin Panneau Droit ---
 
-        self._store_widget_references() # Doit être appelé après la création de TOUS les widgets
-        self._toggle_kappa_visibility() # État initial Kappa
+        self._store_widget_references() 
+        self._toggle_kappa_visibility() 
         self._update_final_scnr_options_state() 
         self._update_photutils_bn_options_state() 
         self._update_feathering_options_state() 
-        self._update_low_wht_mask_options_state() # État initial Low WHT Mask
-        print("DEBUG (GUI create_layout): Fin création layout et appels _update_..._state.")
-
-
-
+        self._update_low_wht_mask_options_state() 
+        print("DEBUG (GUI create_layout V_SaveAsFloat32_1): Fin création layout et appels _update_..._state.") # Version Log
 
 
 #################################################################################################################################
@@ -1438,11 +1436,15 @@ class SeestarStackerGUI:
 
 
 
+
 # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def _store_widget_references(self):
-        """Stocke les références aux widgets qui nécessitent des mises à jour linguistiques et des infobulles."""
-        print("\nDEBUG (GUI _store_widget_references): Début stockage références widgets...")
+        """
+        Stocke les références aux widgets qui nécessitent des mises à jour linguistiques et des infobulles.
+        MODIFIED: Ajout de la référence pour save_as_float32_check.
+        """
+        print("\nDEBUG (GUI _store_widget_references V_SaveAsFloat32_1): Début stockage références widgets...") # Version Log
         notebook_widget = None
         try:
             if hasattr(self, 'control_notebook') and isinstance(self.control_notebook, ttk.Notebook):
@@ -1454,7 +1456,7 @@ class SeestarStackerGUI:
         
         # --- Onglets du Notebook ---
         try:
-            if notebook_widget and notebook_widget.winfo_exists(): # Vérifier si le notebook existe
+            if notebook_widget and notebook_widget.winfo_exists(): 
                 if notebook_widget.index("end") > 0: self.widgets_to_translate["tab_stacking"] = (notebook_widget, 0)
                 if notebook_widget.index("end") > 1: self.widgets_to_translate["tab_expert_title"] = (notebook_widget, 1)
                 if notebook_widget.index("end") > 2: self.widgets_to_translate["tab_preview"] = (notebook_widget, 2)
@@ -1473,7 +1475,9 @@ class SeestarStackerGUI:
             "bn_frame_title": 'bn_frame', "cb_frame_title": 'cb_frame',
             "crop_frame_title": 'crop_frame',
             "feathering_frame_title": 'feathering_frame', 
-            "photutils_bn_frame_title": 'photutils_bn_frame'
+            "photutils_bn_frame_title": 'photutils_bn_frame',
+            # NOUVEAU : Clé pour le titre du nouveau LabelFrame
+            "output_format_frame_title": 'output_format_frame' 
         }
         for key, attr_name in label_frames_keys.items():
             self.widgets_to_translate[key] = getattr(self, attr_name, None)
@@ -1532,7 +1536,9 @@ class SeestarStackerGUI:
             "weight_snr_check": 'weight_snr_check',
             "weight_stars_check": 'weight_stars_check', 
             "cleanup_temp_check_label": 'cleanup_temp_check',
-            "chroma_correction_check": 'chroma_correction_check'
+            "chroma_correction_check": 'chroma_correction_check',
+            # NOUVEAU : Clé pour le texte de la nouvelle Checkbutton
+            "save_as_float32_label": 'save_as_float32_check'
         }
         for key, item in labels_and_checks_keys.items():
             if isinstance(item, tk.Widget): self.widgets_to_translate[key] = item
@@ -1564,67 +1570,53 @@ class SeestarStackerGUI:
         self.tooltips = {} 
         print(f"DEBUG (GUI _store_widget_references): Dictionnaire self.tooltips réinitialisé.")
 
-        # --- ICI : Définition de tooltips_config_list ---
         tooltips_config_list = [
-            # Onglet Expert - BN
+            # ... (toutes les configurations de tooltips existantes restent ici) ...
             ('bn_grid_size_actual_label', 'tooltip_bn_grid_size'), ('bn_grid_size_combo', 'tooltip_bn_grid_size'),
             ('bn_perc_low_actual_label', 'tooltip_bn_perc_low'), ('bn_perc_low_spinbox', 'tooltip_bn_perc_low'),
             ('bn_perc_high_actual_label', 'tooltip_bn_perc_high'), ('bn_perc_high_spinbox', 'tooltip_bn_perc_high'),
             ('bn_std_factor_actual_label', 'tooltip_bn_std_factor'), ('bn_std_factor_spinbox', 'tooltip_bn_std_factor'),
             ('bn_min_gain_actual_label', 'tooltip_bn_min_gain'), ('bn_min_gain_spinbox', 'tooltip_bn_min_gain'),
             ('bn_max_gain_actual_label', 'tooltip_bn_max_gain'), ('bn_max_gain_spinbox', 'tooltip_bn_max_gain'),
-            
-            # Onglet Expert - CB
             ('cb_border_size_actual_label', 'tooltip_cb_border_size'), ('cb_border_size_spinbox', 'tooltip_cb_border_size'),
             ('cb_blur_radius_actual_label', 'tooltip_cb_blur_radius'), ('cb_blur_radius_spinbox', 'tooltip_cb_blur_radius'),
             ('cb_min_b_factor_actual_label', 'tooltip_cb_min_b_factor'), ('cb_min_b_factor_spinbox', 'tooltip_cb_min_b_factor'),
             ('cb_max_b_factor_actual_label', 'tooltip_cb_max_b_factor'), ('cb_max_b_factor_spinbox', 'tooltip_cb_max_b_factor'),
-
-            # Onglet Expert - Crop
             ('final_edge_crop_actual_label', 'tooltip_final_edge_crop_percent'), ('final_edge_crop_spinbox', 'tooltip_final_edge_crop_percent'),
-            
-            # Onglet Empilement - SCNR Final (accès via _ctrls)
             ('apply_final_scnr_check', 'tooltip_apply_final_scnr'),
             (getattr(self, 'scnr_amount_ctrls', {}).get('label'), 'tooltip_final_scnr_amount'),
             (getattr(self, 'scnr_amount_ctrls', {}).get('spinbox'), 'tooltip_final_scnr_amount'),
             (getattr(self, 'scnr_amount_ctrls', {}).get('slider'), 'tooltip_final_scnr_amount'),
             ('final_scnr_preserve_lum_check', 'tooltip_final_scnr_preserve_lum'),
-
-            # Onglet Expert - Photutils BN
             ('apply_photutils_bn_check', 'tooltip_apply_photutils_bn'),
             ('photutils_bn_box_size_label', 'tooltip_photutils_bn_box_size'), ('pb_box_spinbox', 'tooltip_photutils_bn_box_size'),
             ('photutils_bn_filter_size_label', 'tooltip_photutils_bn_filter_size'), ('pb_filt_spinbox', 'tooltip_photutils_bn_filter_size'),
             ('photutils_bn_sigma_clip_label', 'tooltip_photutils_bn_sigma_clip'), ('pb_sig_spinbox', 'tooltip_photutils_bn_sigma_clip'),
             ('photutils_bn_exclude_percentile_label', 'tooltip_photutils_bn_exclude_percentile'), ('pb_excl_spinbox', 'tooltip_photutils_bn_exclude_percentile'),
-            
-            # Onglet Expert - Feathering
             ('apply_feathering_check', 'tooltip_apply_feathering'),
             ('feather_blur_px_label', 'tooltip_feather_blur_px'),
             ('feather_blur_px_spinbox', 'tooltip_feather_blur_px'),
-
-            # Onglet Expert - Low WHT Mask
             ('low_wht_mask_check', 'tooltip_apply_low_wht_mask'),
             ('low_wht_pct_label', 'tooltip_low_wht_percentile'),
             ('low_wht_pct_spinbox', 'tooltip_low_wht_percentile'),
             ('low_wht_soften_px_label', 'tooltip_low_wht_soften_px'),
             ('low_wht_soften_px_spinbox', 'tooltip_low_wht_soften_px'),
+            # NOUVEAU : Tooltip pour la nouvelle Checkbutton
+            ('save_as_float32_check', 'tooltip_save_as_float32')
         ]
-        # --- FIN Définition tooltips_config_list ---
-
+        
         tooltip_created_count = 0
-        for item_identifier, tooltip_translation_key in tooltips_config_list: # Maintenant tooltips_config_list est défini
+        for item_identifier, tooltip_translation_key in tooltips_config_list: 
             widget_to_attach_tooltip = None
-            debug_item_name = "" # Initialiser
+            debug_item_name = "" 
 
             if isinstance(item_identifier, str):
                 debug_item_name = item_identifier
                 widget_to_attach_tooltip = getattr(self, item_identifier, None)
             elif isinstance(item_identifier, tk.Widget):
                 widget_to_attach_tooltip = item_identifier
-                try:
-                    debug_item_name = f"WidgetDirect({widget_to_attach_tooltip.winfo_class()}-{id(widget_to_attach_tooltip)})"
-                except: 
-                    debug_item_name = f"WidgetDirect(id-{id(widget_to_attach_tooltip)})"
+                try: debug_item_name = f"WidgetDirect({widget_to_attach_tooltip.winfo_class()}-{id(widget_to_attach_tooltip)})"
+                except: debug_item_name = f"WidgetDirect(id-{id(widget_to_attach_tooltip)})"
             else:
                 debug_item_name = str(item_identifier)
                 print(f"  Tooltip WARNING: Type d'identifiant d'item inattendu '{debug_item_name}' pour la clé tooltip '{tooltip_translation_key}'.")
@@ -1636,16 +1628,8 @@ class SeestarStackerGUI:
                 if unique_tooltip_id not in self.tooltips:
                     self.tooltips[unique_tooltip_id] = ToolTip(widget_to_attach_tooltip, lambda k=tooltip_translation_key: self.tr(k))
                     tooltip_created_count += 1
-                    # Décommenter pour un log très détaillé de la création des tooltips:
-                    # print(f"  ---> TOOLTIP CREATED for '{tooltip_translation_key}' on '{debug_item_name}' (Widget: {widget_to_attach_tooltip}) -> ID Map: {unique_tooltip_id}")
-                # else:
-                #     print(f"  ---> TOOLTIP SKIPPED for '{tooltip_translation_key}' on '{debug_item_name}' - ID Map '{unique_tooltip_id}' already exists.")
-            # else: # Décommenter pour loguer les widgets non trouvés pour les tooltips
-            #     print(f"  -> TOOLTIP DEBUG: Widget pour '{debug_item_name}' (clé de traduction '{tooltip_translation_key}') NON TROUVÉ ou INVALIDE.")
-                
-        print(f"DEBUG (GUI _store_widget_references): Références et Tooltips stockés. Nb widgets trad: {len(self.widgets_to_translate)}, Nb tooltips créés dans cet appel: {tooltip_created_count}")
-
-
+            
+        print(f"DEBUG (GUI _store_widget_references V_SaveAsFloat32_1): Références et Tooltips stockés. Nb widgets trad: {len(self.widgets_to_translate)}, Nb tooltips créés dans cet appel: {tooltip_created_count}") # Version Log
 
 
 
@@ -3363,7 +3347,10 @@ class SeestarStackerGUI:
             else: print(f"    {param_name}: {value}")
         print("  --- FIN VALEURS ENVOYÉES AU BACKEND ---")
         print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée.")
-
+        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
+        valeur_a_passer_pour_float32_gui = getattr(self.settings, 'save_final_as_float32', "ERREUR_ATTR_DANS_GUI_START")
+        print(f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32_gui} (type: {type(valeur_a_passer_pour_float32_gui)})")
+        # === FIN AJOUT ===
         # --- AJOUT DU BLOC DE VÉRIFICATION CRITIQUE ---
         print("DEBUG (GUI start_processing): Phase 5.5 - Vérification critique avant appel backend...")
         final_mosaic_settings_for_backend = self.settings.mosaic_settings.copy()
@@ -3371,6 +3358,10 @@ class SeestarStackerGUI:
         print(f"  CRITICAL CHECK (GUI start_processing): mosaic_settings QUI SERA ENVOYÉ: {final_mosaic_settings_for_backend}")
         print(f"  CRITICAL CHECK (GUI start_processing): alignment_mode DANS CE DICT: '{alignment_mode_to_backend}'")
         # --- FIN AJOUT ---
+        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
+        valeur_a_passer_pour_float32 = getattr(self.settings, 'save_final_as_float32', "ERREUR_ATTR_DANS_GUI_START")
+        print(f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32} (type: {type(valeur_a_passer_pour_float32)})")
+        # === FIN AJOUT ===
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
@@ -3433,6 +3424,7 @@ class SeestarStackerGUI:
             local_ansvr_path=self.settings.local_ansvr_path,
             local_solver_preference=self.settings.local_solver_preference,
             astap_search_radius=self.settings.astap_search_radius,
+            save_as_float32=self.settings.save_final_as_float32
             # Lire depuis self.settings
             
         )

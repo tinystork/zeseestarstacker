@@ -212,56 +212,51 @@ class SeestarQueuedStacker:
 
 
 
-
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def __init__(self):
-        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") # Modifié
+        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
         
         # --- 1. Attributs Critiques et Simples ---
         print("  -> Initialisation attributs simples et flags...")
         
         
         self.processing_active = False; self.stop_processing = False; self.processing_error = None
-        self.is_mosaic_run = False; self.drizzle_active_session = False # Sera défini dans start_processing
-        #  Attributs spécifiques pour les paramètres de mosaïque et FastAligner
-        self.mosaic_alignment_mode = "local_fast_fallback" # Valeur par défaut si non fournie
-        self.use_wcs_fallback_for_mosaic = True      # Dérivé de alignment_mode
+        self.is_mosaic_run = False; self.drizzle_active_session = False 
+        self.mosaic_alignment_mode = "local_fast_fallback" 
+        self.use_wcs_fallback_for_mosaic = True      
         
         self.fa_orb_features = 5000
         self.fa_min_abs_matches = 12
-        self.fa_min_ransac_raw = 7 # La valeur brute pour min_ransac (ex: 4)
+        self.fa_min_ransac_raw = 7 
         self.fa_ransac_thresh = 5.0
-        # ADDED: Attributs pour les paramètres DAO de FastAligner
         self.fa_daofind_fwhm = 3.5
         self.fa_daofind_thr_sig = 4.0
-        self.fa_max_stars_descr = 750 # Nom différent de max_stars_to_describe pour éviter confusion
-        
-        # Paramètres Drizzle spécifiques à la mosaïque (stockés depuis mosaic_settings_dict)
-        
+        self.fa_max_stars_descr = 750 
         
         self.mosaic_drizzle_kernel = "square"
         self.mosaic_drizzle_pixfrac = 0.8
         self.mosaic_drizzle_fillval = "0.0"
-        self.mosaic_drizzle_wht_threshold = 0.01 # (0-1)
+        self.mosaic_drizzle_wht_threshold = 0.01
 
 
         self.perform_cleanup = True; self.use_quality_weighting = True 
         self.correct_hot_pixels = True; self.apply_chroma_correction = True
         self.apply_final_scnr = False 
-        # Callbacks
+        
+        # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
+        self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
+        print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
+        # --- FIN NOUVEAU ---
+
         self.progress_callback = None; self.preview_callback = None
-        # Queue & Threading
         self.queue = Queue(); self.folders_lock = threading.Lock(); self.processing_thread = None
-        # File & Folder Management
         self.processed_files = set(); self.additional_folders = []; self.current_folder = None
         self.output_folder = None; self.unaligned_folder = None; self.drizzle_temp_dir = None
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
-        # Astrometry & WCS Refs
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
         
-        ### Attributs pour SUM / W (Memmap) ###
         self.sum_memmap_path = None 
         self.wht_memmap_path = None 
         self.cumulative_sum_memmap = None  
@@ -271,7 +266,6 @@ class SeestarQueuedStacker:
         self.memmap_dtype_wht = np.float32 
         print("  -> Attributs SUM/W (memmap) initialisés à None.")
         
-        # Paramètres de pondération initialisés
         self.use_quality_weighting = False 
         self.weight_by_snr = True          
         self.weight_by_stars = True        
@@ -285,108 +279,79 @@ class SeestarQueuedStacker:
         self.current_stack_header = None 
         self.images_in_cumulative_stack = 0 
         self.total_exposure_seconds = 0.0 
-        self.intermediate_drizzle_batch_files = [] # Important de l'avoir ici
+        self.intermediate_drizzle_batch_files = [] 
         
-        # --- ATTRIBUTS POUR LE VRAI DRIZZLE INCRÉMENTAL ---
-        self.incremental_drizzle_objects = []     # Liste pour [driz_R, driz_G, driz_B]
-        self.incremental_drizzle_sci_arrays = []  # Liste pour les arrays numpy out_img [R, G, B]
-        self.incremental_drizzle_wht_arrays = []  # Liste pour les arrays numpy out_wht [R, G, B]
+        self.incremental_drizzle_objects = []     
+        self.incremental_drizzle_sci_arrays = []  
+        self.incremental_drizzle_wht_arrays = []  
         print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
-        # ---  ---
 
-        # Processing Parameters (valeurs par défaut)
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
-        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0 # Note: pixfrac pour Drizzle
-        # snr_exponent, stars_exponent, min_weight sont déjà définis plus haut
+        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0 
         self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
         
-        # Statistics
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
         self.stacked_batches_count = 0; self.total_batches_estimated = 0
         self.failed_align_count = 0; self.failed_stack_count = 0; self.skipped_files_count = 0
         self.photutils_bn_applied_in_session = False
         self.bn_globale_applied_in_session = False
         self.cb_applied_in_session = False
-        self.feathering_applied_in_session = False # Ajouté pour la cohérence
-        self.low_wht_mask_applied_in_session = False # Ajouté pour la cohérence
+        self.feathering_applied_in_session = False 
+        self.low_wht_mask_applied_in_session = False 
         self.scnr_applied_in_session = False
         self.crop_applied_in_session = False
         self.photutils_params_used_in_session = {}
         print("  -> Attributs simples et paramètres par défaut initialisés.")
         
-        # --- Attributs pour l'aligneur local ---
         self.local_aligner_instance = None
-        # Flag pour choisir entre Astrometry.net (si False) et FastAligner (si True et disponible) pour la mosaïque.
-        # Peut être exposé à l'utilisateur plus tard.
         self.is_local_alignment_preferred_for_mosaic = True 
         print(f"  -> Mosaïque: Préférence pour alignement local: {self.is_local_alignment_preferred_for_mosaic}")
-        # --- Fin attributs aligneur local ---
 
-        # --- 2. Instanciations de Classes ---
         try:
             print("  -> Instanciation ChromaticBalancer...")
-            self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15) # Utiliser des valeurs par défaut raisonnables
+            self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15) 
             print("     ✓ ChromaticBalancer OK.")
         except Exception as e_cb: 
             print(f"  -> ERREUR ChromaticBalancer: {e_cb}")
             self.chroma_balancer = None
-            # raise # Optionnel: relancer si critique, ou juste continuer sans
 
         try:
             print("  -> Instanciation SeestarAligner (pour alignement général astroalign)...")
-            self.aligner = SeestarAligner() # Pour l'alignement individuel des images sur la référence principale
+            self.aligner = SeestarAligner() 
             print("     ✓ SeestarAligner (astroalign) OK.")
         except Exception as e_align: 
             print(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
             self.aligner = None
-            raise # L'aligneur principal est critique
+            raise 
 
         try:
             print("  -> Instanciation AstrometrySolver...")
-            self.astrometry_solver = AstrometrySolver(progress_callback=self.update_progress) # Passer le callback
+            self.astrometry_solver = AstrometrySolver(progress_callback=self.update_progress) 
             print("     ✓ AstrometrySolver instancié.")
         except Exception as e_as_solver:
             print(f"  -> ERREUR AstrometrySolver instantiation: {e_as_solver}")
             self.astrometry_solver = None 
-            # Gérer cette erreur de manière appropriée, peut-être lever une exception si c'est critique
-            # Pour l'instant, on continue, mais les fonctions de solving ne marcheront pas.
         
         print("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
 
 
-        # --- Instanciation du SeestarLocalAligner (FastSeestarAligner) ---
-        # _LOCAL_ALIGNER_AVAILABLE est une variable globale définie en haut du module queue_manager.py
-        # lors de la tentative d'import de SeestarLocalAligner.
-        # SeestarLocalAligner (l'alias de la classe) est aussi défini globalement.
         if _LOCAL_ALIGNER_AVAILABLE and SeestarLocalAligner is not None:
             try:
                 print("  -> Instanciation SeestarLocalAligner (pour mosaïque locale si préférée)...")
-                # Mettre debug=True pour avoir les logs détaillés du FastAligner lui-même
                 self.local_aligner_instance = SeestarLocalAligner(debug=True) 
                 print("     ✓ SeestarLocalAligner instancié.")
-                # Passer le progress_callback si on veut que FastAligner logue via le GUI
-                # if self.progress_callback and hasattr(self.local_aligner_instance, 'set_progress_callback'):
-                #     self.local_aligner_instance.set_progress_callback(self.progress_callback)
             except Exception as e_local_align_inst:
                 print(f"  -> ERREUR lors de l'instanciation de SeestarLocalAligner: {e_local_align_inst}")
                 traceback.print_exc(limit=1)
                 self.local_aligner_instance = None
-                # On ne modifie PAS _LOCAL_ALIGNER_AVAILABLE ici. Son statut est fixé à l'import.
-                # L'échec de l'instanciation sera géré par la vérification de `self.local_aligner_instance is not None`.
                 print("     WARN QM: Instanciation de SeestarLocalAligner a échoué. Il ne sera pas utilisable.")
-
-
         else:
             print("  -> SeestarLocalAligner n'est pas disponible (import échoué ou classe non définie), instanciation ignorée.")
-            self.local_aligner_instance = None # S'assurer qu'il est None
-        # --- FIN Instanciation ---
+            self.local_aligner_instance = None 
 
         print("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
-
-
-
 
 
 
@@ -4245,7 +4210,7 @@ class SeestarQueuedStacker:
 
 
 
-# --- DANS LA CLASSE SeestarQueuedStacker ---
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False,
                           drizzle_final_sci_data=None, drizzle_final_wht_data=None):
@@ -4253,10 +4218,15 @@ class SeestarQueuedStacker:
         Calcule l'image finale, applique les post-traitements et sauvegarde.
         Gère Drizzle Incrémental VRAI (depuis objets Drizzle persistants),
         Drizzle Final/Mosaïque (depuis données fournies), et Stacking Classique (depuis memmaps).
-        Version: V_DrizIncr_SaveFix_Full
+        MODIFIED: Ajout de la logique pour sauvegarder en float32 ou uint16 basé sur self.save_final_as_float32.
+        Version: V_SaveDtypeOption_In_SaveFinalStack
         """
         print("\n" + "=" * 80)
-        print(f"DEBUG QM [_save_final_stack V_DrizIncr_SaveFix_Full]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
+        print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_In_SaveFinalStack]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
+        
+        # Lire la valeur du nouvel attribut (on supposera qu'il est défini sur self, ex: par __init__ et start_processing)
+        save_as_float32_setting = getattr(self, 'save_final_as_float32', False) 
+        print(f"  -> Option de sauvegarde effective (self.save_final_as_float32): {save_as_float32_setting}")
         
         is_drizzle_final_mode_with_data = (
             self.drizzle_active_session and
@@ -4296,6 +4266,7 @@ class SeestarQueuedStacker:
         background_model_photutils = None
 
         # --- 1. Obtenir les données initiales (SCI et WHT) ---
+        # ... (cette section est inchangée, elle produit final_image_initial en float32 [0,1])
         if is_true_incremental_drizzle_from_objects:
             print(f"DEBUG QM [_save_final_stack]: Lecture depuis self.incremental_drizzle_..._arrays pour Drizzle Incr. VRAI.")
             if not self.incremental_drizzle_sci_arrays or not self.incremental_drizzle_wht_arrays or \
@@ -4308,7 +4279,7 @@ class SeestarQueuedStacker:
             try:
                 sci_arrays_hw_list = self.incremental_drizzle_sci_arrays
                 wht_arrays_hw_list = self.incremental_drizzle_wht_arrays
-                num_output_channels = 3 # Assumé pour RGB
+                num_output_channels = 3 
                 
                 sum_sci_times_wht_channels = [
                     sci_arrays_hw_list[c].astype(np.float64) * wht_arrays_hw_list[c].astype(np.float64)
@@ -4337,7 +4308,6 @@ class SeestarQueuedStacker:
                 final_wht_map_for_postproc = np.mean(temp_wht_hxwxc, axis=2).astype(np.float32)
                 final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
                 print(f"  -> Carte de poids 2D Drizzle Incr. VRAI (moyenne canaux) créée. Shape: {final_wht_map_for_postproc.shape}")
-                # Les memmaps ne sont pas utilisés, donc pas de _close_memmaps ici.
             except Exception as e_driz_obj_read:
                 self.update_progress(f"❌ Erreur lecture/calcul données Drizzle Incrémental VRAI: {e_driz_obj_read}", "ERROR")
                 self.processing_error = f"DrizIncrVrai:ErreurCalculDonnees:{e_driz_obj_read}"; self.final_stacked_path = None
@@ -4346,8 +4316,6 @@ class SeestarQueuedStacker:
         elif is_drizzle_final_mode_with_data or is_mosaic_mode_with_data:
             source_description = f"Drizzle {self.drizzle_mode} combiné" if is_drizzle_final_mode_with_data else "Mosaïque combinée"
             print(f"DEBUG QM [_save_final_stack]: Utilisation des données {source_description} (drizzle_final_sci/wht_data).")
-            # ... (votre logique existante pour normaliser drizzle_final_sci_data en final_image_initial) ...
-            # ... (et pour créer final_wht_map_for_postproc à partir de drizzle_final_wht_data) ...
             final_image_initial_raw = drizzle_final_sci_data 
             min_r_raw, max_r_raw = np.nanmin(final_image_initial_raw), np.nanmax(final_image_initial_raw)
             if np.isfinite(min_r_raw) and np.isfinite(max_r_raw) and max_r_raw > min_r_raw:
@@ -4357,9 +4325,9 @@ class SeestarQueuedStacker:
             final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
             print(f"  -> Image Drizzle/Mosaïque (données fournies) normalisée 0-1. Shape: {final_image_initial.shape}")
             if drizzle_final_wht_data is not None:
-                if drizzle_final_wht_data.ndim == 3 and drizzle_final_wht_data.shape[2] == 3: # Si HWC
+                if drizzle_final_wht_data.ndim == 3 and drizzle_final_wht_data.shape[2] == 3: 
                     final_wht_map_for_postproc = np.mean(drizzle_final_wht_data, axis=2).astype(np.float32)
-                elif drizzle_final_wht_data.ndim == 2: # Si déjà HW
+                elif drizzle_final_wht_data.ndim == 2: 
                     final_wht_map_for_postproc = drizzle_final_wht_data.astype(np.float32)
                 else:
                     print(f"  -> WARNING: Shape de drizzle_final_wht_data ({drizzle_final_wht_data.shape}) inattendue. WHT pour post-proc pourrait être incorrect.");
@@ -4370,25 +4338,22 @@ class SeestarQueuedStacker:
             else: 
                 print("  -> WARNING: drizzle_final_wht_data est None pour Drizzle Final/Mosaïque. final_wht_map_for_postproc sera None.")
                 final_wht_map_for_postproc = None
-            # Pas de memmap à fermer ici pour ces modes, ils auraient dû être fermés avant si utilisés.
-            # Cependant, _close_memmaps() vérifie si les attributs sont None, donc l'appel est sûr.
             self._close_memmaps() 
             print("DEBUG QM [_save_final_stack]: Memmaps (auraient été) fermés (mode Drizzle Final / Mosaïque).")
 
         else: # Mode SUM/W Classique (lecture depuis memmaps)
             print("DEBUG QM [_save_final_stack]: Utilisation des accumulateurs SUM/W (memmap) pour stacking classique.")
-            # ... (votre logique existante et correcte pour lire depuis memmaps et les fermer) ...
             if (self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.output_folder is None or not os.path.isdir(self.output_folder)):
                 self.final_stacked_path = None; self.update_progress("❌ Erreur interne: Accumulateurs memmap ou dossier sortie non définis. Sauvegarde annulée.")
                 self._close_memmaps(); return
             try:
                 self.update_progress("Lecture des données finales depuis les accumulateurs memmap...")
                 final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
-                final_wht_map_for_postproc = np.array(self.cumulative_wht_memmap, dtype=np.float32) # WHT est HW
-                self._close_memmaps() # Fermer APRÈS lecture
+                final_wht_map_for_postproc = np.array(self.cumulative_wht_memmap, dtype=np.float32) 
+                self._close_memmaps() 
                 self.update_progress("Calcul de l'image moyenne (SUM / WHT)...")
                 epsilon = 1e-9; wht_for_division = np.maximum(final_wht_map_for_postproc.astype(np.float64), epsilon)
-                wht_broadcasted = wht_for_division[..., np.newaxis] # Pour HWC = HWC / HW
+                wht_broadcasted = wht_for_division[..., np.newaxis] 
                 with np.errstate(divide='ignore', invalid='ignore'): final_raw = final_sum / wht_broadcasted
                 final_raw = np.nan_to_num(final_raw, nan=0.0, posinf=0.0, neginf=0.0)
                 min_r_raw, max_r_raw = np.nanmin(final_raw), np.nanmax(final_raw)
@@ -4419,7 +4384,7 @@ class SeestarQueuedStacker:
             print(f"DEBUG QM [_save_final_stack]: Sortie précoce (comptes/poids faibles et non arrêté tôt)."); return
         
         self.update_progress(f"Nombre d'images/poids effectifs pour stack final: {effective_image_count} (Poids max WHT pour post-proc: {max_wht_value:.2f})")
-        data_to_save = final_image_initial.copy()
+        data_after_postproc = final_image_initial.copy() # Renommer pour clarté
 
         # Réinitialisation des flags de post-traitement appliqué
         self.bn_globale_applied_in_session = False; self.photutils_bn_applied_in_session = False
@@ -4427,181 +4392,202 @@ class SeestarQueuedStacker:
         self.low_wht_mask_applied_in_session = False; self.scnr_applied_in_session = False
         self.crop_applied_in_session = False; self.photutils_params_used_in_session = {}
         
-        # --- 3. Pipeline de Post-Traitement ---
-        # (Le code complet du pipeline de post-traitement doit être ici, identique à la version précédente que vous aviez)
-        # ... BN Globale ...
-        # ... Photutils BN ...
-        # ... Chromatic Balancer ...
-        # ... Feathering ...
-        # ... Low WHT Mask ...
-        # ... SCNR Final ...
-        # ... Rognage Final ...
+        # --- 3. Pipeline de Post-Traitement (sur data_after_postproc qui est float32 [0,1]) ---
+        # ... (Le code complet du pipeline de post-traitement reste ici, opérant sur data_after_postproc) ...
+        # ... (Il est important que data_after_postproc reste float32 [0,1] à la fin de cette section)
         print("\n" + "=" * 80); print("DEBUG QM [_save_final_stack]: Début pipeline Post-Traitements."); print("=" * 80 + "\n")
-        print(f"DEBUG QM [_save_final_stack]: Range data_to_save AVANT Post-Proc: [{np.nanmin(data_to_save):.3f}, {np.nanmax(data_to_save):.3f}]")
+        print(f"DEBUG QM [_save_final_stack]: Range data_after_postproc AVANT Post-Proc: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
         
-        # Carte de poids pour effets de bord (Feathering, Low WHT Mask)
         wht_for_edge_effects = final_wht_map_for_postproc 
         if wht_for_edge_effects is None or np.all(wht_for_edge_effects <= 1e-6): 
             self.update_progress("ℹ️ Carte de poids non disponible/vide pour effets de bord, utilisation d'une carte géométrique simulée.")
             try:
-                h_sim, w_sim = data_to_save.shape[:2]; center_y, center_x = (h_sim - 1) / 2.0, (w_sim - 1) / 2.0
+                h_sim, w_sim = data_after_postproc.shape[:2]; center_y, center_x = (h_sim - 1) / 2.0, (w_sim - 1) / 2.0
                 y_coords, x_coords = np.ogrid[:h_sim, :w_sim]; dist_sq = ((y_coords - center_y)**2 / (h_sim / 2.0)**2) + ((x_coords - center_x)**2 / (w_sim / 2.0)**2)
                 cos_arg = np.clip(dist_sq * 0.5 * (np.pi / 2.0), 0, np.pi / 2.0); simulated_wht_2d_profile = np.cos(cos_arg)**2
                 wht_for_edge_effects = np.maximum(simulated_wht_2d_profile, 1e-5).astype(np.float32)
             except Exception as e_sim_wht: 
                 print(f"ERREUR QM [_save_final_stack]: Échec création carte simulée: {e_sim_wht}."); 
-                wht_for_edge_effects = np.ones(data_to_save.shape[:2], dtype=np.float32) # Fallback ultime
+                wht_for_edge_effects = np.ones(data_after_postproc.shape[:2], dtype=np.float32) 
         else: 
             max_wht_val = np.nanmax(wht_for_edge_effects)
             if max_wht_val > 1e-9: wht_for_edge_effects_normalized = wht_for_edge_effects / max_wht_val; wht_for_edge_effects = np.clip(wht_for_edge_effects_normalized, 0.0, 1.0)
         print(f"  -> Carte WHT pour effets de bord (normalisée si réelle). Range: [{np.min(wht_for_edge_effects):.3f} - {np.max(wht_for_edge_effects):.3f}]")
 
-        # BN Globale
-        if data_to_save.ndim == 3 and data_to_save.shape[2] == 3 and _BN_AVAILABLE and getattr(self, 'bn_std_factor', 0.0) > 0: # Ajout condition sur bn_std_factor pour l'activer
-            # ... (logique BN globale) ...
-             self.bn_globale_applied_in_session = True
+        if data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3 and _BN_AVAILABLE and getattr(self, 'bn_std_factor', 0.0) > 0:
+            self.update_progress(f"🔬 Application Neutralisation Fond Globale (Facteur Std: {self.bn_std_factor:.1f})...")
+            try:
+                data_after_postproc = neutralize_background_automatic(data_after_postproc, grid_size_str=self.bn_grid_size_str, percentile_low=self.bn_perc_low, percentile_high=self.bn_perc_high, std_factor=self.bn_std_factor, min_gain=self.bn_min_gain, max_gain=self.bn_max_gain)
+                self.bn_globale_applied_in_session = True; self.update_progress(f"   ✅ Neutralisation Fond Globale terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+            except Exception as bn_err: self.update_progress(f"   ❌ Erreur Neutralisation Fond Globale: {bn_err}. Étape ignorée.")
         
-        # Photutils BN
-
-        print("\n--- Étape Post-Proc (2/7): Photutils BN ---"); 
         if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
-            # DÉFINITION DE photutils_params ICI
-            photutils_params = {
-                'box_size': getattr(self, 'photutils_bn_box_size', 128), 
-                'filter_size': getattr(self, 'photutils_bn_filter_size', 5), 
-                'sigma_clip_val': getattr(self, 'photutils_bn_sigma_clip', 3.0), 
-                'exclude_percentile': getattr(self, 'photutils_bn_exclude_percentile', 98.0)
-            }
-            self.photutils_params_used_in_session = photutils_params.copy() # Copier les params utilisés
-            
+            photutils_params = {'box_size': getattr(self, 'photutils_bn_box_size', 128), 'filter_size': getattr(self, 'photutils_bn_filter_size', 5), 'sigma_clip_val': getattr(self, 'photutils_bn_sigma_clip', 3.0), 'exclude_percentile': getattr(self, 'photutils_bn_exclude_percentile', 98.0)}
+            self.photutils_params_used_in_session = photutils_params.copy()
             self.update_progress(f"🔬 Application Soustraction Fond 2D (Photutils)... Params: Box={photutils_params['box_size']}, Filt={photutils_params['filter_size']}, Sig={photutils_params['sigma_clip_val']:.1f}, Excl%={photutils_params['exclude_percentile']:.1f}")
             try:
-                data_corr, bkg_model = subtract_background_2d(data_to_save, **photutils_params)
+                data_corr, bkg_model = subtract_background_2d(data_after_postproc, **photutils_params)
                 if data_corr is not None:
-                    data_to_save = data_corr
-                    background_model_photutils = bkg_model # Stocker pour sauvegarde potentielle
-                    self.photutils_bn_applied_in_session = True
-                    
-                    # Re-normaliser après soustraction du fond si des valeurs négatives apparaissent
-                    mn_phot, mx_phot = np.nanmin(data_to_save), np.nanmax(data_to_save)
-                    if np.isfinite(mn_phot) and np.isfinite(mx_phot) and mx_phot > mn_phot:
-                        data_to_save = (data_to_save - mn_phot) / (mx_phot - mn_phot)
-                    elif np.any(np.isfinite(data_to_save)): # Image constante
-                        data_to_save = np.full_like(data_to_save, 0.5)
-                    else: # Tout NaN/Inf
-                        data_to_save = np.zeros_like(data_to_save)
-                    data_to_save = np.clip(data_to_save, 0.0, 1.0).astype(np.float32)
-                    self.update_progress(f"   ✅ Soustraction Fond 2D (Photutils) terminée. Nouveau range: [{np.nanmin(data_to_save):.3f}, {np.nanmax(data_to_save):.3f}]")
-                else:
-                    self.update_progress("   ⚠️ Échec Soustraction Fond 2D (Photutils), étape ignorée (data_corr est None).")
-            except Exception as photutils_err: 
-                self.update_progress(f"   ❌ Erreur Soustraction Fond 2D (Photutils): {photutils_err}. Étape ignorée.")
-                print(f"ERREUR QM: Erreur subtract_background_2d: {photutils_err}"); traceback.print_exc(limit=1)
-        elif getattr(self, 'apply_photutils_bn', False) and not _PHOTOUTILS_BG_SUB_AVAILABLE: 
-            self.update_progress("   ⚠️ Soustraction Fond 2D (Photutils) demandée mais Photutils indisponible. Étape ignorée.")
-        else: 
-            self.update_progress("   ℹ️ Soustraction Fond 2D (Photutils) non activée.")
-        print(f"DEBUG QM [_save_final_stack V3]: Range data_to_save APRES Photutils BN: [{np.nanmin(data_to_save):.3f}, {np.nanmax(data_to_save):.3f}]")
-    
-        # Chromatic Balancer (CB)
-        if getattr(self, 'apply_chroma_correction', True) and hasattr(self, 'chroma_balancer') and data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
-            # ... (logique CB) ...
-            self.cb_applied_in_session = True
+                    data_after_postproc = data_corr; background_model_photutils = bkg_model; self.photutils_bn_applied_in_session = True
+                    mn_phot, mx_phot = np.nanmin(data_after_postproc), np.nanmax(data_after_postproc)
+                    if np.isfinite(mn_phot) and np.isfinite(mx_phot) and mx_phot > mn_phot: data_after_postproc = (data_after_postproc - mn_phot) / (mx_phot - mn_phot)
+                    elif np.any(np.isfinite(data_after_postproc)): data_after_postproc = np.full_like(data_after_postproc, 0.5)
+                    else: data_after_postproc = np.zeros_like(data_after_postproc)
+                    data_after_postproc = np.clip(data_after_postproc, 0.0, 1.0).astype(np.float32)
+                    self.update_progress(f"   ✅ Soustraction Fond 2D (Photutils) terminée. Nouveau range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+                else: self.update_progress("   ⚠️ Échec Soustraction Fond 2D (Photutils), étape ignorée (data_corr est None).")
+            except Exception as photutils_err: self.update_progress(f"   ❌ Erreur Soustraction Fond 2D (Photutils): {photutils_err}. Étape ignorée."); print(f"ERREUR QM: Erreur subtract_background_2d: {photutils_err}"); traceback.print_exc(limit=1)
+        
+        if getattr(self, 'apply_chroma_correction', True) and hasattr(self, 'chroma_balancer') and data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3:
+            self.update_progress("🎨 Application Correction Chroma des Bords...")
+            try:
+                self.chroma_balancer.border_size = getattr(self, 'cb_border_size', 50); self.chroma_balancer.blur_radius = getattr(self, 'cb_blur_radius', 15)
+                self.chroma_balancer.min_b_factor = getattr(self, 'cb_min_b_factor', 0.4); self.chroma_balancer.max_b_factor = getattr(self, 'cb_max_b_factor', 1.5)
+                data_after_postproc = self.chroma_balancer.correct(data_after_postproc); self.cb_applied_in_session = True
+                self.update_progress(f"   ✅ Correction Chroma des Bords terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+            except Exception as cb_err: self.update_progress(f"   ❌ Erreur Correction Chroma: {cb_err}. Étape ignorée.")
             
-        # Feathering
-        if getattr(self, 'apply_feathering', False) and _FEATHERING_AVAILABLE and wht_for_edge_effects is not None and data_to_save.ndim == 3:
-            # ... (logique Feathering) ...
-            self.feathering_applied_in_session = True
-
-        # Low WHT Mask
+        if getattr(self, 'apply_feathering', False) and _FEATHERING_AVAILABLE and wht_for_edge_effects is not None and data_after_postproc.ndim == 3:
+            blur_val = getattr(self, 'feather_blur_px', 256)
+            self.update_progress(f"🖌️ Application Feathering (Flou: {blur_val}px)...")
+            try: data_after_postproc = feather_by_weight_map(data_after_postproc, wht_for_edge_effects, blur_px=blur_val); self.feathering_applied_in_session = True
+            except Exception as e_feather: self.update_progress(f"   ❌ Erreur Feathering: {e_feather}. Étape ignorée.")
+            
         if getattr(self, 'apply_low_wht_mask', False) and _LOW_WHT_MASK_AVAILABLE and wht_for_edge_effects is not None:
-            # ... (logique Low WHT Mask) ...
-            self.low_wht_mask_applied_in_session = True
+            pct_val = getattr(self, 'low_wht_percentile', 5); soften_val = getattr(self, 'low_wht_soften_px', 128)
+            self.update_progress(f"🎭 Application Masque Bas WHT (Percentile: {pct_val}%, Adoucir: {soften_val}px)...")
+            try: data_after_postproc = apply_low_wht_mask(data_after_postproc, wht_for_edge_effects, percentile=pct_val, soften_px=soften_val, progress_callback=self.update_progress); self.low_wht_mask_applied_in_session = True
+            except Exception as e_low_wht: self.update_progress(f"   ❌ Erreur Masque Bas WHT: {e_low_wht}. Étape ignorée.")
 
-        # SCNR Final
-        if getattr(self, 'apply_final_scnr', False) and _SCNR_AVAILABLE and data_to_save.ndim == 3 and data_to_save.shape[2] == 3:
-            # ... (logique SCNR) ...
-            self.scnr_applied_in_session = True
+        if getattr(self, 'apply_final_scnr', False) and _SCNR_AVAILABLE and data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3:
+            target_ch = getattr(self, 'final_scnr_target_channel', 'green'); amount = getattr(self, 'final_scnr_amount', 0.8); preserve_lum = getattr(self, 'final_scnr_preserve_luminosity', True)
+            self.update_progress(f"🌿 Application SCNR Final (Cible: {target_ch}, Force: {amount:.2f}, Prés.Lum: {preserve_lum})...")
+            try: data_after_postproc = apply_scnr(data_after_postproc, target_color=target_ch, amount=amount, preserve_luminosity=preserve_lum); self.scnr_applied_in_session = True
+            except Exception as scnr_err: self.update_progress(f"   ❌ Erreur SCNR Final: {scnr_err}. Étape ignorée.")
             
-        # Rognage Final
         final_crop_decimal = getattr(self, 'final_edge_crop_percent_decimal', 0.0)
         if _CROP_AVAILABLE and final_crop_decimal > 1e-6 :
-            # ... (logique Crop) ...
-            self.crop_applied_in_session = True
+            self.update_progress(f"✂️ Application Rognage Final des Bords ({final_crop_decimal*100.0:.1f}%)...")
+            try: data_after_postproc = apply_edge_crop(data_after_postproc, final_crop_decimal); self.crop_applied_in_session = True
+            except Exception as crop_err: self.update_progress(f"   ❌ Erreur Rognage Final: {crop_err}. Étape ignorée.")
             
         print("\n" + "=" * 80); print("DEBUG QM [_save_final_stack]: Fin pipeline Post-Traitements."); print("=" * 80 + "\n")
+        print(f"DEBUG QM [_save_final_stack]: Range data_after_postproc APRES Post-Proc: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
         
         # --- 4. Header FITS final ---
+        # ... (logique de header inchangée) ...
         final_header = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
-        
-        # Ajouter WCS spécifique si Drizzle ou Mosaïque
         if is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_mosaic_mode_with_data:
-            if self.drizzle_output_wcs: # WCS de la grille Drizzle
-                print("DEBUG QM [_save_final_stack]: Mise à jour du header final avec self.drizzle_output_wcs (pour Drizzle/Mosaïque).")
-                final_header.update(self.drizzle_output_wcs.to_header(relax=True))
-            elif is_mosaic_mode_with_data and self.current_stack_header and self.current_stack_header.get('CTYPE1'): # Pour Mosaïque si _finalize_mosaic_processing a mis un WCS dans current_stack_header
-                print("DEBUG QM [_save_final_stack]: Utilisation du WCS déjà présent dans current_stack_header pour Mosaïque.")
-                # Le WCS est déjà dans final_header via la copie de current_stack_header
-            else:
-                print("WARN QM [_save_final_stack]: WCS de sortie Drizzle/Mosaïque non disponible pour le header final.")
-        
+            if self.drizzle_output_wcs: final_header.update(self.drizzle_output_wcs.to_header(relax=True))
+            elif is_mosaic_mode_with_data and self.current_stack_header and self.current_stack_header.get('CTYPE1'): pass
+            else: print("WARN QM [_save_final_stack]: WCS de sortie Drizzle/Mosaïque non disponible pour le header final.")
         final_header['NIMAGES'] = (effective_image_count, 'Effective images/Total Weight for final stack')
         final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure')
-
-        # STACKTYP spécifique
-        if is_true_incremental_drizzle_from_objects:
-            final_header['STACKTYP'] = (f'Drizzle_Incr_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle from objects')
-        elif is_drizzle_final_mode_with_data:
-            final_header['STACKTYP'] = (f'Drizzle_Final_{self.drizzle_scale:.0f}x', 'Standard Drizzle (Final mode)')
-        elif is_mosaic_mode_with_data:
-            final_header['STACKTYP'] = (f'Mosaic_Drizzle_{self.drizzle_scale:.0f}x', 'Mosaic from Drizzled panels')
-        # else, STACKTYP pour classique est déjà dans current_stack_header
-
-        # ... (Ajout des HISTORY et des paramètres de post-traitement au header, comme avant) ...
+        if is_true_incremental_drizzle_from_objects: final_header['STACKTYP'] = (f'Drizzle_Incr_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle from objects')
+        elif is_drizzle_final_mode_with_data: final_header['STACKTYP'] = (f'Drizzle_Final_{self.drizzle_scale:.0f}x', 'Standard Drizzle (Final mode)')
+        elif is_mosaic_mode_with_data: final_header['STACKTYP'] = (f'Mosaic_Drizzle_{self.drizzle_scale:.0f}x', 'Mosaic from Drizzled panels')
+        
         if 'HISTORY' not in final_header and (self.bn_globale_applied_in_session or self.photutils_bn_applied_in_session or self.cb_applied_in_session or self.feathering_applied_in_session or self.low_wht_mask_applied_in_session or self.scnr_applied_in_session or self.crop_applied_in_session):
             final_header.add_history("") 
         if (self.bn_globale_applied_in_session or self.photutils_bn_applied_in_session or self.cb_applied_in_session or self.feathering_applied_in_session or self.low_wht_mask_applied_in_session or self.scnr_applied_in_session or self.crop_applied_in_session):
             if 'HISTORY' in final_header: final_header.add_comment("--- Post-Processing Applied ---", before='HISTORY')
             else: final_header.add_comment("--- Post-Processing Applied ---")
-        # ... (tous les final_header['BN_GLOB'] = ..., etc.)
 
         # --- 5. Construction du nom de fichier ---
-        # ... (identique) ...
+        # ... (inchangé) ...
         base_name = "stack_final"; run_type_suffix = output_filename_suffix if output_filename_suffix else "_unknown_mode"
         if stopped_early: run_type_suffix += "_stopped"
         elif self.processing_error: run_type_suffix += "_error"
         fits_path = os.path.join(self.output_folder, f"{base_name}{run_type_suffix}.fit"); preview_path  = os.path.splitext(fits_path)[0] + ".png"
         self.final_stacked_path = fits_path; self.update_progress(f"Chemin FITS final: {os.path.basename(fits_path)}")
 
-        # --- 6. Sauvegarde FITS ---
-        # ... (identique) ...
+        # --- 6. Préparation des données pour la sauvegarde FITS selon l'option ---
+        data_for_primary_hdu_save = None
+        # data_after_postproc est float32 [0,1] à ce stade.
+        is_color_final_save = data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3
+
+        # save_as_float32_setting a été lu au début de la méthode
+        if save_as_float32_setting:
+            self.update_progress("   Préparation sauvegarde FITS en float32...")
+            data_for_primary_hdu_save = data_after_postproc.astype(np.float32) 
+            print(f"     -> DTYPE de data_for_primary_hdu_save (AVANT transposition HDU): {data_for_primary_hdu_save.dtype}") # LOG
+            
+                        
+            final_header['BITPIX'] = -32 
+            if 'BSCALE' in final_header: del final_header['BSCALE']
+            if 'BZERO' in final_header: del final_header['BZERO']
+            print(f"     -> Données float32 prêtes pour sauvegarde. Range: [{np.min(data_for_primary_hdu_save):.3f}, {np.max(data_for_primary_hdu_save):.3f}]")
+        else: # Sauvegarde en uint16 (comportement par défaut si la case n'est pas cochée)
+            self.update_progress("   Préparation sauvegarde FITS en uint16 (plage 0-65535)...")
+            data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            data_for_primary_hdu_save = data_scaled_uint16
+            print(f"     -> DTYPE de data_for_primary_hdu_save (AVANT transposition HDU): {data_for_primary_hdu_save.dtype}") # LOG
+            final_header['BITPIX'] = 16 
+            # Astropy mettra BZERO=32768 et BSCALE=1 par défaut pour uint16, ce qui est standard.
+            print(f"     -> Données uint16 [0-65535] prêtes pour sauvegarde. Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
+        
+        if is_color_final_save: # Transposer en CxHxW si couleur
+            data_for_primary_hdu_save = np.moveaxis(data_for_primary_hdu_save, -1, 0)
+            print(f"     -> Données transposées pour HDU (CxHxW). Shape: {data_for_primary_hdu_save.shape}, Dtype: {data_for_primary_hdu_save.dtype}") # LOG
+
+        # --- 7. Sauvegarde FITS ---
         try: 
-            is_color_final_save = data_to_save.ndim == 3 and data_to_save.shape[2] == 3; data_for_primary_hdu_save = data_to_save.astype(np.float32) 
-            if is_color_final_save: data_for_primary_hdu_save = np.moveaxis(data_for_primary_hdu_save, -1, 0)
-            primary_hdu = fits.PrimaryHDU(data=data_for_primary_hdu_save, header=final_header); hdus_list = [primary_hdu]
+            print(f"     -> DTYPE de data_for_primary_hdu_save (JUSTE AVANT PrimaryHDU): {data_for_primary_hdu_save.dtype}") # LOG
+            primary_hdu = fits.PrimaryHDU(data=data_for_primary_hdu_save, header=final_header)
+            # ... la suite du bloc try...except pour la sauvegarde FITS (avec la modification scale_data)
+            hdus_list = [primary_hdu]
+            
             if self.photutils_bn_applied_in_session and background_model_photutils is not None and _PHOTOUTILS_BG_SUB_AVAILABLE:
                  bkg_hdu_data = None
-                 if background_model_photutils.ndim == 3 and background_model_photutils.shape[2] == 3: bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32)
-                 elif background_model_photutils.ndim == 2: bkg_hdu_data = background_model_photutils.astype(np.float32)
-                 if bkg_hdu_data is not None: bkg_hdu = fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL"); hdus_list.append(bkg_hdu); self.update_progress("   HDU modèle de fond Photutils incluse dans le FITS.")
-            fits.HDUList(hdus_list).writeto(fits_path, overwrite=True, checksum=True, output_verify='ignore')
-            self.update_progress("   ✅ Sauvegarde FITS terminée."); print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS de '{fits_path}' réussie.")
-        except Exception as save_err: self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); print(f"ERREUR QM: Erreur sauvegarde FITS: {save_err}"); traceback.print_exc(limit=1); self.final_stacked_path = None
+                 if background_model_photutils.ndim == 3 and background_model_photutils.shape[2] == 3: 
+                     bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32)
+                 elif background_model_photutils.ndim == 2: 
+                     bkg_hdu_data = background_model_photutils.astype(np.float32)
+                 
+                 if bkg_hdu_data is not None: 
+                     bkg_hdu = fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL")
+                     hdus_list.append(bkg_hdu)
+                     self.update_progress("   HDU modèle de fond Photutils incluse dans le FITS.")
+            
+            if save_as_float32_setting:
+                fits.HDUList(hdus_list).writeto(
+                    fits_path, 
+                    overwrite=True, 
+                    checksum=True, 
+                    output_verify='ignore', 
+                    #scale_data=False #argument invalide ici 
+                )
+                self.update_progress(f"   ✅ Sauvegarde FITS (float32, scale_data=False) terminée."); 
+                print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS de '{fits_path}' (float32, scale_data=False) réussie.")
+            else:
+                fits.HDUList(hdus_list).writeto(
+                    fits_path, 
+                    overwrite=True, 
+                    checksum=True, 
+                    output_verify='ignore' 
+                )
+                self.update_progress(f"   ✅ Sauvegarde FITS (uint16) terminée."); 
+                print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS de '{fits_path}' (uint16) réussie.")
 
+        except Exception as save_err: 
+            self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); 
+            print(f"ERREUR QM: Erreur sauvegarde FITS: {save_err}"); traceback.print_exc(limit=1); 
+            self.final_stacked_path = None
+        # ... le reste de _save_final_stack (sauvegarde PNG, nettoyage memmap, etc.)
 
-        # --- 7. Sauvegarde preview PNG et stockage ---
-        # ... (identique) ...
-        if data_to_save is not None: 
+        # --- 8. Sauvegarde preview PNG et stockage ---
+        # Utiliser data_after_postproc (qui est float32 [0,1]) pour la preview
+        if data_after_postproc is not None: 
             try:
-                save_preview_image(data_to_save, preview_path, apply_stretch=True, enhanced_stretch=True)
+                save_preview_image(data_after_postproc, preview_path, apply_stretch=True, enhanced_stretch=True)
                 self.update_progress("     ✅ Sauvegarde Preview PNG terminée.")
                 print(f"DEBUG QM [_save_final_stack]: Sauvegarde PNG de '{preview_path}' réussie.")
-                self.last_saved_data_for_preview = data_to_save.copy()
+                self.last_saved_data_for_preview = data_after_postproc.copy()
                 print("DEBUG QM [_save_final_stack]: 'last_saved_data_for_preview' mis à jour.")
                 if self.final_stacked_path and os.path.exists(self.final_stacked_path):
                     self.update_progress(f"🎉 Stack final sauvegardé ({effective_image_count} images/poids). Traitement complet.")
                 elif os.path.exists(preview_path):
-                    self.update_progress(f"⚠️ Traitement terminé. Stack FITS échec, mais prévisualisation PNG sauvegardée.")
+                    self.update_progress(f"⚠️ Traitement terminé. Sauvegarde FITS échec, mais prévisualisation PNG sauvegardée.")
             except Exception as prev_err:
                 self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
                 print(f"ERREUR QM: Erreur sauvegarde PNG: {prev_err}"); traceback.print_exc(limit=1)
@@ -4610,17 +4596,17 @@ class SeestarQueuedStacker:
             self.update_progress("ⓘ Aucune image à sauvegarder."); self.last_saved_data_for_preview = None
 
         # --- Nettoyage des fichiers memmap physiques (SEULEMENT si mode classique) ---
+        # ... (inchangé) ...
         if not (is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_mosaic_mode_with_data): 
             if self.perform_cleanup:
                 print("DEBUG QM [_save_final_stack]: Nettoyage des fichiers memmap (mode SUM/W classique)...")
-                # ... (logique de suppression des .npy)
                 if self.sum_memmap_path and os.path.exists(self.sum_memmap_path):
                     try: os.remove(self.sum_memmap_path); print("     -> Fichier SUM.npy supprimé.")
                     except Exception as e_rem_sum: print(f"     -> WARN: Erreur suppression SUM.npy: {e_rem_sum}")
                 if self.wht_memmap_path and os.path.exists(self.wht_memmap_path):
                     try: os.remove(self.wht_memmap_path); print("     -> Fichier WHT.npy supprimé.")
                     except Exception as e_rem_wht: print(f"     -> WARN: Erreur suppression WHT.npy: {e_rem_wht}")
-                try: # Essayer de supprimer le dossier memmap s'il est vide
+                try: 
                     memmap_dir_final_clean = os.path.join(self.output_folder, "memmap_accumulators")
                     if os.path.isdir(memmap_dir_final_clean) and not os.listdir(memmap_dir_final_clean):
                         os.rmdir(memmap_dir_final_clean); print(f"     -> Dossier memmap vide supprimé: {memmap_dir_final_clean}")
@@ -4628,7 +4614,8 @@ class SeestarQueuedStacker:
         else:
             print("DEBUG QM [_save_final_stack]: Nettoyage fichiers memmap ignoré (mode Drizzle / Mosaïque / Incr. Vrai).")
 
-        print("\n" + "=" * 80); print(f"DEBUG QM [_save_final_stack V_DrizIncr_SaveFix_Full]: Fin méthode (mode: {current_operation_mode_log})."); print("=" * 80 + "\n")
+        print("\n" + "=" * 80); print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_In_SaveFinalStack]: Fin méthode (mode: {current_operation_mode_log})."); print("=" * 80 + "\n")
+
 
 
 
@@ -4860,7 +4847,6 @@ class SeestarQueuedStacker:
 
 
 
-
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
@@ -4896,23 +4882,23 @@ class SeestarQueuedStacker:
                          low_wht_soften_px=128,   
                          is_mosaic_run=False, api_key=None, 
                          mosaic_settings=None,
-                         use_local_solver_priority=False,
+                         use_local_solver_priority=False, # DEPRECATED - ignoré, mais gardé pour compatibilité signature
                          astap_path="",
                          astap_data_dir="",
                          local_ansvr_path="",
-                         astap_search_radius=3.0,# Valeurs par défaut si non fournis
-                         local_solver_preference="none"): # <--- NOUVEAU (remplace use_local_solver_priority)
+                         astap_search_radius=3.0,
+                         local_solver_preference="none",
+                         save_as_float32=False # <-- NOUVEL ARGUMENT AJOUTÉ ICI
+                         ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
+        print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
-                
-    
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        Version: V_StartProcessing_CorrectOrder
-        - Configure les paramètres de session AVANT de déterminer la shape de référence.
-        - Plate-solve la référence AVANT d'appeler initialize().
+        MODIFIED: Ajout argument save_as_float32 et assignation à self.
+        Version: V_StartProcessing_SaveDtypeOption_1
         """
-        print("DEBUG QM (start_processing V_StartProcessing_CorrectOrder): Début tentative démarrage...")
+        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
         
         print("  --- BACKEND ARGS REÇUS (depuis GUI/SettingsManager) ---")
         print(f"    input_dir='{input_dir}', output_dir='{output_dir}'")
@@ -4920,6 +4906,7 @@ class SeestarQueuedStacker:
         print(f"    use_drizzle (global arg de func): {use_drizzle}")
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
+        print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
         if self.processing_active:
@@ -4943,70 +4930,52 @@ class SeestarQueuedStacker:
         # =========================================================================================
         print("DEBUG QM (start_processing): Étape 1 - Configuration des paramètres de session sur l'instance...")
           
-                # --- Vérification préliminaire des chemins d'entrée/sortie ---
         if not self.current_folder or not os.path.isdir(self.current_folder):
             self.update_progress(f"❌ Dossier d'entrée principal '{input_dir}' invalide ou non défini.", "ERROR")
             return False
-        if not self.output_folder: # Maintenant self.output_folder est défini
+        if not self.output_folder: 
             self.update_progress(f"❌ Dossier de sortie '{output_dir}' non défini.", "ERROR")
             return False
         try:
-            os.makedirs(self.output_folder, exist_ok=True) # S'assurer qu'il existe ou le créer
+            os.makedirs(self.output_folder, exist_ok=True) 
         except OSError as e_mkdir:
             self.update_progress(f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}", "ERROR")
             return False
         print(f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'")
-        # --- Fin Vérification ---
-        #         
-        # --- Paramètres des Solveurs Locaux (assignés depuis les arguments de la fonction) ---
-        self.use_local_solver_priority = bool(use_local_solver_priority) # Utilise l'argument de la fonction
-        self.astap_path = str(astap_path)                         # Utilise l'argument de la fonction
-        self.astap_data_dir = str(astap_data_dir)                   # Utilise l'argument de la fonction
-        self.local_ansvr_path = str(local_ansvr_path)                 # Utilise l'argument de la fonction
-                # <<< NOUVEAU : Assignation des paramètres des solveurs locaux et du rayon ASTAP >>>
-        self.local_solver_preference = str(local_solver_preference) # Assurer str
+        
+        self.local_solver_preference = str(local_solver_preference) 
         self.astap_path = str(astap_path)
         self.astap_data_dir = str(astap_data_dir)
-        self.astap_search_radius = float(astap_search_radius) # Assurer float
+        self.astap_search_radius = float(astap_search_radius) 
         self.local_ansvr_path = str(local_ansvr_path)
         
-        # Ajouter des logs de débogage pour vérifier ces nouvelles assignations
         print(f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'")
         print(f"    [Solver Settings sur self via start_processing args] ASTAP Path: '{self.astap_path}'")
         print(f"    [Solver Settings sur self via start_processing args] ASTAP Data Dir: '{self.astap_data_dir}'")
         print(f"    [Solver Settings sur self via start_processing args] ASTAP Search Radius: {self.astap_search_radius}")
         print(f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'")
-        # <<< FIN NOUVEAU >>>F
-        # Optionnel: Tu pourrais aussi initialiser les timeouts ici si tu les ajoutes comme arguments à start_processing
-        # Par exemple, si start_processing recevait `astap_timeout_sec_arg`:
-        # self.astap_timeout_sec = int(astap_timeout_sec_arg) 
-        # Pour l'instant, AstrometrySolver utilise des valeurs par défaut si non passées dans le dict settings.
-        # --- Stocker le rayon de recherche ASTAP ---
+        
         try:
             self.astap_search_radius_config = float(astap_search_radius)
         except (ValueError, TypeError):
             print(f"  WARN QM (start_processing): Valeur astap_search_radius ('{astap_search_radius}') invalide. Utilisation de 5.0° par défaut.")
-            self.astap_search_radius_config = 5.0 # Fallback sûr
-        # ---  ---
-
-        print(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}")
+            self.astap_search_radius_config = 5.0 
+        
+        # self.use_local_solver_priority (attribut de self) n'est plus utilisé, la variable locale de la fonction l'est.
+        # print(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}") 
         print(f"    [Solver Settings sur self] ASTAP Exe: '{self.astap_path}'")
         print(f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'")
         print(f"    [Solver Settings sur self] Ansvr Local: '{self.local_ansvr_path}'")
         print(f"    [Solver Settings sur self] ASTAP Search Radius Config: {self.astap_search_radius_config}°")
 
-
-
-        # Paramètres globaux qui déterminent le mode de fonctionnement
         self.is_mosaic_run = is_mosaic_run                     
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run   
-        self.drizzle_mode = str(drizzle_mode) # Mode Drizzle global (Final ou Incremental)
+        self.drizzle_mode = str(drizzle_mode) 
         
         self.api_key = api_key if isinstance(api_key, str) else ""
         if getattr(self, 'reference_pixel_scale_arcsec', None) is None:
             self.reference_pixel_scale_arcsec = None 
         
-        # Copie de tous les autres paramètres depuis les arguments de la fonction vers les attributs de self
         self.stacking_mode = str(stacking_mode); self.kappa = float(kappa)
         self.correct_hot_pixels = bool(correct_hot_pixels); self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size); self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
@@ -5015,8 +4984,8 @@ class SeestarQueuedStacker:
         self.weight_by_stars = bool(weight_by_stars); self.snr_exponent = float(snr_exp)
         self.stars_exponent = float(stars_exp); self.min_weight = float(max(0.01, min(1.0, min_w)))
         
-        self.drizzle_scale = float(drizzle_scale) if drizzle_scale else 2.0 # Échelle Drizzle (globale ou pour mosaïque)
-        self.drizzle_wht_threshold = float(drizzle_wht_threshold) # Seuil WHT Drizzle global
+        self.drizzle_scale = float(drizzle_scale) if drizzle_scale else 2.0 
+        self.drizzle_wht_threshold = float(drizzle_wht_threshold) 
 
         self.apply_chroma_correction = bool(apply_chroma_correction); self.apply_final_scnr = bool(apply_final_scnr)
         self.final_scnr_target_channel = str(final_scnr_target_channel).lower(); self.final_scnr_amount = float(final_scnr_amount)
@@ -5032,14 +5001,18 @@ class SeestarQueuedStacker:
         self.apply_feathering = bool(apply_feathering); self.feather_blur_px = int(feather_blur_px)
         self.apply_low_wht_mask = bool(apply_low_wht_mask); self.low_wht_percentile = int(low_wht_percentile); self.low_wht_soften_px = int(low_wht_soften_px)
 
-        # Traitement spécifique pour les paramètres de Mosaïque
+        # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
+        self.save_final_as_float32 = bool(save_as_float32)
+        print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
+        # --- FIN NOUVEAU ---
+
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}
         if self.is_mosaic_run:
             print(f"DEBUG QM (start_processing): Application des paramètres de Mosaïque depuis mosaic_settings_dict: {self.mosaic_settings_dict}")
             self.mosaic_alignment_mode = self.mosaic_settings_dict.get('alignment_mode', "local_fast_fallback")
             self.fa_orb_features = int(self.mosaic_settings_dict.get('fastalign_orb_features', 5000))
             self.fa_min_abs_matches = int(self.mosaic_settings_dict.get('fastalign_min_abs_matches', 10))
-            self.fa_min_ransac_raw = int(self.mosaic_settings_dict.get('fastalign_min_ransac', 4)) # Sera utilisé comme min_ransac_inliers_value_config
+            self.fa_min_ransac_raw = int(self.mosaic_settings_dict.get('fastalign_min_ransac', 4)) 
             self.fa_ransac_thresh = float(self.mosaic_settings_dict.get('fastalign_ransac_thresh', 3.0))
             self.fa_daofind_fwhm = float(self.mosaic_settings_dict.get('fastalign_dao_fwhm', 3.5))
             self.fa_daofind_thr_sig = float(self.mosaic_settings_dict.get('fastalign_dao_thr_sig', 4.0))
@@ -5052,13 +5025,11 @@ class SeestarQueuedStacker:
             print(f"  -> Mode Mosaïque ACTIF. Align Mode: '{self.mosaic_alignment_mode}', Fallback WCS: {self.use_wcs_fallback_for_mosaic}")
             print(f"     Mosaic Drizzle: Kernel='{self.mosaic_drizzle_kernel}', Pixfrac={self.mosaic_drizzle_pixfrac:.2f}, Scale(global)={self.drizzle_scale}x")
         
-        # Paramètres Drizzle spécifiques pour le mode Drizzle Standard (non-mosaïque)
         if self.drizzle_active_session and not self.is_mosaic_run:
-            self.drizzle_kernel = str(drizzle_kernel) # Argument de la fonction       
-            self.drizzle_pixfrac = float(drizzle_pixfrac) # Argument de la fonction   
+            self.drizzle_kernel = str(drizzle_kernel)      
+            self.drizzle_pixfrac = float(drizzle_pixfrac)  
             print(f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}")
         
-        # Estimation de la taille de lot si batch_size (argument) <= 0
         requested_batch_size = batch_size 
         if requested_batch_size <= 0:
             sample_img_path_for_bsize = None
@@ -5079,27 +5050,20 @@ class SeestarQueuedStacker:
         
 
 
-        # ==========================================================================================
-        # === ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ===
-        # ==========================================================================================
+        # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
+        # ... (le reste de la méthode est inchangé) ...
         print("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
         reference_image_data_for_shape_determination = None 
         reference_header_for_shape_determination = None     
         ref_shape_hwc = None 
-        # img_data_array_loaded_for_ref_solve n'est plus nécessaire ici car on utilisera un chemin de fichier
-
+        
         try:
-            # Partie 2.1: Charger l'image de référence pour déterminer sa shape
-            # et s'assurer qu'elle est sauvegardée par self.aligner._get_reference_image()
-            # car self.astrometry_solver.solve() attend un chemin de fichier.
-            
-            # --- Logique pour trouver le dossier et les fichiers pour la référence ---
             potential_folders_for_shape = []
             if self.current_folder and os.path.isdir(self.current_folder): 
                 potential_folders_for_shape.append(self.current_folder)
-            if initial_additional_folders: # 'initial_additional_folders' est un argument de start_processing
+            if initial_additional_folders: 
                 for add_f in initial_additional_folders:
-                    abs_add_f = os.path.abspath(str(add_f)) # Assurer str pour os.path.abspath
+                    abs_add_f = os.path.abspath(str(add_f)) 
                     if abs_add_f and os.path.isdir(abs_add_f) and abs_add_f not in potential_folders_for_shape:
                         potential_folders_for_shape.append(abs_add_f)
             if not potential_folders_for_shape: 
@@ -5118,29 +5082,24 @@ class SeestarQueuedStacker:
                     self.update_progress(f"Avertissement: Erreur lecture dossier '{folder_path_iter}' pour réf: {e_listdir}", "WARN")
             if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
                 raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers pour servir de référence.")
-            # --- Fin logique dossier/fichiers référence ---
 
-            # Configurer l'aligneur pour _get_reference_image
             self.aligner.correct_hot_pixels = self.correct_hot_pixels
             self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
             self.aligner.neighborhood_size = self.neighborhood_size
             self.aligner.bayer_pattern = self.bayer_pattern
             self.aligner.reference_image_path = reference_path_ui or None 
 
-            # _get_reference_image sauvegarde "reference_image.fit" dans "temp_processing"
-            # et retourne les données et le header de cette image (déjà prétraitée)
             reference_image_data_for_shape_determination, reference_header_for_shape_determination = \
                 self.aligner._get_reference_image(
                     current_folder_to_scan_for_shape, 
                     files_in_folder_for_shape,
-                    self.output_folder  # <<< AJOUTER self.output_folder ICI COMME TROISIÈME ARGUMENT
+                    self.output_folder 
                 )
 
 
             if reference_image_data_for_shape_determination is None or reference_header_for_shape_determination is None:
                 raise RuntimeError("Échec obtention de l'image de référence par self.aligner._get_reference_image.")
             
-            # Déterminer la shape HWC pour les accumulateurs
             ref_shape_initial = reference_image_data_for_shape_determination.shape
             if len(ref_shape_initial) == 2: 
                 ref_shape_hwc = (ref_shape_initial[0], ref_shape_initial[1], 3)
@@ -5149,37 +5108,34 @@ class SeestarQueuedStacker:
             else:
                 raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée.")
             
-            # Ce header sera utilisé pour le solving et mis à jour par celui-ci
             self.reference_header_for_wcs = reference_header_for_shape_determination.copy() 
             print(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
 
-            # Chemin vers le fichier "reference_image.fit" sauvegardé par _get_reference_image
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
             reference_image_path_for_solving = os.path.join(ref_temp_processing_dir, "reference_image.fit")
 
-            # Partie 2.2: Plate-solving de la référence (CONDITIONNEL)
-            self.reference_wcs_object = None # Initialiser
+            self.reference_wcs_object = None 
             
-            if self.drizzle_active_session or self.is_mosaic_run: # Si Drizzle ou Mosaïque, un WCS est nécessaire
+            if self.drizzle_active_session or self.is_mosaic_run: 
                 print("DEBUG QM (start_processing): Plate-solving de la référence principale requis...")
                 
                 if not os.path.exists(reference_image_path_for_solving):
                     raise RuntimeError(f"Fichier de référence '{reference_image_path_for_solving}' non trouvé pour le solving.")
 
-                if self.astrometry_solver is None: # Vérifier si l'instance a été créée dans __init__
+                if self.astrometry_solver is None: 
                     self.update_progress("❌ ERREUR CRITIQUE: AstrometrySolver non initialisé.", "ERROR")
-                    return False # Ne peut pas continuer
+                    return False 
 
-                # Préparer le dictionnaire de settings pour le solveur
                 solver_settings_for_ref = {
-                    "use_local_solver_priority": self.use_local_solver_priority,
+                    "local_solver_preference": self.local_solver_preference,
                     "api_key": self.api_key,
                     "astap_path": self.astap_path,
                     "astap_data_dir": self.astap_data_dir,
+                    "astap_search_radius": self.astap_search_radius,
                     "local_ansvr_path": self.local_ansvr_path,
-                    "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec, # Peut être None
-                    "scale_tolerance_percent": 20, # Pourrait être un setting
-                    "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120), # Valeurs par défaut
+                    "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec, 
+                    "scale_tolerance_percent": 20, 
+                    "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120), 
                     "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
                     "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300)
                 }
@@ -5187,38 +5143,32 @@ class SeestarQueuedStacker:
                 self.update_progress("   [StartProcRefSolve] Tentative résolution astrométrique pour référence globale...")
                 self.reference_wcs_object = self.astrometry_solver.solve(
                     image_path=reference_image_path_for_solving, 
-                    fits_header=self.reference_header_for_wcs, # Ce header sera mis à jour si solution trouvée
+                    fits_header=self.reference_header_for_wcs, 
                     settings=solver_settings_for_ref,
-                    update_header_with_solution=True # Très important
+                    update_header_with_solution=True 
                 )
                 
                 if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
                     self.update_progress("   [StartProcRefSolve] Référence globale plate-solvée avec succès.")
-                    # Assurer que pixel_shape est défini sur l'objet WCS (AstrometrySolver devrait le faire)
                     if self.reference_wcs_object.pixel_shape is None:
                          nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', ref_shape_hwc[1])
                          ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
                          self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
                          print(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
 
-                # --- NOUVEAU : Extraire et stocker l'échelle du WCS de référence ---
-                try:
-                    # proj_plane_pixel_scales doit être importé: from astropy.wcs.utils import proj_plane_pixel_scales
-                    # Assure-toi que cet import est en haut de queue_manager.py
-                    scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
-                    avg_scale_deg_per_pix = np.mean(np.abs(scales_deg_per_pix))
-                    
-                    if avg_scale_deg_per_pix > 1e-9: # S'assurer que c'est une valeur raisonnable
-                        self.reference_pixel_scale_arcsec = avg_scale_deg_per_pix * 3600.0
-                        self.update_progress(f"   [StartProcRefSolve] Échelle image de référence estimée à: {self.reference_pixel_scale_arcsec:.2f} arcsec/pix.", "INFO")
-                        print(f"DEBUG QM: self.reference_pixel_scale_arcsec mis à jour à {self.reference_pixel_scale_arcsec:.3f} depuis le WCS de référence.")
-                    else:
-                        self.update_progress("   [StartProcRefSolve] Avertissement: Échelle calculée depuis WCS de référence trop faible ou invalide.", "WARN")
-                        # self.reference_pixel_scale_arcsec reste à sa valeur précédente (probablement None ou une config UI)
-                except Exception as e_scale_extract:
-                    self.update_progress(f"   [StartProcRefSolve] Avertissement: Impossible d'extraire l'échelle du WCS de référence: {e_scale_extract}", "WARN")
-                    # self.reference_pixel_scale_arcsec reste à sa valeur précédente
-                # --- FIN NOUVEAU ---
+                    try:
+                        from astropy.wcs.utils import proj_plane_pixel_scales 
+                        scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
+                        avg_scale_deg_per_pix = np.mean(np.abs(scales_deg_per_pix))
+                        
+                        if avg_scale_deg_per_pix > 1e-9: 
+                            self.reference_pixel_scale_arcsec = avg_scale_deg_per_pix * 3600.0
+                            self.update_progress(f"   [StartProcRefSolve] Échelle image de référence estimée à: {self.reference_pixel_scale_arcsec:.2f} arcsec/pix.", "INFO")
+                            print(f"DEBUG QM: self.reference_pixel_scale_arcsec mis à jour à {self.reference_pixel_scale_arcsec:.3f} depuis le WCS de référence.")
+                        else:
+                            self.update_progress("   [StartProcRefSolve] Avertissement: Échelle calculée depuis WCS de référence trop faible ou invalide.", "WARN")
+                    except Exception as e_scale_extract:
+                        self.update_progress(f"   [StartProcRefSolve] Avertissement: Impossible d'extraire l'échelle du WCS de référence: {e_scale_extract}", "WARN")
                                          
                 else: 
                     self.update_progress("   [StartProcRefSolve] ÉCHEC plate-solving réf. globale. Tentative WCS approximatif...", "WARN")
@@ -5227,10 +5177,9 @@ class SeestarQueuedStacker:
                     except ImportError: self.update_progress("     -> Import _create_wcs_from_header échoué pour fallback.", "ERROR")
                     
                     if _cwfh_func_startup: 
-                        self.reference_wcs_object = _cwfh_func_startup(self.reference_header_for_wcs) # Utilise le header déjà mis à jour (ou pas)
+                        self.reference_wcs_object = _cwfh_func_startup(self.reference_header_for_wcs) 
                     
                     if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
-                        # S'assurer que pixel_shape est défini pour ce WCS approximatif
                         nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', ref_shape_hwc[1])
                         ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
                         self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
@@ -5238,11 +5187,10 @@ class SeestarQueuedStacker:
                     else: 
                         self.update_progress("❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.", "ERROR")
                         return False 
-            else: # Mode Stacking Classique seul, pas besoin de WCS de référence global à ce stade.
+            else: 
                 print("DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique seul).")
                 self.reference_wcs_object = None 
             
-            # Libérer la mémoire des données image de référence si elles ne sont plus nécessaires immédiatement
             if reference_image_data_for_shape_determination is not None:
                 del reference_image_data_for_shape_determination
             gc.collect() 
@@ -5253,8 +5201,6 @@ class SeestarQueuedStacker:
             print(f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"); traceback.print_exc(limit=2)
             return False
         
-        # --- LOGS DE DEBUG AVANT APPEL initialize() ---
-        # ... (comme avant) ...
         print(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
         print(f"  -> self.is_mosaic_run: {self.is_mosaic_run}")
         print(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
@@ -5265,9 +5211,6 @@ class SeestarQueuedStacker:
         else:
             print(f"     WCS Ref non disponible ou non céleste.")
 
-
-
-        # --- ÉTAPE 3 : INITIALISATION DES ACCUMULATEURS ET DE L'ÉTAT DU QueuedStacker ---
         print(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
         if not self.initialize(output_dir, ref_shape_hwc): 
             self.processing_active = False 
@@ -5275,7 +5218,6 @@ class SeestarQueuedStacker:
             return False
         print("DEBUG QM (start_processing): self.initialize() terminé avec succès.")
 
-        # --- ÉTAPE 4 : PRÉPARATION DES DOSSIERS ET DE LA FILE D'ATTENTE ---
         print("DEBUG QM (start_processing): Étape 4 - Remplissage de la file d'attente...")
         initial_folders_to_add_count = 0
         with self.folders_lock:
@@ -5296,21 +5238,17 @@ class SeestarQueuedStacker:
         elif not self.additional_folders: 
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
         
-        self.aligner.reference_image_path = reference_path_ui or None # Ré-assigner au cas où _get_reference_image l'aurait modifié
+        self.aligner.reference_image_path = reference_path_ui or None 
 
-        # --- ÉTAPE 5 : DÉMARRAGE DU THREAD WORKER ---
-        print("DEBUG QM (start_processing V_StartProcessing_CorrectOrder): Démarrage du thread worker...") # Nom de version mis à jour
+        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
         self.processing_thread.daemon = True 
         self.processing_thread.start()
         self.processing_active = True 
         
         self.update_progress("🚀 Thread de traitement démarré.")
-        print("DEBUG QM (start_processing V_StartProcessing_CorrectOrder): Fin.") # Nom de version mis à jour
+        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Fin.") # Version Log
         return True
-
-
-
 
 
 

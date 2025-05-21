@@ -95,6 +95,10 @@ EN_TRANSLATIONS = {
     'photutils_bn_sigma_clip_label': "Sigma Clip:",
     'photutils_bn_exclude_percentile_label': "Exclude Brightest (%):",
     ### END expert tab ###
+    
+    # --- Output Format Section ---
+    'output_format_frame_title': "Output FITS Format",
+    'save_as_float32_label': "Save final FITS as float32 (larger files, max precision)",
 
     ### NEW: Tooltips for Expert Tab ###
     'tooltip_bn_grid_size': "BN: RxC grid for background analysis. More zones (32x32) = finer local analysis, noise sensitive. Fewer (8x8) = robust stats, worse for complex gradients. Default: 16x16.",
@@ -123,6 +127,8 @@ EN_TRANSLATIONS = {
     'tooltip_apply_low_wht_mask': "Low WHT Mask: Attenuates image areas where the weight map (WHT) is very low (typically edges with little signal). Helps reduce banding and color casts in these zones. Applied after Feathering and before Photutils background subtraction.",
     'tooltip_low_wht_percentile': "Low WHT Percentile: Defines the threshold for considering a weight as 'low'. E.g., 5% means the bottom 5% of non-zero pixel weights will be targeted. Range: 1-20. Default: 5.",
     'tooltip_low_wht_soften_px': "Soften Low WHT Mask (px): Radius of Gaussian blur applied to the binary mask of low-weight areas. Allows for a smoother transition of the correction. Range: 32-512. Default: 128.",
+    # Tooltips save_as_float32
+    'tooltip_save_as_float32': "If checked, the final FITS file will be saved using 32-bit floating-point numbers, preserving the maximum numerical precision from processing but resulting in larger files (approx. 2x). If unchecked (default), the file will be saved as 16-bit unsigned integers (0-65535 range after scaling from 0-1), significantly reducing file size.",
 
     # ... end expert tab ...
     
