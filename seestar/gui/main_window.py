@@ -3428,11 +3428,13 @@ class SeestarStackerGUI:
             is_mosaic_run=self.settings.mosaic_mode_active,
             api_key=self.settings.astrometry_api_key,
             mosaic_settings=self.settings.mosaic_settings, 
-            use_local_solver_priority=self.settings.use_local_solver_priority,
             astap_path=self.settings.astap_path,
             astap_data_dir=self.settings.astap_data_dir,
             local_ansvr_path=self.settings.local_ansvr_path,
-            astap_search_radius_ui=self.settings.astap_search_radius
+            local_solver_preference=self.settings.local_solver_preference,
+            astap_search_radius=self.settings.astap_search_radius,
+            # Lire depuis self.settings
+            
         )
         print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 

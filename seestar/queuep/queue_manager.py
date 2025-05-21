@@ -1384,28 +1384,38 @@ class SeestarQueuedStacker:
             # =====================================================================================
         
             self.update_progress("⭐ Préparation image(s) de référence...")
-            # ... (logique pour trouver folder_for_ref_scan et files_for_ref_scan, inchangée) ...
-            if not self.current_folder or not os.path.isdir(self.current_folder): # ... (etc)
-                # ... (comme avant) ...
-                pass # Pour la concision, cette logique reste
-            files_for_ref_scan = [] # ... (comme avant)
-            folder_for_ref_scan = None # ... (comme avant)
-            if self.current_folder and os.path.isdir(self.current_folder): # ... (etc)
+            
+            # --- Détermination du dossier et des fichiers pour la référence ---
+            # (Votre logique existante pour trouver folder_for_ref_scan et files_for_ref_scan)
+            # --- Exemple simplifié de cette logique ---
+            files_for_ref_scan = [] 
+            folder_for_ref_scan = None
+            if self.current_folder and os.path.isdir(self.current_folder):
                 files_for_ref_scan = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith((".fit", ".fits"))])
                 if files_for_ref_scan: folder_for_ref_scan = self.current_folder
-            if not files_for_ref_scan and self.additional_folders: # ... (etc)
+            
+            if not files_for_ref_scan and hasattr(self, 'additional_folders') and self.additional_folders:
+                # (Code pour chercher dans additional_folders si besoin)
                 first_additional = self.additional_folders[0]
                 if os.path.isdir(first_additional):
-                    files_for_ref_scan = sorted([f for f in os.listdir(first_additional) if f.lower().endswith((".fit", ".fits"))])
-                    if files_for_ref_scan: folder_for_ref_scan = first_additional; print(f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence.")
-            if not files_for_ref_scan or not folder_for_ref_scan: raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence.")
-            # ... (fin logique folder_for_ref_scan)
+                    files_for_ref_scan_add = sorted([f for f in os.listdir(first_additional) if f.lower().endswith((".fit", ".fits"))])
+                    if files_for_ref_scan_add: 
+                        files_for_ref_scan = files_for_ref_scan_add
+                        folder_for_ref_scan = first_additional
+                        print(f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence.")
+            
+            if not files_for_ref_scan or not folder_for_ref_scan: 
+                raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence.")
+            # --- Fin logique dossier/fichiers référence ---
 
-            # ... (configuration de self.aligner, inchangée) ...
-            self.aligner.correct_hot_pixels = self.correct_hot_pixels # ... (etc)
+            # Configuration de self.aligner pour _get_reference_image
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels 
+            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
+            self.aligner.neighborhood_size = self.neighborhood_size
             self.aligner.bayer_pattern = self.bayer_pattern
+            # self.aligner.reference_image_path est déjà setté dans start_processing
 
-            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
+            print(f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
             reference_image_data_for_global_alignment, reference_header_for_global_alignment = self.aligner._get_reference_image(
                 folder_for_ref_scan, 
                 files_for_ref_scan,
@@ -1418,112 +1428,140 @@ class SeestarQueuedStacker:
             if reference_header_for_global_alignment.get('_SOURCE_PATH'):
                 source_path_val_ref = reference_header_for_global_alignment.get('_SOURCE_PATH')
                 self.reference_header_for_wcs['_REFSRCFN'] = (str(source_path_val_ref), "Base name of global ref source")
+                # Si c'est une mosaïque locale, le premier panneau traité est l'ancre.
+                if use_local_aligner_for_this_mosaic_run: # Ce flag est défini au début de _worker
+                    path_of_processed_ref_panel_basename = str(source_path_val_ref) # Pour le skipper plus tard
 
-            # _get_reference_image a déjà sauvegardé "reference_image.fit" dans "temp_processing"
-            # C'est ce fichier que nous allons utiliser pour le solving.
+
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
             reference_image_path_for_solver = os.path.join(ref_temp_processing_dir, "reference_image.fit")
             
-            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
+            print(f"DEBUG QM [_worker]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
 
             # --- 1.A Plate-solving de la référence ---
             self.update_progress("DEBUG WORKER: Section 1.A - Plate-solving de la référence...")
             self.reference_wcs_object = None 
-            temp_wcs_ancre = None 
+            temp_wcs_ancre = None # Spécifique pour la logique mosaïque locale
 
-            # Construction du dictionnaire de settings pour le solveur
-            # Les attributs comme self.use_local_solver_priority, self.astap_path etc.
-            # DOIVENT avoir été définis dans start_processing() avant l'appel à _worker.
+            # <<< DEBUG PRINT AVANT CRÉATION DICT POUR SOLVEUR ANCRE >>>
+            print(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
+            print(f"    self.is_mosaic_run = {self.is_mosaic_run}")
+            print(f"    self.local_solver_preference = '{getattr(self, 'local_solver_preference', 'NON_DÉFINI')}'")
+            print(f"    self.astap_search_radius = {getattr(self, 'astap_search_radius', 'NON_DÉFINI')}")
+            print(f"    self.reference_pixel_scale_arcsec = {self.reference_pixel_scale_arcsec}")
+            # <<< FIN DEBUG PRINT >>>
+
             solver_settings_for_ref_anchor = {
-                "use_local_solver_priority": getattr(self, 'use_local_solver_priority', False),
-                "api_key": self.api_key, # Vient de self.api_key
-                "astap_path": getattr(self, 'astap_path', ""),
-                "astap_data_dir": getattr(self, 'astap_data_dir', ""),
-                "local_ansvr_path": getattr(self, 'local_ansvr_path', ""),
-                "scale_est_arcsec_per_pix": None, # Vient de self.reference_pixel_scale_arcsec
-                "scale_tolerance_percent": 20, # Peut être rendu configurable via self.settings
-                # Timeouts (valeurs par défaut si non définis sur self)
-                "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120),
-                "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
-                "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300),
-                "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0)
-                }
+                'local_solver_preference': self.local_solver_preference,
+                'api_key': self.api_key,
+                'astap_path': self.astap_path,
+                'astap_data_dir': self.astap_data_dir,
+                'astap_search_radius': self.astap_search_radius,
+                'local_ansvr_path': self.local_ansvr_path,
+                'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec, # Peut être None au premier passage
+                'scale_tolerance_percent': 20,
+                'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+            }
+            # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
+            print(f"DEBUG QM (_worker): Contenu de solver_settings_for_ref_anchor:") 
+            for key_s, val_s in solver_settings_for_ref_anchor.items():               
+                if key_s == 'api_key': print(f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'")
+                else: print(f"    '{key_s}': '{val_s}'")
+
+            # <<< DEBUG PRINT AVANT BLOC IF/ELIF POUR SOLVING ANCRE >>>
+            print(f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- CAS 1: Mosaïque Locale (FastAligner avec ou sans fallback WCS) ---
-            if use_local_aligner_for_this_mosaic_run:
+            if use_local_aligner_for_this_mosaic_run: # Flag défini au tout début de _worker
                 self.update_progress("⭐ Mosaïque Locale: Traitement du panneau de référence (ancrage)...")
-                # L'image de référence globale *est* notre panneau d'ancrage pour ce mode.
                 mosaic_ref_panel_image_data = reference_image_data_for_global_alignment 
-                mosaic_ref_panel_header = self.reference_header_for_wcs.copy() # Utiliser le header déjà copié et potentiellement annoté
+                mosaic_ref_panel_header = self.reference_header_for_wcs.copy()
                 
                 if reference_header_for_global_alignment.get('_SOURCE_PATH'):
-                    path_of_processed_ref_panel_basename = str(reference_header_for_global_alignment.get('_SOURCE_PATH'))
+                    # path_of_processed_ref_panel_basename est déjà défini plus haut
                     mosaic_ref_panel_header['_PANREF_FN'] = (path_of_processed_ref_panel_basename, "Base name of this mosaic ref panel source")
 
                 if self.astrometry_solver and os.path.exists(reference_image_path_for_solver):
                     self.update_progress("   -> Mosaïque Locale: Tentative résolution astrométrique ancre via self.astrometry_solver.solve...")
                     temp_wcs_ancre = self.astrometry_solver.solve(
                         reference_image_path_for_solver,
-                        mosaic_ref_panel_header, # Ce header sera mis à jour par le solveur si succès
-                        solver_settings_for_ref_anchor,
-                        update_header_with_solution=True # Important pour mettre à jour mosaic_ref_panel_header
+                        mosaic_ref_panel_header, 
+                        settings=solver_settings_for_ref_anchor,
+                        update_header_with_solution=True
                     )
                     if temp_wcs_ancre: self.update_progress("   -> Mosaïque Locale: Astrometry (via solveur) ancre RÉUSSI.")
                     else: self.update_progress("   -> Mosaïque Locale: Astrometry (via solveur) ancre ÉCHOUÉ.")
                 else:
                     self.update_progress("   -> Mosaïque Locale: AstrometrySolver non dispo ou fichier réf. manquant. Solving ancre impossible.", "ERROR")
 
-                # Si temp_wcs_ancre est None (échec de TOUS les solveurs) et qu'on n'a pas de WCS manuel:
                 if temp_wcs_ancre is None: 
-                     # Fallback WCS approximatif (si même les solveurs ont échoué)
                     self.update_progress("   ⚠️ Échec de tous les solveurs pour panneau de référence. Tentative WCS approximatif (fallback)...")
                     _cwfh_func = None; from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh; _cwfh_func = _cwfh
-                    if _cwfh_func: temp_wcs_ancre = _cwfh_func(mosaic_ref_panel_header) # Utilise le header de l'ancre
+                    if _cwfh_func: temp_wcs_ancre = _cwfh_func(mosaic_ref_panel_header)
                     if temp_wcs_ancre and temp_wcs_ancre.is_celestial:
                          nx_hdr_a = mosaic_ref_panel_header.get('NAXIS1'); ny_hdr_a = mosaic_ref_panel_header.get('NAXIS2')
                          if nx_hdr_a and ny_hdr_a: temp_wcs_ancre.pixel_shape = (int(nx_hdr_a), int(ny_hdr_a))
                          elif hasattr(mosaic_ref_panel_image_data,'shape'): temp_wcs_ancre.pixel_shape=(mosaic_ref_panel_image_data.shape[1],mosaic_ref_panel_image_data.shape[0])
                 
                 if temp_wcs_ancre is None: raise RuntimeError("Mosaïque Locale: Échec critique obtention WCS pour panneau de référence.")
-                self.reference_wcs_object = temp_wcs_ancre # C'est LE WCS de l'ancre
-                # ... (reste de la logique pour CAS 1, comme l'ajout à all_aligned_files_with_info_for_mosaic) ...
+                self.reference_wcs_object = temp_wcs_ancre 
+                
+                if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'pixel_scale_matrix'): # Mettre à jour l'échelle globale
+                    try: self.reference_pixel_scale_arcsec = np.sqrt(np.abs(np.linalg.det(self.reference_wcs_object.pixel_scale_matrix))) * 3600.0
+                    except: pass # Ignorer si erreur de calcul
+
                 if self.reference_wcs_object: print(f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
-                mat_identite_ref_panel = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32); valid_mask_ref_panel_pixels = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool)
+                
+                mat_identite_ref_panel = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32)
+                valid_mask_ref_panel_pixels = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool)
                 all_aligned_files_with_info_for_mosaic.append((mosaic_ref_panel_image_data.copy(), mosaic_ref_panel_header.copy(), self.reference_wcs_object, mat_identite_ref_panel, valid_mask_ref_panel_pixels))
-                self.aligned_files_count += 1; self.processed_files_count += 1; print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Mosaïque Locale: Panneau de référence ajouté.")
+                self.aligned_files_count += 1; self.processed_files_count += 1
+                print(f"DEBUG QM [_worker]: Mosaïque Locale: Panneau de référence ajouté à all_aligned_files_with_info_for_mosaic.")
 
-
-            # --- CAS 2: Mosaïque Astrometry.net par panneau OU Drizzle Standard ---
-            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic:
+            # --- CAS 2: Mosaïque Astrometry.net par panneau OU Drizzle Standard (pour la référence globale) ---
+            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic: # `use_astrometry_per_panel_mosaic` est True si mode mosaique="astrometry_per_panel"
                 self.update_progress("DEBUG WORKER: Branche Drizzle Std / AstroMosaic pour référence globale...")
                 if self.astrometry_solver and os.path.exists(reference_image_path_for_solver):
                     self.update_progress("   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve...")
                     self.reference_wcs_object = self.astrometry_solver.solve(
                         reference_image_path_for_solver,
-                        self.reference_header_for_wcs, # Ce header sera mis à jour
-                        solver_settings_for_ref_anchor,
+                        self.reference_header_for_wcs, 
+                        settings=solver_settings_for_ref_anchor, # Utilise le même dict de settings que pour l'ancre
                         update_header_with_solution=True
                     )
                 else:
                     self.update_progress("   -> Drizzle Std/AstroMosaic: AstrometrySolver non dispo ou fichier réf. manquant. Solving réf. globale impossible.", "ERROR")
                     self.reference_wcs_object = None
                 
-                if self.reference_wcs_object is None:
-                    self.update_progress("ERREUR WORKER: Échec plate-solving réf. principale (Drizzle Std / AstroMosaic). Levée de RuntimeError...")
-                    raise RuntimeError("Échec plate-solving réf. principale pour Drizzle standard ou Mosaïque Astrometry.")
-                else:
-                    self.update_progress("   -> Drizzle Std/AstroMosaic: Astrometry (via solveur) réf. globale RÉUSSI.")
-                    if self.reference_wcs_object.pixel_shape is None: # S'assurer que pixel_shape est défini
-                         nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', reference_image_data_for_global_alignment.shape[1])
-                         ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', reference_image_data_for_global_alignment.shape[0])
-                         self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
-                    print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
+                if self.reference_wcs_object is None: # Si solving a échoué
+                    self.update_progress("ERREUR WORKER: Échec plate-solving réf. principale (Drizzle Std / AstroMosaic). Tentative WCS approximatif...", "WARN")
+                    # Fallback WCS approximatif pour Drizzle Standard / Mosaïque Astrometry.net per Panel
+                    _cwfh_func_std_driz = None; from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_std; _cwfh_func_std_driz = _cwfh_std
+                    if _cwfh_func_std_driz: self.reference_wcs_object = _cwfh_func_std_driz(self.reference_header_for_wcs)
+                    if not (self.reference_wcs_object and self.reference_wcs_object.is_celestial):
+                        raise RuntimeError("Échec critique obtention WCS pour Drizzle standard ou Mosaïque Astrometry (même après fallback).")
+                    self.update_progress("   -> WCS approximatif pour réf. globale créé (pour Drizzle Std / AstroMosaic).", "INFO")
+
+                # Si on a un WCS (résolu ou approximatif)
+                self.update_progress("   -> Drizzle Std/AstroMosaic: WCS pour réf. globale obtenu (résolu ou approx).")
+                if self.reference_wcs_object.pixel_shape is None:
+                     nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', reference_image_data_for_global_alignment.shape[1])
+                     ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', reference_image_data_for_global_alignment.shape[0])
+                     self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
+                
+                if hasattr(self.reference_wcs_object, 'pixel_scale_matrix'): # Mettre à jour l'échelle globale
+                    try: self.reference_pixel_scale_arcsec = np.sqrt(np.abs(np.linalg.det(self.reference_wcs_object.pixel_scale_matrix))) * 3600.0
+                    except: pass
+
+                print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
             
-            # ... (Le reste de la Section 1.A, puis Section 1.B initialisation grille Drizzle, etc. comme avant) ...
-            # ... (Puis la boucle principale Section 2, etc.) ...
-            # ... (Le reste de la Section 1.A, puis Section 1.B initialisation grille Drizzle, etc. comme avant) ...
-            if self.drizzle_active_session and not self.is_mosaic_run: # Initialisation grille Drizzle STANDARD
-                # ... (code existant, qui utilise self.reference_wcs_object et reference_image_data_for_global_alignment.shape[:2])
+            # <<< DEBUG PRINT APRÈS BLOC IF/ELIF POUR SOLVING ANCRE >>>
+            print(f"!!!! DEBUG _worker APRÈS BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
+
+            # --- Initialisation grille Drizzle Standard (si applicable pour un run NON-mosaïque) ---
+            if self.drizzle_active_session and not self.is_mosaic_run: 
                 self.update_progress("DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...", "DEBUG_DETAIL")
                 if self.reference_wcs_object and hasattr(reference_image_data_for_global_alignment, 'shape'):
                     ref_shape_for_drizzle_grid_hw = reference_image_data_for_global_alignment.shape[:2]
@@ -1539,51 +1577,67 @@ class SeestarQueuedStacker:
                         self.update_progress(f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}", "INFO")
                     except Exception as e_grid_driz:
                         error_msg_grid = f"Échec critique création grille de sortie Drizzle Standard: {e_grid_driz}"
-                        self.update_progress(error_msg_grid, "ERROR")
-                        raise RuntimeError(error_msg_grid)
+                        self.update_progress(error_msg_grid, "ERROR"); raise RuntimeError(error_msg_grid)
                 else:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
-                    self.update_progress(error_msg_ref_driz, "ERROR")
-                    raise RuntimeError(error_msg_ref_driz)
-
-            self.update_progress("DEBUG WORKER: Fin Section 1.A Plate-solving de la référence.") 
+                    self.update_progress(error_msg_ref_driz, "ERROR"); raise RuntimeError(error_msg_ref_driz)
+            
+            # <<< DEBUG PRINT POST SECTION 1 (après init grille Drizzle si applicable) >>>
+            print(f"!!!! DEBUG _worker POST SECTION 1 (après init grille Drizzle si applicable) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
+            
+            self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
             self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
-            self.update_progress(f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})...")
-
             
 
 
-
+            self.update_progress(f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})...")
 
             # ============================================================
             # === SECTION 2 : BOUCLE PRINCIPALE DE TRAITEMENT DES IMAGES ===
             # ============================================================
             iteration_count = 0
-            self.update_progress("DEBUG WORKER: ENTRÉE IMMINENTE DANS LA BOUCLE while not self.stop_processing...")
+            # self.update_progress("DEBUG WORKER: ENTRÉE IMMINENTE DANS LA BOUCLE while not self.stop_processing...") # Peut être un peu verbeux
+            
             while not self.stop_processing:
                 iteration_count += 1
-                print(f"DEBUG QM [_worker V_Global_TupleFix - Loop Iter]: DÉBUT Itération #{iteration_count}. Queue approx: {self.queue.qsize()}. Mosaic list size AVANT GET: {len(all_aligned_files_with_info_for_mosaic)}") # Nom de version mis à jour
+                
+                # <<< LOG PRINCIPAL AU DÉBUT DE CHAQUE ITÉRATION DE LA BOUCLE >>>
+                print(f"!!!! DEBUG _worker LOOP START iter {iteration_count}: self.is_mosaic_run = {self.is_mosaic_run}, "
+                      f"self.mosaic_alignment_mode = '{self.mosaic_alignment_mode}', "
+                      f"self.drizzle_active_session = {self.drizzle_active_session}, "
+                      f"self.drizzle_mode = '{self.drizzle_mode}'")
+                
+                # Log existant (bon à garder)
+                print(f"DEBUG QM [_worker V_LoopFocus - Loop Iter]: DÉBUT Itération #{iteration_count}. " 
+                      f"Queue approx: {self.queue.qsize()}. "
+                      f"Mosaic list AVANT GET: {len(all_aligned_files_with_info_for_mosaic)}")
 
                 file_path = None 
                 file_name_for_log = "FichierInconnu" 
 
                 try:
-                    file_path = self.queue.get(timeout=1.0)
+                    file_path = self.queue.get(timeout=1.0) 
                     file_name_for_log = os.path.basename(file_path)
-                    print(f"DEBUG QM [_worker V_Global_TupleFix / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue.")
+                    print(f"DEBUG QM [_worker V_LoopFocus / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue.")
 
                     if path_of_processed_ref_panel_basename and file_name_for_log == path_of_processed_ref_panel_basename:
                         self.update_progress(f"   [WorkerLoop] Panneau d'ancre '{file_name_for_log}' déjà traité. Ignoré dans la boucle principale.")
-                        print(f"DEBUG QM [_worker V_Global_TupleFix]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité.")
+                        print(f"DEBUG QM [_worker V_LoopFocus]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité (path_of_processed_ref_panel_basename='{path_of_processed_ref_panel_basename}').")
                         self.processed_files_count += 1 
                         self.queue.task_done()
                         continue 
 
-                    item_result_tuple = None # Renommé pour clarté, sera un tuple de 6 éléments
+                    item_result_tuple = None 
 
-                    if use_local_aligner_for_this_mosaic_run: # Pour "local_fast_fallback" ou "local_fast_only"
-                        self.update_progress(f"   -> Mosaïque Locale: Tentative alignement FastAligner/Fallback pour '{file_name_for_log}'...")
-                        
+                    # <<< DEBUG AVANT LE BLOC IF/ELIF/ELSE D'APPEL À _process_file >>>
+                    print(f"  DEBUG _worker (iter {iteration_count}): PRE-CALL _process_file pour '{file_name_for_log}'")
+                    print(f"    - use_local_aligner_for_this_mosaic_run: {use_local_aligner_for_this_mosaic_run}")
+                    print(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
+                    print(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
+                    # <<< FIN DEBUG >>>
+
+                    if use_local_aligner_for_this_mosaic_run: 
+                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment, 
@@ -1597,13 +1651,11 @@ class SeestarQueuedStacker:
                             max_stars_to_describe_config=self.fa_max_stars_descr
                         )
                         
-                        # ... (logs de debug pour item_result_tuple) ...
-
-                        self.processed_files_count += 1
+                        self.processed_files_count += 1 # Mis ici car _process_file est appelé
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
                            item_result_tuple[0] is not None and \
                            item_result_tuple[3] is not None and isinstance(item_result_tuple[3], WCS) and \
-                           item_result_tuple[4] is not None: # item_result_tuple[4] est la matrice M
+                           item_result_tuple[4] is not None: 
                             
                             panel_data, panel_header, _scores, panel_wcs, panel_matrix_m, panel_mask = item_result_tuple
                             all_aligned_files_with_info_for_mosaic.append(
@@ -1611,46 +1663,40 @@ class SeestarQueuedStacker:
                             )
                             self.aligned_files_count += 1
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
-                            print(f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté.")
+                            print(f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
-                            # ... (logique d'échec et _move_to_unaligned) ...
                             self.failed_align_count += 1
+                            print(f"  DEBUG QM [_worker / Mosaïque Locale]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
-
-                    elif use_astrometry_per_panel_mosaic: # Pour "astrometry_per_panel"
-                        self.update_progress(f"   -> Mosaïque Astro: Traitement '{file_name_for_log}'...")
-                        item_result_tuple = self._process_file( # Renommer en item_result_tuple
+                    elif use_astrometry_per_panel_mosaic: 
+                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file.") # DEBUG
+                        item_result_tuple = self._process_file(
                             file_path,
-                            reference_image_data_for_global_alignment, 
+                            reference_image_data_for_global_alignment, # Passé mais pas utilisé pour l'alignement direct dans ce mode
                             solve_astrometry_for_this_file=True
                         )
                         self.processed_files_count += 1
-                        # _process_file avec solve_astrometry_for_this_file=True retourne aussi 6 éléments.
-                        # Le 5ème élément (matrice M) sera None ou une identité si nous l'ajoutons dans _process_file.
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
                            item_result_tuple[0] is not None and \
                            item_result_tuple[3] is not None and isinstance(item_result_tuple[3], WCS):
                             
                             panel_data, panel_header, _scores, wcs_object_panel, M_returned, valid_mask_panel = item_result_tuple
-                            
-                            # Pour Astrometry/Panel, la matrice M effective est l'identité car le WCS est déjà absolu.
-                            # Si _process_file retourne None pour M_returned dans ce cas, on crée une identité.
                             M_to_store = M_returned if M_returned is not None else np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32)
-                            
                             all_aligned_files_with_info_for_mosaic.append(
                                 (panel_data, panel_header, wcs_object_panel, M_to_store, valid_mask_panel)
                             )
                             self.aligned_files_count += 1
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
-                            print(f"  DEBUG QM [_worker / Mosaïque Astro]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté.")
+                            print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
                             self.failed_align_count += 1
+                            print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
                     else: # Stacking Classique ou Drizzle Standard (non-mosaïque)
-                        self.update_progress(f"   -> Traitement standard/DrizzleStd: '{file_name_for_log}'...")
-                        item_result_tuple = self._process_file( # Renommer en item_result_tuple
+                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
+                        item_result_tuple = self._process_file( 
                             file_path,
                             reference_image_data_for_global_alignment, 
                             solve_astrometry_for_this_file=False       
@@ -1660,56 +1706,73 @@ class SeestarQueuedStacker:
                            item_result_tuple[0] is not None: 
                             
                             self.aligned_files_count += 1
-                            # Déballer les 6 éléments, même si _matrice_M_pas_utilisee_ici et _wcs_gen ne sont pas toujours utiles ici
-                            aligned_data, header_orig, _scores, _wcs_gen, _matrice_M_pas_utilisee_ici, valid_mask = item_result_tuple
+                            aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple # Déballer les 6
                             
-                            # Pour le Drizzle standard et le Stacking Classique, nous avons principalement besoin de:
-                            # aligned_data, header_orig, et potentiellement valid_mask si on l'utilise pour le stacking.
-
-                            if self.drizzle_active_session: 
-                                temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig) # Utilise aligned_data et header_orig
+                            if self.drizzle_active_session: # Drizzle Standard (non-mosaïque)
+                                print(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
+                                temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig) 
                                 if temp_driz_file_path:
                                     current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
-                                    # ...
                                 else:
-                                    self.failed_stack_count +=1 
-                            else: 
-                                # Pour le stacking classique, on a besoin d'un tuple qui sera consommé par _process_completed_batch
-                                # _process_completed_batch attend des tuples: (données, header, scores, wcs, masque)
-                                # Nous allons donc recréer ce tuple à 5 éléments.
-                                classic_stack_item = (aligned_data, header_orig, _scores, _wcs_gen, valid_mask)
+                                    self.failed_stack_count +=1 # Échec sauvegarde temp, donc échec pour le stack
+                                    print(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
+                            else: # Stacking Classique (SUM/W)
+                                print(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
+                                classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val) # Recréer tuple à 5
                                 current_batch_items_with_masks_for_stack_batch.append(classic_stack_item) 
-                                # ...
-                        else:
+                        else: # _process_file a échoué pour le mode classique/drizzle std
                             self.failed_align_count += 1
+                            print(f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
                         
-                        # ... (logique de traitement de lot inchangée à partir d'ici) ...
-                        if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
-                            # ...
-                            current_batch_items_with_masks_for_stack_batch = [] 
+                        # --- Gestion des lots pour Stacking Classique ou Drizzle Standard ---
+                        if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
+                            self.stacked_batches_count += 1
+                            print(f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd.")
+                            if self.drizzle_active_session: # Drizzle Standard Final
+                                print(f"    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final).")
+                                batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
+                                    current_batch_items_with_masks_for_stack_batch, 
+                                    self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count
+                                )
+                                if batch_sci_p and batch_wht_p_list: 
+                                    self.intermediate_drizzle_batch_files.append((batch_sci_p, batch_wht_p_list))
+                                else: self.failed_stack_count += len(current_batch_items_with_masks_for_stack_batch)
+                            else: # Stacking Classique
+                                print(f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W).")
+                                self._process_completed_batch(
+                                    current_batch_items_with_masks_for_stack_batch, 
+                                    self.stacked_batches_count, self.total_batches_estimated
+                                )
+                            current_batch_items_with_masks_for_stack_batch = [] # Vider le lot
 
                     self.queue.task_done()
                 except Empty:
-                    # ...
-                    break 
-                except Exception as e_inner_loop_main:
-                    # ...
+                    self.update_progress("INFO: File d'attente vide, en attente de nouveaux fichiers ou fin de traitement...", None)
+                    if not self.additional_folders and self.queue.empty(): 
+                        self.update_progress("INFO: Plus aucun fichier ni dossier supplémentaire. Fin de la boucle de traitement.", None)
+                        break 
+                    time.sleep(0.5) 
+                    continue 
+                except Exception as e_inner_loop_main: 
+                    self.update_progress(f"❌ ERREUR (Boucle Worker) pour {file_name_for_log}: {e_inner_loop_main}", "ERROR")
+                    print(f"ERREUR QM [_worker V_LoopFocus]: Exception dans boucle principale pour {file_name_for_log}: {e_inner_loop_main}")
+                    traceback.print_exc(limit=3)
+                    self.processing_error = f"Erreur boucle {file_name_for_log}: {e_inner_loop_main}"
                     self.stop_processing = True 
                     if file_path and os.path.exists(file_path) and hasattr(self, '_move_to_unaligned'):
                          self._move_to_unaligned(file_path) 
-                
-                
                 finally:
-                    print(f"DEBUG QM [_worker LoopFinally]: Début du finally interne de la boucle. iteration_count={iteration_count}")
-                    if 'file_path' in locals() and file_path is not None: del file_path
-                    if 'item_result' in locals() and item_result is not None: del item_result
-                    if iteration_count % 5 == 0: gc.collect()
-                    print(f"DEBUG QM [_worker V5.3.4_FixFinally - Loop Iter]: FIN Itération #{iteration_count}. Mosaic list size APRÈS TRAITEMENT: {len(all_aligned_files_with_info_for_mosaic)}")
+                    print(f"DEBUG QM [_worker LoopFinally iter {iteration_count}]: Début du finally interne de la boucle.")
+                    if 'file_path' in locals() and file_path is not None: del file_path # Libérer ref
+                    if 'item_result_tuple' in locals() and item_result_tuple is not None: del item_result_tuple # Libérer ref
+                    if iteration_count % 5 == 0: gc.collect() # GC occasionnel
+                    print(f"DEBUG QM [_worker V_LoopFocus - Loop Iter]: FIN Itération #{iteration_count}. "
+                          f"self.is_mosaic_run = {self.is_mosaic_run}. " # <<< Vérifier ici aussi
+                          f"Mosaic list APRÈS: {len(all_aligned_files_with_info_for_mosaic)}")
             # --- Fin de la boucle while ---
 
-
-# ==============================================================
+            # ==============================================================
             # === SECTION 3 : TRAITEMENT FINAL APRÈS LA BOUCLE PRINCIPALE ===
             # ==============================================================
             print(f"DEBUG QM [_worker V_DrizIncrTrue_Fix1 / FIN DE BOUCLE WHILE]:") # Version Log
@@ -2910,66 +2973,77 @@ class SeestarQueuedStacker:
                 
                 # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
                 # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback" (défini dans start_processing)
+                # --- Logique de Fallback si FastAligner a échoué ET que c'est permis ---
+                # self.use_wcs_fallback_for_mosaic est True pour "local_fast_fallback" (défini dans start_processing)
                 if not fa_success and self.use_wcs_fallback_for_mosaic: 
                     self.update_progress(f"     -> Tentative Fallback (via AstrometrySolver) pour '{file_name}'...", None)
-                    align_method_log_msg += "_Fallback_Attempted"
+                    align_method_log_msg += "_Fallback_Attempted" 
                     
-                    if self.astrometry_solver: # Vérifier si l'instance du solveur existe
+                    if self.astrometry_solver: 
+                        print(f"DEBUG QM (_process_file - FallbackWCS): Construction du dictionnaire 'settings' pour panneau '{file_name}'...")
+                        
+                        # Utiliser directement l'échelle de l'ancre si elle a été résolue
+                        # self.reference_pixel_scale_arcsec est mis à jour dans _worker après le solving de l'ancre.
+                        # Si l'ancre n'a pas pu être résolue, self.reference_pixel_scale_arcsec pourrait être None 
+                        # ou sa valeur initiale (qui pourrait aussi être None).
+                        scale_to_use_for_panel_fallback = self.reference_pixel_scale_arcsec 
+                        
+                        print(f"    DEBUG QM (_process_file - FallbackWCS): Scale estimée (depuis self.reference_pixel_scale_arcsec) pour fallback panneau '{file_name}': {scale_to_use_for_panel_fallback}")
+                    
                         solver_settings_for_panel_fallback = {
-                            "use_local_solver_priority": self.use_local_solver_priority,
-                            "api_key": self.api_key,
-                            "astap_path": self.astap_path,
-                            "astap_data_dir": self.astap_data_dir,
-                            "local_ansvr_path": self.local_ansvr_path,
-                            "scale_est_arcsec_per_pix": None,
-                            #"scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
-                            "scale_tolerance_percent": 20, 
-                            "ansvr_timeout_sec": getattr(self, 'ansvr_timeout_sec', 120),
-                            "astap_timeout_sec": getattr(self, 'astap_timeout_sec', 120),
-                            "astrometry_net_timeout_sec": getattr(self, 'astrometry_net_timeout_sec', 300),
-                            "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0)
+                            'local_solver_preference': self.local_solver_preference, # <<< UTILISER LA NOUVELLE PRÉFÉRENCE
+                            'api_key': self.api_key,
+                            'astap_path': self.astap_path,                           # Utiliser self.astap_path
+                            'astap_data_dir': self.astap_data_dir,                     # Utiliser self.astap_data_dir
+                            'astap_search_radius': self.astap_search_radius,           # <<< UTILISER self.astap_search_radius
+                            'local_ansvr_path': self.local_ansvr_path,                 # Utiliser self.local_ansvr_path
+                            'scale_est_arcsec_per_pix': scale_to_use_for_panel_fallback, # <<< UTILISER LA VARIABLE DÉFINIE CI-DESSUS
+                            'scale_tolerance_percent': 20, 
+                            'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                            'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                            'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+                            # La ligne "use_local_solver_priority" est supprimée
+                            # La ligne "astap_search_radius": getattr(self, 'astap_search_radius_config', 5.0) est supprimée
                         }
-                        
-                        # AstrometrySolver.solve attend le chemin du fichier FITS brut du panneau (file_path)
-                        # et le header de ce panneau (header_final_pour_retour), qui sera mis à jour.
-                        # img_data_array_loaded est le contenu de ce fichier, utilisé par l'ancien solve_image_wcs.
-                        # Pour la nouvelle approche, AstrometrySolver.solve s'attend à un CHEMIN.
-                        
+                        # DEBUG pour vérifier le dictionnaire
+                        print(f"DEBUG QM (_process_file - FallbackWCS): Contenu de solver_settings_for_panel_fallback pour '{file_name}':")
+                        for k_fb, v_fb in solver_settings_for_panel_fallback.items():
+                            if k_fb == 'api_key': print(f"    '{k_fb}': '{'Présente' if v_fb else 'Absente'}'")
+                            else: print(f"    '{k_fb}': '{v_fb}'")
+                        # --- FIN DEBUG ---
+                        # --- FIN MODIFICATION DU DICTIONNAIRE ---
+
                         wcs_panel_solved_by_solver = self.astrometry_solver.solve(
-                            image_path=file_path, # Le chemin du FITS original du panneau
-                            fits_header=header_final_pour_retour, # Le header de ce panneau
-                            settings=solver_settings_for_panel_fallback,
-                            update_header_with_solution=True # Mettre à jour le header_final_pour_retour
+                            image_path=file_path, 
+                            fits_header=header_final_pour_retour, 
+                            settings=solver_settings_for_panel_fallback, # Utilise le dictionnaire corrigé
+                            update_header_with_solution=True 
                         )
 
                         if wcs_panel_solved_by_solver and wcs_panel_solved_by_solver.is_celestial:
                             self.update_progress(f"       -> Fallback (via AstrometrySolver) RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
-                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
-                            wcs_final_pour_retour = wcs_panel_solved_by_solver # WCS résolu pour CE panneau
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success" # Mettre à jour le log de la méthode
+                            wcs_final_pour_retour = wcs_panel_solved_by_solver 
                             
-                            # Calculer la matrice M pour transformer CE panneau vers le WCS de l'ANCRE (self.reference_wcs_object)
                             matrice_M_calculee = self._calculate_M_from_wcs(
-                                wcs_panel_solved_by_solver,      # WCS source (ce panneau)
-                                self.reference_wcs_object,       # WCS cible (l'ancre de la mosaïque)
-                                prepared_img_apres_pretraitement.shape[:2] # Shape du panneau actuel
+                                wcs_panel_solved_by_solver,      
+                                self.reference_wcs_object,       
+                                prepared_img_apres_pretraitement.shape[:2] 
                             )
                             if matrice_M_calculee is None:
                                 self.update_progress(f"       -> ERREUR Fallback: Échec calcul Matrice M pour '{file_name}'. Ce panneau sera probablement mal placé.", "ERROR")
                                 align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
-                                # Si M échoue, même avec un WCS, le panneau ne peut pas être aligné correctement
-                                # sur l'ancre pour le Drizzle via pixmap.
-                                # On pourrait choisir de l'ignorer ou de le traiter comme une nouvelle "ancre" (complexe).
-                                # Pour l'instant, on marque l'échec.
-                                wcs_final_pour_retour = None # Invalider le WCS si M n'est pas calculable
+                                wcs_final_pour_retour = None 
                         else:
                             self.update_progress(f"       -> Fallback (via AstrometrySolver) ÉCHOUÉ pour '{file_name}'.", "WARN")
-                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail" # Mettre à jour le log
                             wcs_final_pour_retour = None 
                             matrice_M_calculee = None
                     else: 
                         self.update_progress(f"     -> AstrometrySolver non disponible pour fallback WCS pour '{file_name}'.", "ERROR")
-                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
-                        wcs_final_pour_retour = None; matrice_M_calculee = None
+                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver" # Mettre à jour le log
+                        wcs_final_pour_retour = None
+                        matrice_M_calculee = None
                 
                 elif not fa_success and not self.use_wcs_fallback_for_mosaic: # FastAligner a échoué et pas de fallback (mode "local_fast_only")
                     self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}' et pas de fallback WCS (mode 'local_fast_only').", "WARN")
@@ -2977,31 +3051,62 @@ class SeestarQueuedStacker:
                     wcs_final_pour_retour = None 
                     matrice_M_calculee = None
 
+
             # --- CAS B : Mosaïque Astrometry.net par Panneau ---
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
-                # ... (logique identique à V_FastAligner_Fallback_Logic, qui fonctionne pour ce mode) ...
-                self.update_progress(f"   [ProcessFile] Tentative Astrometry.net direct pour panneau '{file_name}'...", None)
-                align_method_log_msg = "AstrometryNet_Per_Panel_Attempted"
-                solve_wcs_func_local_direct = None
-                try: from ..alignment.astrometry_solver import solve_image_wcs as siw_f_direct; solve_wcs_func_local_direct = siw_f_direct
-                except ImportError: pass
+                self.update_progress(f"   [ProcessFile] Tentative résolution AstrometrySolver (mode par panneau) pour '{file_name}'...", None)
+                align_method_log_msg = "Astrometry_Per_Panel_Attempted"
+                
+                if self.astrometry_solver:
+                    # --- Construction du dictionnaire settings pour ce panneau ---
+                    print(f"DEBUG QM (_process_file - AstroPerPanel): Construction du dictionnaire 'settings' pour AstrometrySolver.solve() (panneau '{file_name}')...")
+                    
+                    solver_settings_for_this_panel = {
+                        'local_solver_preference': self.local_solver_preference,
+                        'api_key': self.api_key,
+                        'astap_path': self.astap_path,
+                        'astap_data_dir': self.astap_data_dir,
+                        'astap_search_radius': self.astap_search_radius,
+                        'local_ansvr_path': self.local_ansvr_path,
+                        'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec, 
+                        'scale_tolerance_percent': 20, 
+                        'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                        'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                        'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+                    }
+                    # DEBUG pour vérifier le dictionnaire
+                    print(f"DEBUG QM (_process_file - AstroPerPanel): Contenu de solver_settings_for_this_panel pour '{file_name}':")
+                    for k_panel, v_panel in solver_settings_for_this_panel.items():
+                        if k_panel == 'api_key': 
+                            print(f"    '{k_panel}': '{'Présente' if v_panel else 'Absente'}'")
+                        else: 
+                            print(f"    '{k_panel}': '{v_panel}'")
+                    # --- FIN DEBUG ---
 
-                if solve_wcs_func_local_direct:
-                    wcs_final_pour_retour = solve_wcs_func_local_direct(
-                        img_data_array_loaded, header_final_pour_retour, self.api_key,
-                        scale_est_arcsec_per_pix=self.reference_pixel_scale_arcsec,
-                        progress_callback=self.update_progress, update_header_with_solution=True
+                    wcs_final_pour_retour = self.astrometry_solver.solve(
+                        image_path=file_path,                 
+                        fits_header=header_final_pour_retour, 
+                        settings=solver_settings_for_this_panel, 
+                        update_header_with_solution=True      
                     )
-                    if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
-                        align_method_log_msg = "AstrometryNet_Per_Panel_Success"
-                        matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32) 
-                    else:
-                        align_method_log_msg = "AstrometryNet_Per_Panel_Fail"; wcs_final_pour_retour = None
-                else:
-                    align_method_log_msg = "AstrometryNet_Per_Panel_NoSolver"; wcs_final_pour_retour = None
-                # data_final_pour_retour est prepared_img_apres_pretraitement
 
-            # --- CAS C : Stacking Standard ou Drizzle Standard (Astroalign) ---
+                    if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
+                        align_method_log_msg = "Astrometry_Per_Panel_Success"
+                        matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32) 
+                        print(f"    [ProcessFile] AstrometrySolver (mode par panneau) RÉUSSI pour '{file_name}'. WCS obtenu.") 
+                    else:
+                        align_method_log_msg = "Astrometry_Per_Panel_Fail"
+                        wcs_final_pour_retour = None 
+                        matrice_M_calculee = None
+                        print(f"    [ProcessFile] AstrometrySolver (mode par panneau) ÉCHOUÉ pour '{file_name}'.") 
+                else: 
+                    self.update_progress(f"   [ProcessFile] AstrometrySolver non disponible pour '{file_name}' (mode par panneau).", "ERROR")
+                    align_method_log_msg = "Astrometry_Per_Panel_NoSolver"
+                    wcs_final_pour_retour = None
+                    matrice_M_calculee = None
+                
+                # data_final_pour_retour est prepared_img_apres_pretraitement (l'image originale prétraitée)
+                # car pour ce mode, on ne la warpe pas, c'est le WCS résolu qui est important.
             else: 
                 # ... (logique identique à V_FastAligner_Fallback_Logic) ...
                 self.update_progress(f"   [ProcessFile] Tentative Alignement Astroalign standard pour '{file_name}'...", None)
@@ -4799,12 +4904,13 @@ class SeestarQueuedStacker:
                          low_wht_soften_px=128,   
                          is_mosaic_run=False, api_key=None, 
                          mosaic_settings=None,
-                         # --- NOUVEAUX ARGUMENTS AJOUTÉS ICI ---
                          use_local_solver_priority=False,
                          astap_path="",
                          astap_data_dir="",
                          local_ansvr_path="",
-                         astap_search_radius_ui=5.0):# Valeurs par défaut si non fournis
+                         astap_search_radius=3.0,# Valeurs par défaut si non fournis
+                         local_solver_preference="none"): # <--- NOUVEAU (remplace use_local_solver_priority)
+        print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
                          
                 
     
@@ -4865,16 +4971,29 @@ class SeestarQueuedStacker:
         self.astap_path = str(astap_path)                         # Utilise l'argument de la fonction
         self.astap_data_dir = str(astap_data_dir)                   # Utilise l'argument de la fonction
         self.local_ansvr_path = str(local_ansvr_path)                 # Utilise l'argument de la fonction
+                # <<< NOUVEAU : Assignation des paramètres des solveurs locaux et du rayon ASTAP >>>
+        self.local_solver_preference = str(local_solver_preference) # Assurer str
+        self.astap_path = str(astap_path)
+        self.astap_data_dir = str(astap_data_dir)
+        self.astap_search_radius = float(astap_search_radius) # Assurer float
+        self.local_ansvr_path = str(local_ansvr_path)
         
+        # Ajouter des logs de débogage pour vérifier ces nouvelles assignations
+        print(f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'")
+        print(f"    [Solver Settings sur self via start_processing args] ASTAP Path: '{self.astap_path}'")
+        print(f"    [Solver Settings sur self via start_processing args] ASTAP Data Dir: '{self.astap_data_dir}'")
+        print(f"    [Solver Settings sur self via start_processing args] ASTAP Search Radius: {self.astap_search_radius}")
+        print(f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'")
+        # <<< FIN NOUVEAU >>>F
         # Optionnel: Tu pourrais aussi initialiser les timeouts ici si tu les ajoutes comme arguments à start_processing
         # Par exemple, si start_processing recevait `astap_timeout_sec_arg`:
         # self.astap_timeout_sec = int(astap_timeout_sec_arg) 
         # Pour l'instant, AstrometrySolver utilise des valeurs par défaut si non passées dans le dict settings.
         # --- Stocker le rayon de recherche ASTAP ---
         try:
-            self.astap_search_radius_config = float(astap_search_radius_ui)
+            self.astap_search_radius_config = float(astap_search_radius)
         except (ValueError, TypeError):
-            print(f"  WARN QM (start_processing): Valeur astap_search_radius_ui ('{astap_search_radius_ui}') invalide. Utilisation de 5.0° par défaut.")
+            print(f"  WARN QM (start_processing): Valeur astap_search_radius ('{astap_search_radius}') invalide. Utilisation de 5.0° par défaut.")
             self.astap_search_radius_config = 5.0 # Fallback sûr
         # ---  ---
 
@@ -4931,7 +5050,7 @@ class SeestarQueuedStacker:
             self.fa_min_ransac_raw = int(self.mosaic_settings_dict.get('fastalign_min_ransac', 4)) # Sera utilisé comme min_ransac_inliers_value_config
             self.fa_ransac_thresh = float(self.mosaic_settings_dict.get('fastalign_ransac_thresh', 3.0))
             self.fa_daofind_fwhm = float(self.mosaic_settings_dict.get('fastalign_dao_fwhm', 3.5))
-            self.fa_daofind_thr_sig = float(self.mosaic_settings_dict.get('fastalign_dao_thr_sig', 6.0))
+            self.fa_daofind_thr_sig = float(self.mosaic_settings_dict.get('fastalign_dao_thr_sig', 4.0))
             self.fa_max_stars_descr = int(self.mosaic_settings_dict.get('fastalign_dao_max_stars', 750))
             self.use_wcs_fallback_for_mosaic = (self.mosaic_alignment_mode == "local_fast_fallback")
             self.mosaic_drizzle_kernel = str(self.mosaic_settings_dict.get('kernel', "square"))
