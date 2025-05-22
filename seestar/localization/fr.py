@@ -271,6 +271,7 @@ FR_TRANSLATIONS = {
     'Yes': "Oui",
     'No': "Non",
     'Not Found!': "Non Trouvé !",
+    'unaligned_files_message_prefix': "Des images n'ont pas pu être alignées. Elles se trouvent dans :",
     
     
     # --- Weighting Info Display ---

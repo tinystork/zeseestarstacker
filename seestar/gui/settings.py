@@ -598,8 +598,8 @@ class SettingsManager:
                 self.drizzle_kernel = current_driz_kernel.lower()
             try:
                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
-                if not (0.01 <= self.drizzle_pixfrac <= 1.0):
-                    original = self.drizzle_pixfrac; self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 1.0)
+                if not (0.01 <= self.drizzle_pixfrac <= 2.0):
+                    original = self.drizzle_pixfrac; self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 2.0)
                     messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}")
             except (ValueError, TypeError):
                 original = self.drizzle_pixfrac; self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']

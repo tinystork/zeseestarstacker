@@ -38,7 +38,7 @@ class SeestarAligner:
     """
     NUM_IMAGES_FOR_AUTO_REF = 50 # Number of initial images to check for reference
 
-    def __init__(self):
+    def __init__(self, move_to_unaligned_callback=None):
         """Initialise l'aligneur avec des valeurs par défaut."""
         self.bayer_pattern = "GRBG"
         self.batch_size = 0
@@ -49,7 +49,7 @@ class SeestarAligner:
         self.stop_processing = False
         self.progress_callback = None
         self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
-    
+        self.move_to_unaligned_callback = move_to_unaligned_callback 
     
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
@@ -369,7 +369,8 @@ class SeestarAligner:
         except ValueError as ve: self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}"); return img_to_align, False
         except Exception as e: self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}"); traceback.print_exc(limit=3); return img_to_align, False
 
-# --- _align_batch (Unchanged - returns results, doesn't save aligned files here) ---
+
+    # ... (début de la méthode _align_batch) ...
     def _align_batch(self, images_data, original_indices, reference_image, input_folder, output_folder, unaligned_folder):
         """Aligns a batch of images (data provided) in parallel."""
         num_cores = os.cpu_count() or 1
@@ -378,27 +379,43 @@ class SeestarAligner:
 
         def align_single_image_task(args):
             idx_in_batch, (img_float_01, hdr, fname), original_file_index = args
+            original_file_path = os.path.join(input_folder, fname) # Chemin original complet
+
             if self.stop_processing:
                 return None
             try:
                 aligned_img, success = self._align_image(img_float_01, reference_image, fname)
                 if not success:
-                    original_path = os.path.join(input_folder, fname)
-                    out_path = os.path.join(unaligned_folder, f"unaligned_{original_file_index:04d}_{fname}")
-                    if os.path.exists(original_path):
-                        shutil.copy2(original_path, out_path)
-                    return (original_file_index, False, f"Échec alignement: {fname}")
+                    # MODIFIÉ : Utiliser le callback de déplacement si fourni
+                    if self.move_to_unaligned_callback:
+                        try:
+                            self.move_to_unaligned_callback(original_file_path) # Appeler le callback
+                            self.update_progress(f"   Image '{fname}' déplacée vers 'unaligned_by_stacker' de son dossier source.", "INFO_DETAIL")
+                        except Exception as move_cb_err:
+                            self.update_progress(f"⚠️ Erreur appel callback déplacement pour '{fname}': {move_cb_err}", "WARN")
+                            # Fallback : si le callback échoue, on copie dans l'ancien dossier unaligned_files
+                            self._fallback_copy_to_unaligned_folder(original_file_path, unaligned_folder, original_file_index)
+                    else:
+                        # Si aucun callback n'est fourni, on utilise l'ancien comportement de copie
+                        self._fallback_copy_to_unaligned_folder(original_file_path, unaligned_folder, original_file_index)
+                        
+                    return (original_file_index, False, f"Échec alignement: {fname}") # Retourner l'échec
+                
                 return (original_file_index, True, aligned_img, hdr)  # index, success, data, header
             except Exception as e:
                 error_msg = f"Erreur tâche alignement {fname}: {e}"
                 self.update_progress(f"❌ {error_msg}")
-                try:
-                    original_path = os.path.join(input_folder, fname)
-                    out_path = os.path.join(unaligned_folder, f"error_{original_file_index:04d}_{fname}")
-                    if os.path.exists(original_path):
-                        shutil.copy2(original_path, out_path)
-                except Exception:
-                    pass
+                # MODIFIÉ : Appeler le callback ou le fallback de copie en cas d'exception aussi
+                if self.move_to_unaligned_callback:
+                    try:
+                        self.move_to_unaligned_callback(original_file_path) # Appeler le callback
+                        self.update_progress(f"   Image '{fname}' (échec exception) déplacée vers 'unaligned_by_stacker' de son dossier source.", "INFO_DETAIL")
+                    except Exception as move_cb_err:
+                        self.update_progress(f"⚠️ Erreur appel callback déplacement pour '{fname}' (exception): {move_cb_err}", "WARN")
+                        self._fallback_copy_to_unaligned_folder(original_file_path, unaligned_folder, original_file_index)
+                else:
+                    self._fallback_copy_to_unaligned_folder(original_file_path, unaligned_folder, original_file_index)
+
                 return (original_file_index, False, None, None)  # index, success, data, header
 
         task_args = [(i, data_tuple, original_indices[i]) for i, data_tuple in enumerate(images_data)]
@@ -426,7 +443,28 @@ class SeestarAligner:
         fail_count = len(results) - success_count
         self.update_progress(f"🏁 Alignement lot terminé: {success_count} succès, {fail_count} échecs.")
         return results
-    
+
+
+    # ... (autres méthodes de SeestarAligner) ...
+
+    def _fallback_copy_to_unaligned_folder(self, original_file_path, unaligned_output_folder, original_file_index):
+        """
+        Copie un fichier original vers l'ancien dossier 'unaligned_files' dans l'output_folder.
+        Utilisé comme fallback si le callback de déplacement local n'est pas dispo ou échoue.
+        """
+        if os.path.exists(original_file_path):
+            try:
+                os.makedirs(unaligned_output_folder, exist_ok=True)
+                dest_path = os.path.join(unaligned_output_folder, f"unaligned_{original_file_index:04d}_{os.path.basename(original_file_path)}")
+                shutil.copy2(original_file_path, dest_path)
+                self.update_progress(f"   FallBack: Copié '{os.path.basename(original_file_path)}' vers '{os.path.basename(unaligned_output_folder)}'.", "INFO_DETAIL")
+            except Exception as fb_copy_err:
+                self.update_progress(f"⚠️ Erreur Fallback Copie '{os.path.basename(original_file_path)}' vers ancien dossier unaligned: {fb_copy_err}", "WARN")
+        else:
+            self.update_progress(f"   FallBack: Original '{os.path.basename(original_file_path)}' non trouvé pour copie.", "WARN")
+
+    # ... (le reste de la classe SeestarAligner) ...
+
 # --- Compatibility Function (Unchanged) ---
 def align_seestar_images_batch(*args, **kwargs):
     """(Compatibility) Use SeestarAligner().align_images(...) directly."""

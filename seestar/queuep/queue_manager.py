@@ -364,51 +364,45 @@ class SeestarQueuedStacker:
 
 
 
-
-
-
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
-
     def _move_to_unaligned(self, file_path):
         """
         Déplace un fichier dans un sous-dossier 'unaligned_by_stacker' 
         CRÉÉ DANS LE DOSSIER D'ORIGINE du fichier.
         Notifie l'utilisateur via update_progress (log spécial) la première fois 
         pour un dossier source.
-        MODIFIED: Notification utilisateur via log spécial et gestion warned_unaligned_source_folders.
-        Version: V_MoveUnaligned_LocalNotifyLog
+        Version: V_MoveUnaligned_RobustAdd
         """
-        if not file_path or not os.path.exists(file_path):
-            # L'appelant (probablement _process_file ou _worker) devrait gérer le log
-            # de l'échec si file_path est invalide dès le départ.
-            # self.update_progress(f"   ⚠️ [MoveUnaligned] Chemin fichier source invalide ou inexistant: {file_path}", "WARN")
-            print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Chemin fichier source invalide ou inexistant: {file_path}. Sortie.")
+        # --- NOUVELLE VÉRIFICATION DE LA PRÉSENCE DU FICHIER EN DÉBUT ---
+        if not file_path or not isinstance(file_path, str) or file_path.strip() == "":
+            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Chemin fichier source invalide ou vide: '{file_path}'. Sortie précoce.")
             return
 
+        original_folder_abs = os.path.abspath(os.path.dirname(file_path))
+        file_basename = os.path.basename(file_path)
+        
+        # Ce check doit être fait après avoir extrait le basename pour un meilleur log
+        if not os.path.exists(file_path):
+            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' (chemin: '{file_path}') N'EXISTE PAS au début de _move_to_unaligned. Abandon.")
+            return # Sortie si le fichier n'existe vraiment pas
+
+        unaligned_subfolder_name = "unaligned_by_stacker" 
+        destination_folder_for_this_file = os.path.join(original_folder_abs, unaligned_subfolder_name)
+
+        # --- Notification (message spécial) ---
+        # Cette notification se fait toujours si le dossier n'a pas déjà été averti,
+        # avant même de tenter le déplacement.
+        # Le set.add() pour le dossier sera fait plus tard, SEULEMENT si le déplacement réussit.
+        if original_folder_abs not in self.warned_unaligned_source_folders:
+            info_msg_for_ui = (
+                f"Les fichiers de '{os.path.basename(original_folder_abs)}' qui ne peuvent pas être alignés "
+                f"seront déplacés dans son sous-dossier : '{unaligned_subfolder_name}'. "
+                f"(Ce message apparaît une fois par dossier source par session)"
+            )
+            self.update_progress(f"UNALIGNED_INFO:{info_msg_for_ui}", "WARN") 
+            # Ne pas ajouter à warned_unaligned_source_folders ICI, mais plus tard si succès.
+        # --- Fin Notification ---
+
         try:
-            original_folder_abs = os.path.abspath(os.path.dirname(file_path)) # Chemin absolu pour le set
-            file_basename = os.path.basename(file_path)
-
-            unaligned_subfolder_name = "unaligned_by_stacker" 
-            destination_folder_for_this_file = os.path.join(original_folder_abs, unaligned_subfolder_name)
-
-            # --- Notification pour la première création (via update_progress avec un message spécial) ---
-            # Utiliser le chemin absolu du dossier original pour le suivi
-            if original_folder_abs not in self.warned_unaligned_source_folders:
-                # Message informatif pour le log de l'UI
-                # Le GUI interprétera "UNALIGNED_INFO:" pour un affichage spécial si nécessaire.
-                # Le message lui-même est maintenant plus descriptif.
-                info_msg_for_ui = (
-                    f"Files from '{os.path.basename(original_folder_abs)}' that cannot be aligned "
-                    f"will be moved to its subfolder: '{unaligned_subfolder_name}'. "
-                    f"(This message appears once per source folder per session)"
-                )
-                # On utilise "WARN" pour que le ProgressManager puisse le colorer s'il est configuré pour.
-                self.update_progress(f"UNALIGNED_INFO:{info_msg_for_ui}", "WARN") 
-                
-                self.warned_unaligned_source_folders.add(original_folder_abs)
-            # --- Fin Notification ---
-
             # S'assurer que le dossier de destination existe
             os.makedirs(destination_folder_for_this_file, exist_ok=True)
             
@@ -420,25 +414,61 @@ class SeestarQueuedStacker:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
                 unique_filename = f"{base}_unaligned_{timestamp}{ext}"
                 dest_path = os.path.join(destination_folder_for_this_file, unique_filename)
-                # Ce log est plus pour le debug console, pas besoin de surcharger l'UI avec ça.
-                print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Conflit de nom pour '{file_basename}', renommé en '{unique_filename}' dans '{destination_folder_for_this_file}'.")
+                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Conflit de nom pour '{file_basename}', renommé en '{unique_filename}' dans '{destination_folder_for_this_file}'.")
 
-            shutil.move(file_path, dest_path)
-            
-            # Message de log pour le déplacement effectif (peut rester plus discret)
-            self.update_progress(f"   Moved to unaligned: '{file_basename}' (now in its source folder's subfolder '{unaligned_subfolder_name}')", "INFO_DETAIL")
-            print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Fichier '{file_path}' déplacé vers '{dest_path}'.")
+            # --- Logique de déplacement/copie avec retry et pause ---
+            max_retries = 3
+            initial_delay_sec = 0.1 # Petite pause initiale
+            final_move_copy_success = False
+
+            for attempt in range(max_retries):
+                if not os.path.exists(file_path): # Le fichier peut disparaître entre les tentatives
+                    print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' n'existe plus à l'essai {attempt+1}. Abandon des tentatives.")
+                    break # Sortir de la boucle si le fichier a disparu
+
+                try:
+                    # Ajouter une petite pause pour laisser le système libérer le fichier
+                    if attempt > 0: # Pause uniquement après la première tentative
+                        time.sleep(initial_delay_sec * (2 ** (attempt - 1))) # Délai exponentiel
+                        print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Ré-essai {attempt+1}/{max_retries} pour déplacer '{file_basename}' après pause...")
+
+                    # Tenter de déplacer
+                    shutil.move(file_path, dest_path)
+                    final_move_copy_success = True
+                    break # Succès, sortir de la boucle
+
+                except (OSError, FileNotFoundError, shutil.Error) as e_move:
+                    print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement '{file_basename}' (essai {attempt+1}): {e_move}")
+                    if attempt == max_retries - 1: # Dernière tentative échouée, essayer de copier
+                        print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement après {max_retries} essais. Tentative de copie en dernier recours...")
+                        try:
+                            shutil.copy2(file_path, dest_path)
+                            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Copie de '{file_basename}' réussie en dernier recours.")
+                            final_move_copy_success = True # Considérer comme succès si la copie marche
+                        except Exception as e_copy:
+                            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec de la copie de '{file_basename}' aussi : {e_copy}")
+                            final_move_copy_success = False # La copie a aussi échoué
+            # --- Fin Nouvelle logique ---
+
+            if final_move_copy_success:
+                self.update_progress(f"   Déplacé vers non alignés: '{file_basename}' (maintenant dans '{unaligned_subfolder_name}' de son dossier source).", "INFO_DETAIL")
+                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' traité (déplacé/copié) vers '{dest_path}'.")
+                
+                # NOUVEAU : Ajouter le dossier source au set SEULEMENT si le déplacement/copie a réussi
+                self.warned_unaligned_source_folders.add(original_folder_abs)
+                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Dossier source '{original_folder_abs}' ajouté à warned_unaligned_source_folders.")
+
+            else: # Final_move_copy_success est False
+                self.update_progress(f"   ❌ Échec déplacement/copie fichier non-aligné '{file_basename}'.", "ERROR")
+                print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec définitif déplacement/copie de '{file_basename}'.")
+
 
         except Exception as e:
-            # Log d'erreur plus complet pour le fichier console et un message plus simple pour l'UI
-            error_details = f"Échec déplacement de '{file_path}' vers un sous-dossier local non aligné: {e}"
-            print(f"ERREUR QM [_move_to_unaligned_V_LocalNotifyLog]: {error_details}")
+            # Gérer toute autre exception inattendue lors de la préparation/finalisation
+            error_details = f"Erreur générale _move_to_unaligned pour '{file_basename}': {e}"
+            print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: {error_details}")
             traceback.print_exc(limit=1)
-            self.update_progress(f"   ❌ Erreur déplacement fichier non-aligné localement ({os.path.basename(file_path)}): {type(e).__name__}", "ERROR")
-
-
-
-
+            self.update_progress(f"   ❌ Erreur inattendue déplacement/copie fichier non-aligné '{file_basename}': {type(e).__name__}", "ERROR")
 
 
 
@@ -3288,12 +3318,14 @@ class SeestarQueuedStacker:
             self.update_progress(f"   ⚠️ Fichier '{file_name}' ignoré dans _process_file: {proc_err}", "WARN")
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"Error_{type(proc_err).__name__}", "Processing file error")
+            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) # Ajout info box
             return None, header_final_pour_retour, quality_scores, None, None, None 
         except Exception as e:
             self.update_progress(f"❌ Erreur critique traitement fichier {file_name} dans _process_file: {e}", "ERROR")
             print(f"ERREUR QM [_process_file V_FastAligner_Fallback_Implemented]: Exception: {e}"); traceback.print_exc(limit=3)
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"CritError_{type(e).__name__}", "Critical processing error")
+            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) # Ajout info box
             return None, header_final_pour_retour, quality_scores, None, None, None 
         finally:
             if img_data_array_loaded is not None: del img_data_array_loaded

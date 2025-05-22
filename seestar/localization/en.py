@@ -333,6 +333,8 @@ EN_TRANSLATIONS = {
     'Yes': "Yes",
     'No': "No",
     'Not Found!': "Not Found!", # Pour le cas où final_stack_path existe mais pas le fichier
+    'unaligned_files_message_prefix': "Some images could not be aligned. They can be found in:",
+    
     # --- Section Feathering ---
     'feathering_frame_title': "Feathering (Weight Map Smoothing)",
     'apply_feathering_label': "Enable Feathering by Weight Map",

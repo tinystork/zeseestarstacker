@@ -732,7 +732,7 @@ class SeestarStackerGUI:
         self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text="Scale:"); self.drizzle_scale_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_2x = ttk.Radiobutton(self.drizzle_scale_frame, text="x2", variable=self.drizzle_scale_var, value="2"); self.drizzle_radio_3x = ttk.Radiobutton(self.drizzle_scale_frame, text="x3", variable=self.drizzle_scale_var, value="3"); self.drizzle_radio_4x = ttk.Radiobutton(self.drizzle_scale_frame, text="x4", variable=self.drizzle_scale_var, value="4"); self.drizzle_radio_2x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_3x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_4x.pack(side=tk.LEFT, padx=3)
         wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5)); self.drizzle_wht_label = ttk.Label(wht_frame, text="WHT Threshold %:"); self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_wht_spinbox = ttk.Spinbox(wht_frame, from_=10.0, to=100.0, increment=5.0, textvariable=self.drizzle_wht_display_var, width=6, command=self._convert_spinbox_percent_to_float, format="%.0f"); self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
         kernel_frame = ttk.Frame(self.drizzle_options_frame); kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_kernel_label = ttk.Label(kernel_frame, text="Kernel:"); self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
-        pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text="Pixfrac:"); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text="Pixfrac:"); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=2.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction"); self.hp_frame.pack(fill=tk.X, pady=5, padx=5); hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text="Correct hot pixels", variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text="Threshold:"); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text="Neighborhood:"); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
         self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Quality Weighting"); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5); self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text="Enable weighting", variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text="Metrics:"); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text="SNR", variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text="Star Count", variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text="SNR Exp.:"); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text="Stars Exp.:"); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text="Min Weight:"); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text="Post-Processing Options"); self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5); self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Cleanup temporary files", variable=self.cleanup_temp_var); self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5); self.chroma_correction_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Edge Enhance", variable=self.apply_chroma_correction_var); self.chroma_correction_check.pack(side=tk.LEFT, padx=5, pady=5)
@@ -2906,7 +2906,8 @@ class SeestarStackerGUI:
             feathering_applied_this_run_backend = getattr(q_stacker, 'feathering_applied_in_session', False)
             low_wht_mask_applied_this_run_backend = getattr(q_stacker, 'low_wht_mask_applied_in_session', False)
             photutils_params_used_backend = getattr(q_stacker, 'photutils_params_used_in_session', {}).copy()
-
+            source_folders_with_unaligned_in_run = getattr(q_stacker, 'warned_unaligned_source_folders', set()) 
+            print(f"DEBUG GUI [_processing_finished]: warned_unaligned_source_folders (backend) contient {len(source_folders_with_unaligned_in_run)} dossiers.")
 
             print(f"  -> final_stack_path (backend): {final_stack_path}")
             print(f"  -> drizzle_active_session: {drizzle_active_session}, drizzle_mode: {drizzle_mode}")
@@ -3132,7 +3133,8 @@ class SeestarStackerGUI:
         elif processing_error_details and not final_stack_file_exists : # Erreur critique ET pas de fichier final
              messagebox.showerror(self.tr("error"), f"{status_text_for_log}") # Affiche juste l'erreur principale
         else: # Succès ou erreur avec fichier partiel -> Afficher le dialogue complet
-            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button)
+            # MODIFIÉ : Passage du nouveau paramètre
+            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run)
 
 
         # --- Réinitialisation de l'état de l'UI pour un nouveau traitement ---
@@ -3170,22 +3172,70 @@ class SeestarStackerGUI:
 
 
 ################################################################################################################################################
-    def _show_summary_dialog(self, summary_title, summary_text, can_open_output): # Ajout argument
-        """Displays a custom modal dialog with the processing summary."""
-        dialog = tk.Toplevel(self.root); dialog.title(summary_title); dialog.transient(self.root); dialog.grab_set(); dialog.resizable(False, False)
-        content_frame = ttk.Frame(dialog, padding="10 10 10 10"); content_frame.pack(expand=True, fill=tk.BOTH)
-        try: icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
-        except tk.TclError: icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
-        icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
-        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450); summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
-        button_frame = ttk.Frame(content_frame); button_frame.grid(row=1, column=0, columnspan=2, sticky="se", pady=(15, 0))
+  
 
-        # --- Bouton Ouvrir Dossier (Conditionnel) ---
-        # L'état est basé sur l'argument can_open_output passé depuis _processing_finished
+
+
+    def _show_summary_dialog(self, summary_title, summary_text, can_open_output, source_folders_with_unaligned_in_run: list[str] = None):
+        """
+        Displays a custom modal dialog with the processing summary.
+        Includes optional information about unaligned files and their paths.
+        Version: Fix TclError on button creation in Toplevel
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title(summary_title)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        content_frame = ttk.Frame(dialog, padding="10 10 10 10")
+        content_frame.pack(expand=True, fill=tk.BOTH)
+
+        # Icon and main summary text
+        try:
+            icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
+        except tk.TclError:
+            icon_label = ttk.Label(content_frame, text="i", font=("Arial", 16, "bold"), padding=(0, 0, 10, 0))
+        icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
+
+        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450)
+        summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
+
+        # --- Variables pour la disposition des éléments suivants ---
+        current_grid_row_for_next_elements = 1 # Démarre à la ligne 1 pour le message non aligné
+
+        # --- BLOC POUR LE MESSAGE FICHIERS NON ALIGNÉS ---
+        if source_folders_with_unaligned_in_run and len(source_folders_with_unaligned_in_run) > 0:
+            unaligned_message_text_prefix = self.tr("unaligned_files_message_prefix", default="Des images n'ont pas pu être alignées. Elles se trouvent dans :")
+            
+            unaligned_paths_list = []
+            for folder_path in sorted(list(source_folders_with_unaligned_in_run)):
+                unaligned_paths_list.append(os.path.join(folder_path, "unaligned_by_stacker"))
+            
+            full_unaligned_display_text = f"{unaligned_message_text_prefix}\n"
+            for i, path_example in enumerate(unaligned_paths_list):
+                full_unaligned_display_text += f"• {path_example}\n"
+
+            self.unaligned_info_label = ttk.Label(content_frame, text=full_unaligned_display_text.strip(), justify=tk.LEFT, wraplength=450)
+            try:
+                self.unaligned_info_label.config(foreground="red", font=('TkDefaultFont', 9, 'bold'))
+            except Exception as e_style:
+                print(f"DEBUG GUI: Erreur application style/couleur label unaligned: {e_style}. Utilisation gras simple.")
+                self.unaligned_info_label.config(font=('TkDefaultFont', 9, 'bold'))
+
+            self.unaligned_info_label.grid(row=current_grid_row_for_next_elements, column=0, columnspan=2, sticky="nw", padx=10, pady=(10, 10))
+            
+            current_grid_row_for_next_elements += 1 # Incrémenter la ligne pour les boutons
+        # --- FIN BLOC POUR LE MESSAGE FICHIERS NON ALIGNÉS ---
+
+
+        # --- Cadre pour les boutons (créé ici, avant grab_set) ---
+        button_frame = ttk.Frame(content_frame)
+        button_frame.grid(row=current_grid_row_for_next_elements, column=0, columnspan=2, sticky="se", pady=(15, 0)) # Positionnement final
+
+        # --- Boutons (créés ici, avant grab_set) ---
         open_button = ttk.Button(button_frame, text=self.tr("Open Output", default="Open Output"), command=self._open_output_folder, state=tk.NORMAL if can_open_output else tk.DISABLED)
-        open_button.pack(side=tk.LEFT, padx=(0, 10)) # Toujours packé, l'état le contrôle
-######################################################
-        # --- Boutons Copier et OK (inchangés) ---
+        open_button.pack(side=tk.LEFT, padx=(0, 10))
+
         def copy_action():
             try:
                 dialog.clipboard_clear()
@@ -3214,14 +3264,22 @@ class SeestarStackerGUI:
         ok_button.pack(side=tk.RIGHT)
         ok_button.focus_set()
 
+        # --- FIN DE LA CRÉATION DES WIDGETS ---
+
+        # --- Rendre la fenêtre modale et attendre ---
+        dialog.grab_set() # Rendre modale APRÈS la création de TOUS les widgets
+        dialog.update_idletasks() # Assurer que la géométrie est calculée avant le centrage
+        
         # Centrer dialogue (inchangé)
-        dialog.update_idletasks()
         root_x = self.root.winfo_x(); root_y = self.root.winfo_y(); root_width = self.root.winfo_width(); root_height = self.root.winfo_height()
         dialog_width = dialog.winfo_width(); dialog_height = dialog.winfo_height()
         pos_x = root_x + (root_width // 2) - (dialog_width // 2); pos_y = root_y + (root_height // 2) - (dialog_height // 2)
         dialog.geometry(f"+{pos_x}+{pos_y}")
-        self.root.wait_window(dialog)
-#######################################################################################################################################
+        
+        self.root.wait_window(dialog) # Attendre que la fenêtre modale soit fermée
+
+
+
 
 
 #########################################################################################################################################
