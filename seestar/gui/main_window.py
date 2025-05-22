@@ -2736,45 +2736,77 @@ class SeestarStackerGUI:
             self.update_progress_gui(f"ⓘ Ouverture du dossier: {output_folder}", None)
         except FileNotFoundError: messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier.\nCommande non trouvée pour votre système ({system}).")
         except Exception as e: print(f"Erreur ouverture dossier: {e}"); messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}"); self.update_progress_gui(f"❌ Erreur ouverture dossier: {e}", None)
-########################################################
-    # --- MÉTHODE update_progress_gui MODIFIÉE ---
+
+
+
+#############################################################################################################################################
+  
+  
+
+
+
+# --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
+
     def update_progress_gui(self, message, progress=None):
-        """Met à jour l'interface de progression, en gérant les messages Drizzle."""
-        # Gérer le message spécial pour le compteur de dossiers
+        """
+        Met à jour l'interface de progression.
+        MODIFIED: Détection et transmission du message UNALIGNED_INFO avec niveau WARN.
+        Version: V_UnalignedInfoLog_1
+        """
+        # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try: self.root.after_idle(self.update_additional_folders_display)
-            except tk.TclError: pass # Ignorer si fenêtre fermée
-            return # Ne pas afficher ce message dans le log
+            except tk.TclError: pass 
+            return 
+
+        actual_message_to_log = message
+        log_level_for_pm = None # Sera "WARN" pour notre message spécial, sinon None (par défaut)
+
+        # --- NOUVEAU : Gérer le message d'information sur les fichiers non alignés ---
+        unaligned_info_prefix = "UNALIGNED_INFO:"
+        if isinstance(message, str) and message.startswith(unaligned_info_prefix):
+            actual_message_to_log = message[len(unaligned_info_prefix):].strip() # Extraire le message réel
+            log_level_for_pm = "WARN" # Utiliser "WARN" pour que ProgressManager puisse le distinguer
+            print(f"DEBUG GUI [update_progress_gui]: Message UNALIGNED_INFO détecté: '{actual_message_to_log}' (niveau WARN)")
+        # --- FIN NOUVEAU ---
 
         # Procéder à la mise à jour via ProgressManager si disponible
         if hasattr(self, "progress_manager") and self.progress_manager:
             final_drizzle_active = False
-            # Détecter les messages indiquant l'étape Drizzle finale
-            if isinstance(message, str):
-                if "💧 Exécution Drizzle final" in message:
+            # Utiliser actual_message_to_log pour la détection Drizzle
+            if isinstance(actual_message_to_log, str): 
+                if "💧 Exécution Drizzle final" in actual_message_to_log:
                     final_drizzle_active = True
-                    message = "⏳ " + message # Ajouter indicateur visuel
+                    # Le préfixe emoji est déjà dans le message original du backend
+                    # actual_message_to_log = "⏳ " + actual_message_to_log 
 
             # Mettre à jour la barre et le log texte via ProgressManager
-            self.progress_manager.update_progress(message, progress)
+            # On passe le message (potentiellement modifié) et le niveau de log déterminé
+            self.progress_manager.update_progress(actual_message_to_log, progress, level=log_level_for_pm)
 
-            # Gérer le mode indéterminé de la barre de progression
+            # Gérer le mode indéterminé de la barre de progression (inchangé)
             try:
                 pb = self.progress_manager.progress_bar
-                if pb.winfo_exists():
-                    current_mode = pb['mode']
-                    if final_drizzle_active and current_mode != 'indeterminate':
-                        pb.config(mode='indeterminate')
-                        pb.start(15) # Vitesse animation (ms)
-                    elif not final_drizzle_active and current_mode == 'indeterminate':
-                        pb.stop()
-                        pb.config(mode='determinate')
-                        # Optionnel : Forcer la valeur si on a une progression
-                        if progress is not None:
-                            try: pb.configure(value=max(0.0, min(100.0, float(progress))))
-                            except ValueError: pass
+                if pb.winfo_exists(): 
+                     current_mode = pb['mode']
+                     if final_drizzle_active and current_mode != 'indeterminate':
+                         pb.config(mode='indeterminate')
+                         pb.start(15) 
+                     elif not final_drizzle_active and current_mode == 'indeterminate':
+                         pb.stop()
+                         pb.config(mode='determinate')
+                         if progress is not None:
+                             try: pb.configure(value=max(0.0, min(100.0, float(progress))))
+                             except ValueError: pass
             except (tk.TclError, AttributeError):
-                pass # Ignorer si widgets détruits
+                pass 
+        # else: # Si ProgressManager n'est pas encore prêt (ne devrait pas arriver après init)
+            # print(f"DEBUG GUI [update_progress_gui]: ProgressManager non disponible. Message: {actual_message_to_log}")
+
+
+
+
+
 #############################################################################################################################################
 
 

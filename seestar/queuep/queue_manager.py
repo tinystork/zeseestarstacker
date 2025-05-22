@@ -243,6 +243,9 @@ class SeestarQueuedStacker:
         self.perform_cleanup = True; self.use_quality_weighting = True 
         self.correct_hot_pixels = True; self.apply_chroma_correction = True
         self.apply_final_scnr = False 
+
+        #Info message pour l'utilisateur
+        self.warned_unaligned_source_folders = set()
         
         # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
@@ -360,36 +363,84 @@ class SeestarQueuedStacker:
 
 
 
+
+
+
+
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
     def _move_to_unaligned(self, file_path):
         """
-        Déplace un fichier dans le dossier des fichiers non alignés.
+        Déplace un fichier dans un sous-dossier 'unaligned_by_stacker' 
+        CRÉÉ DANS LE DOSSIER D'ORIGINE du fichier.
+        Notifie l'utilisateur via update_progress (log spécial) la première fois 
+        pour un dossier source.
+        MODIFIED: Notification utilisateur via log spécial et gestion warned_unaligned_source_folders.
+        Version: V_MoveUnaligned_LocalNotifyLog
         """
         if not file_path or not os.path.exists(file_path):
-            self.update_progress(f"   ⚠️ [MoveUnaligned] Chemin fichier source invalide ou inexistant: {file_path}", "WARN")
-            return
-
-        if not self.unaligned_folder: # self.unaligned_folder est défini dans initialize()
-            self.update_progress(f"   ⚠️ [MoveUnaligned] Dossier des non-alignés non défini. Impossible de déplacer {os.path.basename(file_path)}.", "WARN")
+            # L'appelant (probablement _process_file ou _worker) devrait gérer le log
+            # de l'échec si file_path est invalide dès le départ.
+            # self.update_progress(f"   ⚠️ [MoveUnaligned] Chemin fichier source invalide ou inexistant: {file_path}", "WARN")
+            print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Chemin fichier source invalide ou inexistant: {file_path}. Sortie.")
             return
 
         try:
-            os.makedirs(self.unaligned_folder, exist_ok=True) # S'assurer que le dossier existe
-            dest_path = os.path.join(self.unaligned_folder, os.path.basename(file_path))
+            original_folder_abs = os.path.abspath(os.path.dirname(file_path)) # Chemin absolu pour le set
+            file_basename = os.path.basename(file_path)
+
+            unaligned_subfolder_name = "unaligned_by_stacker" 
+            destination_folder_for_this_file = os.path.join(original_folder_abs, unaligned_subfolder_name)
+
+            # --- Notification pour la première création (via update_progress avec un message spécial) ---
+            # Utiliser le chemin absolu du dossier original pour le suivi
+            if original_folder_abs not in self.warned_unaligned_source_folders:
+                # Message informatif pour le log de l'UI
+                # Le GUI interprétera "UNALIGNED_INFO:" pour un affichage spécial si nécessaire.
+                # Le message lui-même est maintenant plus descriptif.
+                info_msg_for_ui = (
+                    f"Files from '{os.path.basename(original_folder_abs)}' that cannot be aligned "
+                    f"will be moved to its subfolder: '{unaligned_subfolder_name}'. "
+                    f"(This message appears once per source folder per session)"
+                )
+                # On utilise "WARN" pour que le ProgressManager puisse le colorer s'il est configuré pour.
+                self.update_progress(f"UNALIGNED_INFO:{info_msg_for_ui}", "WARN") 
+                
+                self.warned_unaligned_source_folders.add(original_folder_abs)
+            # --- Fin Notification ---
+
+            # S'assurer que le dossier de destination existe
+            os.makedirs(destination_folder_for_this_file, exist_ok=True)
+            
+            dest_path = os.path.join(destination_folder_for_this_file, file_basename)
             
             # Gérer les conflits de noms si le fichier existe déjà à destination
             if os.path.exists(dest_path):
-                base, ext = os.path.splitext(os.path.basename(file_path))
+                base, ext = os.path.splitext(file_basename)
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                unique_filename = f"{base}_{timestamp}{ext}"
-                dest_path = os.path.join(self.unaligned_folder, unique_filename)
-                self.update_progress(f"   [MoveUnaligned] Fichier de destination existait, renommage en: {unique_filename}", "DEBUG_DETAIL")
+                unique_filename = f"{base}_unaligned_{timestamp}{ext}"
+                dest_path = os.path.join(destination_folder_for_this_file, unique_filename)
+                # Ce log est plus pour le debug console, pas besoin de surcharger l'UI avec ça.
+                print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Conflit de nom pour '{file_basename}', renommé en '{unique_filename}' dans '{destination_folder_for_this_file}'.")
 
             shutil.move(file_path, dest_path)
-            # self.update_progress(f"   Moved to unaligned: {os.path.basename(file_path)}", "INFO_DETAIL") # Peut être trop verbeux pour l'UI
-            print(f"DEBUG QM [_move_to_unaligned]: Fichier '{file_path}' déplacé vers '{dest_path}'.")
+            
+            # Message de log pour le déplacement effectif (peut rester plus discret)
+            self.update_progress(f"   Moved to unaligned: '{file_basename}' (now in its source folder's subfolder '{unaligned_subfolder_name}')", "INFO_DETAIL")
+            print(f"DEBUG QM [_move_to_unaligned_V_LocalNotifyLog]: Fichier '{file_path}' déplacé vers '{dest_path}'.")
+
         except Exception as e:
-            self.update_progress(f"   ❌ Erreur déplacement fichier vers non-alignés ({os.path.basename(file_path)}): {e}", "ERROR")
-            print(f"ERREUR QM [_move_to_unaligned]: Échec déplacement de '{file_path}' vers '{self.unaligned_folder}': {e}")
+            # Log d'erreur plus complet pour le fichier console et un message plus simple pour l'UI
+            error_details = f"Échec déplacement de '{file_path}' vers un sous-dossier local non aligné: {e}"
+            print(f"ERREUR QM [_move_to_unaligned_V_LocalNotifyLog]: {error_details}")
+            traceback.print_exc(limit=1)
+            self.update_progress(f"   ❌ Erreur déplacement fichier non-aligné localement ({os.path.basename(file_path)}): {type(e).__name__}", "ERROR")
+
+
+
+
+
+
 
 
 
@@ -560,6 +611,7 @@ class SeestarQueuedStacker:
                 return False
         
         # --- Réinitialisations Communes (comme avant) ---
+        self.warned_unaligned_source_folders.clear()
         print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init]: Réinitialisation des autres états...")
         self.reference_wcs_object = self.reference_wcs_object # Conserver le WCS de réf si déjà plate-solvé (fait dans _worker avant initialize)
         self.intermediate_drizzle_batch_files = []
@@ -1340,10 +1392,39 @@ class SeestarQueuedStacker:
             print(f"    - drizzle_mode (standard): '{self.drizzle_mode}'")
 
         path_of_processed_ref_panel_basename = None # Pour skipper le panneau d'ancre si local_fast_fallback
+        
+        # Récupérer les paramètres Drizzle spécifiques à la mosaïque depuis mosaic_settings_dict
+        mosaic_drizzle_kernel_effective = str(self.mosaic_settings_dict.get('kernel', "square"))
+        mosaic_drizzle_pixfrac_effective = float(self.mosaic_settings_dict.get('pixfrac', 1.0))
+        mosaic_drizzle_fillval_effective = str(self.mosaic_settings_dict.get('fillval', "0.0"))
+        mosaic_drizzle_wht_threshold_effective = float(self.mosaic_settings_dict.get('wht_threshold', 0.01))
 
+        # Les paramètres globaux de Drizzle (self.drizzle_kernel, self.drizzle_pixfrac, etc.)
+        # sont déjà configurés par start_processing.
+        # Ici, nous les *surchargons* avec les valeurs spécifiques à la mosaïque si le mode mosaïque est actif.
+        if self.is_mosaic_run:
+            self.drizzle_kernel = mosaic_drizzle_kernel_effective
+            self.drizzle_pixfrac = mosaic_drizzle_pixfrac_effective
+            self.drizzle_fillval = mosaic_drizzle_fillval_effective # <-- Assurez-vous que cet attribut existe sur self
+            self.drizzle_wht_threshold = mosaic_drizzle_wht_threshold_effective # <-- Assurez-vous que cet attribut existe sur self
+
+            print(f"DEBUG QM [_worker]: Mode Mosaïque ACTIF. Surcharge des paramètres Drizzle globaux:")
+            print(f"  -> self.drizzle_kernel mis à '{self.drizzle_kernel}' (depuis mosaic_settings)")
+            print(f"  -> self.drizzle_pixfrac mis à '{self.drizzle_pixfrac}' (depuis mosaic_settings)")
+            print(f"  -> self.drizzle_fillval mis à '{self.drizzle_fillval}' (depuis mosaic_settings)")
+            print(f"  -> self.drizzle_wht_threshold mis à '{self.drizzle_wht_threshold}' (depuis mosaic_settings)")
+        else:
+            # S'assurer que les attributs spécifiques à la mosaïque (qui ne sont pas self.drizzle_*)
+            # ont une valeur par défaut, même si le mode mosaïque n'est pas actif.
+            # Cela évite des erreurs si on les lit par erreur dans d'autres branches de code.
+            # (Si vos attributs `mosaic_drizzle_kernel` etc. ne sont pas déjà initialisés dans `__init__`,
+            # il faudrait les initialiser ici. Actuellement, ils le sont via `start_processing` ou `initialize`
+            # donc ce bloc 'else' est pour la clarté mais pas strictement nécessaire ici si le flux est correct.)
+            pass # Les attributs self.mosaic_drizzle_xyz sont déjà settés par start_processing et ne sont pas lus ici.
         
 
         try:
+
             # =====================================================================================
             # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
             # =====================================================================================
@@ -1351,8 +1432,6 @@ class SeestarQueuedStacker:
             self.update_progress("⭐ Préparation image(s) de référence...")
             
             # --- Détermination du dossier et des fichiers pour la référence ---
-            # (Votre logique existante pour trouver folder_for_ref_scan et files_for_ref_scan)
-            # --- Exemple simplifié de cette logique ---
             files_for_ref_scan = [] 
             folder_for_ref_scan = None
             if self.current_folder and os.path.isdir(self.current_folder):
@@ -1360,7 +1439,6 @@ class SeestarQueuedStacker:
                 if files_for_ref_scan: folder_for_ref_scan = self.current_folder
             
             if not files_for_ref_scan and hasattr(self, 'additional_folders') and self.additional_folders:
-                # (Code pour chercher dans additional_folders si besoin)
                 first_additional = self.additional_folders[0]
                 if os.path.isdir(first_additional):
                     files_for_ref_scan_add = sorted([f for f in os.listdir(first_additional) if f.lower().endswith((".fit", ".fits"))])
@@ -1381,6 +1459,9 @@ class SeestarQueuedStacker:
             # self.aligner.reference_image_path est déjà setté dans start_processing
 
             print(f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
+            # _get_reference_image DOIT s'assurer que s'il ajoute _SOURCE_PATH à son header interne
+            # avant de sauvegarder reference_image.fit, il utilise os.path.basename().
+            # C'est la source de l'erreur "keyword too long".
             reference_image_data_for_global_alignment, reference_header_for_global_alignment = self.aligner._get_reference_image(
                 folder_for_ref_scan, 
                 files_for_ref_scan,
@@ -1389,19 +1470,45 @@ class SeestarQueuedStacker:
             if reference_image_data_for_global_alignment is None or reference_header_for_global_alignment is None:
                 raise RuntimeError("Échec critique obtention image/header de référence de base (globale/premier panneau).")
 
+            # Préparation du header qui sera utilisé pour le WCS de référence global
             self.reference_header_for_wcs = reference_header_for_global_alignment.copy() 
-            if reference_header_for_global_alignment.get('_SOURCE_PATH'):
-                source_path_val_ref = reference_header_for_global_alignment.get('_SOURCE_PATH')
-                self.reference_header_for_wcs['_REFSRCFN'] = (str(source_path_val_ref), "Base name of global ref source")
-                # Si c'est une mosaïque locale, le premier panneau traité est l'ancre.
-                if use_local_aligner_for_this_mosaic_run: # Ce flag est défini au début de _worker
-                    path_of_processed_ref_panel_basename = str(source_path_val_ref) # Pour le skipper plus tard
+            
+            # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
+            # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
+            # nous devons extraire le nom de base pour nos propres besoins.
+            # Le fichier reference_image.fit lui-même (s'il contient _SOURCE_PATH) doit avoir été sauvegardé
+            # par _get_reference_image en utilisant déjà un nom de base pour ce mot-clé.
+            original_source_path_from_ref_fits = reference_header_for_global_alignment.get('_SOURCE_PATH')
 
+            if original_source_path_from_ref_fits:
+                source_basename_for_wcs_ref = os.path.basename(str(original_source_path_from_ref_fits))
+                # Utiliser une clé claire pour indiquer que c'est le nom de base du fichier de référence
+                self.reference_header_for_wcs['REF_FNAME'] = (source_basename_for_wcs_ref, "Basename of the source file for global WCS reference")
+                
+                # Pour la logique de mosaïque locale, path_of_processed_ref_panel_basename
+                # doit aussi être juste le nom de base.
+                if use_local_aligner_for_this_mosaic_run: 
+                    path_of_processed_ref_panel_basename = source_basename_for_wcs_ref
+                    print(f"DEBUG QM [_worker]: Panneau d'ancre identifié par basename: {path_of_processed_ref_panel_basename}")
+            else:
+                # Si _SOURCE_PATH n'est pas dans le header de reference_image.fit, on ne peut pas le définir
+                # Cela pourrait arriver si _get_reference_image ne l'ajoute pas.
+                print("WARN QM [_worker]: Mot-clé '_SOURCE_PATH' non trouvé dans le header de l'image de référence globale.")
+                if use_local_aligner_for_this_mosaic_run:
+                     path_of_processed_ref_panel_basename = "unknown_reference_panel.fits" # Fallback
 
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
             reference_image_path_for_solver = os.path.join(ref_temp_processing_dir, "reference_image.fit")
             
+            # À ce stade, reference_image.fit doit exister, sinon l'erreur que tu as eue se produira.
+            if not os.path.exists(reference_image_path_for_solver):
+                # Cette erreur devrait être prévenue si _get_reference_image fonctionne correctement
+                # ET si la correction pour _SOURCE_PATH trop long est appliquée DANS _get_reference_image.
+                raise RuntimeError(f"CRITICAL: Fichier de référence '{reference_image_path_for_solver}' non trouvé après appel à _get_reference_image. Vérifier la logique de sauvegarde dans SeestarAligner._get_reference_image pour les headers longs.")
+
             print(f"DEBUG QM [_worker]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
+
+
 
             # --- 1.A Plate-solving de la référence ---
             self.update_progress("DEBUG WORKER: Section 1.A - Plate-solving de la référence...")
@@ -1713,29 +1820,63 @@ class SeestarQueuedStacker:
 
                     self.queue.task_done()
                 except Empty:
-                    self.update_progress("INFO: File d'attente vide, en attente de nouveaux fichiers ou fin de traitement...", None)
+                    # --- NOUVELLE LOGIQUE POUR GÉRER LES DOSSIERS ADDITIONNELS (DÉBUT) ---
+                    print(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. Vérification des dossiers additionnels.")
+                    new_files_added_from_additional_folder = 0
+                    folder_to_process_from_additional = None
+
+                    # Protéger l'accès à self.additional_folders avec le Lock
+                    with self.folders_lock:
+                        if self.additional_folders: # Si des dossiers additionnels sont en attente
+                            folder_to_process_from_additional = self.additional_folders.pop(0) # Prendre le premier et le retirer
+                            print(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel trouvé et retiré: '{os.path.basename(folder_to_process_from_additional)}'.")
+                            # Mettre à jour le statut dans l'UI immédiatement (même si pas de fichiers à l'intérieur)
+                            self.update_progress(f"🔍 Scan du dossier additionnel: {os.path.basename(folder_to_process_from_additional)}...", None)
+                        else:
+                            print(f"DEBUG QM [_worker / EmptyExcept]: self.additional_folders est vide (pas de dossiers additionnels en attente).")
+
+                    if folder_to_process_from_additional:
+                        # Mettre à jour self.current_folder pour que les logs d'erreurs éventuelles soient pertinents
+                        self.current_folder = folder_to_process_from_additional
+                        new_files_added_from_additional_folder = self._add_files_to_queue(folder_to_process_from_additional)
+                        print(f"DEBUG QM [_worker / EmptyExcept]: {new_files_added_from_additional_folder} nouveaux fichiers ajoutés de '{os.path.basename(folder_to_process_from_additional)}'.")
+                        
+                        # Notifier le GUI que le nombre de dossiers additionnels a diminué
+                        # (La mise à jour de l'affichage du nombre de dossiers dans l'UI via le callback)
+                        self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
+
+                        if new_files_added_from_additional_folder > 0:
+                            # Si de nouveaux fichiers ont été ajoutés, on continue la boucle
+                            # et la queue sera traitée à la prochaine itération.
+                            print(f"DEBUG QM [_worker / EmptyExcept]: Nouveaux fichiers détectés, continuer la boucle.")
+                            continue # <-- CRUCIAL: Retourne au début de la boucle while pour traiter les nouveaux fichiers
+                        else:
+                            # Si le dossier additionnel était vide de FITS, on log l'info.
+                            self.update_progress(f"   ℹ️ Dossier '{os.path.basename(folder_to_process_from_additional)}' ne contient aucun fichier FITS à traiter. Passons au suivant ou finalisons.")
+                            print(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel vide, pas de nouveaux fichiers à traiter.")
+                            # Si le dossier additionnel ne contenait pas de fichiers FITS, la queue reste vide.
+                            # On laisse la logique de fin de traitement prendre le relais à la prochaine itération.
+                            # Pas de 'continue' ici, pour permettre l'évaluation de la condition finale de sortie.
+                            pass 
+
+                    # Si aucun dossier additionnel n'a été trouvé OU si le dossier trouvé était vide de FITS
+                    # (et qu'on est arrivé ici sans 'continue' précédent)
                     if not self.additional_folders and self.queue.empty(): 
                         self.update_progress("INFO: Plus aucun fichier ni dossier supplémentaire. Fin de la boucle de traitement.", None)
-                        break 
-                    time.sleep(0.5) 
-                    continue 
-                except Exception as e_inner_loop_main: 
-                    self.update_progress(f"❌ ERREUR (Boucle Worker) pour {file_name_for_log}: {e_inner_loop_main}", "ERROR")
-                    print(f"ERREUR QM [_worker V_LoopFocus]: Exception dans boucle principale pour {file_name_for_log}: {e_inner_loop_main}")
-                    traceback.print_exc(limit=3)
-                    self.processing_error = f"Erreur boucle {file_name_for_log}: {e_inner_loop_main}"
-                    self.stop_processing = True 
-                    if file_path and os.path.exists(file_path) and hasattr(self, '_move_to_unaligned'):
-                         self._move_to_unaligned(file_path) 
-                finally:
-                    print(f"DEBUG QM [_worker LoopFinally iter {iteration_count}]: Début du finally interne de la boucle.")
-                    if 'file_path' in locals() and file_path is not None: del file_path # Libérer ref
-                    if 'item_result_tuple' in locals() and item_result_tuple is not None: del item_result_tuple # Libérer ref
-                    if iteration_count % 5 == 0: gc.collect() # GC occasionnel
-                    print(f"DEBUG QM [_worker V_LoopFocus - Loop Iter]: FIN Itération #{iteration_count}. "
-                          f"self.is_mosaic_run = {self.is_mosaic_run}. " # <<< Vérifier ici aussi
-                          f"Mosaic list APRÈS: {len(all_aligned_files_with_info_for_mosaic)}")
-            # --- Fin de la boucle while ---
+                        print(f"DEBUG QM [_worker / EmptyExcept]: Condition de sortie (self.additional_folders et queue vides) remplie. BREAK.")
+                        break # <-- CRUCIAL: Sortie normale de la boucle while
+                    else:
+                        # Si self.additional_folders n'est PAS vide (même après le pop d'un élément, d'autres ont pu être ajoutés à la volée),
+                        # ou si la queue n'est pas vide (si _add_files_to_queue a réussi),
+                        # alors on devrait continuer. Si on est ici, la queue est vide.
+                        # Cela signifie que self.additional_folders doit avoir des éléments pour que la boucle continue.
+                        # Sinon, c'est une boucle infinie si on arrive ici sans `break` ou `continue` et que la queue est vide.
+                        # Un `time.sleep` est alors nécessaire pour éviter le CPU à 100%.
+                        self.update_progress("INFO: File d'attente vide, en attente de nouveaux ...", None)
+                        print(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. self.additional_folders n'est PAS vide (il reste des dossiers à traiter), OU un 'continue' a été manqué. Sleep et revérification...")
+                        time.sleep(0.5) # Attendre un peu avant de refaire un `get` (pour éviter boucle serrée)
+                        continue # <-- CRUCIAL: Retourne au début de la boucle `while` pour re-tenter de prendre un item ou un autre dossier additionnel
+                    # --- NOUVELLE LOGIQUE POUR GÉRER LES DOSSIERS ADDITIONNELS (FIN) ---
 
             # ==============================================================
             # === SECTION 3 : TRAITEMENT FINAL APRÈS LA BOUCLE PRINCIPALE ===
@@ -4266,7 +4407,8 @@ class SeestarQueuedStacker:
         background_model_photutils = None
 
         # --- 1. Obtenir les données initiales (SCI et WHT) ---
-        # ... (cette section est inchangée, elle produit final_image_initial en float32 [0,1])
+        # Cette section prépare 'final_image_initial' (l'image SCI brute non normalisée 0-1)
+        # et 'final_wht_map_for_postproc' (carte de poids 2D) en fonction du mode de Drizzle.
         if is_true_incremental_drizzle_from_objects:
             print(f"DEBUG QM [_save_final_stack]: Lecture depuis self.incremental_drizzle_..._arrays pour Drizzle Incr. VRAI.")
             if not self.incremental_drizzle_sci_arrays or not self.incremental_drizzle_wht_arrays or \
@@ -4281,6 +4423,7 @@ class SeestarQueuedStacker:
                 wht_arrays_hw_list = self.incremental_drizzle_wht_arrays
                 num_output_channels = 3 
                 
+                # Calcul de l'image moyenne pondérée à partir des accumulateurs des objets Drizzle
                 sum_sci_times_wht_channels = [
                     sci_arrays_hw_list[c].astype(np.float64) * wht_arrays_hw_list[c].astype(np.float64)
                     for c in range(num_output_channels)
@@ -4288,26 +4431,71 @@ class SeestarQueuedStacker:
                 sum_wht_channels = [arr.astype(np.float64) for arr in wht_arrays_hw_list]
                 avg_img_channels_list = []
                 for c in range(num_output_channels):
-                    wht_ch = np.maximum(sum_wht_channels[c], 1e-9) 
+                    wht_ch = np.maximum(sum_wht_channels[c], 1e-9) # Éviter division par zéro
                     avg_ch_calc = sum_sci_times_wht_channels[c] / wht_ch
                     avg_img_channels_list.append(np.nan_to_num(avg_ch_calc, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32))
                 
-                final_image_initial_raw = np.stack(avg_img_channels_list, axis=-1) 
+                final_image_initial_raw = np.stack(avg_img_channels_list, axis=-1)
 
-                min_r_raw, max_r_raw = np.nanmin(final_image_initial_raw), np.nanmax(final_image_initial_raw)
-                if np.isfinite(min_r_raw) and np.isfinite(max_r_raw) and max_r_raw > min_r_raw:
-                     final_image_initial = (final_image_initial_raw - min_r_raw) / (max_r_raw - min_r_raw)
-                elif np.any(np.isfinite(final_image_initial_raw)):
-                     final_image_initial = np.full_like(final_image_initial_raw, 0.5)
+                # --- DÉBUT MODIFICATION : Clipping explicite après Drizzle ---
+                print(f"  DEBUG QM [_save_final_stack]: Clipping post-Drizzle pour gérer overshoot/undershoot de {self.drizzle_kernel}.")
+                # Ce clipping est crucial pour ramener les valeurs dans une plage [0,1]
+                # car les noyaux comme Lanczos peuvent produire des valeurs > 1 ou < 0.
+                final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, 1.0)
+                # --- FIN MODIFICATION ---
+
+                # --- DÉBUT MODIFICATION : Normalisation finale par percentiles ---
+                print(f"  DEBUG QM [_save_final_stack]: Application normalisation finale par percentiles.")
+                
+                # S'assurer que toutes les valeurs sont finies (remplace NaN/Inf par 0)
+                data_for_robust_norm = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+                # Si c'est une image couleur, travailler sur la luminance pour les statistiques des percentiles.
+                # C'est cette luminance qui déterminera les points noir/blanc pour l'ensemble de l'image.
+                if data_for_robust_norm.ndim == 3 and data_for_robust_norm.shape[2] == 3:
+                    luminance = 0.299 * data_for_robust_norm[..., 0] + 0.587 * data_for_robust_norm[..., 1] + 0.114 * data_for_robust_norm[..., 2]
                 else:
-                     final_image_initial = np.zeros_like(final_image_initial_raw)
-                final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
-                print(f"  -> Image Drizzle Incrémental VRAI (depuis objets) normalisée 0-1. Shape: {final_image_initial.shape}")
+                    luminance = data_for_robust_norm # Si N&B, la luminance est l'image elle-même.
+                
+                # Filtrer les valeurs non finies pour le calcul des percentiles.
+                finite_luminance = luminance[np.isfinite(luminance)]
+                
+                if finite_luminance.size > 0: # S'assurer qu'il y a des données utiles.
+                    # Calculer les points noir et blanc robustes (percentiles)
+                    # bp_val : 0.1% est un bon compromis pour l'astro (coupe le bruit de fond le plus bas)
+                    # wp_val : 99.9% est un bon compromis (inclut la plupart des étoiles sans être tiré par des pixels chauds aberrants)
+                    bp_val = np.percentile(finite_luminance, 0.1)
+                    wp_val = np.percentile(finite_luminance, 99.9)
 
-                temp_wht_hxwxc = np.stack(wht_arrays_hw_list, axis=-1).astype(np.float32)
-                final_wht_map_for_postproc = np.mean(temp_wht_hxwxc, axis=2).astype(np.float32)
-                final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
-                print(f"  -> Carte de poids 2D Drizzle Incr. VRAI (moyenne canaux) créée. Shape: {final_wht_map_for_postproc.shape}")
+                    # Ajuster la plage pour éviter division par zéro ou saturation rapide si la dynamique est faible
+                    if wp_val <= bp_val + 1e-6: # Ajouter une petite marge de sécurité pour la division
+                        if np.max(finite_luminance) > np.min(finite_luminance):
+                            # Si dynamique existe mais est très faible, étirer au max/min réels.
+                            bp_val = np.min(finite_luminance)
+                            wp_val = np.max(finite_luminance)
+                            if wp_val <= bp_val: wp_val = bp_val + 1e-6 # Assurer une petite dynamique (pour la division)
+                        else: # Image constante ou vide de dynamique.
+                            bp_val, wp_val = 0.0, 1.0 # Fallback pour éviter des erreurs, l'image sera gris moyen ou noir.
+                    
+                    # Appliquer la normalisation linéaire avec ces points
+                    final_image_initial = (data_for_robust_norm - bp_val) / (wp_val - bp_val)
+                    print(f"  DEBUG QM [_save_final_stack]: Normalisation finale basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}.")
+                    print(f"    Range après normalisation: [{np.nanmin(final_image_initial):.3f}, {np.nanmax(final_image_initial):.3f}]")
+
+                else: # Pas de données finies dans la luminance (image vide ou tout NaN/Inf)
+                    final_image_initial = np.zeros_like(final_image_initial_raw, dtype=np.float32)
+                    print("  DEBUG QM [_save_final_stack]: Normalisation finale: luminance vide, image mise à zéro.")
+            
+                    # Clipping final à la plage [0,1] et conversion en float32 (sécurité)
+                    final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
+                    # --- FIN MODIFICATION : Normalisation finale par percentiles ---
+
+                    print(f"  -> Image Drizzle Incrémental VRAI (depuis objets) normalisée 0-1. Shape: {final_image_initial.shape}")
+
+                    temp_wht_hxwxc = np.stack(wht_arrays_hw_list, axis=-1).astype(np.float32)
+                    final_wht_map_for_postproc = np.mean(temp_wht_hxwxc, axis=2).astype(np.float32)
+                    final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
+                    print(f"  -> Carte de poids 2D Drizzle Incr. VRAI (moyenne canaux) créée. Shape: {final_wht_map_for_postproc.shape}")
             except Exception as e_driz_obj_read:
                 self.update_progress(f"❌ Erreur lecture/calcul données Drizzle Incrémental VRAI: {e_driz_obj_read}", "ERROR")
                 self.processing_error = f"DrizIncrVrai:ErreurCalculDonnees:{e_driz_obj_read}"; self.final_stacked_path = None
@@ -4317,12 +4505,41 @@ class SeestarQueuedStacker:
             source_description = f"Drizzle {self.drizzle_mode} combiné" if is_drizzle_final_mode_with_data else "Mosaïque combinée"
             print(f"DEBUG QM [_save_final_stack]: Utilisation des données {source_description} (drizzle_final_sci/wht_data).")
             final_image_initial_raw = drizzle_final_sci_data 
-            min_r_raw, max_r_raw = np.nanmin(final_image_initial_raw), np.nanmax(final_image_initial_raw)
-            if np.isfinite(min_r_raw) and np.isfinite(max_r_raw) and max_r_raw > min_r_raw:
-                 final_image_initial = (final_image_initial_raw - min_r_raw) / (max_r_raw - min_r_raw)
-            elif np.any(np.isfinite(final_image_initial_raw)): final_image_initial = np.full_like(final_image_initial_raw, 0.5)
-            else: final_image_initial = np.zeros_like(final_image_initial_raw)
+            
+            # --- DÉBUT MODIFICATION : Clipping explicite après Drizzle (aussi pour Drizzle Final/Mosaïque) ---
+            print(f"  DEBUG QM [_save_final_stack]: Clipping post-Drizzle pour gérer overshoot/undershoot de {self.drizzle_kernel}.")
+            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, 1.0)
+            # --- FIN MODIFICATION ---
+
+            # --- DÉBUT MODIFICATION : Normalisation finale par percentiles (aussi pour Drizzle Final/Mosaïque) ---
+            print(f"  DEBUG QM [_save_final_stack]: Application normalisation finale par percentiles.")
+            data_for_robust_norm = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+            if data_for_robust_norm.ndim == 3 and data_for_robust_norm.shape[2] == 3:
+                luminance = 0.299 * data_for_robust_norm[..., 0] + 0.587 * data_for_robust_norm[..., 1] + 0.114 * data_for_robust_norm[..., 2]
+            else:
+                luminance = data_for_robust_norm
+            
+            finite_luminance = luminance[np.isfinite(luminance)]
+            if finite_luminance.size > 0:
+                bp_val = np.percentile(finite_luminance, 0.1)
+                wp_val = np.percentile(finite_luminance, 99.9)
+                if wp_val <= bp_val + 1e-6:
+                    if np.max(finite_luminance) > np.min(finite_luminance):
+                        bp_val = np.min(finite_luminance)
+                        wp_val = np.max(finite_luminance)
+                        if wp_val <= bp_val: wp_val = bp_val + 1e-6
+                    else:
+                        bp_val, wp_val = 0.0, 1.0
+                final_image_initial = (data_for_robust_norm - bp_val) / (wp_val - bp_val)
+                print(f"  DEBUG QM [_save_final_stack]: Normalisation finale basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}.")
+                print(f"    Range après normalisation: [{np.nanmin(final_image_initial):.3f}, {np.nanmax(final_image_initial):.3f}]")
+            else:
+                final_image_initial = np.zeros_like(final_image_initial_raw, dtype=np.float32)
+                print("  DEBUG QM [_save_final_stack]: Normalisation finale: luminance vide, image mise à zéro.")
+            
             final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
+            # --- FIN MODIFICATION : Normalisation finale par percentiles ---
+
             print(f"  -> Image Drizzle/Mosaïque (données fournies) normalisée 0-1. Shape: {final_image_initial.shape}")
             if drizzle_final_wht_data is not None:
                 if drizzle_final_wht_data.ndim == 3 and drizzle_final_wht_data.shape[2] == 3: 
@@ -4340,6 +4557,7 @@ class SeestarQueuedStacker:
                 final_wht_map_for_postproc = None
             self._close_memmaps() 
             print("DEBUG QM [_save_final_stack]: Memmaps (auraient été) fermés (mode Drizzle Final / Mosaïque).")
+
 
         else: # Mode SUM/W Classique (lecture depuis memmaps)
             print("DEBUG QM [_save_final_stack]: Utilisation des accumulateurs SUM/W (memmap) pour stacking classique.")
@@ -4417,8 +4635,21 @@ class SeestarQueuedStacker:
         if data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3 and _BN_AVAILABLE and getattr(self, 'bn_std_factor', 0.0) > 0:
             self.update_progress(f"🔬 Application Neutralisation Fond Globale (Facteur Std: {self.bn_std_factor:.1f})...")
             try:
-                data_after_postproc = neutralize_background_automatic(data_after_postproc, grid_size_str=self.bn_grid_size_str, percentile_low=self.bn_perc_low, percentile_high=self.bn_perc_high, std_factor=self.bn_std_factor, min_gain=self.bn_min_gain, max_gain=self.bn_max_gain)
-                self.bn_globale_applied_in_session = True; self.update_progress(f"   ✅ Neutralisation Fond Globale terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+                # Convertir la chaîne "16x16" en tuple (16, 16) avant de la passer.
+                grid_rows, grid_cols = map(int, self.bn_grid_size_str.split('x'))
+                data_after_postproc = neutralize_background_automatic(
+                    data_after_postproc,
+                    grid_size=(grid_rows, grid_cols), # <-- CHANGEMENT ICI
+                    bg_percentile_low=self.bn_perc_low,
+                    bg_percentile_high=self.bn_perc_high,
+                    std_factor_threshold=self.bn_std_factor, # <-- Correction du nom de l'argument ici aussi
+                    min_applied_gain=self.bn_min_gain, # <-- Correction du nom de l'argument ici aussi
+                    max_applied_gain=self.bn_max_gain  # <-- Correction du nom de l'argument ici aussi
+                )
+                self.bn_globale_applied_in_session = True
+                self.update_progress(f"   ✅ Neutralisation Fond Globale terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+
+
             except Exception as bn_err: self.update_progress(f"   ❌ Erreur Neutralisation Fond Globale: {bn_err}. Étape ignorée.")
         
         if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
@@ -4441,10 +4672,20 @@ class SeestarQueuedStacker:
         if getattr(self, 'apply_chroma_correction', True) and hasattr(self, 'chroma_balancer') and data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3:
             self.update_progress("🎨 Application Correction Chroma des Bords...")
             try:
-                self.chroma_balancer.border_size = getattr(self, 'cb_border_size', 50); self.chroma_balancer.blur_radius = getattr(self, 'cb_blur_radius', 15)
-                self.chroma_balancer.min_b_factor = getattr(self, 'cb_min_b_factor', 0.4); self.chroma_balancer.max_b_factor = getattr(self, 'cb_max_b_factor', 1.5)
-                data_after_postproc = self.chroma_balancer.correct(data_after_postproc); self.cb_applied_in_session = True
+            
+                # Mettez à jour les paramètres du chroma_balancer AVANT d'appeler la méthode normalize_stack
+                # Ces lignes sont importantes pour que les réglages de l'UI soient pris en compte
+                self.chroma_balancer.border_size = getattr(self, 'cb_border_size', 25)
+                self.chroma_balancer.blur_radius = getattr(self, 'cb_blur_radius', 8)
+                self.chroma_balancer.r_factor_min = 0.7 # Ajoutez r_factor_min/max si vous les utilisez dans l'UI ou dans les settings
+                self.chroma_balancer.r_factor_max = 1.3
+                self.chroma_balancer.b_factor_min = getattr(self, 'cb_min_b_factor', 0.4)
+                self.chroma_balancer.b_factor_max = getattr(self, 'cb_max_b_factor', 1.5)
+
+                data_after_postproc = self.chroma_balancer.normalize_stack(data_after_postproc) # <-- CHANGEMENT ICI
+                self.cb_applied_in_session = True
                 self.update_progress(f"   ✅ Correction Chroma des Bords terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
+            
             except Exception as cb_err: self.update_progress(f"   ❌ Erreur Correction Chroma: {cb_err}. Étape ignorée.")
             
         if getattr(self, 'apply_feathering', False) and _FEATHERING_AVAILABLE and wht_for_edge_effects is not None and data_after_postproc.ndim == 3:
