@@ -2706,7 +2706,9 @@ class SeestarQueuedStacker:
                     out_wht=out_wht_ch,
                     out_shape=output_shape_hw,
                     kernel=self.mosaic_drizzle_kernel, # Kernel spécifique mosaïque
-                    fillval=self.mosaic_drizzle_fillval # Fillval spécifique mosaïque
+                    fillval=self.mosaic_drizzle_fillval, # Fillval spécifique mosaïque
+                    max_ctx_id=0, # <<< AJOUT ICI pour désactiver le contexte et éviter l'allocation int32 massive
+                    disable_ctx=True # <<< AJOUT ICI, pour être explicite (peut être redondant avec max_ctx_id=0)
                 )
                 final_drizzlers_list.append(driz_ch)
             initialized = True
@@ -5295,6 +5297,8 @@ class SeestarQueuedStacker:
             self.mosaic_drizzle_pixfrac = float(self.mosaic_settings_dict.get('pixfrac', 1.0))
             self.mosaic_drizzle_fillval = str(self.mosaic_settings_dict.get('fillval', "0.0"))
             self.mosaic_drizzle_wht_threshold = float(self.mosaic_settings_dict.get('wht_threshold', 0.01))
+            # Surcharge du facteur d'échelle global pour la mosaïque
+            self.drizzle_scale = float(self.mosaic_settings_dict.get('mosaic_scale_factor', self.drizzle_scale)) 
             print(f"  -> Mode Mosaïque ACTIF. Align Mode: '{self.mosaic_alignment_mode}', Fallback WCS: {self.use_wcs_fallback_for_mosaic}")
             print(f"     Mosaic Drizzle: Kernel='{self.mosaic_drizzle_kernel}', Pixfrac={self.mosaic_drizzle_pixfrac:.2f}, Scale(global)={self.drizzle_scale}x")
         

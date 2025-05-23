@@ -7,12 +7,11 @@ import numpy as np
 # VALID_DRIZZLE_KERNELS est déjà défini dans votre fichier, je le garde.
 VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'gaussian', 'lanczos2', 'lanczos3'] 
 
+
+
 class MosaicSettingsWindow(tk.Toplevel):
-
-# DANS LA CLASSE MosaicSettingsWindow DANS seestar/gui/mosaic_gui.py
-
     def __init__(self, parent_gui):
-        print("DEBUG (MosaicSettingsWindow __init__ V4 - Trad): Initialisation...") # Log mis à jour
+        print("DEBUG (MosaicSettingsWindow __init__ V4 - Trad): Initialisation...")
         if not hasattr(parent_gui, 'root') or not parent_gui.root.winfo_exists():
              raise ValueError("Parent GUI invalide pour MosaicSettingsWindow")
 
@@ -21,36 +20,40 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.withdraw() 
 
         # --- 1. Récupération des settings existants et des valeurs par défaut ---
+        # (Ce bloc reste inchangé par rapport à sa position)
         initial_mosaic_state = getattr(self.parent_gui, 'mosaic_mode_active', False)
-        
         sm_defaults = self.parent_gui.settings.get_default_values() 
         default_mosaic_settings_from_sm = sm_defaults.get('mosaic_settings', {})
-        
         current_parent_mosaic_settings = getattr(self.parent_gui.settings, 'mosaic_settings', {})
         if not isinstance(current_parent_mosaic_settings, dict): 
             current_parent_mosaic_settings = {} 
-        
         self.settings = default_mosaic_settings_from_sm.copy()
         self.settings.update(current_parent_mosaic_settings) 
-        # print(f"DEBUG (MosaicSettingsWindow __init__ - Trad): self.settings fusionné: {self.settings}") # Commenté
 
-        # --- 2. Initialisation des Variables Tkinter locales ---
-        # (Les valeurs initiales viennent de self.settings, qui est déjà prêt)
+        # --- 2. Initialisation des Variables Tkinter locales (DÉPLACÉES EN DÉBUT) ---
+        # Toutes ces variables doivent être définies AVANT l'appel à self._build_ui()
         self.local_mosaic_active_var = tk.BooleanVar(value=self.settings.get('enabled', initial_mosaic_state))
         self.local_mosaic_align_mode_var = tk.StringVar(value=self.settings.get('alignment_mode', 'local_fast_fallback'))
-
         initial_api_key = getattr(self.parent_gui.settings, 'astrometry_api_key', '') 
         self.local_api_key_var = tk.StringVar(value=initial_api_key) 
 
+        # Ces variables pour les options Drizzle Mosaïque doivent être définies ici
+        self.local_mosaic_scale_var = tk.StringVar(value=str(self.settings.get('mosaic_scale_factor', 2))) # <<< CELLE-CI ÉTAIT LE PROBLÈME
         self.local_drizzle_kernel_var = tk.StringVar(value=self.settings.get('kernel', 'square'))
         self.local_drizzle_pixfrac_var = tk.DoubleVar(value=float(self.settings.get('pixfrac', 0.8)))
         self.local_drizzle_fillval_var = tk.StringVar(value=str(self.settings.get('fillval', '0.0')))
-        
         initial_wht_storage_value = float(self.settings.get('wht_threshold', 0.01))
         self.local_drizzle_wht_thresh_storage_var = tk.DoubleVar(value=initial_wht_storage_value)
         self.local_drizzle_wht_thresh_display_var = tk.StringVar(value=f"{initial_wht_storage_value * 100.0:.0f}")
+        # La trace_add doit être après l'initialisation de la variable, mais c'est ok.
         self.local_drizzle_wht_thresh_display_var.trace_add("write", self._convert_wht_display_to_storage)
 
+        # Les variables FastAligner DAO aussi, si elles sont utilisées dans _build_ui
+        self.fa_dao_fwhm_var = tk.DoubleVar(value=float(self.settings.get('fastalign_dao_fwhm', 3.5)))
+        self.fa_dao_thr_sig_var = tk.DoubleVar(value=float(self.settings.get('fastalign_dao_thr_sig', 4.0)))
+        self.fa_dao_max_stars_var = tk.DoubleVar(value=float(self.settings.get('fastalign_dao_max_stars', 750.0)))
+        
+        # Et les variables FastAligner ORB/RANSAC
         self.local_fastalign_orb_features_var = tk.DoubleVar(
             value=float(self.settings.get('fastalign_orb_features', 3000.0))
         )
@@ -63,14 +66,14 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.local_fastalign_ransac_thresh_var = tk.DoubleVar(
             value=float(self.settings.get('fastalign_ransac_thresh', 2.5))
         )
-        # print("DEBUG (MosaicSettingsWindow __init__ - Trad): tk.Variables locales initialisées.") # Commenté
+        # --- FIN INITIALISATION VARIABLES TKINTER LOCALES (DÉPLACÉES) ---
 
         # --- 3. Configuration de la fenêtre Toplevel ---
-        # Utilisation de self.parent_gui.tr() pour le titre
         self.title(self.parent_gui.tr("mosaic_settings_title", default="Mosaic Options"))
         self.transient(parent_gui.root) 
         
         # --- 4. Construction de l'Interface Utilisateur (Widgets) ---
+        # CET APPEL EST MAINTENANT SÛR, CAR TOUTES LES VARIABLES SONT DÉFINIES
         self._build_ui() 
         
         # --- 5. Mise à jour initiale de l'état des options ---
@@ -97,6 +100,8 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.grab_set() 
         
         print("DEBUG (MosaicSettingsWindow __init__ V4 - Trad): Fin initialisation.")
+
+
 
 
 ###################################################################################################################################################
@@ -233,6 +238,18 @@ class MosaicSettingsWindow(tk.Toplevel):
                   text=self.parent_gui.tr("mosaic_drizzle_wht_thresh_label", default="Low WHT Mask (%):"), # Nouvelle clé
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.wht_spinbox = ttk.Spinbox(wht_frame, from_=0, to=100, increment=1, textvariable=self.local_drizzle_wht_thresh_display_var, width=7, justify=tk.RIGHT, format="%.0f"); self.wht_spinbox.pack(side=tk.LEFT, padx=5)
+        # NOUVEAU BLOC : Facteur d'échelle Mosaïque
+        mosaic_scale_frame = ttk.Frame(self.drizzle_options_frame, padding=5)
+        mosaic_scale_frame.pack(fill=tk.X)
+        ttk.Label(mosaic_scale_frame,
+                text=self.parent_gui.tr("mosaic_scale_label", default="Scale Factor:"), # Nouvelle clé
+                width=15).pack(side=tk.LEFT, padx=(0,5))
+        
+        # Boutons radio x1, x2, x3, x4
+        for scale_val in ["1", "2", "3", "4"]:
+            ttk.Radiobutton(mosaic_scale_frame, text=f"x{scale_val}",
+                            variable=self.local_mosaic_scale_var, value=scale_val).pack(side=tk.LEFT, padx=3)
+
 
         # --- 6. Boutons OK / Annuler ---
         button_frame = ttk.Frame(main_frame, padding="5")
@@ -251,6 +268,9 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.fa_dao_thr_sig_var = tk.DoubleVar(value=float(self.settings.get('fastalign_dao_thr_sig', 4.0))) # Mettre un défaut plus bas
         self.fa_dao_max_stars_var = tk.DoubleVar(value=float(self.settings.get('fastalign_dao_max_stars', 750.0)))
         # --- Ajout des Spinbox pour les paramètres DAO ---
+
+
+
 
 ###################################################################################################################################################
 
@@ -347,22 +367,21 @@ class MosaicSettingsWindow(tk.Toplevel):
 
 
 
-
-
-# --- DANS LA CLASSE MosaicSettingsWindow ---
-
     def _on_ok(self):
         """
         Valide les entrées, sauvegarde les paramètres dans l'objet settings
         du parent_gui, et ferme la fenêtre.
+        Version: Include mosaic_scale_factor in settings_dict_to_save
         """
         print("DEBUG (MosaicSettingsWindow _on_ok V_APIKeyOptional_FixAllLocalVarNames): Bouton OK cliqué.") # DEBUG Version
 
         is_mosaic_enabled_ui = self.local_mosaic_active_var.get() 
-        selected_align_method = self.local_mosaic_align_mode_var.get() # <<< CORRIGÉ ICI
+        selected_align_method = self.local_mosaic_align_mode_var.get() 
         api_key_value = self.local_api_key_var.get().strip()
 
-        api_key_potentially_needed = False
+        # Initialisation de api_key_potentially_needed à False pour garantir sa définition
+        api_key_potentially_needed = False 
+        # Ce bloc de code existant est parfait, il va surcharger api_key_potentially_needed à True si les conditions sont remplies.
         if is_mosaic_enabled_ui:
             if selected_align_method == "astrometry_per_panel":
                 api_key_potentially_needed = True
@@ -384,7 +403,10 @@ class MosaicSettingsWindow(tk.Toplevel):
         print(f"DEBUG (MosaicSettingsWindow _on_ok): parent_gui.mosaic_mode_active mis à {self.parent_gui.mosaic_mode_active}")
         print(f"DEBUG (MosaicSettingsWindow _on_ok): parent_gui.settings.mosaic_mode_active mis à {self.parent_gui.settings.mosaic_mode_active}")
 
-        # --- CORRECTION DES NOMS DE VARIABLES ICI AUSSI pour correspondre à __init__ ---
+        # --- CONSTRUTION DU DICTIONNAIRE settings_dict_to_save ---
+        # Lire la valeur du local_mosaic_scale_var (qui est un tk.StringVar) et la convertir en int
+        mosaic_scale_factor_value = int(self.local_mosaic_scale_var.get()) # Lecture et conversion en int
+
         settings_dict_to_save = {
             'enabled': is_mosaic_enabled_ui, 
             'alignment_mode': selected_align_method,
@@ -392,22 +414,19 @@ class MosaicSettingsWindow(tk.Toplevel):
             'fastalign_min_abs_matches': self.local_fastalign_min_abs_matches_var.get(),
             'fastalign_min_ransac': self.local_fastalign_min_ransac_var.get(), 
             'fastalign_ransac_thresh': self.local_fastalign_ransac_thresh_var.get(),
-            # Pour les paramètres DAO, vous les aviez nommés self.fa_dao_xxx_var dans __init__ d'après
-            # votre précédent message sur _build_ui, mais dans votre __init__ actuel ils sont
-            # self.local_fastalign_..._var. Je vais supposer que les variables Tkinter
-            # pour DAO sont aussi préfixées par local_fastalign_ dans votre __init__.
-            # Si ce n'est pas le cas (si elles sont bien self.fa_dao_fwhm_var etc.), il faudra ajuster ici.
-            # Pour l'instant, je suppose qu'elles suivent le même pattern :
-            'fastalign_dao_fwhm': getattr(self, 'local_fastalign_dao_fwhm_var', tk.DoubleVar(value=3.5)).get(), # Exemple avec getattr et fallback
-            'fastalign_dao_thr_sig': getattr(self, 'local_fastalign_dao_thr_sig_var', tk.DoubleVar(value=8.0)).get(),
-            'fastalign_dao_max_stars': getattr(self, 'local_fastalign_dao_max_stars_var', tk.DoubleVar(value=750.0)).get(),
+            # Pour les paramètres DAO, on utilise getattr avec un fallback si les variables Tkinter n'existent pas
+            'fastalign_dao_fwhm': getattr(self, 'fa_dao_fwhm_var', tk.DoubleVar(value=3.5)).get(), 
+            'fastalign_dao_thr_sig': getattr(self, 'fa_dao_thr_sig_var', tk.DoubleVar(value=8.0)).get(),
+            'fastalign_dao_max_stars': getattr(self, 'fa_dao_max_stars_var', tk.DoubleVar(value=750.0)).get(),
             
             'kernel': self.local_drizzle_kernel_var.get(), 
             'pixfrac': self.local_drizzle_pixfrac_var.get(),
             'fillval': self.local_drizzle_fillval_var.get(),
-            'wht_threshold': self.local_drizzle_wht_thresh_storage_var.get(), 
+            'wht_threshold': self.local_drizzle_wht_thresh_storage_var.get(),
+            
+            'mosaic_scale_factor': mosaic_scale_factor_value, # <-- NOUVELLE LIGNE : Ajout de la valeur lue
         }
-        # --- FIN CORRECTION NOMS DE VARIABLES ---
+        # --- FIN CONSTRUCTION DU DICTIONNAIRE ---
         
         self.parent_gui.settings.mosaic_settings = settings_dict_to_save
         self.parent_gui.settings.astrometry_api_key = api_key_value 
@@ -420,9 +439,6 @@ class MosaicSettingsWindow(tk.Toplevel):
 
         self.grab_release()
         self.destroy()
-
-
-
 
 
 
