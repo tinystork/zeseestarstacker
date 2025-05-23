@@ -788,7 +788,7 @@ class SettingsManager:
         MODIFIED: Ajout de save_final_as_float32.
         """
         settings_data = {
-            'version': "2.3.1", # Version mise à jour pour refléter l'ajout
+            'version': "2.5.5", # Version mise à jour pour refléter l'ajout
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),

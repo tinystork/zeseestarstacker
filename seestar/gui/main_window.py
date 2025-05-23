@@ -2743,6 +2743,45 @@ class SeestarStackerGUI:
   
   
 
+    def _open_unaligned_folder_from_summary(self, folder_path):
+        """
+        Ouvre le dossier 'unaligned_by_stacker' spécifié dans l'explorateur de fichiers système.
+        Cette méthode est appelée par le bouton "Open Unaligned" dans le résumé.
+        """
+        if not folder_path:
+            messagebox.showwarning(self.tr("warning"), self.tr("unaligned_folder_path_missing", default="Le chemin du dossier des non-alignés n'est pas défini."))
+            return
+        
+        # S'assurer que le chemin est absolu
+        abs_folder_path = os.path.abspath(folder_path)
+
+        if not os.path.isdir(abs_folder_path):
+            messagebox.showerror(self.tr("error"), self.tr("unaligned_folder_not_found", default="Le dossier des non-alignés n'existe pas ou n'est pas un répertoire :") + f"\n{abs_folder_path}")
+            return
+        
+        try:
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(abs_folder_path)
+            elif system == "Darwin": # macOS
+                subprocess.Popen(["open", abs_folder_path])
+            else: # Linux et autres (xdg-open est courant)
+                subprocess.Popen(["xdg-open", abs_folder_path])
+            
+            self.update_progress_gui(self.tr("unaligned_folder_opened", default="Ouverture du dossier des non-alignés :") + f" {abs_folder_path}", None)
+
+        except FileNotFoundError:
+            messagebox.showerror(self.tr("error"), self.tr("cannot_open_folder_command_not_found", default="Impossible d'ouvrir le dossier. Commande système non trouvée pour votre OS."))
+        except Exception as e:
+            print(f"Erreur ouverture dossier non-alignés: {e}"); traceback.print_exc()
+            messagebox.showerror(self.tr("error"), self.tr("error_opening_unaligned_folder", default="Une erreur est survenue lors de l'ouverture du dossier des non-alignés :") + f"\n{e}")
+            self.update_progress_gui(self.tr("error_opening_unaligned_folder_short", default="Erreur ouverture dossier non-alignés."), "ERROR")
+
+  
+  
+###############################################################################################################################################
+
+
 
 
 # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
@@ -2811,8 +2850,6 @@ class SeestarStackerGUI:
 
 
 
-
-
     def _processing_finished(self):
         """
         Actions finales à exécuter dans le thread GUI après la fin ou l'arrêt
@@ -2827,6 +2864,9 @@ class SeestarStackerGUI:
         print("DEBUG GUI [_processing_finished]: Entrée dans la méthode.")
         self.processing = False # Marquer que le traitement GUI est terminé
 
+        # Initialisation de la variable pour la rendre toujours définie
+        source_folders_with_unaligned_in_run = set() 
+        
         # --- Arrêter le timer de la barre de progression et finaliser la barre ---
         if hasattr(self, 'progress_manager') and self.progress_manager:
             self.progress_manager.stop_timer()
@@ -2842,7 +2882,7 @@ class SeestarStackerGUI:
                      # hasattr vérifie si queued_stacker a été initialisé,
                      # getattr vérifie si processing_error a été défini à autre chose que None.
                      # Si processing_error est None (pas d'erreur) OU si l'erreur n'était pas True (convention bizarre), on met à 100.
-                     if not hasattr(self, 'queued_stacker') or not getattr(self.queued_stacker, 'processing_error', True):
+                     if not hasattr(self, "queued_stacker") or not getattr(self.queued_stacker, "processing_error", True):
                          pb.configure(value=100)
                      # else: Laisser la barre de progression à sa valeur actuelle si erreur
             except (tk.TclError, AttributeError) as e_pb:
@@ -2876,7 +2916,9 @@ class SeestarStackerGUI:
         feathering_applied_this_run_backend = False # Ajout pour feathering
         low_wht_mask_applied_this_run_backend = False # Ajout pour Low WHT Mask
         photutils_params_used_backend = {}
-
+        
+        # Récupérer le chemin du dossier d'entrée principal pour le bouton "Open Unaligned"
+        input_folder_path_for_unaligned_button = self.input_path.get() # <-- NOUVELLE LIGNE AJOUTÉE
 
         if hasattr(self, "queued_stacker") and self.queued_stacker is not None:
             q_stacker = self.queued_stacker # Alias pour lisibilité
@@ -2888,6 +2930,10 @@ class SeestarStackerGUI:
             was_stopped_by_user = getattr(q_stacker, 'stop_processing_flag_for_gui', False) # Utiliser le flag dédié
             processing_error_details = getattr(q_stacker, 'processing_error', None)
             
+            # NOUVELLE POSITION : Récupération du set de dossiers avec fichiers non alignés
+            source_folders_with_unaligned_in_run = getattr(q_stacker, 'warned_unaligned_source_folders', set()) 
+            print(f"DEBUG GUI [_processing_finished]: warned_unaligned_source_folders (backend) contient {len(source_folders_with_unaligned_in_run)} dossiers.")
+
             # Compteurs
             images_in_cumulative_from_backend = getattr(q_stacker, 'images_in_cumulative_stack', 0)
             aligned_count = getattr(q_stacker, 'aligned_files_count', 0)
@@ -2906,8 +2952,7 @@ class SeestarStackerGUI:
             feathering_applied_this_run_backend = getattr(q_stacker, 'feathering_applied_in_session', False)
             low_wht_mask_applied_this_run_backend = getattr(q_stacker, 'low_wht_mask_applied_in_session', False)
             photutils_params_used_backend = getattr(q_stacker, 'photutils_params_used_in_session', {}).copy()
-            source_folders_with_unaligned_in_run = getattr(q_stacker, 'warned_unaligned_source_folders', set()) 
-            print(f"DEBUG GUI [_processing_finished]: warned_unaligned_source_folders (backend) contient {len(source_folders_with_unaligned_in_run)} dossiers.")
+
 
             print(f"  -> final_stack_path (backend): {final_stack_path}")
             print(f"  -> drizzle_active_session: {drizzle_active_session}, drizzle_mode: {drizzle_mode}")
@@ -2916,7 +2961,11 @@ class SeestarStackerGUI:
             print(f"  -> images_in_cumulative_from_backend: {images_in_cumulative_from_backend}")
             print(f"  -> Compteurs: Aligned={aligned_count}, FailAlign={failed_align_count}, FailStack={failed_stack_count}, Skipped={skipped_count}, Processed={processed_files_count}")
             print(f"  -> Total Exposure: {total_exposure:.2f}s")
+
             print(f"  -> Post-Proc Flags (Backend): PB2D={photutils_applied_this_run_backend}, BNGlob={bn_globale_applied_this_run_backend}, CB={cb_applied_in_session_backend}, SCNR={scnr_applied_this_run_backend}, Crop={crop_applied_this_run_backend}, Feather={feathering_applied_this_run_backend}, LowWHT={low_wht_mask_applied_this_run_backend}")
+
+
+
             if photutils_applied_this_run_backend: print(f"     -> Params PB2D: {photutils_params_used_backend}")
 
 
@@ -3134,7 +3183,7 @@ class SeestarStackerGUI:
              messagebox.showerror(self.tr("error"), f"{status_text_for_log}") # Affiche juste l'erreur principale
         else: # Succès ou erreur avec fichier partiel -> Afficher le dialogue complet
             # MODIFIÉ : Passage du nouveau paramètre
-            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run)
+            self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run, input_folder_path_for_unaligned_button)
 
 
         # --- Réinitialisation de l'état de l'UI pour un nouveau traitement ---
@@ -3169,23 +3218,21 @@ class SeestarStackerGUI:
 
 
 
-
-
 ################################################################################################################################################
   
 
 
-
-    def _show_summary_dialog(self, summary_title, summary_text, can_open_output, source_folders_with_unaligned_in_run: list[str] = None):
+    def _show_summary_dialog(self, summary_title, summary_text, can_open_output, source_folders_with_unaligned_in_run: list[str] = None, input_folder_path_for_unaligned_button: str = None):
         """
         Displays a custom modal dialog with the processing summary.
-        Includes optional information about unaligned files and their paths.
-        Version: Fix TclError on button creation in Toplevel
+        Includes optional information about unaligned files and their paths,
+        and a button to open the unaligned folder.
+        Version: Fix Open Unaligned Button Packing
         """
         dialog = tk.Toplevel(self.root)
         dialog.title(summary_title)
-        dialog.transient(self.root)
-        dialog.resizable(False, False)
+        dialog.transient(self.root)  # Associate with main window
+        dialog.resizable(False, False) # Prevent resizing
 
         content_frame = ttk.Frame(dialog, padding="10 10 10 10")
         content_frame.pack(expand=True, fill=tk.BOTH)
@@ -3207,35 +3254,50 @@ class SeestarStackerGUI:
         if source_folders_with_unaligned_in_run and len(source_folders_with_unaligned_in_run) > 0:
             unaligned_message_text_prefix = self.tr("unaligned_files_message_prefix", default="Des images n'ont pas pu être alignées. Elles se trouvent dans :")
             
+            # Construire la liste des chemins formatés
             unaligned_paths_list = []
-            for folder_path in sorted(list(source_folders_with_unaligned_in_run)):
+            for folder_path in sorted(list(source_folders_with_unaligned_in_run)): # Trier les chemins pour un affichage ordonné
                 unaligned_paths_list.append(os.path.join(folder_path, "unaligned_by_stacker"))
             
             full_unaligned_display_text = f"{unaligned_message_text_prefix}\n"
+            # Ajouter un formatage simple pour la liste des chemins
             for i, path_example in enumerate(unaligned_paths_list):
-                full_unaligned_display_text += f"• {path_example}\n"
+                full_unaligned_display_text += f"• {path_example}\n" # Utilisez "• " pour des puces simples
 
-            self.unaligned_info_label = ttk.Label(content_frame, text=full_unaligned_display_text.strip(), justify=tk.LEFT, wraplength=450)
+            # Créer un Label pour le message non aligné
+            self.unaligned_info_label = ttk.Label(content_frame, text=full_unaligned_display_text.strip(), justify=tk.LEFT, wraplength=450) # .strip() pour éviter un saut de ligne en trop
+
+            # Appliquer le style rouge et gras
             try:
                 self.unaligned_info_label.config(foreground="red", font=('TkDefaultFont', 9, 'bold'))
             except Exception as e_style:
                 print(f"DEBUG GUI: Erreur application style/couleur label unaligned: {e_style}. Utilisation gras simple.")
-                self.unaligned_info_label.config(font=('TkDefaultFont', 9, 'bold'))
+                self.unaligned_info_label.config(font=('TkDefaultFont', 9, 'bold')) # Juste gras en dernier recours
 
+            # Placer le label dans la grille. Il se trouve sur la ligne 'current_grid_row_for_next_elements'.
             self.unaligned_info_label.grid(row=current_grid_row_for_next_elements, column=0, columnspan=2, sticky="nw", padx=10, pady=(10, 10))
             
             current_grid_row_for_next_elements += 1 # Incrémenter la ligne pour les boutons
         # --- FIN BLOC POUR LE MESSAGE FICHIERS NON ALIGNÉS ---
 
 
-        # --- Cadre pour les boutons (créé ici, avant grab_set) ---
+        # --- Cadre pour les boutons ---
         button_frame = ttk.Frame(content_frame)
-        button_frame.grid(row=current_grid_row_for_next_elements, column=0, columnspan=2, sticky="se", pady=(15, 0)) # Positionnement final
+        button_frame.grid(row=current_grid_row_for_next_elements, column=0, columnspan=2, sticky="se", pady=(15, 0))
 
-        # --- Boutons (créés ici, avant grab_set) ---
-        open_button = ttk.Button(button_frame, text=self.tr("Open Output", default="Open Output"), command=self._open_output_folder, state=tk.NORMAL if can_open_output else tk.DISABLED)
-        open_button.pack(side=tk.LEFT, padx=(0, 10))
+        # --- Boutons packés de DROITE à GAUCHE pour un alignement cohérent ---
 
+        # 1. Bouton OK (le plus à droite)
+        ok_button = ttk.Button(
+            button_frame,
+            text="OK",
+            command=dialog.destroy,
+            style="Accent.TButton" if "Accent.TButton" in ttk.Style().element_names() else "TButton",
+        )
+        ok_button.pack(side=tk.RIGHT) 
+        ok_button.focus_set()
+
+        # 2. Bouton Copy Summary (juste à gauche de OK)
         def copy_action():
             try:
                 dialog.clipboard_clear()
@@ -3255,14 +3317,19 @@ class SeestarStackerGUI:
         )
         copy_button.pack(side=tk.RIGHT, padx=(5, 0))
 
-        ok_button = ttk.Button(
-            button_frame,
-            text="OK",
-            command=dialog.destroy,
-            style="Accent.TButton" if "Accent.TButton" in ttk.Style().element_names() else "TButton",
-        )
-        ok_button.pack(side=tk.RIGHT)
-        ok_button.focus_set()
+        # 3. Bouton Open Output (juste à gauche de Copy Summary)
+        open_button = ttk.Button(button_frame, text=self.tr("Open Output", default="Open Output"), command=self._open_output_folder, state=tk.NORMAL if can_open_output else tk.DISABLED)
+        open_button.pack(side=tk.RIGHT, padx=(5, 10)) # Plus grand padx pour séparer du groupe droit
+
+        # 4. NOUVEAU BOUTON "OPEN UNALIGNED" (tout à gauche du groupe)
+        if source_folders_with_unaligned_in_run and len(source_folders_with_unaligned_in_run) > 0:
+            unaligned_target_path = os.path.join(input_folder_path_for_unaligned_button, "unaligned_by_stacker")
+            
+            open_unaligned_btn = ttk.Button(button_frame, text=self.tr("open_unaligned_button_text", default="Open Unaligned"), 
+                                            command=lambda p=unaligned_target_path: self._open_unaligned_folder_from_summary(p))
+            open_unaligned_btn.pack(side=tk.RIGHT, padx=(5, 10)) # Plus grand padx pour séparer du groupe droit
+        # --- FIN NOUVEAU BOUTON ---
+
 
         # --- FIN DE LA CRÉATION DES WIDGETS ---
 
@@ -3270,13 +3337,14 @@ class SeestarStackerGUI:
         dialog.grab_set() # Rendre modale APRÈS la création de TOUS les widgets
         dialog.update_idletasks() # Assurer que la géométrie est calculée avant le centrage
         
-        # Centrer dialogue (inchangé)
+        # Centrer dialogue
         root_x = self.root.winfo_x(); root_y = self.root.winfo_y(); root_width = self.root.winfo_width(); root_height = self.root.winfo_height()
         dialog_width = dialog.winfo_width(); dialog_height = dialog.winfo_height()
         pos_x = root_x + (root_width // 2) - (dialog_width // 2); pos_y = root_y + (root_height // 2) - (dialog_height // 2)
         dialog.geometry(f"+{pos_x}+{pos_y}")
         
         self.root.wait_window(dialog) # Attendre que la fenêtre modale soit fermée
+
 
 
 

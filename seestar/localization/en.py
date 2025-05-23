@@ -334,7 +334,14 @@ EN_TRANSLATIONS = {
     'No': "No",
     'Not Found!': "Not Found!", # Pour le cas où final_stack_path existe mais pas le fichier
     'unaligned_files_message_prefix': "Some images could not be aligned. They can be found in:",
-    
+    'open_unaligned_button_text': "Open Unaligned", # Nouveau bouton
+    'unaligned_folder_path_missing': "The path to the unaligned files folder is not defined.",
+    'unaligned_folder_not_found': "The unaligned files folder does not exist or is not a directory:",
+    'unaligned_folder_opened': "Opening unaligned files folder:",
+    'cannot_open_folder_command_not_found': "Could not open folder. System command not found for your OS.",
+    'error_opening_unaligned_folder': "An error occurred while trying to open the unaligned files folder:",
+    'error_opening_unaligned_folder_short': "Error opening unaligned files folder.",
+ 
     # --- Section Feathering ---
     'feathering_frame_title': "Feathering (Weight Map Smoothing)",
     'apply_feathering_label': "Enable Feathering by Weight Map",

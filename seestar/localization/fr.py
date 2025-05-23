@@ -272,6 +272,13 @@ FR_TRANSLATIONS = {
     'No': "Non",
     'Not Found!': "Non Trouvé !",
     'unaligned_files_message_prefix': "Des images n'ont pas pu être alignées. Elles se trouvent dans :",
+    'open_unaligned_button_text': "Ouvrir Non Alignés", # Nouveau bouton
+    'unaligned_folder_path_missing': "Le chemin du dossier des non-alignés n'est pas défini.",
+    'unaligned_folder_not_found': "Le dossier des non-alignés n'existe pas ou n'est pas un répertoire :",
+    'unaligned_folder_opened': "Ouverture du dossier des non-alignés :",
+    'cannot_open_folder_command_not_found': "Impossible d'ouvrir le dossier. Commande système non trouvée pour votre OS.",
+    'error_opening_unaligned_folder': "Une erreur est survenue lors de l'ouverture du dossier des non-alignés :",
+    'error_opening_unaligned_folder_short': "Erreur ouverture dossier non-alignés.",
     
     
     # --- Weighting Info Display ---
