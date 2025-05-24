@@ -43,14 +43,10 @@ class SettingsManager:
 
 
 
-
-
-# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
-
     def update_from_ui(self, gui_instance):
         """
         Met à jour les paramètres de CETTE instance SettingsManager.
-        MODIFIED: Ajout de la lecture pour save_final_as_float32.
+        MODIFIED: Ajout de la lecture pour save_final_as_float32 et ajustement mosaic_settings.
         """
         if gui_instance is None or not hasattr(gui_instance, 'root') or not gui_instance.root.winfo_exists():
             print("Warning (SM update_from_ui): Cannot update settings from invalid GUI instance.")
@@ -128,27 +124,26 @@ class SettingsManager:
                      self.window_geometry = current_geo_ui
             
             # --- NOUVEAU : Lecture du setting pour la sauvegarde en float32 ---
-            # Anticipe que gui_instance aura une variable Tkinter nommée 'save_as_float32_var'
-            # Si la variable n'existe pas sur gui_instance, getattr utilisera une tk.BooleanVar temporaire
-            # initialisée avec la valeur par défaut de default_values_from_code.
             self.save_final_as_float32 = getattr(gui_instance, 'save_as_float32_var', 
                                                  tk.BooleanVar(value=default_values_from_code.get('save_final_as_float32', False))
                                                 ).get()
             print(f"DEBUG SM (update_from_ui): self.save_final_as_float32 lu (attribut UI ou défaut): {self.save_final_as_float32}")
             # --- FIN NOUVEAU ---
 
-            default_mma = default_values_from_code.get('mosaic_mode_active', False)
-            self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_mma))
+            self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_values_from_code.get('mosaic_mode_active', False)))
             print(f"DEBUG SM (update_from_ui): self.mosaic_mode_active (lu depuis gui_instance ou défaut): {self.mosaic_mode_active}")
 
-            default_ms_dict = default_values_from_code.get('mosaic_settings', {})
-            current_ms_on_self = getattr(self, 'mosaic_settings', None)
-            if isinstance(current_ms_on_self, dict):
-                self.mosaic_settings = current_ms_on_self 
-                print(f"DEBUG SM (update_from_ui): self.mosaic_settings (conservé depuis self): {self.mosaic_settings}")
-            else:
-                self.mosaic_settings = default_ms_dict.copy() 
+            # Gérer l'initialisation de self.mosaic_settings pour être sûr que c'est un dict
+            if not isinstance(self.mosaic_settings, dict):
+                self.mosaic_settings = default_values_from_code.get('mosaic_settings', {}).copy()
                 print(f"DEBUG SM (update_from_ui): self.mosaic_settings réinitialisé aux défauts car non trouvé/invalide sur self.")
+            else:
+                # Si self.mosaic_settings est déjà un dict, mettre à jour les clés manquantes
+                # depuis les défauts, notamment 'mosaic_scale_factor' si elle n'est pas présente.
+                for key, value in default_values_from_code.get('mosaic_settings', {}).items():
+                    if key not in self.mosaic_settings:
+                        self.mosaic_settings[key] = value
+                print(f"DEBUG SM (update_from_ui): self.mosaic_settings (après lecture/conservation de self, incluant new scale): {self.mosaic_settings}")
 
             self.local_solver_preference = getattr(self, 'local_solver_preference', default_values_from_code.get('local_solver_preference', 'none'))
             self.astap_path = getattr(self, 'astap_path', default_values_from_code.get('astap_path', ''))
@@ -172,9 +167,6 @@ class SettingsManager:
         except Exception as e:
             print(f"Unexpected error SM (update_from_ui V_SaveAsFloat32_1): {e}") # Version Log
             traceback.print_exc(limit=2)
-
-
-
 
 
 
@@ -440,7 +432,9 @@ class SettingsManager:
             "fastalign_ransac_thresh": 2.5,
             "fastalign_dao_fwhm": 3.5,       
             "fastalign_dao_thr_sig": 8.0,    
-            "fastalign_dao_max_stars": 750,  
+            "fastalign_dao_max_stars": 750,
+            "mosaic_scale_factor": 1, # <-- NOUVELLE LIGNE : Facteur d'échelle par défaut pour mosaïque (entier)
+
         }
         
         defaults_dict['astrometry_api_key'] = "" 
@@ -466,12 +460,11 @@ class SettingsManager:
 ###################################################################################################################################
 
 
-# --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
 
     def validate_settings(self):
         """
         Valide et corrige les paramètres si nécessaire. Retourne les messages de correction.
-        MODIFIED: Ajout de la validation pour save_final_as_float32.
+        MODIFIED: Ajout de la validation pour save_final_as_float32 et mosaic_scale_factor.
         """
         messages = []
         print("DEBUG (Settings validate_settings V_SaveAsFloat32_1): DÉBUT de la validation.") # Version Log
@@ -576,7 +569,7 @@ class SettingsManager:
                 self.drizzle_wht_threshold = float(self.drizzle_wht_threshold)
                 if not (0.0 < self.drizzle_wht_threshold <= 1.0):
                     original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = np.clip(self.drizzle_wht_threshold, 0.1, 1.0)
-                    messages.append(f"Seuil Drizzle WHT ({original:.2f}) ajusté à {self.drizzle_wht_threshold:.2f}")
+                    messages.append(f"Seuil Drizzle WHT ({original:.2f}) hors limites [0.1, 1.0], ajusté à {self.drizzle_wht_threshold:.2f}")
             except (ValueError, TypeError):
                 original = self.drizzle_wht_threshold; self.drizzle_wht_threshold = defaults_fallback['drizzle_wht_threshold']
                 messages.append(f"Seuil Drizzle WHT invalide ('{original}'), réinitialisé à {self.drizzle_wht_threshold:.2f}")
@@ -598,9 +591,9 @@ class SettingsManager:
                 self.drizzle_kernel = current_driz_kernel.lower()
             try:
                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
-                if not (0.01 <= self.drizzle_pixfrac <= 2.0):
-                    original = self.drizzle_pixfrac; self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 2.0)
-                    messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}")
+                if not (0.01 <= self.drizzle_pixfrac <= 2.0): # MODIFIÉ : Limite supérieure à 2.0
+                    original = self.drizzle_pixfrac; self.drizzle_pixfrac = np.clip(self.drizzle_pixfrac, 0.01, 2.0) # MODIFIÉ : Clip à 2.0
+                    messages.append(f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 2.0], ajusté à {self.drizzle_pixfrac:.2f}")
             except (ValueError, TypeError):
                 original = self.drizzle_pixfrac; self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']
                 messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
@@ -735,13 +728,13 @@ class SettingsManager:
                 self.local_solver_preference = current_pref
             current_astap_path = getattr(self, 'astap_path', defaults_fallback['astap_path'])
             if not isinstance(current_astap_path, str):
-                messages.append("Chemin ASTAP invalide (type), réinitialisé.")
+                messages.append("Chemin ASTAP invalide (pas une chaîne), réinitialisé.")
                 self.astap_path = defaults_fallback['astap_path']
             else:
                  self.astap_path = current_astap_path.strip() 
             current_astap_data_dir = getattr(self, 'astap_data_dir', defaults_fallback['astap_data_dir'])
             if not isinstance(current_astap_data_dir, str):
-                messages.append("Chemin données ASTAP invalide (type), réinitialisé.")
+                messages.append("Chemin données ASTAP invalide (pas une chaîne), réinitialisé.")
                 self.astap_data_dir = defaults_fallback['astap_data_dir']
             else:
                 self.astap_data_dir = current_astap_data_dir.strip()
@@ -759,11 +752,32 @@ class SettingsManager:
                 messages.append(f"Rayon recherche ASTAP ('{original_radius_str}') invalide, réinitialisé à {self.astap_search_radius:.1f}°.")
             current_local_ansvr_path = getattr(self, 'local_ansvr_path', defaults_fallback['local_ansvr_path'])
             if not isinstance(current_local_ansvr_path, str):
-                messages.append("Chemin Ansvr Local invalide (type), réinitialisé.")
+                messages.append("Chemin Ansvr Local invalide (pas une chaîne), réinitialisé.")
                 self.local_ansvr_path = defaults_fallback['local_ansvr_path']
             else:
                 self.local_ansvr_path = current_local_ansvr_path.strip()
             print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}") 
+
+            # Validation du facteur d'échelle mosaïque
+            # MODIFIÉ : Ce bloc de validation est maintenant inclus ici
+            if not isinstance(self.mosaic_settings, dict):
+                messages.append("Mosaic settings are invalid (not a dictionary), resetting to defaults.")
+                self.mosaic_settings = defaults_fallback['mosaic_settings'].copy()
+            
+            try:
+                scale_factor_m = int(self.mosaic_settings.get('mosaic_scale_factor', defaults_fallback['mosaic_settings'].get('mosaic_scale_factor', 2)))
+                if not (1 <= scale_factor_m <= 4):
+                    original_scale = scale_factor_m
+                    scale_factor_m = np.clip(scale_factor_m, 1, 4)
+                    messages.append(f"Mosaic Scale Factor ({original_scale}) hors limites [1, 4], ajusté à {scale_factor_m}.")
+                self.mosaic_settings['mosaic_scale_factor'] = scale_factor_m
+                print(f"DEBUG SM (validate_settings): Mosaic Scale Factor validé à {self.mosaic_settings['mosaic_scale_factor']}.")
+            except (ValueError, TypeError) as e_scale_val:
+                original_scale = self.mosaic_settings.get('mosaic_scale_factor', 'N/A')
+                self.mosaic_settings['mosaic_scale_factor'] = defaults_fallback['mosaic_settings']['mosaic_scale_factor']
+                messages.append(f"Mosaic Scale Factor ('{original_scale}') invalide ({e_scale_val}), réinitialisé à {self.mosaic_settings['mosaic_scale_factor']}.")
+                print(f"DEBUG SM (validate_settings): Mosaic Scale Factor invalide, réinitialisé. Erreur: {e_scale_val}")
+            # --- FIN DU BLOC DE VALIDATION DU FACTEUR D'ÉCHELLE MOSAÏQUE ---
 
 
         except Exception as e_global_val: 
@@ -788,7 +802,7 @@ class SettingsManager:
         MODIFIED: Ajout de save_final_as_float32.
         """
         settings_data = {
-            'version': "2.5.5", # Version mise à jour pour refléter l'ajout
+            'version': "2.6.0", # Version mise à jour pour refléter l'ajout
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),

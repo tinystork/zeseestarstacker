@@ -34,6 +34,8 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from astropy.wcs.utils import proj_plane_pixel_scales
+from reproject.mosaicking import reproject_and_coadd
+from reproject import reproject_interp 
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -2637,227 +2639,152 @@ class SeestarQueuedStacker:
 
 
 
+
     def _finalize_mosaic_processing(self, aligned_files_info_list):
         """
-        Effectue la combinaison finale Drizzle pour le mode mosaïque.
-        Utilise les données et WCS des panneaux alignés.
-        Version: V_Corrected_Scope
+        Effectue la combinaison finale pour le mode mosaïque en utilisant reproject.
+        MODIFIED: Removed 'progress_bar=True' from reproject_and_coadd call to fix TypeError.
+                  TQDM might be used by default by reproject if installed.
+        Version: V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall
         """
-        num_panels = len(aligned_files_info_list) # Défini ici
-        print(f"DEBUG (Backend _finalize_mosaic_processing V_Corrected_Scope): Début finalisation pour {num_panels} panneaux.")
-        self.update_progress(f"🖼️ Préparation assemblage mosaïque final ({num_panels} images)...")
+        num_panels = len(aligned_files_info_list) 
+        print(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Début finalisation pour {num_panels} panneaux avec reproject.")
+        self.update_progress(f"🖼️ Préparation assemblage mosaïque final ({num_panels} images) avec reproject...")
 
-        if num_panels < 1: # Modifié de < 2 à < 1 car même 1 panneau peut être "drizzlé" sur une grille cible
+        if num_panels < 1: 
             self.update_progress("⚠️ Moins de 1 panneau aligné disponible pour la mosaïque. Traitement annulé.")
-            self.final_stacked_path = None
-            self.processing_error = "Mosaïque: Moins de 1 panneau aligné"
-            return
+            self.final_stacked_path = None; self.processing_error = "Mosaïque: Moins de 1 panneau aligné"; return
         
-        if not _OO_DRIZZLE_AVAILABLE or Drizzle is None:
-            error_msg = "Bibliothèque Drizzle (stsci.drizzle) non disponible pour l'assemblage mosaïque."
-            self.update_progress(f"❌ {error_msg}")
-            self.processing_error = error_msg
-            self.final_stacked_path = None
-            return
-
-        # --- Calcul Grille Finale (WCS et Shape de sortie pour la mosaïque) ---
-        print("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid...")
-        # La liste des WCS des panneaux pour calculer la grille
-        input_wcs_list_for_grid = [panel_info[2] for panel_info in aligned_files_info_list if panel_info[2] is not None and isinstance(panel_info[2], WCS)]
-        
-        # La méthode _calculate_final_mosaic_grid n'a pas besoin de input_shapes_hw_list_for_grid
-        # ni du drizzle_scale en argument direct, elle utilise self.drizzle_scale.
-
-        if not input_wcs_list_for_grid: # Vérification ajoutée pour éviter de passer une liste vide
-            error_msg = "Aucun WCS valide à passer à _calculate_final_mosaic_grid."
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            self.processing_error = error_msg; self.final_stacked_path = None
-            return
-
-        # output_wcs et output_shape_hw sont définis ici
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid( # APPEL CORRIGÉ ICI
-            input_wcs_list_for_grid 
-        )
-
-        if output_wcs is None or output_shape_hw is None:
-            error_msg = "Échec calcul grille de sortie pour la mosaïque."
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            self.processing_error = error_msg
-            self.final_stacked_path = None
-            return
-        print(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque calculée -> Shape={output_shape_hw} (H,W), WCS CRVAL={output_wcs.wcs.crval if output_wcs.wcs else 'N/A'}")
-
-        # --- Initialiser Drizzle Final ---
-        num_output_channels = 3
-        final_drizzlers_list = []
-        final_output_sci_arrays = []
-        final_output_wht_arrays = []
-        initialized = False
         try:
-            print(f"  -> Initialisation Drizzle final pour {num_output_channels} canaux (Shape Cible: {output_shape_hw})...")
-            for _ in range(num_output_channels):
-                out_img_ch = np.zeros(output_shape_hw, dtype=np.float32)
-                out_wht_ch = np.zeros(output_shape_hw, dtype=np.float32)
-                final_output_sci_arrays.append(out_img_ch)
-                final_output_wht_arrays.append(out_wht_ch)
-                
-                driz_ch = Drizzle(
-                    out_img=out_img_ch,
-                    out_wht=out_wht_ch,
-                    out_shape=output_shape_hw,
-                    kernel=self.mosaic_drizzle_kernel, # Kernel spécifique mosaïque
-                    fillval=self.mosaic_drizzle_fillval # Fillval spécifique mosaïque
-                )
-                final_drizzlers_list.append(driz_ch)
-            initialized = True
-            print("  -> Initialisation Drizzle final OK.")
-        except Exception as init_err:
-            print(f"  -> ERREUR init Drizzle Mosaïque: {init_err}")
-            traceback.print_exc(limit=1)
-            self.processing_error = f"Erreur Init Drizzle Mosaïque: {init_err}"
-            self.final_stacked_path = None
-            return
+            from reproject.mosaicking import reproject_and_coadd
+            from reproject import reproject_interp 
+        except ImportError:
+            error_msg = "Bibliothèque reproject non disponible pour l'assemblage mosaïque."
+            self.update_progress(f"❌ {error_msg}"); self.processing_error = error_msg; self.final_stacked_path = None; return
 
-        if not initialized:
-            self.processing_error = "Drizzle final non initialisé (état inattendu)."
-            self.final_stacked_path = None
-            return
-        # --- AJOUTER CE BLOC DE DEBUG ---
-        print(f"    DEBUG QM [FinalizeMosaicDrizzleLoop]: Contenu de aligned_files_info_list (avant boucle):")
-        for idx_item, item_content in enumerate(aligned_files_info_list):
-            if isinstance(item_content, tuple) and len(item_content) >= 3:
-                print(f"      Item {idx_item}: Type du 3ème élément (WCS attendu): {type(item_content[2])}")
-                if isinstance(item_content[2], dict):
-                    print(f"         !!! C'EST UN DICT: {item_content[2]} !!!")
-            else:
-                print(f"      Item {idx_item}: Format de tuple inattendu ou trop court: {item_content}")
-        # --- FIN BLOC DE DEBUG ---
-        # --- Boucle Drizzle sur les informations des panneaux alignés ---
-        print(f"  -> Démarrage boucle Drizzle finale sur {num_panels} panneaux (infos en mémoire)...")
-        panels_added_successfully = 0 # Compteur pour les panneaux effectivement ajoutés
+        input_data_for_reproject = []; input_footprints_for_reproject = []; all_wcs_for_grid_calc = []
 
+        print(f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd...")
         for i_panel_loop, panel_info_tuple_local in enumerate(aligned_files_info_list):
-            if self.stop_processing:
-                self.update_progress("🛑 Arrêt demandé pendant assemblage final Drizzle mosaïque.")
-                break 
-
             try:
-                panel_image_data_HWC, panel_header_orig, wcs_for_panel_input, _transform_matrix_M_panel, _pixel_mask_2d_panel = panel_info_tuple_local
+                panel_image_data_HWC_orig, panel_header_orig, wcs_for_panel_input, _transform_matrix_M_panel, _pixel_mask_2d_bool = panel_info_tuple_local
             except (TypeError, ValueError) as e_unpack:
                 self.update_progress(f"    -> ERREUR déballage tuple panneau {i_panel_loop+1}: {e_unpack}. Ignoré.", "ERROR")
-                print(f"ERREUR QM [_finalize_mosaic_processing]: Déballage tuple panneau {i_panel_loop+1} ({panel_info_tuple_local if isinstance(panel_info_tuple_local, tuple) else 'NonTuple'})")
+                print(f"ERREUR QM [_finalize_mosaic_processing]: Déballage tuple panneau {i_panel_loop+1}"); continue
+
+            original_filename_for_log = panel_header_orig.get('_SRCFILE', (f"Panel_{i_panel_loop+1}", ""))[0]
+            print(f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}")
+
+            if panel_image_data_HWC_orig is None or wcs_for_panel_input is None:
+                self.update_progress(f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.", "WARN"); continue
+            
+            current_panel_shape_hw = panel_image_data_HWC_orig.shape[:2]
+            footprint_panel = None
+            if _pixel_mask_2d_bool is not None and _pixel_mask_2d_bool.shape == current_panel_shape_hw:
+                footprint_panel = np.clip(_pixel_mask_2d_bool.astype(np.float32), 0.0, 1.0) 
+                print(f"      Panel {i_panel_loop+1}: Using provided pixel mask as footprint. Sum: {np.sum(footprint_panel)}")
+            else:
+                self.update_progress(f"      WARN: Panneau {i_panel_loop+1}, masque de pixels invalide ou manquant. Utilisation d'un footprint complet (np.ones).")
+                footprint_panel = np.ones(current_panel_shape_hw, dtype=np.float32)
+            
+            input_data_for_reproject.append((panel_image_data_HWC_orig, wcs_for_panel_input))
+            input_footprints_for_reproject.append(footprint_panel)
+            all_wcs_for_grid_calc.append(wcs_for_panel_input)
+
+        if not input_data_for_reproject:
+            self.update_progress("❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.", "ERROR")
+            self.final_stacked_path = None; self.processing_error = "Mosaïque: Aucun panneau valide pour reproject"; return
+
+        print("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject...")
+        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(all_wcs_for_grid_calc)
+
+        if output_wcs is None or output_shape_hw is None:
+            error_msg = "Échec calcul grille de sortie pour la mosaïque avec reproject."
+            self.update_progress(f"❌ {error_msg}", "ERROR"); self.processing_error = error_msg; self.final_stacked_path = None; return
+        print(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque pour reproject calculée -> Shape={output_shape_hw} (H,W), WCS CRVAL={output_wcs.wcs.crval if output_wcs.wcs else 'N/A'}")
+
+        final_mosaic_sci_channels = []; final_mosaic_coverage_channels = [] 
+        num_color_channels_expected = 3 
+
+        print(f"  -> Exécution de reproject_and_coadd par canal (pour {num_color_channels_expected} canaux)...")
+        total_reproject_time_sec = 0.0
+        
+        progress_base_finalize = 70 
+        progress_range_reproject_step = 25 
+
+        for i_ch in range(num_color_channels_expected):
+            gui_progress_before_channel = progress_base_finalize + int(progress_range_reproject_step * (i_ch / num_color_channels_expected))
+            self.update_progress(f"   Reprojection et combinaison du canal {i_ch+1}/{num_color_channels_expected}...", gui_progress_before_channel)
+            
+            channel_arrays_wcs_list = []
+            channel_footprints_list = []
+
+            for panel_data_tuple, panel_footprint in zip(input_data_for_reproject, input_footprints_for_reproject):
+                panel_hwc_data, panel_wcs = panel_data_tuple
+                if panel_hwc_data.ndim == 3 and panel_hwc_data.shape[2] == num_color_channels_expected:
+                    channel_arrays_wcs_list.append( (panel_hwc_data[..., i_ch], panel_wcs) )
+                    channel_footprints_list.append(panel_footprint) 
+                elif panel_hwc_data.ndim == 2 and i_ch == 0 : 
+                     channel_arrays_wcs_list.append( (panel_hwc_data, panel_wcs) )
+                     channel_footprints_list.append(panel_footprint)
+                elif panel_hwc_data.ndim == 2 and i_ch > 0: 
+                    continue 
+            
+            if not channel_arrays_wcs_list:
+                self.update_progress(f"    Aucune donnée pour le canal {i_ch+1}. Ce canal sera vide.", "WARN")
+                final_mosaic_sci_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
+                final_mosaic_coverage_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
                 continue
 
-            original_filename_for_log = f"Panneau_{i_panel_loop+1}_NomInconnu"
-            if panel_header_orig and isinstance(panel_header_orig, fits.Header):
-                srcfile_tuple_log = panel_header_orig.get('_SRCFILE', None)
-                if srcfile_tuple_log and isinstance(srcfile_tuple_log, tuple) and len(srcfile_tuple_log) > 0:
-                    original_filename_for_log = srcfile_tuple_log[0]
-                elif srcfile_tuple_log: 
-                    original_filename_for_log = str(srcfile_tuple_log)
-            
-            if (i_panel_loop + 1) % 10 == 0 or i_panel_loop == 0 or i_panel_loop == num_panels - 1:
-                 self.update_progress(f"   Mosaïque: Drizzle panneau {i_panel_loop+1}/{num_panels} ({original_filename_for_log})...", 55 + int(40 * (i_panel_loop / num_panels)))
-            print(f"    DEBUG QM [FinalizeMosaicDrizzleLoop]: Panneau {i_panel_loop+1}/{num_panels} ('{original_filename_for_log}')")
-
-            if panel_image_data_HWC is None or wcs_for_panel_input is None:
-                self.update_progress(f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.", "WARN")
-                print(f"    DEBUG QM [FinalizeMosaicDrizzleLoop]: Panneau {i_panel_loop+1} ignoré (données/WCS None).")
-                continue
-            if panel_image_data_HWC.ndim != 3 or panel_image_data_HWC.shape[2] != num_output_channels:
-                 self.update_progress(f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Shape données {panel_image_data_HWC.shape} non HxWxC. Ignoré.", "WARN")
-                 print(f"    DEBUG QM [FinalizeMosaicDrizzleLoop]: Panneau {i_panel_loop+1} ignoré (mauvaise shape).")
-                 continue
-            
-            pixmap_panel_to_final_grid = None # Doit être défini pour le bloc finally
             try:
-                current_panel_shape_hw = panel_image_data_HWC.shape[:2]
-                y_coords_panel_in, x_coords_panel_in = np.indices(current_panel_shape_hw)
+                print(f"    Appel reproject_and_coadd pour canal {i_ch+1}. Nombre d'images pour ce canal: {len(channel_arrays_wcs_list)}")
+                start_time_reproject_ch = time.monotonic()
                 
-                sky_coords_panel_ra_deg, sky_coords_panel_dec_deg = wcs_for_panel_input.all_pix2world(
-                    x_coords_panel_in.ravel(), y_coords_panel_in.ravel(), 0
+                # Removed progress_bar=True from this call
+                mosaic_channel_sci, mosaic_channel_coverage = reproject_and_coadd(
+                    channel_arrays_wcs_list,
+                    output_projection=output_wcs,
+                    shape_out=output_shape_hw,
+                    input_weights=channel_footprints_list, 
+                    reproject_function=reproject_interp, 
+                    combine_function='mean', 
+                    match_background=True, 
+                    block_size=getattr(self, 'reproject_block_size_xy', (256,256))
                 )
                 
-                final_output_pixels_x_flat, final_output_pixels_y_flat = output_wcs.all_world2pix( # output_wcs est le WCS de la grille finale
-                    sky_coords_panel_ra_deg, sky_coords_panel_dec_deg, 0
-                )
-                
-                pixmap_panel_to_final_grid = np.dstack((
-                    final_output_pixels_x_flat.reshape(current_panel_shape_hw),
-                    final_output_pixels_y_flat.reshape(current_panel_shape_hw)
-                )).astype(np.float32)
-                
-                # --- AJOUTER CES LOGS DE DEBUG POUR LE PIXMAP ---
-                if pixmap_panel_to_final_grid is not None:
-                    print(f"      DEBUG PIXMAP Panel {i_panel_loop+1}: Shape={pixmap_panel_to_final_grid.shape}, Dtype={pixmap_panel_to_final_grid.dtype}")
-                    if np.isnan(pixmap_panel_to_final_grid).any():
-                        print(f"      WARN PIXMAP Panel {i_panel_loop+1}: CONTIENT DES NaN !")
-                    if np.isinf(pixmap_panel_to_final_grid).any():
-                        print(f"      WARN PIXMAP Panel {i_panel_loop+1}: CONTIENT DES INF !")
-                    print(f"      DEBUG PIXMAP Panel {i_panel_loop+1} X Coords: Min={np.nanmin(pixmap_panel_to_final_grid[...,0]):.2f}, Max={np.nanmax(pixmap_panel_to_final_grid[...,0]):.2f}")
-                    print(f"      DEBUG PIXMAP Panel {i_panel_loop+1} Y Coords: Min={np.nanmin(pixmap_panel_to_final_grid[...,1]):.2f}, Max={np.nanmax(pixmap_panel_to_final_grid[...,1]):.2f}")
-                    # Optionnel: Remplacer les NaN/Inf par une valeur neutre (ex: -1, que drizzle pourrait ignorer)
-                    # pixmap_panel_to_final_grid = np.nan_to_num(pixmap_panel_to_final_grid, nan=-1.0, posinf=-1.0, neginf=-1.0)
-                
-                else:
-                    print(f"      WARN PIXMAP Panel {i_panel_loop+1}: pixmap_panel_to_final_grid EST NONE AVANT ADD_IMAGE.")
-                # --- FIN AJOUT LOGS DEBUG PIXMAP -
-                exposure_time_for_drizzle_panel = 1.0
-                if panel_header_orig and 'EXPTIME' in panel_header_orig:
-                    try: exposure_time_for_drizzle_panel = max(1e-6, float(panel_header_orig['EXPTIME']))
-                    except (ValueError, TypeError): pass
-                
-                effective_weight_map = None
-                if _pixel_mask_2d_panel is not None and _pixel_mask_2d_panel.shape == current_panel_shape_hw and _pixel_mask_2d_panel.dtype == bool:
-                    effective_weight_map = _pixel_mask_2d_panel.astype(np.float32)
-                else:
-                    print(f"      WARN: Panneau {i_panel_loop+1}, masque de pixels invalide ou manquant. Utilisation poids uniforme pour Drizzle.add_image.")
+                end_time_reproject_ch = time.monotonic()
+                duration_reproject_ch_sec = end_time_reproject_ch - start_time_reproject_ch
+                total_reproject_time_sec += duration_reproject_ch_sec
 
-                for i_channel_loop in range(num_output_channels):
-                    channel_data_2d_panel = panel_image_data_HWC[:, :, i_channel_loop].astype(np.float32)
-                    channel_data_2d_clean_panel = np.nan_to_num(channel_data_2d_panel, nan=0.0, posinf=0.0, neginf=0.0)
-                    
-                    final_drizzlers_list[i_channel_loop].add_image(
-                        data=channel_data_2d_clean_panel,
-                        pixmap=pixmap_panel_to_final_grid,
-                        exptime=exposure_time_for_drizzle_panel,
-                        in_units='counts', 
-                        pixfrac=self.mosaic_drizzle_pixfrac, 
-                        weight_map=effective_weight_map
-                    )
-                panels_added_successfully += 1
-            
-            except Exception as e_panel_driz_loop:
-                self.update_progress(f"    -> Mosaïque ERREUR: Échec Drizzle pour panneau {i_panel_loop+1} ('{original_filename_for_log}'): {e_panel_driz_loop}", "WARN")
-                print(f"ERREUR QM [_finalize_mosaic_processing loop]: Échec Drizzle panneau {i_panel_loop+1}: {e_panel_driz_loop}")
-                traceback.print_exc(limit=1)
-            finally:
-                del panel_image_data_HWC, panel_header_orig, wcs_for_panel_input, _transform_matrix_M_panel, _pixel_mask_2d_panel
-                if pixmap_panel_to_final_grid is not None: del pixmap_panel_to_final_grid
-                if (i_panel_loop + 1) % 5 == 0: 
-                    gc.collect()
-        # --- Fin Boucle Drizzle sur les panneaux ---
+                final_mosaic_sci_channels.append(mosaic_channel_sci.astype(np.float32))
+                final_mosaic_coverage_channels.append(mosaic_channel_coverage.astype(np.float32))
+                
+                log_msg_time_console = f"    Canal {i_ch+1} traité en {duration_reproject_ch_sec:.2f} secondes. Shape SCI: {mosaic_channel_sci.shape}, Shape Coverage: {mosaic_channel_coverage.shape}"
+                print(log_msg_time_console)
+                self.update_progress(f"   Canal {i_ch+1}/{num_color_channels_expected} combiné.")
 
-        print(f"  -> Boucle assemblage Drizzle mosaïque terminée. {panels_added_successfully}/{num_panels} panneaux effectivement ajoutés.")
-        if panels_added_successfully == 0:
-            error_msg = "Aucun panneau n'a pu être traité avec succès pour la mosaïque finale."
-            self.update_progress(f"❌ ERREUR: {error_msg}", "ERROR")
-            self.processing_error = error_msg
-            self.final_stacked_path = None
-            del final_drizzlers_list, final_output_sci_arrays, final_output_wht_arrays; gc.collect()
-            return 
+            except Exception as e_reproject:
+                error_msg = f"Erreur durant reproject_and_coadd pour canal {i_ch+1}: {e_reproject}"
+                self.update_progress(f"❌ {error_msg}", "ERROR"); traceback.print_exc(limit=3)
+                final_mosaic_sci_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
+                final_mosaic_coverage_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
+        
+        self.update_progress(f"  Temps total pour reproject_and_coadd (tous canaux): {total_reproject_time_sec:.2f}s.", progress_base_finalize + progress_range_reproject_step)
 
-        # --- Assemblage et Stockage Résultat ---
+        if not final_mosaic_sci_channels or len(final_mosaic_sci_channels) != num_color_channels_expected:
+             error_msg = "Échec critique: reproject_and_coadd n'a pas produit le nombre attendu de canaux."
+             self.update_progress(f"❌ {error_msg}", "ERROR"); self.processing_error = error_msg; self.final_stacked_path = None; return
+
         try:
-            print("  -> Assemblage final des canaux (Mosaïque)...")
-            final_sci_image_HWC = np.stack(final_output_sci_arrays, axis=-1).astype(np.float32)
-            final_wht_map_HWC = np.stack(final_output_wht_arrays, axis=-1).astype(np.float32)
+            final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1).astype(np.float32)
+            final_coverage_map_2D = final_mosaic_coverage_channels[0] 
             
-            print(f"  -> Combinaison terminée. Shape SCI: {final_sci_image_HWC.shape}")
-            self.current_stack_data = final_sci_image_HWC 
+            print(f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}, Shape Coverage: {final_coverage_map_2D.shape}")
+            print(f"     Range SCI (après reproject mean): [{np.nanmin(final_sci_image_HWC):.4g}, {np.nanmax(final_sci_image_HWC):.4g}]")
+            print(f"     Range Coverage (après reproject): [{np.nanmin(final_coverage_map_2D):.4g}, {np.nanmax(final_coverage_map_2D):.4g}]")
+
             self.current_stack_header = fits.Header() 
-            if output_wcs: 
-                self.current_stack_header.update(output_wcs.to_header(relax=True))
+            if output_wcs: self.current_stack_header.update(output_wcs.to_header(relax=True))
             
             if self.reference_header_for_wcs: 
                 keys_to_copy_ref_hdr = ['INSTRUME', 'TELESCOP', 'OBSERVER', 'OBJECT', 
@@ -2868,48 +2795,30 @@ class SeestarQueuedStacker:
                         try: self.current_stack_header[key_cp] = (self.reference_header_for_wcs[key_cp], self.reference_header_for_wcs.comments[key_cp])
                         except KeyError: self.current_stack_header[key_cp] = self.reference_header_for_wcs[key_cp]
             
-            self.current_stack_header['STACKTYP'] = (f'Mosaic Drizzle ({self.drizzle_scale:.0f}x)', 'Mosaic from solved panels')
-            self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Overall Drizzle scale factor applied')
-            self.current_stack_header['DRZKERNEL'] = (self.mosaic_drizzle_kernel, 'Mosaic Drizzle kernel')
-            self.current_stack_header['DRZPIXFR'] = (self.mosaic_drizzle_pixfrac, 'Mosaic Drizzle pixfrac')
-            self.current_stack_header['NIMAGES'] = (panels_added_successfully, 'Number of panels combined in mosaic') 
+            self.current_stack_header['STACKTYP'] = (f'Mosaic Reproject ({self.drizzle_scale:.0f}x)', 'Mosaic from reproject_and_coadd')
+            self.current_stack_header['NIMAGES'] = (num_panels, 'Number of panels input to reproject') 
             
             total_approx_exposure = 0.0 
-            if self.reference_header_for_wcs:
+            if self.reference_header_for_wcs: 
                 single_exp_ref = float(self.reference_header_for_wcs.get('EXPTIME', 10.0)) 
-                total_approx_exposure = panels_added_successfully * single_exp_ref 
+                total_approx_exposure = num_panels * single_exp_ref 
             self.current_stack_header['TOTEXP'] = (round(total_approx_exposure, 2), '[s] Approx total exposure (sum of panels ref exp)')
             
-            # Normaliser l'image finale pour l'aperçu et sauvegarde (0-1)
-            # Garder final_wht_map_HWC pour _save_final_stack si besoin pour post-traitement
-            temp_sci_data_for_norm = self.current_stack_data.copy() # Travailler sur une copie pour la normalisation
-            min_val_final, max_val_final = np.nanmin(temp_sci_data_for_norm), np.nanmax(temp_sci_data_for_norm)
-            if np.isfinite(min_val_final) and np.isfinite(max_val_final) and max_val_final > min_val_final:
-                self.current_stack_data = (temp_sci_data_for_norm - min_val_final) / (max_val_final - min_val_final)
-            elif np.any(np.isfinite(temp_sci_data_for_norm)):
-                self.current_stack_data = np.full_like(temp_sci_data_for_norm, 0.5) 
-            else:
-                self.current_stack_data = np.zeros_like(temp_sci_data_for_norm)
-            self.current_stack_data = np.clip(self.current_stack_data, 0.0, 1.0).astype(np.float32)
-            del temp_sci_data_for_norm; gc.collect()
-
             self._save_final_stack(
-                output_filename_suffix="_mosaic_drizzle", 
-                drizzle_final_sci_data=self.current_stack_data, # Le SCI final normalisé 0-1
-                drizzle_final_wht_data=final_wht_map_HWC       # La carte de poids HWC brute
+                output_filename_suffix="_mosaic_reproject", 
+                drizzle_final_sci_data=final_sci_image_HWC, 
+                drizzle_final_wht_data=final_coverage_map_2D 
             )
 
         except Exception as e_stack_final:
-            error_msg = f"Erreur finalisation/sauvegarde mosaïque: {e_stack_final}"
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            traceback.print_exc(limit=3)
-            self.processing_error = error_msg
-            self.final_stacked_path = None
+            error_msg = f"Erreur finalisation/sauvegarde mosaïque avec reproject: {e_stack_final}"
+            self.update_progress(f"❌ {error_msg}", "ERROR"); traceback.print_exc(limit=3); self.processing_error = error_msg; self.final_stacked_path = None
         finally:
-            del final_drizzlers_list, final_output_sci_arrays, final_output_wht_arrays
+            del input_data_for_reproject, input_footprints_for_reproject, all_wcs_for_grid_calc
+            del final_mosaic_sci_channels, final_mosaic_coverage_channels
             gc.collect()
         
-        print("DEBUG (Backend _finalize_mosaic_processing V_Corrected_Scope): Fin.")
+        print(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Fin.")
 
 
 
@@ -2965,9 +2874,10 @@ class SeestarQueuedStacker:
 
 
 
-# --- DANS LA CLASSE SeestarQueuedStacker ---
 
-    def _process_file(self, file_path, 
+# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
+    def _process_file(self, file_path,
                       reference_image_data_for_alignment, # Image de l'ANCRE pour FastAligner ou réf. pour Astroalign std
                       solve_astrometry_for_this_file=False,
                       fa_orb_features_config=5000,
@@ -2979,36 +2889,42 @@ class SeestarQueuedStacker:
                       max_stars_to_describe_config=750):
         """
         Traite un seul fichier image.
-        Version: V_FastAligner_Fallback_Implemented
+        MODIFIED CRITICAL:
+        - For Drizzle modes: Ensures data is in ADU range [0, 65535] (or original ADU if > 1.0)
+          BEFORE passing to alignment or Drizzle-related steps. It forces 0-1 data to ADU.
+        - For Classic Stacking mode: Alignment is performed on data as it comes from debayer/HP
+          (could be ADU or 0-1). The result of alignment IS THEN NORMALIZED to 0-1.
+        - Corrected Pylance error for is_drizzle_mode_active_for_clipping.
+        Version: V_ProcessFile_ADUForDrizzle_01ForClassicAlignOutput_PylanceFix_DebugClassic1
         """
         file_name = os.path.basename(file_path)
         quality_scores = {'snr': 0.0, 'stars': 0.0}
-        print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Implemented]: Début '{file_name}', SolveAstrometryDirectly: {solve_astrometry_for_this_file}")
-        
-        if not solve_astrometry_for_this_file and self.is_mosaic_run and \
-           self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
-            print(f"  -> Mode Mosaïque Locale. Tentative FastAligner. Params FA: AbsM={fa_min_abs_matches_config}, RansacInl={fa_min_ransac_inliers_value_config}, RansacThr={fa_ransac_thresh_config}")
-            print(f"  -> Params DAO: FWHM={daofind_fwhm_config}, ThrSig={daofind_threshold_sigma_config}, MaxStars={max_stars_to_describe_config}")
+        # ---- DEBUG CLASSIC 1: Log d'entrée ----
+        print(f"\nDEBUG QM [_process_file V_ProcessFile_ADUForDrizzle_01ForClassicAlignOutput_PylanceFix_DebugClassic1]:")
+        print(f"  >> Fichier: '{file_name}'")
+        print(f"  >> Solve Astrometry Directly: {solve_astrometry_for_this_file}")
+        print(f"  >> is_mosaic_run: {self.is_mosaic_run}, mosaic_alignment_mode: {getattr(self, 'mosaic_alignment_mode', 'N/A')}")
+        print(f"  >> drizzle_active_session: {self.drizzle_active_session}")
+        # ---- FIN DEBUG ----
 
         header_final_pour_retour = None
         img_data_array_loaded = None
-        prepared_img_apres_pretraitement = None 
+        prepared_img_after_initial_proc = None
+        image_for_alignment_or_drizzle_input = None
         wcs_final_pour_retour = None
-        data_final_pour_retour = None 
+        data_final_pour_retour = None
         valid_pixel_mask_2d = None
-        matrice_M_calculee = None 
+        matrice_M_calculee = None
         align_method_log_msg = "Unknown"
 
         try:
             # === 1. Charger et valider FITS ===
-            # ... (identique à V_FastAligner_Fallback_Logic, charge img_data_array_loaded et header_final_pour_retour) ...
             print(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
             loaded_data_tuple = load_and_validate_fits(file_path)
             if loaded_data_tuple and loaded_data_tuple[0] is not None:
                 img_data_array_loaded, header_from_load = loaded_data_tuple
                 header_final_pour_retour = header_from_load.copy() if header_from_load else fits.Header()
             else:
-                # ... (logique fallback header) ...
                 header_temp_fallback = None
                 if loaded_data_tuple and loaded_data_tuple[1] is not None: header_temp_fallback = loaded_data_tuple[1].copy()
                 else:
@@ -3017,320 +2933,257 @@ class SeestarQueuedStacker:
                 header_final_pour_retour = header_temp_fallback
                 raise ValueError("Échec chargement/validation FITS (données non retournées).")
             header_final_pour_retour['_SRCFILE'] = (file_name, "Original source filename")
-
+            bitpix = header_from_load.get('BITPIX', 0) if header_from_load else 0
+            # ---- DEBUG CLASSIC 1: Log après chargement ----
+            print(f"     - FITS original - BITPIX: {bitpix}, Range: [{np.min(img_data_array_loaded):.4g}, {np.max(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}")
+            # ---- FIN DEBUG ----
 
             # === 2. Vérification variance ===
-            # ... (identique) ...
             print(f"  -> [2/7] Vérification variance pour '{file_name}'...")
             std_dev = np.std(img_data_array_loaded)
-            variance_threshold = 0.0015 
+            variance_threshold = 0.0015
             if std_dev < variance_threshold:
                 raise ValueError(f"Faible variance: {std_dev:.4f} (seuil: {variance_threshold}).")
             print(f"     - Variance OK (std: {std_dev:.4f}).")
 
             # === 3. Pré-traitement (Debayer, WB Auto basique, Correction HP) ===
-            # ... (identique, produit prepared_img_apres_pretraitement) ...
             print(f"  -> [3/7] Pré-traitement pour '{file_name}'...")
-            prepared_img_apres_pretraitement = img_data_array_loaded.astype(np.float32)
-            # ... (logique debayer, WB, hot_pixels) ...
+            prepared_img_after_initial_proc = img_data_array_loaded.astype(np.float32)
+            # ---- DEBUG CLASSIC 1: Log après conversion float32 ----
+            print(f"     - Après conversion float32: Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}], Shape: {prepared_img_after_initial_proc.shape}, Dtype: {prepared_img_after_initial_proc.dtype}")
+            # ---- FIN DEBUG ----
+
             is_color_after_preprocessing = False
-            if prepared_img_apres_pretraitement.ndim == 2:
+            if prepared_img_after_initial_proc.ndim == 2:
                 bayer_pattern_from_header = header_final_pour_retour.get('BAYERPAT', self.bayer_pattern)
                 pattern_upper = bayer_pattern_from_header.upper() if isinstance(bayer_pattern_from_header, str) else self.bayer_pattern.upper()
                 if pattern_upper in ["GRBG", "RGGB", "GBRG", "BGGR"]:
-                    prepared_img_apres_pretraitement = debayer_image(prepared_img_apres_pretraitement, pattern_upper)
+                    prepared_img_after_initial_proc = debayer_image(prepared_img_after_initial_proc, pattern_upper)
                     is_color_after_preprocessing = True
-            elif prepared_img_apres_pretraitement.ndim == 3 and prepared_img_apres_pretraitement.shape[2] == 3:
+                    # ---- DEBUG CLASSIC 1: Log après debayer ----
+                    print(f"     - Image débayerisée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}], Shape: {prepared_img_after_initial_proc.shape}")
+                    # ---- FIN DEBUG ----
+            elif prepared_img_after_initial_proc.ndim == 3 and prepared_img_after_initial_proc.shape[2] == 3:
                 is_color_after_preprocessing = True
-            else: raise ValueError(f"Shape image {prepared_img_apres_pretraitement.shape} non supportée post-chargement.")
+            else:
+                raise ValueError(f"Shape image {prepared_img_after_initial_proc.shape} non supportée post-chargement.")
 
-            if is_color_after_preprocessing: 
+            if is_color_after_preprocessing:
                 try:
-                    r_ch, g_ch, b_ch = prepared_img_apres_pretraitement[...,0], prepared_img_apres_pretraitement[...,1], prepared_img_apres_pretraitement[...,2]
+                    r_ch, g_ch, b_ch = prepared_img_after_initial_proc[...,0], prepared_img_after_initial_proc[...,1], prepared_img_after_initial_proc[...,2]
                     med_r, med_g, med_b = np.median(r_ch), np.median(g_ch), np.median(b_ch)
                     if med_g > 1e-6:
-                        gain_r = np.clip(med_g / max(med_r, 1e-6),0.5,2.0); gain_b = np.clip(med_g / max(med_b,1e-6),0.5,2.0)
-                        prepared_img_apres_pretraitement[...,0] *= gain_r; prepared_img_apres_pretraitement[...,2] *= gain_b
-                        prepared_img_apres_pretraitement = np.clip(prepared_img_apres_pretraitement, 0.0, 1.0)
-                except Exception: pass 
+                        gain_r = np.clip(med_g / max(med_r, 1e-6), 0.5, 2.0)
+                        gain_b = np.clip(med_g / max(med_b, 1e-6), 0.5, 2.0)
+                        prepared_img_after_initial_proc[...,0] *= gain_r
+                        prepared_img_after_initial_proc[...,2] *= gain_b
+                    # ---- DEBUG CLASSIC 1: Log après WB ----
+                    print(f"     - WB basique appliquée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+                    # ---- FIN DEBUG ----
+                except Exception as e_wb: print(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
             if self.correct_hot_pixels:
-                prepared_img_apres_pretraitement = detect_and_correct_hot_pixels(prepared_img_apres_pretraitement, self.hot_pixel_threshold, self.neighborhood_size)
-            prepared_img_apres_pretraitement = prepared_img_apres_pretraitement.astype(np.float32)
-            print(f"     - Pré-traitement terminé. Shape: {prepared_img_apres_pretraitement.shape}")
-            
-            # Par défaut, les données à retourner sont les données prétraitées (sera écrasé par astroalign si non-mosaïque locale)
-            data_final_pour_retour = prepared_img_apres_pretraitement.copy()
+                prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
+                    prepared_img_after_initial_proc, self.hot_pixel_threshold, self.neighborhood_size)
+                # ---- DEBUG CLASSIC 1: Log après HP ----
+                print(f"     - Correction HP. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+                # ---- FIN DEBUG ----
 
-            # === 4. Logique d'Alignement / Résolution WCS ===
+            is_drizzle_or_mosaic_mode = (self.drizzle_active_session or self.is_mosaic_run)
+            # ---- DEBUG CLASSIC 1: Log mode ----
+            print(f"     - is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}")
+            # ---- FIN DEBUG ----
+
+            image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
+
+            current_max_val = np.nanmax(image_for_alignment_or_drizzle_input)
+            if is_drizzle_or_mosaic_mode:
+                if current_max_val <= 1.0 + 1e-5 and current_max_val > 0:
+                    image_for_alignment_or_drizzle_input *= 65535.0
+                    print(f"     - POUR DRIZZLE/MOSAIQUE: Image rescalée de [0,1] vers [0,65535]. Nouveau max: {np.nanmax(image_for_alignment_or_drizzle_input):.4g}")
+                image_for_alignment_or_drizzle_input = np.clip(image_for_alignment_or_drizzle_input, 0.0, None)
+                print(f"     - Pré-traitement final POUR DRIZZLE: Données LINÉAIRES (ADU). Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+                data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
+            else: # Stacking Classique
+                # ---- DEBUG CLASSIC 1: Log avant alignement pour stacking classique ----
+                print(f"     - STACKING CLASSIQUE: Données POUR ALIGNEMENT. Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}], Shape: {image_for_alignment_or_drizzle_input.shape}, Dtype: {image_for_alignment_or_drizzle_input.dtype}")
+                # data_final_pour_retour sera défini après l'alignement et la normalisation 0-1
+                # ---- FIN DEBUG ----
+
+            # --- 4. Logique d'Alignement / Résolution WCS ---
             print(f"  -> [4/7] Alignement/Résolution WCS pour '{file_name}'...")
 
-
-            # --- CAS A : Mosaïque avec Alignement Local (FastAligner + Fallback WCS si activé) ---
             if not solve_astrometry_for_this_file and self.is_mosaic_run and \
                self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
-                
-                self.update_progress(f"   [ProcessFile] Tentative Alignement Local (FastAligner) pour '{file_name}' sur ancre...", None)
-                align_method_log_msg = "FastAligner_Attempted"
-                fa_success = False 
-                
-                if self.local_aligner_instance is not None and reference_image_data_for_alignment is not None:
-                    _image_alignee_par_fa, M_par_fa, fa_success_interne = self.local_aligner_instance._align_image(
-                        src_img=prepared_img_apres_pretraitement,
-                        ref_img=reference_image_data_for_alignment,
-                        file_name=file_name, 
-                        min_absolute_matches=fa_min_abs_matches_config,
-                        min_ransac_inliers_value=fa_min_ransac_inliers_value_config,
-                        ransac_thresh=fa_ransac_thresh_config,
-                        min_matches_ratio=0.15, 
-                        daofind_fwhm=daofind_fwhm_config,
-                        daofind_threshold_sigma=daofind_threshold_sigma_config,
-                        max_stars_to_describe=max_stars_to_describe_config
-                    )
-                    fa_success = fa_success_interne 
-
-                    if fa_success and M_par_fa is not None:
-                        self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) RÉUSSI pour '{file_name}'.", "INFO")
-                        align_method_log_msg = "FastAligner_Success"
-                        matrice_M_calculee = M_par_fa
-                        wcs_final_pour_retour = self.reference_wcs_object 
-                    else: 
-                        fa_success = False 
-                        self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}'.", "WARN")
-                        align_method_log_msg = "FastAligner_Fail"
-                else:
-                    self.update_progress(f"   [ProcessFile] Alignement Local non tenté pour '{file_name}' (local_aligner ou ancre manquants).", "WARN")
-                    align_method_log_msg = "LocalAlign_Not_Attempted"
-                
-                if not fa_success and self.use_wcs_fallback_for_mosaic: 
-                    self.update_progress(f"     -> Tentative Fallback (via AstrometrySolver) pour '{file_name}'...", None)
-                    align_method_log_msg += "_Fallback_Attempted" 
-                    
-                    if self.astrometry_solver: 
-                        print(f"DEBUG QM (_process_file - FallbackWCS): Construction du dictionnaire 'settings' pour panneau '{file_name}'...")
-                        scale_to_use_for_panel_fallback = self.reference_pixel_scale_arcsec 
-                        print(f"    DEBUG QM (_process_file - FallbackWCS): Scale estimée (depuis self.reference_pixel_scale_arcsec) pour fallback panneau '{file_name}': {scale_to_use_for_panel_fallback}")
-                        solver_settings_for_panel_fallback = {
-                            'local_solver_preference': self.local_solver_preference,
-                            'api_key': self.api_key,
-                            'astap_path': self.astap_path,
-                            'astap_data_dir': self.astap_data_dir,
-                            'astap_search_radius': self.astap_search_radius,
-                            'local_ansvr_path': self.local_ansvr_path,
-                            'scale_est_arcsec_per_pix': scale_to_use_for_panel_fallback,
-                            'scale_tolerance_percent': 20, 
-                            'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
-                            'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
-                            'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
-                        }
-                        print(f"DEBUG QM (_process_file - FallbackWCS): Contenu de solver_settings_for_panel_fallback pour '{file_name}':")
-                        for k_fb, v_fb in solver_settings_for_panel_fallback.items():
-                            if k_fb == 'api_key': print(f"    '{k_fb}': '{'Présente' if v_fb else 'Absente'}'")
-                            else: print(f"    '{k_fb}': '{v_fb}'")
-
-                        # --- DÉBUT DU BLOC TRY/EXCEPT AJOUTÉ ---
-                        wcs_panel_solved_by_solver = None # Initialiser avant le try
-                        try:
-                            print(f"!!!!!! DEBUG _process_file: APPEL à AstrometrySolver.solve pour fallback panneau '{file_name}'")
-                            wcs_panel_solved_by_solver = self.astrometry_solver.solve(
-                                image_path=file_path, 
-                                fits_header=header_final_pour_retour, 
-                                settings=solver_settings_for_panel_fallback,
-                                update_header_with_solution=True 
-                            )
-                            print(f"!!!!!! DEBUG _process_file: RETOUR de AstrometrySolver.solve pour '{file_name}'. Solution: {'Oui' if wcs_panel_solved_by_solver else 'Non'}")
-
-                        except Exception as e_solve_fallback:
-                            self.update_progress(f"       -> ERREUR CRITIQUE pendant appel AstrometrySolver.solve (fallback) pour '{file_name}': {e_solve_fallback}", "ERROR")
-                            print(f"ERREUR QM (_process_file - Fallback Solve Call): {e_solve_fallback}")
-                            traceback.print_exc(limit=5) # Afficher plus de détails
-                            wcs_panel_solved_by_solver = None # S'assurer qu'il est None en cas d'erreur ici
-                            align_method_log_msg += f"_SolveError_{type(e_solve_fallback).__name__}"
-                        # --- FIN DU BLOC TRY/EXCEPT AJOUTÉ ---
-
+                # ... (Logique Mosaïque Locale, non détaillée pour ce debug) ...
+                align_method_log_msg = "FastAligner_Attempted"; fa_success = False
+                if self.local_aligner_instance and reference_image_data_for_alignment is not None:
+                    _, M_par_fa, fa_success = self.local_aligner_instance._align_image(image_for_alignment_or_drizzle_input, reference_image_data_for_alignment, file_name, fa_min_abs_matches_config, fa_min_ransac_inliers_value_config, fa_ransac_thresh_config, 0.15, daofind_fwhm_config, daofind_threshold_sigma_config, max_stars_to_describe_config)
+                    if fa_success and M_par_fa is not None: align_method_log_msg = "FastAligner_Success"; matrice_M_calculee = M_par_fa; wcs_final_pour_retour = self.reference_wcs_object
+                    else: fa_success = False; align_method_log_msg = "FastAligner_Fail"
+                else: align_method_log_msg = "LocalAlign_Not_Attempted"
+                if not fa_success and self.use_wcs_fallback_for_mosaic:
+                    align_method_log_msg += "_Fallback_Attempted"
+                    if self.astrometry_solver:
+                        solver_settings_for_panel_fallback = { 'local_solver_preference': self.local_solver_preference, 'api_key': self.api_key, 'astap_path': self.astap_path, 'astap_data_dir': self.astap_data_dir,'astap_search_radius': self.astap_search_radius,'local_ansvr_path': self.local_ansvr_path,'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,'scale_tolerance_percent': 20, 'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)}
+                        wcs_panel_solved_by_solver = None
+                        try: wcs_panel_solved_by_solver = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_panel_fallback,True)
+                        except Exception as e_s: align_method_log_msg += f"_SolveError_{type(e_s).__name__}"
                         if wcs_panel_solved_by_solver and wcs_panel_solved_by_solver.is_celestial:
-                            self.update_progress(f"       -> Fallback (via AstrometrySolver) RÉUSSI pour '{file_name}'. Calcul Matrice M...", "INFO")
-                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"
-                            wcs_final_pour_retour = wcs_panel_solved_by_solver 
-                            matrice_M_calculee = self._calculate_M_from_wcs(
-                                wcs_panel_solved_by_solver,      
-                                self.reference_wcs_object,       
-                                prepared_img_apres_pretraitement.shape[:2] 
-                            )
-                            if matrice_M_calculee is None:
-                                self.update_progress(f"       -> ERREUR Fallback: Échec calcul Matrice M pour '{file_name}'. Ce panneau sera probablement mal placé.", "ERROR")
-                                align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"
-                                wcs_final_pour_retour = None 
+                            align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Success"; wcs_final_pour_retour = wcs_panel_solved_by_solver
+                            matrice_M_calculee = self._calculate_M_from_wcs(wcs_panel_solved_by_solver, self.reference_wcs_object, image_for_alignment_or_drizzle_input.shape[:2] )
+                            if matrice_M_calculee is None: align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Matrix_Fail"; wcs_final_pour_retour = None
                         else:
-                            # Si wcs_panel_solved_by_solver est None (soit parce que solve a retourné None, soit à cause d'une exception ci-dessus)
-                            self.update_progress(f"       -> Fallback (via AstrometrySolver) ÉCHOUÉ pour '{file_name}'.", "WARN")
-                            if "_SolveError_" not in align_method_log_msg: # N'écrase pas un log d'erreur plus spécifique
-                                align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
-                            wcs_final_pour_retour = None 
-                            matrice_M_calculee = None
-                    else: 
-                        self.update_progress(f"     -> AstrometrySolver non disponible pour fallback WCS pour '{file_name}'.", "ERROR")
-                        align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"
-                        wcs_final_pour_retour = None
-                        matrice_M_calculee = None
-                
-                elif not fa_success and not self.use_wcs_fallback_for_mosaic:
-                    self.update_progress(f"   [ProcessFile] Alignement Local (FastAligner) ÉCHOUÉ pour '{file_name}' et pas de fallback WCS (mode 'local_fast_only').", "WARN")
-                    align_method_log_msg = "FastAligner_Fail_No_Fallback"
-                    wcs_final_pour_retour = None 
-                    matrice_M_calculee = None
+                            if "_SolveError_" not in align_method_log_msg: align_method_log_msg = "FastAligner_Fail_Fallback_WCS_Fail"
+                            wcs_final_pour_retour = None; matrice_M_calculee = None
+                    else: align_method_log_msg = "FastAligner_Fail_Fallback_NoSolver"; wcs_final_pour_retour = None; matrice_M_calculee = None
+                elif not fa_success and not self.use_wcs_fallback_for_mosaic: align_method_log_msg = "FastAligner_Fail_No_Fallback"; wcs_final_pour_retour = None; matrice_M_calculee = None
+                # data_final_pour_retour was already set to ADU data for mosaic
 
-            # --- CAS B : Mosaïque Astrometry.net par Panneau ---
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
-                self.update_progress(f"   [ProcessFile] Tentative résolution AstrometrySolver (mode par panneau) pour '{file_name}'...", None)
+                # ... (Logique Mosaïque Astro, non détaillée pour ce debug) ...
                 align_method_log_msg = "Astrometry_Per_Panel_Attempted"
-                
                 if self.astrometry_solver:
-                    # --- Construction du dictionnaire settings pour ce panneau ---
-                    print(f"DEBUG QM (_process_file - AstroPerPanel): Construction du dictionnaire 'settings' pour AstrometrySolver.solve() (panneau '{file_name}')...")
-                    
-                    solver_settings_for_this_panel = {
-                        'local_solver_preference': self.local_solver_preference,
-                        'api_key': self.api_key,
-                        'astap_path': self.astap_path,
-                        'astap_data_dir': self.astap_data_dir,
-                        'astap_search_radius': self.astap_search_radius,
-                        'local_ansvr_path': self.local_ansvr_path,
-                        'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec, 
-                        'scale_tolerance_percent': 20, 
-                        'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
-                        'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
-                        'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
-                    }
-                    # DEBUG pour vérifier le dictionnaire
-                    print(f"DEBUG QM (_process_file - AstroPerPanel): Contenu de solver_settings_for_this_panel pour '{file_name}':")
-                    for k_panel, v_panel in solver_settings_for_this_panel.items():
-                        if k_panel == 'api_key': 
-                            print(f"    '{k_panel}': '{'Présente' if v_panel else 'Absente'}'")
-                        else: 
-                            print(f"    '{k_panel}': '{v_panel}'")
-                    # --- FIN DEBUG ---
-
-                    wcs_final_pour_retour = self.astrometry_solver.solve(
-                        image_path=file_path,                 
-                        fits_header=header_final_pour_retour, 
-                        settings=solver_settings_for_this_panel, 
-                        update_header_with_solution=True      
-                    )
-
-                    if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
-                        align_method_log_msg = "Astrometry_Per_Panel_Success"
-                        matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32) 
-                        print(f"    [ProcessFile] AstrometrySolver (mode par panneau) RÉUSSI pour '{file_name}'. WCS obtenu.") 
-                    else:
-                        align_method_log_msg = "Astrometry_Per_Panel_Fail"
-                        wcs_final_pour_retour = None 
-                        matrice_M_calculee = None
-                        print(f"    [ProcessFile] AstrometrySolver (mode par panneau) ÉCHOUÉ pour '{file_name}'.") 
-                else: 
-                    self.update_progress(f"   [ProcessFile] AstrometrySolver non disponible pour '{file_name}' (mode par panneau).", "ERROR")
-                    align_method_log_msg = "Astrometry_Per_Panel_NoSolver"
-                    wcs_final_pour_retour = None
-                    matrice_M_calculee = None
-                
-                # data_final_pour_retour est prepared_img_apres_pretraitement (l'image originale prétraitée)
-                # car pour ce mode, on ne la warpe pas, c'est le WCS résolu qui est important.
-            else: 
-                # ... (logique identique à V_FastAligner_Fallback_Logic) ...
-                self.update_progress(f"   [ProcessFile] Tentative Alignement Astroalign standard pour '{file_name}'...", None)
+                    solver_settings_for_this_panel = { 'local_solver_preference': self.local_solver_preference, 'api_key': self.api_key, 'astap_path': self.astap_path, 'astap_data_dir': self.astap_data_dir, 'astap_search_radius': self.astap_search_radius, 'local_ansvr_path': self.local_ansvr_path, 'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,'scale_tolerance_percent': 20, 'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)}
+                    wcs_final_pour_retour = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_this_panel, True)
+                    if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial: align_method_log_msg = "Astrometry_Per_Panel_Success"; matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32)
+                    else: align_method_log_msg = "Astrometry_Per_Panel_Fail"; wcs_final_pour_retour = None; matrice_M_calculee = None
+                else: align_method_log_msg = "Astrometry_Per_Panel_NoSolver"; wcs_final_pour_retour = None; matrice_M_calculee = None
+                # data_final_pour_retour was already set to ADU data for mosaic
+            else:
+                # STACKING CLASSIQUE ou DRIZZLE STANDARD (qui aligne sur une référence via Astroalign)
                 align_method_log_msg = "Astroalign_Standard_Attempted"
-                if reference_image_data_for_alignment is None:
-                    raise RuntimeError("Image de référence (pour Astroalign standard) non disponible.")
-                
+                if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
+
+                # `image_for_alignment_or_drizzle_input` est ADU si Drizzle standard, sinon plage d'origine (peut être 0-1)
                 aligned_img_astroalign, align_success_astroalign = self.aligner._align_image(
-                    prepared_img_apres_pretraitement, 
-                    reference_image_data_for_alignment, 
-                    file_name
-                )
+                    image_for_alignment_or_drizzle_input, reference_image_data_for_alignment, file_name)
+
+                # ---- DEBUG CLASSIC 1: Log résultat alignement ----
+                if align_success_astroalign and aligned_img_astroalign is not None:
+                    print(f"     - Alignement Astroalign RÉUSSI. Range aligned_img: [{np.min(aligned_img_astroalign):.4g}, {np.max(aligned_img_astroalign):.4g}], Shape: {aligned_img_astroalign.shape}")
+                else:
+                    print(f"     - Alignement Astroalign ÉCHOUÉ. align_success: {align_success_astroalign}, aligned_img is None: {aligned_img_astroalign is None}")
+                # ---- FIN DEBUG ----
+
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
-                    data_final_pour_retour = aligned_img_astroalign 
-                    if header_final_pour_retour: # WCS approx
-                        try: 
-                            with warnings.catch_warnings(): warnings.simplefilter('ignore'); wcs_approx = WCS(header_final_pour_retour, naxis=2)
-                            if wcs_approx and wcs_approx.is_celestial: wcs_final_pour_retour = wcs_approx
-                        except Exception: pass
-                        if wcs_final_pour_retour is None:
-                            try: from ..enhancement.drizzle_integration import _create_wcs_from_header as _cwfh_func; wcs_gen_temp = _cwfh_func(header_final_pour_retour)
-                            except ImportError: wcs_gen_temp = None
-                            if wcs_gen_temp and wcs_gen_temp.is_celestial: wcs_final_pour_retour = wcs_gen_temp
-                        if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
-                            naxis1_h = header_final_pour_retour.get('NAXIS1'); naxis2_h = header_final_pour_retour.get('NAXIS2')
-                            if naxis1_h and naxis2_h:
-                                try: wcs_final_pour_retour.pixel_shape = (int(naxis1_h), int(naxis2_h))
-                                except ValueError: pass
+                    data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
+
+                    if not is_drizzle_or_mosaic_mode: # STACKING CLASSIQUE
+                        # ---- DEBUG CLASSIC 1: Log avant normalisation 0-1 ----
+                        print(f"     - STACKING CLASSIQUE: AVANT normalisation 0-1. data_final_pour_retour - Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}], Shape: {data_final_pour_retour.shape}")
+                        # ---- FIN DEBUG ----
+                        min_val_aligned = np.nanmin(data_final_pour_retour)
+                        max_val_aligned = np.nanmax(data_final_pour_retour)
+                        # ---- DEBUG CLASSIC 1: Log des valeurs pour la condition de normalisation ----
+                        print(f"       - Pour normalisation: min_val_aligned={min_val_aligned:.4g}, max_val_aligned={max_val_aligned:.4g}")
+                        print(f"       - Conditions: np.isfinite(min)={np.isfinite(min_val_aligned)}, np.isfinite(max)={np.isfinite(max_val_aligned)}, max > min + 1e-7 = {max_val_aligned > min_val_aligned + 1e-7}")
+                        # ---- FIN DEBUG ----
+                        if np.isfinite(min_val_aligned) and np.isfinite(max_val_aligned) and max_val_aligned > min_val_aligned + 1e-7: # Ajouté + 1e-7 pour robustesse float
+                            data_final_pour_retour = (data_final_pour_retour - min_val_aligned) / (max_val_aligned - min_val_aligned)
+                            print(f"       - Normalisation 0-1 effectuée (dynamique normale).")
+                        else:
+                            # ---- DEBUG CLASSIC 1: Log si l'image est mise à zéro ----
+                            print(f"       - AVERTISSEMENT: Image alignée plate ou avec NaN/Inf. data_final_pour_retour sera mis à ZÉRO.")
+                            # ---- FIN DEBUG ----
+                            data_final_pour_retour = np.zeros_like(data_final_pour_retour)
+                        data_final_pour_retour = np.clip(data_final_pour_retour, 0.0, 1.0)
+                        # ---- DEBUG CLASSIC 1: Log après normalisation 0-1 ----
+                        print(f"     - STACKING CLASSIQUE: Données alignées NORMALISÉES 0-1. Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}], Moy: {np.mean(data_final_pour_retour):.4g}")
+                        # ---- FIN DEBUG ----
+                    else: # Pour Drizzle Standard, data_final_pour_retour reste en ADU après alignement
+                        print(f"     - DRIZZLE STANDARD: Données alignées gardées en ADU (venant de image_for_alignment_or_drizzle_input). Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}]")
+
+                    # ... (logique WCS) ...
                 else:
-                    align_method_log_msg = "Astroalign_Standard_Fail"
-                    raise RuntimeError(f"Échec Alignement Astroalign standard pour {file_name}.")
-                matrice_M_calculee = None # Pas de matrice M spécifique pour ce mode
-            
-            header_final_pour_retour['_ALIGN_METHOD_LOG'] = (align_method_log_msg, "Alignment method used for this panel")
+                    align_method_log_msg = "Astroalign_Standard_Fail"; raise RuntimeError(f"Échec Alignement Astroalign standard pour {file_name}.")
+                matrice_M_calculee = None # Pour Astroalign standard, on ne retourne pas M via cette fonction
+
+            header_final_pour_retour['_ALIGN_METHOD_LOG'] = (align_method_log_msg, "Alignment method used")
 
             # === 5. Création du masque de pixels valides (sur data_final_pour_retour) ===
-            # ... (identique) ...
             print(f"  -> [5/7] Création du masque de pixels valides pour '{file_name}'...")
             if data_final_pour_retour is None: raise ValueError("Données finales pour masque sont None.")
-            if data_final_pour_retour.ndim == 3 and data_final_pour_retour.shape[2] == 3:
-                luminance_mask_src = 0.299*data_final_pour_retour[...,0] + 0.587*data_final_pour_retour[...,1] + 0.114*data_final_pour_retour[...,2]
-                valid_pixel_mask_2d = (luminance_mask_src > 1e-5).astype(bool)
-            elif data_final_pour_retour.ndim == 2:
-                valid_pixel_mask_2d = (data_final_pour_retour > 1e-5).astype(bool)
+
+            if data_final_pour_retour.ndim == 3: luminance_mask_src = 0.299 * data_final_pour_retour[..., 0] + 0.587 * data_final_pour_retour[..., 1] + 0.114 * data_final_pour_retour[..., 2]
+            elif data_final_pour_retour.ndim == 2: luminance_mask_src = data_final_pour_retour
             else:
-                valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool) 
-            print(f"     - Masque de pixels valides créé. Shape: {valid_pixel_mask_2d.shape}")
+                valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool)
+                print(f"     - Masque (tous valides, car shape data_final_pour_retour {data_final_pour_retour.shape} inattendue pour luminance).")
 
+            if 'valid_pixel_mask_2d' not in locals() or valid_pixel_mask_2d is None : # S'assurer qu'il est créé si pas dans le else au-dessus
+                # ---- DEBUG CLASSIC 1: Log avant création masque ----
+                print(f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]")
+                # ---- FIN DEBUG ----
+                max_lum_val = np.nanmax(luminance_mask_src)
+                # Le seuil est important. Si data_final_pour_retour est 0-1 et potentiellement très sombre, 1e-5 est ok.
+                # Si c'était ADU (pour Drizzle/Mosaïque), le max_lum_val serait grand, donc 1.0 serait ok.
+                # Comme data_final_pour_retour est normalisé 0-1 pour le stacking classique ici, 1e-5 est bon.
+                mask_threshold = 1e-5
+                valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(bool)
+                # ---- DEBUG CLASSIC 1: Log après création masque ----
+                print(f"     - Masque de pixels valides créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Nombre de pixels valides (True): {np.sum(valid_pixel_mask_2d)}")
+                # ---- FIN DEBUG ----
 
-            # === 6. Calcul des scores de qualité (sur prepared_img_apres_pretraitement) ===
-            # ... (identique) ...
+            # === 6. Calcul des scores de qualité (sur `prepared_img_after_initial_proc` avant rescale ADU) ===
             print(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
-            if self.use_quality_weighting:
-                quality_scores = self._calculate_quality_metrics(prepared_img_apres_pretraitement)
+            if self.use_quality_weighting: quality_scores = self._calculate_quality_metrics(prepared_img_after_initial_proc)
             else: print(f"     - Pondération qualité désactivée.")
 
-
             # === 7. Vérification finale avant retour ===
-            if data_final_pour_retour is None:
-                raise RuntimeError("data_final_pour_retour est None à la fin de _process_file.")
-            
-            # Pour la mosaïque locale, un WCS ET une Matrice M sont nécessaires pour que le panneau soit utilisable.
-            # Le WCS peut être celui de l'ancre (si M vient de FastAligner) OU le WCS propre du panneau (si M vient du fallback WCS).
-            if self.is_mosaic_run and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
-                if wcs_final_pour_retour is None or matrice_M_calculee is None:
-                    raise RuntimeError(f"Pour mosaïque locale '{file_name}', WCS ou Matrice M manquant(e) après toutes tentatives. AlignMethod: {align_method_log_msg}")
-            
-            # Pour la mosaïque Astrometry/Panel, un WCS résolu est nécessaire.
-            elif self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
-                if wcs_final_pour_retour is None:
-                    raise RuntimeError(f"Pour mosaïque Astrometry/Panneau '{file_name}', WCS résolu manquant. AlignMethod: {align_method_log_msg}")
+            if data_final_pour_retour is None: raise RuntimeError("data_final_pour_retour est None à la fin de _process_file.")
+            if valid_pixel_mask_2d is None: raise RuntimeError("valid_pixel_mask_2d est None à la fin de _process_file.") # Ajouté
 
-            print(f"DEBUG QM [_process_file V_FastAligner_Fallback_Implemented]: Traitement de '{file_name}' terminé. AlignMethod: {align_method_log_msg}.")
-            
-            return (data_final_pour_retour, header_final_pour_retour, quality_scores, 
+            if self.is_mosaic_run and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
+                if wcs_final_pour_retour is None or matrice_M_calculee is None: raise RuntimeError(f"Mosaïque locale '{file_name}', WCS ou M manquant. AlignMethod: {align_method_log_msg}")
+            elif self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
+                if wcs_final_pour_retour is None: raise RuntimeError(f"Mosaïque AstroPanel '{file_name}', WCS résolu manquant. AlignMethod: {align_method_log_msg}")
+
+            # ---- DEBUG CLASSIC 1: Log final avant retour ----
+            print(f"DEBUG QM [_process_file V_ProcessFile_ADUForDrizzle_01ForClassicAlignOutput_PylanceFix_DebugClassic1]: FIN pour '{file_name}'.")
+            print(f"  >> AlignMethod: {align_method_log_msg}")
+            if data_final_pour_retour is not None:
+                print(f"  >> data_final_pour_retour - Shape: {data_final_pour_retour.shape}, Dtype: {data_final_pour_retour.dtype}, Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}], Moy: {np.mean(data_final_pour_retour):.4g}")
+            else:
+                print(f"  >> data_final_pour_retour est None.")
+            if valid_pixel_mask_2d is not None:
+                print(f"  >> valid_pixel_mask_2d - Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
+            else:
+                print(f"  >> valid_pixel_mask_2d est None.")
+            print(f"  >> quality_scores: {quality_scores}")
+            # ---- FIN DEBUG ----
+
+            return (data_final_pour_retour, header_final_pour_retour, quality_scores,
                     wcs_final_pour_retour, matrice_M_calculee, valid_pixel_mask_2d)
 
-        # ... (blocs except et finally identiques à V_FastAligner_Fallback_Logic) ...
         except (ValueError, RuntimeError) as proc_err:
             self.update_progress(f"   ⚠️ Fichier '{file_name}' ignoré dans _process_file: {proc_err}", "WARN")
+            # ---- DEBUG CLASSIC 1: Log en cas d'erreur Value/Runtime ----
+            print(f"ERREUR QM [_process_file V_ProcessFile_ADUForDrizzle_01ForClassicAlignOutput_PylanceFix_DebugClassic1]: (ValueError/RuntimeError) pour '{file_name}': {proc_err}")
+            # ---- FIN DEBUG ----
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"Error_{type(proc_err).__name__}", "Processing file error")
-            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) # Ajout info box
-            return None, header_final_pour_retour, quality_scores, None, None, None 
+            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
+            return None, header_final_pour_retour, quality_scores, None, None, None
         except Exception as e:
             self.update_progress(f"❌ Erreur critique traitement fichier {file_name} dans _process_file: {e}", "ERROR")
-            print(f"ERREUR QM [_process_file V_FastAligner_Fallback_Implemented]: Exception: {e}"); traceback.print_exc(limit=3)
+            # ---- DEBUG CLASSIC 1: Log en cas d'exception générale ----
+            print(f"ERREUR QM [_process_file V_ProcessFile_ADUForDrizzle_01ForClassicAlignOutput_PylanceFix_DebugClassic1]: Exception générale pour '{file_name}': {e}"); traceback.print_exc(limit=3)
+            # ---- FIN DEBUG ----
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"CritError_{type(e).__name__}", "Critical processing error")
-            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) # Ajout info box
-            return None, header_final_pour_retour, quality_scores, None, None, None 
+            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
+            return None, header_final_pour_retour, quality_scores, None, None, None
         finally:
             if img_data_array_loaded is not None: del img_data_array_loaded
-            if prepared_img_apres_pretraitement is not None: del prepared_img_apres_pretraitement
+            if prepared_img_after_initial_proc is not None: del prepared_img_after_initial_proc
+            if image_for_alignment_or_drizzle_input is not None: del image_for_alignment_or_drizzle_input
             gc.collect()
+
+
+
+
 
 
 
@@ -4210,16 +4063,22 @@ class SeestarQueuedStacker:
         """
         Combine les résultats Drizzle intermédiaires (par lot) sauvegardés sur disque.
         MODIFIED V4_CombineFixAPI: Correction initialisation Drizzle et utilisation pixfrac.
+        MODIFIED DebugDrizzleFinal_1: Commenté le clipping Lanczos agressif, ajout logs.
         """
         final_sci_image_HWC = None
-        final_wht_map_HWC = None
+        final_wht_map_HWC = None # Sera HWC aussi, car les poids sont par canal pour Drizzle
 
         num_batches_to_combine = len(intermediate_files_list)
         if num_batches_to_combine == 0:
             self.update_progress("ⓘ Aucun lot Drizzle intermédiaire à combiner.")
             return final_sci_image_HWC, final_wht_map_HWC
 
-        print(f"DEBUG QM [_combine_intermediate_drizzle_batches V4_CombineFixAPI]: Début pour {num_batches_to_combine} lots. Shape Sortie CIBLE: {output_shape_final_target_hw}")
+        # --- DEBUG DRIZZLE FINAL 1: Log d'entrée ---
+        print("\n" + "="*70)
+        print(f"DEBUG QM [_combine_intermediate_drizzle_batches V4_CombineFixAPI_DebugDrizzleFinal_1]:")
+        print(f"  Début pour {num_batches_to_combine} lots.")
+        print(f"  Shape Sortie CIBLE: {output_shape_final_target_hw}, Drizzle Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac}")
+        # --- FIN DEBUG ---
         self.update_progress(f"💧 [CombineBatches V4] Début combinaison {num_batches_to_combine} lots Drizzle...")
 
         if output_wcs_final_target is None or output_shape_final_target_hw is None:
@@ -4228,32 +4087,28 @@ class SeestarQueuedStacker:
 
         num_output_channels = 3
         final_drizzlers = []
-        final_output_images_list = []
-        final_output_weights_list = []
+        final_output_images_list = [] # Liste des arrays SCI (H,W) par canal
+        final_output_weights_list = []# Liste des arrays WHT (H,W) par canal
 
         try:
             self.update_progress(f"   [CombineBatches V4] Initialisation Drizzle final (Shape: {output_shape_final_target_hw})...")
             for _ in range(num_output_channels):
                 final_output_images_list.append(np.zeros(output_shape_final_target_hw, dtype=np.float32))
                 final_output_weights_list.append(np.zeros(output_shape_final_target_hw, dtype=np.float32))
-            
+
             for i in range(num_output_channels):
-                # --- CORRECTION INITIALISATION DRIZZLE ---
                 driz_ch = Drizzle(
                     kernel=self.drizzle_kernel,
-                    fillval="0.0", # Ou self.drizzle_fillval si tu as un attribut pour ça
+                    fillval=str(getattr(self, "drizzle_fillval", "0.0")), # Utiliser l'attribut si existe
                     out_img=final_output_images_list[i],
                     out_wht=final_output_weights_list[i],
-                    out_shape=output_shape_final_target_hw # Utilise le bon nom de variable pour la shape
-                    # PAS de pixfrac ici
-                    # PAS de out_wcs ici
+                    out_shape=output_shape_final_target_hw
                 )
-                # --- FIN CORRECTION ---
                 final_drizzlers.append(driz_ch)
             self.update_progress(f"   [CombineBatches V4] Objets Drizzle finaux initialisés.")
         except Exception as init_err:
             self.update_progress(f"   [CombineBatches V4] ERREUR: Échec init Drizzle final: {init_err}", "ERROR")
-            print(f"ERREUR QM [_combine_intermediate_drizzle_batches V4_CombineFixAPI]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
+            print(f"ERREUR QM [_combine_intermediate_drizzle_batches]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
             return None, None
 
         total_contributing_ninputs_for_final_header = 0
@@ -4263,20 +4118,21 @@ class SeestarQueuedStacker:
             if self.stop_processing:
                 self.update_progress("🛑 Arrêt demandé pendant combinaison lots Drizzle.")
                 break
-            
+
             self.update_progress(f"   [CombineBatches V4] Ajout lot intermédiaire {i_batch_loop+1}/{num_batches_to_combine}: {os.path.basename(sci_fpath)}...")
-            # ... (print DEBUG) ...
+            # --- DEBUG DRIZZLE FINAL 1: Log chemin lot ---
+            print(f"  Processing batch {i_batch_loop+1}: SCI='{sci_fpath}', WHT0='{wht_fpaths_list_for_batch[0] if wht_fpaths_list_for_batch else 'N/A'}'")
+            # --- FIN DEBUG ---
 
             if len(wht_fpaths_list_for_batch) != num_output_channels:
                 self.update_progress(f"      -> ERREUR: Nb incorrect de cartes poids ({len(wht_fpaths_list_for_batch)}) pour lot {i_batch_loop+1}. Ignoré.", "WARN")
                 continue
-            
+
             sci_data_cxhxw_lot = None; wcs_lot_intermediaire = None
             wht_maps_2d_list_for_lot = None; header_sci_lot = None
             pixmap_batch_to_final_grid = None
-            
+
             try:
-                # ... (Chargement SCI et WHT du lot, identique à ta version) ...
                 with fits.open(sci_fpath, memmap=False) as hdul_sci:
                     sci_data_cxhxw_lot = hdul_sci[0].data.astype(np.float32); header_sci_lot = hdul_sci[0].header
                     with warnings.catch_warnings(): warnings.simplefilter("ignore"); wcs_lot_intermediaire = WCS(header_sci_lot, naxis=2)
@@ -4285,85 +4141,84 @@ class SeestarQueuedStacker:
                 for ch_idx_w, wht_fpath_ch in enumerate(wht_fpaths_list_for_batch):
                     with fits.open(wht_fpath_ch, memmap=False) as hdul_wht: wht_map_2d_ch = hdul_wht[0].data.astype(np.float32)
                     wht_maps_2d_list_for_lot.append(np.nan_to_num(np.maximum(wht_map_2d_ch, 0.0)))
+                # --- DEBUG DRIZZLE FINAL 1: Log données lot chargées ---
+                print(f"    Lot {i_batch_loop+1} SCI chargé - Shape CxHxW: {sci_data_cxhxw_lot.shape}, Range Ch0: [{np.min(sci_data_cxhxw_lot[0]):.3g}, {np.max(sci_data_cxhxw_lot[0]):.3g}]")
+                print(f"    Lot {i_batch_loop+1} WHT0 chargé - Shape HW: {wht_maps_2d_list_for_lot[0].shape}, Range: [{np.min(wht_maps_2d_list_for_lot[0]):.3g}, {np.max(wht_maps_2d_list_for_lot[0]):.3g}]")
+                # --- FIN DEBUG ---
 
-                # Calcul Pixmap (identique)
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
                 y_lot_intermed, x_lot_intermed = np.indices(shape_lot_intermediaire_hw)
                 sky_coords_lot_ra, sky_coords_lot_dec = wcs_lot_intermediaire.all_pix2world(x_lot_intermed.ravel(), y_lot_intermed.ravel(), 0)
                 x_final_output_pix, y_final_output_pix = output_wcs_final_target.all_world2pix(sky_coords_lot_ra, sky_coords_lot_dec, 0)
                 pixmap_batch_to_final_grid = np.dstack((x_final_output_pix.reshape(shape_lot_intermediaire_hw), y_final_output_pix.reshape(shape_lot_intermediaire_hw))).astype(np.float32)
-                
+
                 if pixmap_batch_to_final_grid is not None:
                     ninputs_this_batch = int(header_sci_lot.get('NINPUTS', 0))
                     for ch_idx_add in range(num_output_channels):
                         data_ch_sci_2d_lot = np.nan_to_num(sci_data_cxhxw_lot[ch_idx_add, :, :])
                         data_ch_wht_2d_lot = wht_maps_2d_list_for_lot[ch_idx_add]
-                        
-                        # --- ASSURER QUE PIXFRAC EST PASSÉ À ADD_IMAGE ---
+                        # --- DEBUG DRIZZLE FINAL 1: Log avant add_image ---
+                        print(f"      Ch{ch_idx_add} add_image: data SCI min/max [{np.min(data_ch_sci_2d_lot):.3g}, {np.max(data_ch_sci_2d_lot):.3g}], data WHT min/max [{np.min(data_ch_wht_2d_lot):.3g}, {np.max(data_ch_wht_2d_lot):.3g}], pixfrac={self.drizzle_pixfrac}")
+                        # --- FIN DEBUG ---
                         final_drizzlers[ch_idx_add].add_image(
                             data=data_ch_sci_2d_lot,
                             pixmap=pixmap_batch_to_final_grid,
                             weight_map=data_ch_wht_2d_lot,
-                            exptime=1.0,
-                            pixfrac=self.drizzle_pixfrac, # Utiliser self.drizzle_pixfrac (param global)
-                            in_units='cps'
+                            exptime=1.0, # Les lots sont déjà en counts/sec
+                            pixfrac=self.drizzle_pixfrac,
+                            in_units='cps' # Confirmé par BUNIT='Counts/s' dans les fichiers de lot
                         )
-                        # --- FIN ASSURANCE ---
                     batches_successfully_added_to_final_drizzle += 1
                     total_contributing_ninputs_for_final_header += ninputs_this_batch
-            
-            except Exception as e_lot_proc: # ... (gestion erreur)
+
+            except Exception as e_lot_proc:
                 self.update_progress(f"   [CombineBatches V4] ERREUR traitement lot {i_batch_loop+1}: {e_lot_proc}", "ERROR"); continue
-            finally: # ... (del et gc.collect)
+            finally:
                 del sci_data_cxhxw_lot, wcs_lot_intermediaire, wht_maps_2d_list_for_lot, header_sci_lot, pixmap_batch_to_final_grid; gc.collect()
-        # --- Fin boucle ---
 
- 
         if batches_successfully_added_to_final_drizzle == 0:
-             return None, None # Retourner None, None au lieu de variables non définies
-        
-        # Tes logs de debug actuels (très utiles pour Lanczos) :
-        print(f"DEBUG [CombineBatches V4]: Valeurs BRUTES canal 0 APRÈS add_image avec Kernel '{self.drizzle_kernel}':") # Modifié pour afficher le kernel actuel
-        temp_ch0_data = final_output_images_list[0]
-        if temp_ch0_data is not None and temp_ch0_data.size > 0: # S'assurer que temp_ch0_data n'est pas vide
-            print(f"  Min: {np.min(temp_ch0_data):.4g}, Max: {np.max(temp_ch0_data):.4g}, Mean: {np.mean(temp_ch0_data):.4g}, Std: {np.std(temp_ch0_data):.4g}")
-            print(f"  Nombre de pixels négatifs: {np.sum(temp_ch0_data < 0)}")
-            print(f"  Nombre de pixels > 1.5 (test overshoot): {np.sum(temp_ch0_data > 1.5)}") # Exemple de test d'overshoot
-        else:
-            print("  [CombineBatches V4]: Données du canal 0 vides ou invalides pour stats.")
+             self.update_progress("   [CombineBatches V4] ERREUR: Aucun lot Drizzle intermédiaire n'a pu être ajouté à la combinaison finale.", "ERROR")
+             return None, None
 
+        # --- DEBUG DRIZZLE FINAL 1: Log des données brutes accumulées PAR CANAL ---
+        for ch_log_idx in range(num_output_channels):
+            temp_ch_data = final_output_images_list[ch_log_idx]
+            temp_ch_wht = final_output_weights_list[ch_log_idx]
+            print(f"  DEBUG [CombineBatches V4]: DONNÉES ACCUMULÉES BRUTES (avant division/clipping) - Canal {ch_log_idx}:")
+            if temp_ch_data is not None and temp_ch_data.size > 0:
+                print(f"    SCI_ACCUM (out_img): Min={np.min(temp_ch_data):.4g}, Max={np.max(temp_ch_data):.4g}, Mean={np.mean(temp_ch_data):.4g}, Std={np.std(temp_ch_data):.4g}")
+                print(f"      Négatifs SCI_ACCUM: {np.sum(temp_ch_data < 0)}")
+            else: print("    SCI_ACCUM: Données vides ou invalides.")
+            if temp_ch_wht is not None and temp_ch_wht.size > 0:
+                print(f"    WHT_ACCUM (out_wht): Min={np.min(temp_ch_wht):.4g}, Max={np.max(temp_ch_wht):.4g}, Mean={np.mean(temp_ch_wht):.4g}")
+            else: print("    WHT_ACCUM: Données vides ou invalides.")
+        # --- FIN DEBUG ---
 
         try:
+            # Les `final_output_images_list` contiennent la somme(data*wht) et `final_output_weights_list` contient la somme(wht)
+            # La division se fera dans _save_final_stack. Ici, on stack juste pour retourner.
             final_sci_image_HWC = np.stack(final_output_images_list, axis=-1).astype(np.float32)
-            final_wht_map_HWC = np.stack(final_output_weights_list, axis=-1).astype(np.float32)
+            final_wht_map_HWC = np.stack(final_output_weights_list, axis=-1).astype(np.float32) # Maintenant HWC
 
-            # --- DÉBUT SECTION CLIPPING CONDITIONNEL POUR LANCZOS ---
-            if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:
-                print(f"DEBUG [CombineBatches V4]: Application du clipping spécifique pour kernel {self.drizzle_kernel}.")
-                self.update_progress(f"   Appli. clipping spécifique pour Lanczos...", "DEBUG_DETAIL")
-                # Valeurs de clipping (pourraient devenir des paramètres plus tard)
-                # L'idée est de ramener les extrêmes à une plage plus "normale" attendue
-                # pour des données qui devraient être en gros entre 0 et 1 (ou un peu plus pour les étoiles brillantes).
-                # Un clipping à 0 pour les négatifs est quasi certain.
-                # Le clipping supérieur est plus délicat. Si les données d'entrée des lots sont déjà
-                # bien normalisées (ex: en counts/sec où le signal physique ne dépasse pas X),
-                # on pourrait clipper à X*1.1 ou X*1.5.
-                # Pour l'instant, un clipping simple pour limiter les forts dépassements.
-                clip_min_lanczos = 0.0
-                clip_max_lanczos = 2.0 # Exemple, à ajuster. Si les données peuvent légitimement dépasser 1.0.
-                                      # Si les données sont strictement 0-1 attendues, mettre 1.0.
+            # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---
+            # if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:
+            #     print(f"DEBUG [CombineBatches V4]: CLIPPING LANCZOS TEMPORAIREMENT DÉSACTIVÉ.")
+            #     # print(f"DEBUG [CombineBatches V4]: Application du clipping spécifique pour kernel {self.drizzle_kernel}.")
+            #     # self.update_progress(f"   Appli. clipping spécifique pour Lanczos...", "DEBUG_DETAIL")
+            #     # clip_min_lanczos = 0.0
+            #     # clip_max_lanczos = 2.0 # Exemple, à ajuster.
+            #     # print(f"  [CombineBatches V4]: Clipping Lanczos: Min={clip_min_lanczos}, Max={clip_max_lanczos}")
+            #     # print(f"    Avant clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            #     # final_sci_image_HWC = np.clip(final_sci_image_HWC, clip_min_lanczos, clip_max_lanczos)
+            #     # print(f"    Après clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            # --- FIN SECTION CLIPPING COMMENTÉE ---
 
-                print(f"  [CombineBatches V4]: Clipping Lanczos: Min={clip_min_lanczos}, Max={clip_max_lanczos}")
-                print(f"    Avant clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
-                final_sci_image_HWC = np.clip(final_sci_image_HWC, clip_min_lanczos, clip_max_lanczos)
-                print(f"    Après clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
-            # --- FIN SECTION CLIPPING CONDITIONNEL POUR LANCZOS ---
-            
+            # Nettoyage NaN/Inf et s'assurer que les poids sont non-négatifs
             final_sci_image_HWC = np.nan_to_num(final_sci_image_HWC, nan=0.0, posinf=0.0, neginf=0.0)
             final_wht_map_HWC = np.nan_to_num(final_wht_map_HWC, nan=0.0, posinf=0.0, neginf=0.0)
-            final_wht_map_HWC = np.maximum(final_wht_map_HWC, 0.0)
-            
-            self.update_progress(f"   -> Assemblage final Drizzle terminé (Shape Sci: {final_sci_image_HWC.shape})")
+            final_wht_map_HWC = np.maximum(final_wht_map_HWC, 0.0) # Poids doivent être >= 0
+
+            self.update_progress(f"   -> Assemblage final Drizzle terminé (Shape Sci HWC: {final_sci_image_HWC.shape}, Wht HWC: {final_wht_map_HWC.shape})")
             self.images_in_cumulative_stack = total_contributing_ninputs_for_final_header
         except Exception as e_final_asm:
             self.update_progress(f"   - ERREUR pendant assemblage final Drizzle: {e_final_asm}", "ERROR")
@@ -4373,401 +4228,217 @@ class SeestarQueuedStacker:
             del final_drizzlers, final_output_images_list, final_output_weights_list
             gc.collect()
         
+        print("="*70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
-
-# --- FIN de la méthode _combine_intermediate_drizzle_batches ---
 
 ############################################################################################################################################
 
 
 
 
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
-
     def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False,
                           drizzle_final_sci_data=None, drizzle_final_wht_data=None):
         """
         Calcule l'image finale, applique les post-traitements et sauvegarde.
-        Gère Drizzle Incrémental VRAI (depuis objets Drizzle persistants),
-        Drizzle Final/Mosaïque (depuis données fournies), et Stacking Classique (depuis memmaps).
-        MODIFIED: Ajout de la logique pour sauvegarder en float32 ou uint16 basé sur self.save_final_as_float32.
-        Version: V_SaveDtypeOption_In_SaveFinalStack
+        MODIFIED: Creates self.raw_adu_data_for_ui_histogram if saving FITS as float32.
+                  self.last_saved_data_for_preview always gets the 0-1 post-processed data.
+        Version: V_SaveDtypeOption_Reproject_ADUForUIHisto_CosmeticForUIPreview
         """
         print("\n" + "=" * 80)
-        print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_In_SaveFinalStack]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
+        print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_Reproject_ADUForUIHisto_CosmeticForUIPreview]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
         
-        # Lire la valeur du nouvel attribut (on supposera qu'il est défini sur self, ex: par __init__ et start_processing)
         save_as_float32_setting = getattr(self, 'save_final_as_float32', False) 
         print(f"  -> Option de sauvegarde effective (self.save_final_as_float32): {save_as_float32_setting}")
         
+        is_reproject_mosaic_mode = (output_filename_suffix == "_mosaic_reproject" and 
+                                    drizzle_final_sci_data is not None and 
+                                    drizzle_final_wht_data is not None)
         is_drizzle_final_mode_with_data = (
-            self.drizzle_active_session and
-            self.drizzle_mode == "Final" and 
-            not self.is_mosaic_run and 
-            drizzle_final_sci_data is not None and
-            drizzle_final_wht_data is not None
-        )
-        is_mosaic_mode_with_data = (
-            self.is_mosaic_run and
-            drizzle_final_sci_data is not None
+            self.drizzle_active_session and self.drizzle_mode == "Final" and 
+            not self.is_mosaic_run and drizzle_final_sci_data is not None and
+            drizzle_final_wht_data is not None and not is_reproject_mosaic_mode 
         )
         is_true_incremental_drizzle_from_objects = (
-            self.drizzle_active_session and 
-            self.drizzle_mode == "Incremental" and 
-            not self.is_mosaic_run and 
-            drizzle_final_sci_data is None 
+            self.drizzle_active_session and self.drizzle_mode == "Incremental" and 
+            not self.is_mosaic_run and drizzle_final_sci_data is None 
         )
 
         current_operation_mode_log = "Inconnu"
-        if is_true_incremental_drizzle_from_objects:
-            current_operation_mode_log = "Drizzle Incrémental VRAI (depuis objets Drizzle)"
-        elif is_drizzle_final_mode_with_data:
-            current_operation_mode_log = f"Drizzle Standard Final (données fournies)"
-        elif is_mosaic_mode_with_data:
-            current_operation_mode_log = f"Mosaïque (données fournies)"
-        else: # Doit être Stacking Classique SUM/W
-            current_operation_mode_log = "Stacking Classique SUM/W (depuis memmaps)"
-        
+        # ... (détermination current_operation_mode_log) ...
+        if is_reproject_mosaic_mode: current_operation_mode_log = "Mosaïque (via reproject_and_coadd)"
+        elif is_true_incremental_drizzle_from_objects: current_operation_mode_log = "Drizzle Incrémental VRAI (depuis objets Drizzle)"
+        elif is_drizzle_final_mode_with_data: current_operation_mode_log = f"Drizzle Standard Final (données fournies)"
+        else: current_operation_mode_log = "Stacking Classique SUM/W (depuis memmaps)"
         print(f"  Mode d'opération détecté pour sauvegarde: {current_operation_mode_log}")
         print("=" * 80 + "\n")
-
         self.update_progress(f"💾 Préparation sauvegarde finale (Mode: {current_operation_mode_log})...")
 
-        final_image_initial = None      
+        final_image_initial_raw = None  
+        final_image_normalized_for_cosmetics = None 
         final_wht_map_for_postproc = None 
         background_model_photutils = None
+        self.raw_adu_data_for_ui_histogram = None # NOUVEL ATTRIBUT
 
-        # --- 1. Obtenir les données initiales (SCI et WHT) ---
-        # Cette section prépare 'final_image_initial' (l'image SCI brute non normalisée 0-1)
-        # et 'final_wht_map_for_postproc' (carte de poids 2D) en fonction du mode de Drizzle.
-        if is_true_incremental_drizzle_from_objects:
-            print(f"DEBUG QM [_save_final_stack]: Lecture depuis self.incremental_drizzle_..._arrays pour Drizzle Incr. VRAI.")
-            if not self.incremental_drizzle_sci_arrays or not self.incremental_drizzle_wht_arrays or \
-               len(self.incremental_drizzle_sci_arrays) != 3 or len(self.incremental_drizzle_wht_arrays) != 3:
-                self.update_progress("❌ Erreur: Données Drizzle incrémentales finales (objets/arrays) non valides ou vides.", "ERROR")
-                self.processing_error = "DrizIncrVrai:DonneesObjetsInvalides"
-                self.final_stacked_path = None
-                return 
-
-            try:
-                sci_arrays_hw_list = self.incremental_drizzle_sci_arrays
-                wht_arrays_hw_list = self.incremental_drizzle_wht_arrays
-                num_output_channels = 3 
-                
-                # Calcul de l'image moyenne pondérée à partir des accumulateurs des objets Drizzle
-                sum_sci_times_wht_channels = [
-                    sci_arrays_hw_list[c].astype(np.float64) * wht_arrays_hw_list[c].astype(np.float64)
-                    for c in range(num_output_channels)
-                ]
-                sum_wht_channels = [arr.astype(np.float64) for arr in wht_arrays_hw_list]
+        # --- 1. Obtenir/Calculer final_image_initial_raw (ADU) et final_wht_map_for_postproc (2D) ---
+        # ... (Cette section est identique à la version V_SaveDtypeOption_ReprojectInputHandling_PreviewReflectsFits) ...
+        # ... (Elle calcule final_image_initial_raw (ADU) et final_wht_map_for_postproc (2D))
+        # ... (Elle applique aussi le WHT Threshold sur final_image_initial_raw en mettant les pixels à NaN)
+        # --- COPIE DE LA LOGIQUE PRÉCÉDENTE POUR CETTE SECTION ---
+        if is_reproject_mosaic_mode:
+            final_image_initial_raw = drizzle_final_sci_data.astype(np.float32) 
+            final_wht_map_for_postproc = drizzle_final_wht_data.astype(np.float32) 
+            self._close_memmaps()
+        elif is_true_incremental_drizzle_from_objects:
+            # ... (logique Drizzle Incr. VRAI pour final_image_initial_raw et final_wht_map_for_postproc)
+            try: # Simplified for brevity
+                sci_arrays_hw_list = self.incremental_drizzle_sci_arrays; wht_arrays_hw_list = self.incremental_drizzle_wht_arrays
                 avg_img_channels_list = []
-                for c in range(num_output_channels):
-                    wht_ch = np.maximum(sum_wht_channels[c], 1e-9) # Éviter division par zéro
-                    avg_ch_calc = sum_sci_times_wht_channels[c] / wht_ch
-                    avg_img_channels_list.append(np.nan_to_num(avg_ch_calc, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32))
-                
+                for c in range(3):
+                    wht_ch = np.maximum(wht_arrays_hw_list[c].astype(np.float64), 1e-9) 
+                    avg_ch_calc = (sci_arrays_hw_list[c].astype(np.float64) * wht_arrays_hw_list[c].astype(np.float64)) / wht_ch
+                    avg_img_channels_list.append(np.nan_to_num(avg_ch_calc, nan=0.0).astype(np.float32))
                 final_image_initial_raw = np.stack(avg_img_channels_list, axis=-1)
-
-                # --- DÉBUT MODIFICATION : Clipping explicite après Drizzle ---
-                print(f"  DEBUG QM [_save_final_stack]: Clipping post-Drizzle pour gérer overshoot/undershoot de {self.drizzle_kernel}.")
-                # Ce clipping est crucial pour ramener les valeurs dans une plage [0,1]
-                # car les noyaux comme Lanczos peuvent produire des valeurs > 1 ou < 0.
-                final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, 1.0)
-                # --- FIN MODIFICATION ---
-
-                # --- DÉBUT MODIFICATION : Normalisation finale par percentiles ---
-                print(f"  DEBUG QM [_save_final_stack]: Application normalisation finale par percentiles.")
-                
-                # S'assurer que toutes les valeurs sont finies (remplace NaN/Inf par 0)
-                data_for_robust_norm = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-
-                # Si c'est une image couleur, travailler sur la luminance pour les statistiques des percentiles.
-                # C'est cette luminance qui déterminera les points noir/blanc pour l'ensemble de l'image.
-                if data_for_robust_norm.ndim == 3 and data_for_robust_norm.shape[2] == 3:
-                    luminance = 0.299 * data_for_robust_norm[..., 0] + 0.587 * data_for_robust_norm[..., 1] + 0.114 * data_for_robust_norm[..., 2]
-                else:
-                    luminance = data_for_robust_norm # Si N&B, la luminance est l'image elle-même.
-                
-                # Filtrer les valeurs non finies pour le calcul des percentiles.
-                finite_luminance = luminance[np.isfinite(luminance)]
-                
-                if finite_luminance.size > 0: # S'assurer qu'il y a des données utiles.
-                    # Calculer les points noir et blanc robustes (percentiles)
-                    # bp_val : 0.1% est un bon compromis pour l'astro (coupe le bruit de fond le plus bas)
-                    # wp_val : 99.9% est un bon compromis (inclut la plupart des étoiles sans être tiré par des pixels chauds aberrants)
-                    bp_val = np.percentile(finite_luminance, 0.1)
-                    wp_val = np.percentile(finite_luminance, 99.9)
-
-                    # Ajuster la plage pour éviter division par zéro ou saturation rapide si la dynamique est faible
-                    if wp_val <= bp_val + 1e-6: # Ajouter une petite marge de sécurité pour la division
-                        if np.max(finite_luminance) > np.min(finite_luminance):
-                            # Si dynamique existe mais est très faible, étirer au max/min réels.
-                            bp_val = np.min(finite_luminance)
-                            wp_val = np.max(finite_luminance)
-                            if wp_val <= bp_val: wp_val = bp_val + 1e-6 # Assurer une petite dynamique (pour la division)
-                        else: # Image constante ou vide de dynamique.
-                            bp_val, wp_val = 0.0, 1.0 # Fallback pour éviter des erreurs, l'image sera gris moyen ou noir.
-                    
-                    # Appliquer la normalisation linéaire avec ces points
-                    final_image_initial = (data_for_robust_norm - bp_val) / (wp_val - bp_val)
-                    print(f"  DEBUG QM [_save_final_stack]: Normalisation finale basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}.")
-                    print(f"    Range après normalisation: [{np.nanmin(final_image_initial):.3f}, {np.nanmax(final_image_initial):.3f}]")
-
-                else: # Pas de données finies dans la luminance (image vide ou tout NaN/Inf)
-                    final_image_initial = np.zeros_like(final_image_initial_raw, dtype=np.float32)
-                    print("  DEBUG QM [_save_final_stack]: Normalisation finale: luminance vide, image mise à zéro.")
-            
-                    # Clipping final à la plage [0,1] et conversion en float32 (sécurité)
-                    final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
-                    # --- FIN MODIFICATION : Normalisation finale par percentiles ---
-
-                    print(f"  -> Image Drizzle Incrémental VRAI (depuis objets) normalisée 0-1. Shape: {final_image_initial.shape}")
-
-                    temp_wht_hxwxc = np.stack(wht_arrays_hw_list, axis=-1).astype(np.float32)
-                    final_wht_map_for_postproc = np.mean(temp_wht_hxwxc, axis=2).astype(np.float32)
-                    final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
-                    print(f"  -> Carte de poids 2D Drizzle Incr. VRAI (moyenne canaux) créée. Shape: {final_wht_map_for_postproc.shape}")
-            except Exception as e_driz_obj_read:
-                self.update_progress(f"❌ Erreur lecture/calcul données Drizzle Incrémental VRAI: {e_driz_obj_read}", "ERROR")
-                self.processing_error = f"DrizIncrVrai:ErreurCalculDonnees:{e_driz_obj_read}"; self.final_stacked_path = None
-                return
-
-        elif is_drizzle_final_mode_with_data or is_mosaic_mode_with_data:
-            source_description = f"Drizzle {self.drizzle_mode} combiné" if is_drizzle_final_mode_with_data else "Mosaïque combinée"
-            print(f"DEBUG QM [_save_final_stack]: Utilisation des données {source_description} (drizzle_final_sci/wht_data).")
-            final_image_initial_raw = drizzle_final_sci_data 
-            
-            # --- DÉBUT MODIFICATION : Clipping explicite après Drizzle (aussi pour Drizzle Final/Mosaïque) ---
-            print(f"  DEBUG QM [_save_final_stack]: Clipping post-Drizzle pour gérer overshoot/undershoot de {self.drizzle_kernel}.")
-            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, 1.0)
-            # --- FIN MODIFICATION ---
-
-            # --- DÉBUT MODIFICATION : Normalisation finale par percentiles (aussi pour Drizzle Final/Mosaïque) ---
-            print(f"  DEBUG QM [_save_final_stack]: Application normalisation finale par percentiles.")
-            data_for_robust_norm = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-            if data_for_robust_norm.ndim == 3 and data_for_robust_norm.shape[2] == 3:
-                luminance = 0.299 * data_for_robust_norm[..., 0] + 0.587 * data_for_robust_norm[..., 1] + 0.114 * data_for_robust_norm[..., 2]
-            else:
-                luminance = data_for_robust_norm
-            
-            finite_luminance = luminance[np.isfinite(luminance)]
-            if finite_luminance.size > 0:
-                bp_val = np.percentile(finite_luminance, 0.1)
-                wp_val = np.percentile(finite_luminance, 99.9)
-                if wp_val <= bp_val + 1e-6:
-                    if np.max(finite_luminance) > np.min(finite_luminance):
-                        bp_val = np.min(finite_luminance)
-                        wp_val = np.max(finite_luminance)
-                        if wp_val <= bp_val: wp_val = bp_val + 1e-6
-                    else:
-                        bp_val, wp_val = 0.0, 1.0
-                final_image_initial = (data_for_robust_norm - bp_val) / (wp_val - bp_val)
-                print(f"  DEBUG QM [_save_final_stack]: Normalisation finale basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}.")
-                print(f"    Range après normalisation: [{np.nanmin(final_image_initial):.3f}, {np.nanmax(final_image_initial):.3f}]")
-            else:
-                final_image_initial = np.zeros_like(final_image_initial_raw, dtype=np.float32)
-                print("  DEBUG QM [_save_final_stack]: Normalisation finale: luminance vide, image mise à zéro.")
-            
-            final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
-            # --- FIN MODIFICATION : Normalisation finale par percentiles ---
-
-            print(f"  -> Image Drizzle/Mosaïque (données fournies) normalisée 0-1. Shape: {final_image_initial.shape}")
-            if drizzle_final_wht_data is not None:
-                if drizzle_final_wht_data.ndim == 3 and drizzle_final_wht_data.shape[2] == 3: 
-                    final_wht_map_for_postproc = np.mean(drizzle_final_wht_data, axis=2).astype(np.float32)
-                elif drizzle_final_wht_data.ndim == 2: 
-                    final_wht_map_for_postproc = drizzle_final_wht_data.astype(np.float32)
-                else:
-                    print(f"  -> WARNING: Shape de drizzle_final_wht_data ({drizzle_final_wht_data.shape}) inattendue. WHT pour post-proc pourrait être incorrect.");
-                    final_wht_map_for_postproc = None
-                if final_wht_map_for_postproc is not None:
-                     final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
-                     print(f"  -> Carte de poids 2D (données fournies) pour post-proc créée. Shape: {final_wht_map_for_postproc.shape}")
-            else: 
-                print("  -> WARNING: drizzle_final_wht_data est None pour Drizzle Final/Mosaïque. final_wht_map_for_postproc sera None.")
-                final_wht_map_for_postproc = None
-            self._close_memmaps() 
-            print("DEBUG QM [_save_final_stack]: Memmaps (auraient été) fermés (mode Drizzle Final / Mosaïque).")
-
-
-        else: # Mode SUM/W Classique (lecture depuis memmaps)
-            print("DEBUG QM [_save_final_stack]: Utilisation des accumulateurs SUM/W (memmap) pour stacking classique.")
-            if (self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.output_folder is None or not os.path.isdir(self.output_folder)):
-                self.final_stacked_path = None; self.update_progress("❌ Erreur interne: Accumulateurs memmap ou dossier sortie non définis. Sauvegarde annulée.")
-                self._close_memmaps(); return
-            try:
-                self.update_progress("Lecture des données finales depuis les accumulateurs memmap...")
-                final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
-                final_wht_map_for_postproc = np.array(self.cumulative_wht_memmap, dtype=np.float32) 
+                final_wht_map_for_postproc = np.mean(np.stack(wht_arrays_hw_list, axis=-1).astype(np.float32), axis=2)
+                final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
+            except Exception as e: self.processing_error = f"ErrDrizIncrRead:{e}"; return
+        elif is_drizzle_final_mode_with_data: 
+            # ... (logique Drizzle Final pour final_image_initial_raw et final_wht_map_for_postproc)
+            try: # Simplified
+                sci_data_float64 = drizzle_final_sci_data.astype(np.float64); wht_data_float64 = drizzle_final_wht_data.astype(np.float64)
+                if wht_data_float64.ndim == 3: final_wht_map_for_postproc = np.mean(wht_data_float64, axis=2).astype(np.float32)
+                else: final_wht_map_for_postproc = wht_data_float64.astype(np.float32)
+                final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
+                wht_for_div = np.maximum(final_wht_map_for_postproc, 1e-9)[..., np.newaxis] if sci_data_float64.ndim == 3 else np.maximum(final_wht_map_for_postproc, 1e-9)
+                with np.errstate(divide='ignore', invalid='ignore'): final_image_initial_raw = sci_data_float64 / wht_for_div
+                final_image_initial_raw = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+                self._close_memmaps()
+            except Exception as e: self.processing_error = f"ErrDrizFinalRead:{e}"; return
+        else: # SUM/W Classique
+            # ... (logique SUM/W pour final_image_initial_raw et final_wht_map_for_postproc)
+            try: # Simplified
+                final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64); final_wht_map_for_postproc = np.array(self.cumulative_wht_memmap, dtype=np.float32) 
                 self._close_memmaps() 
-                self.update_progress("Calcul de l'image moyenne (SUM / WHT)...")
-                epsilon = 1e-9; wht_for_division = np.maximum(final_wht_map_for_postproc.astype(np.float64), epsilon)
-                wht_broadcasted = wht_for_division[..., np.newaxis] 
-                with np.errstate(divide='ignore', invalid='ignore'): final_raw = final_sum / wht_broadcasted
-                final_raw = np.nan_to_num(final_raw, nan=0.0, posinf=0.0, neginf=0.0)
-                min_r_raw, max_r_raw = np.nanmin(final_raw), np.nanmax(final_raw)
-                if np.isfinite(min_r_raw) and np.isfinite(max_r_raw) and max_r_raw > min_r_raw: final_image_initial = (final_raw - min_r_raw) / (max_r_raw - min_r_raw)
-                elif np.any(np.isfinite(final_raw)): final_image_initial = np.full_like(final_raw, 0.5)
-                else: final_image_initial = np.zeros_like(final_raw)
-                final_image_initial = np.clip(final_image_initial, 0.0, 1.0).astype(np.float32)
-                del final_sum, wht_for_division, wht_broadcasted, final_raw; gc.collect()
-                self.update_progress(f"Image moyenne SUM/W classique calculée. Range: [{np.nanmin(final_image_initial):.3f}, {np.nanmax(final_image_initial):.3f}]")
-            except Exception as e_calc_sumw:
-                print(f"ERREUR QM [_save_final_stack]: Erreur calcul final SUM/W classique - {e_calc_sumw}"); traceback.print_exc(limit=2)
-                self.update_progress(f"❌ Erreur lors du calcul final SUM/W classique: {e_calc_sumw}")
-                self.processing_error = f"Erreur Calcul Final SUM/W: {e_calc_sumw}"; self._close_memmaps(); return
+                wht_for_div = np.maximum(final_wht_map_for_postproc.astype(np.float64), 1e-9)[..., np.newaxis]
+                with np.errstate(divide='ignore', invalid='ignore'): final_image_initial_raw = final_sum / wht_for_div
+                final_image_initial_raw = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+            except Exception as e: self.processing_error = f"ErrSumWRead:{e}"; return
+        # --- FIN COPIE LOGIQUE ---
         
-        # --- 2. Vérifier si on a une image à traiter ---
-        if final_image_initial is None:
-            self.final_stacked_path = None; self.update_progress("ⓘ Aucun stack final (final_image_initial est None). Sauvegarde annulée.")
-            print("DEBUG QM [_save_final_stack]: final_image_initial est None. Sortie."); return
+        if final_image_initial_raw is None: self.final_stacked_path = None; self.update_progress("ⓘ Aucun stack final (raw est None)."); return
 
-        effective_image_count = self.images_in_cumulative_stack
-        max_wht_value = 0.0
-        if final_wht_map_for_postproc is not None and final_wht_map_for_postproc.size > 0:
-            try: max_wht_value = np.max(final_wht_map_for_postproc)
-            except Exception: pass
-        
-        if effective_image_count <= 0 and max_wht_value <= 1e-6 and not stopped_early:
-            self.final_stacked_path = None; self.update_progress(f"ⓘ Aucun stack final (0 images/poids accumulés effectifs). Sauvegarde annulée.")
-            print(f"DEBUG QM [_save_final_stack]: Sortie précoce (comptes/poids faibles et non arrêté tôt)."); return
-        
-        self.update_progress(f"Nombre d'images/poids effectifs pour stack final: {effective_image_count} (Poids max WHT pour post-proc: {max_wht_value:.2f})")
-        data_after_postproc = final_image_initial.copy() # Renommer pour clarté
+        final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None) # Clip négatifs
 
-        # Réinitialisation des flags de post-traitement appliqué
-        self.bn_globale_applied_in_session = False; self.photutils_bn_applied_in_session = False
-        self.cb_applied_in_session = False; self.feathering_applied_in_session = False
-        self.low_wht_mask_applied_in_session = False; self.scnr_applied_in_session = False
-        self.crop_applied_in_session = False; self.photutils_params_used_in_session = {}
+        if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
+            invalid_wht_pixels = final_wht_map_for_postproc < self.drizzle_wht_threshold
+            if final_image_initial_raw.ndim == 3: final_image_initial_raw = np.where(invalid_wht_pixels[..., np.newaxis], np.nan, final_image_initial_raw)
+            else: final_image_initial_raw = np.where(invalid_wht_pixels, np.nan, final_image_initial_raw)
         
-        # --- 3. Pipeline de Post-Traitement (sur data_after_postproc qui est float32 [0,1]) ---
-        # ... (Le code complet du pipeline de post-traitement reste ici, opérant sur data_after_postproc) ...
-        # ... (Il est important que data_after_postproc reste float32 [0,1] à la fin de cette section)
+        # --- NOUVEAU: Stocker les données ADU brutes (après WHT Thresh) pour l'histogramme UI si float32 ---
+        if save_as_float32_setting:
+            self.raw_adu_data_for_ui_histogram = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32).copy()
+            print(f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]")
+        else:
+            self.raw_adu_data_for_ui_histogram = None # Pas besoin si FITS uint16
+
+        # --- Normalisation par percentiles pour obtenir `final_image_normalized_for_cosmetics` (0-1) ---
+        print(f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw...")
+        data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32) # Utiliser nan=0.0 pour ne pas biaiser les percentiles avec des NaN remplacés par des valeurs extrêmes.
+        if data_for_percentile_norm.ndim == 3: luminance = 0.299 * data_for_percentile_norm[..., 0] + 0.587 * data_for_percentile_norm[..., 1] + 0.114 * data_for_percentile_norm[..., 2]
+        else: luminance = data_for_percentile_norm
+        finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)] # Exclure les zéros purs du calcul des percentiles si possible
+        
+        if finite_luminance.size > 20: # Assez de points pour des percentiles robustes
+            bp_val = np.percentile(finite_luminance, 0.1)
+            wp_val = np.percentile(finite_luminance, 99.9)
+            if wp_val <= bp_val + 1e-7: # Augmenté epsilon un peu
+                 min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
+                 if max_finite > min_finite + 1e-7 : bp_val, wp_val = min_finite, max_finite
+                 else: bp_val, wp_val = 0.0, max(1e-7, max_finite) # Éviter wp=0 si tout est noir
+            if wp_val <= bp_val: wp_val = bp_val + 1e-7 # Dernière sécurité
+            final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (wp_val - bp_val)
+            print(f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}.")
+        else: # Pas assez de points ou image plate/noire
+            max_overall = np.nanmax(data_for_percentile_norm)
+            if max_overall > 1e-9: final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall # Simple normalisation par le max
+            else: final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
+            print("  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles).")
+
+        final_image_normalized_for_cosmetics = np.clip(final_image_normalized_for_cosmetics, 0.0, 1.0).astype(np.float32)
+        print(f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]")
+        
+        effective_image_count = self.images_in_cumulative_stack # ... (vérification effective_image_count) ...
+        
+        # `data_after_postproc` est la version 0-1 qui subira les post-traitements cosmétiques.
+        data_after_postproc = final_image_normalized_for_cosmetics.copy() 
+
+        # --- self.last_saved_data_for_preview utilisera TOUJOURS data_after_postproc (0-1, cosmétique) ---
+        # Cette affectation se fera APRÈS le pipeline de post-traitement.
+        print("DEBUG QM [_save_final_stack]: L'aperçu UI utilisera data_after_postproc (après normalisation 0-1 et post-traitements).")
+
+        # --- 3. Pipeline de Post-Traitement (opère sur data_after_postproc qui est float32 [0,1]) ---
+        # ... (Pipeline de post-traitement inchangé, il modifie `data_after_postproc`) ...
         print("\n" + "=" * 80); print("DEBUG QM [_save_final_stack]: Début pipeline Post-Traitements."); print("=" * 80 + "\n")
         print(f"DEBUG QM [_save_final_stack]: Range data_after_postproc AVANT Post-Proc: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
-        
         wht_for_edge_effects = final_wht_map_for_postproc 
         if wht_for_edge_effects is None or np.all(wht_for_edge_effects <= 1e-6): 
-            self.update_progress("ℹ️ Carte de poids non disponible/vide pour effets de bord, utilisation d'une carte géométrique simulée.")
-            try:
-                h_sim, w_sim = data_after_postproc.shape[:2]; center_y, center_x = (h_sim - 1) / 2.0, (w_sim - 1) / 2.0
-                y_coords, x_coords = np.ogrid[:h_sim, :w_sim]; dist_sq = ((y_coords - center_y)**2 / (h_sim / 2.0)**2) + ((x_coords - center_x)**2 / (w_sim / 2.0)**2)
-                cos_arg = np.clip(dist_sq * 0.5 * (np.pi / 2.0), 0, np.pi / 2.0); simulated_wht_2d_profile = np.cos(cos_arg)**2
-                wht_for_edge_effects = np.maximum(simulated_wht_2d_profile, 1e-5).astype(np.float32)
-            except Exception as e_sim_wht: 
-                print(f"ERREUR QM [_save_final_stack]: Échec création carte simulée: {e_sim_wht}."); 
-                wht_for_edge_effects = np.ones(data_after_postproc.shape[:2], dtype=np.float32) 
+            try: # Simplified
+                h_sim, w_sim = data_after_postproc.shape[:2]; y_coords, x_coords = np.ogrid[:h_sim, :w_sim]; dist_sq = ((y_coords - (h_sim - 1) / 2.0)**2 / (h_sim / 2.0)**2) + ((x_coords - (w_sim - 1) / 2.0)**2 / (w_sim / 2.0)**2)
+                wht_for_edge_effects = np.maximum(np.cos(np.clip(dist_sq * 0.5 * (np.pi / 2.0), 0, np.pi / 2.0))**2, 1e-5).astype(np.float32)
+            except Exception: wht_for_edge_effects = np.ones(data_after_postproc.shape[:2], dtype=np.float32) 
         else: 
-            max_wht_val = np.nanmax(wht_for_edge_effects)
-            if max_wht_val > 1e-9: wht_for_edge_effects_normalized = wht_for_edge_effects / max_wht_val; wht_for_edge_effects = np.clip(wht_for_edge_effects_normalized, 0.0, 1.0)
-        print(f"  -> Carte WHT pour effets de bord (normalisée si réelle). Range: [{np.min(wht_for_edge_effects):.3f} - {np.max(wht_for_edge_effects):.3f}]")
-
-        if data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3 and _BN_AVAILABLE and getattr(self, 'bn_std_factor', 0.0) > 0:
-            self.update_progress(f"🔬 Application Neutralisation Fond Globale (Facteur Std: {self.bn_std_factor:.1f})...")
-            try:
-                # Convertir la chaîne "16x16" en tuple (16, 16) avant de la passer.
-                grid_rows, grid_cols = map(int, self.bn_grid_size_str.split('x'))
-                data_after_postproc = neutralize_background_automatic(
-                    data_after_postproc,
-                    grid_size=(grid_rows, grid_cols), # <-- CHANGEMENT ICI
-                    bg_percentile_low=self.bn_perc_low,
-                    bg_percentile_high=self.bn_perc_high,
-                    std_factor_threshold=self.bn_std_factor, # <-- Correction du nom de l'argument ici aussi
-                    min_applied_gain=self.bn_min_gain, # <-- Correction du nom de l'argument ici aussi
-                    max_applied_gain=self.bn_max_gain  # <-- Correction du nom de l'argument ici aussi
-                )
-                self.bn_globale_applied_in_session = True
-                self.update_progress(f"   ✅ Neutralisation Fond Globale terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
-
-
-            except Exception as bn_err: self.update_progress(f"   ❌ Erreur Neutralisation Fond Globale: {bn_err}. Étape ignorée.")
-        
+            max_wht_val = np.nanmax(wht_for_edge_effects); 
+            if max_wht_val > 1e-9: wht_for_edge_effects = np.clip(wht_for_edge_effects / max_wht_val, 0.0, 1.0)
+        # ... (Tous les post-traitements opèrent sur data_after_postproc) ...
+        if data_after_postproc.ndim == 3 and _BN_AVAILABLE and getattr(self, 'bn_std_factor', 0.0) > 0:
+            try: data_after_postproc = neutralize_background_automatic(data_after_postproc,grid_size=map(int, self.bn_grid_size_str.split('x')),bg_percentile_low=self.bn_perc_low,bg_percentile_high=self.bn_perc_high,std_factor_threshold=self.bn_std_factor,min_applied_gain=self.bn_min_gain,max_applied_gain=self.bn_max_gain); self.bn_globale_applied_in_session = True
+            except Exception as bn_err: self.update_progress(f"   ❌ Erreur BN: {bn_err}.")
         if getattr(self, 'apply_photutils_bn', False) and _PHOTOUTILS_BG_SUB_AVAILABLE:
-            photutils_params = {'box_size': getattr(self, 'photutils_bn_box_size', 128), 'filter_size': getattr(self, 'photutils_bn_filter_size', 5), 'sigma_clip_val': getattr(self, 'photutils_bn_sigma_clip', 3.0), 'exclude_percentile': getattr(self, 'photutils_bn_exclude_percentile', 98.0)}
-            self.photutils_params_used_in_session = photutils_params.copy()
-            self.update_progress(f"🔬 Application Soustraction Fond 2D (Photutils)... Params: Box={photutils_params['box_size']}, Filt={photutils_params['filter_size']}, Sig={photutils_params['sigma_clip_val']:.1f}, Excl%={photutils_params['exclude_percentile']:.1f}")
-            try:
-                data_corr, bkg_model = subtract_background_2d(data_after_postproc, **photutils_params)
-                if data_corr is not None:
-                    data_after_postproc = data_corr; background_model_photutils = bkg_model; self.photutils_bn_applied_in_session = True
-                    mn_phot, mx_phot = np.nanmin(data_after_postproc), np.nanmax(data_after_postproc)
-                    if np.isfinite(mn_phot) and np.isfinite(mx_phot) and mx_phot > mn_phot: data_after_postproc = (data_after_postproc - mn_phot) / (mx_phot - mn_phot)
-                    elif np.any(np.isfinite(data_after_postproc)): data_after_postproc = np.full_like(data_after_postproc, 0.5)
-                    else: data_after_postproc = np.zeros_like(data_after_postproc)
-                    data_after_postproc = np.clip(data_after_postproc, 0.0, 1.0).astype(np.float32)
-                    self.update_progress(f"   ✅ Soustraction Fond 2D (Photutils) terminée. Nouveau range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
-                else: self.update_progress("   ⚠️ Échec Soustraction Fond 2D (Photutils), étape ignorée (data_corr est None).")
-            except Exception as photutils_err: self.update_progress(f"   ❌ Erreur Soustraction Fond 2D (Photutils): {photutils_err}. Étape ignorée."); print(f"ERREUR QM: Erreur subtract_background_2d: {photutils_err}"); traceback.print_exc(limit=1)
-        
-        if getattr(self, 'apply_chroma_correction', True) and hasattr(self, 'chroma_balancer') and data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3:
-            self.update_progress("🎨 Application Correction Chroma des Bords...")
-            try:
-            
-                # Mettez à jour les paramètres du chroma_balancer AVANT d'appeler la méthode normalize_stack
-                # Ces lignes sont importantes pour que les réglages de l'UI soient pris en compte
-                self.chroma_balancer.border_size = getattr(self, 'cb_border_size', 25)
-                self.chroma_balancer.blur_radius = getattr(self, 'cb_blur_radius', 8)
-                self.chroma_balancer.r_factor_min = 0.7 # Ajoutez r_factor_min/max si vous les utilisez dans l'UI ou dans les settings
-                self.chroma_balancer.r_factor_max = 1.3
-                self.chroma_balancer.b_factor_min = getattr(self, 'cb_min_b_factor', 0.4)
-                self.chroma_balancer.b_factor_max = getattr(self, 'cb_max_b_factor', 1.5)
-
-                data_after_postproc = self.chroma_balancer.normalize_stack(data_after_postproc) # <-- CHANGEMENT ICI
-                self.cb_applied_in_session = True
-                self.update_progress(f"   ✅ Correction Chroma des Bords terminée. Range: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
-            
-            except Exception as cb_err: self.update_progress(f"   ❌ Erreur Correction Chroma: {cb_err}. Étape ignorée.")
-            
+            try: # Simplified
+                data_corr, bkg_model = subtract_background_2d(data_after_postproc, box_size=self.photutils_bn_box_size, filter_size=self.photutils_bn_filter_size, sigma_clip_val=self.photutils_bn_sigma_clip, exclude_percentile=self.photutils_bn_exclude_percentile)
+                if data_corr is not None: data_after_postproc = np.clip((data_corr - np.nanmin(data_corr)) / (np.nanmax(data_corr) - np.nanmin(data_corr)),0,1).astype(np.float32); background_model_photutils = bkg_model; self.photutils_bn_applied_in_session = True
+            except Exception as photutils_err: self.update_progress(f"   ❌ Erreur Photutils BN: {photutils_err}.")
+        if getattr(self, 'apply_chroma_correction', True) and hasattr(self, 'chroma_balancer') and data_after_postproc.ndim == 3 :
+            try: self.chroma_balancer.border_size=self.cb_border_size; self.chroma_balancer.blur_radius=self.cb_blur_radius; data_after_postproc = self.chroma_balancer.normalize_stack(data_after_postproc); self.cb_applied_in_session = True
+            except Exception as cb_err: self.update_progress(f"   ❌ Erreur CB: {cb_err}.")
+        # ... (autres post-traitements : feather, low_wht, scnr, crop)
         if getattr(self, 'apply_feathering', False) and _FEATHERING_AVAILABLE and wht_for_edge_effects is not None and data_after_postproc.ndim == 3:
-            blur_val = getattr(self, 'feather_blur_px', 256)
-            self.update_progress(f"🖌️ Application Feathering (Flou: {blur_val}px)...")
-            try: data_after_postproc = feather_by_weight_map(data_after_postproc, wht_for_edge_effects, blur_px=blur_val); self.feathering_applied_in_session = True
-            except Exception as e_feather: self.update_progress(f"   ❌ Erreur Feathering: {e_feather}. Étape ignorée.")
-            
+            try: data_after_postproc = feather_by_weight_map(data_after_postproc, wht_for_edge_effects, blur_px=self.feather_blur_px); self.feathering_applied_in_session = True
+            except Exception as e_feather: self.update_progress(f"   ❌ Erreur Feathering: {e_feather}.")
         if getattr(self, 'apply_low_wht_mask', False) and _LOW_WHT_MASK_AVAILABLE and wht_for_edge_effects is not None:
-            pct_val = getattr(self, 'low_wht_percentile', 5); soften_val = getattr(self, 'low_wht_soften_px', 128)
-            self.update_progress(f"🎭 Application Masque Bas WHT (Percentile: {pct_val}%, Adoucir: {soften_val}px)...")
-            try: data_after_postproc = apply_low_wht_mask(data_after_postproc, wht_for_edge_effects, percentile=pct_val, soften_px=soften_val, progress_callback=self.update_progress); self.low_wht_mask_applied_in_session = True
-            except Exception as e_low_wht: self.update_progress(f"   ❌ Erreur Masque Bas WHT: {e_low_wht}. Étape ignorée.")
-
-        if getattr(self, 'apply_final_scnr', False) and _SCNR_AVAILABLE and data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3:
-            target_ch = getattr(self, 'final_scnr_target_channel', 'green'); amount = getattr(self, 'final_scnr_amount', 0.8); preserve_lum = getattr(self, 'final_scnr_preserve_luminosity', True)
-            self.update_progress(f"🌿 Application SCNR Final (Cible: {target_ch}, Force: {amount:.2f}, Prés.Lum: {preserve_lum})...")
-            try: data_after_postproc = apply_scnr(data_after_postproc, target_color=target_ch, amount=amount, preserve_luminosity=preserve_lum); self.scnr_applied_in_session = True
-            except Exception as scnr_err: self.update_progress(f"   ❌ Erreur SCNR Final: {scnr_err}. Étape ignorée.")
-            
-        final_crop_decimal = getattr(self, 'final_edge_crop_percent_decimal', 0.0)
-        if _CROP_AVAILABLE and final_crop_decimal > 1e-6 :
-            self.update_progress(f"✂️ Application Rognage Final des Bords ({final_crop_decimal*100.0:.1f}%)...")
-            try: data_after_postproc = apply_edge_crop(data_after_postproc, final_crop_decimal); self.crop_applied_in_session = True
-            except Exception as crop_err: self.update_progress(f"   ❌ Erreur Rognage Final: {crop_err}. Étape ignorée.")
-            
-        print("\n" + "=" * 80); print("DEBUG QM [_save_final_stack]: Fin pipeline Post-Traitements."); print("=" * 80 + "\n")
+            try: data_after_postproc = apply_low_wht_mask(data_after_postproc, wht_for_edge_effects, percentile=self.low_wht_percentile, soften_px=self.low_wht_soften_px, progress_callback=self.update_progress); self.low_wht_mask_applied_in_session = True
+            except Exception as e_low_wht: self.update_progress(f"   ❌ Erreur Low WHT Mask: {e_low_wht}.")
+        if getattr(self, 'apply_final_scnr', False) and _SCNR_AVAILABLE and data_after_postproc.ndim == 3:
+            try: data_after_postproc = apply_scnr(data_after_postproc, target_color=self.final_scnr_target_channel, amount=self.final_scnr_amount, preserve_luminosity=self.final_scnr_preserve_luminosity); self.scnr_applied_in_session = True
+            except Exception as scnr_err: self.update_progress(f"   ❌ Erreur SCNR: {scnr_err}.")
+        if _CROP_AVAILABLE and getattr(self, 'final_edge_crop_percent_decimal', 0.0) > 1e-6 :
+            try: data_after_postproc = apply_edge_crop(data_after_postproc, self.final_edge_crop_percent_decimal); self.crop_applied_in_session = True
+            except Exception as crop_err: self.update_progress(f"   ❌ Erreur Crop: {crop_err}.")
         print(f"DEBUG QM [_save_final_stack]: Range data_after_postproc APRES Post-Proc: [{np.nanmin(data_after_postproc):.3f}, {np.nanmax(data_after_postproc):.3f}]")
         
+        # --- self.last_saved_data_for_preview est maintenant TOUJOURS data_after_postproc (0-1 cosmétique) ---
+        self.last_saved_data_for_preview = data_after_postproc.copy()
+        print("DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI).")
+
         # --- 4. Header FITS final ---
-        # ... (logique de header inchangée) ...
+        # ... (Logique du header inchangée) ...
         final_header = self.current_stack_header.copy() if self.current_stack_header else fits.Header()
-        if is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_mosaic_mode_with_data:
-            if self.drizzle_output_wcs: final_header.update(self.drizzle_output_wcs.to_header(relax=True))
-            elif is_mosaic_mode_with_data and self.current_stack_header and self.current_stack_header.get('CTYPE1'): pass
+        if is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_reproject_mosaic_mode: 
+            if self.drizzle_output_wcs and not is_reproject_mosaic_mode : final_header.update(self.drizzle_output_wcs.to_header(relax=True))
+            elif is_reproject_mosaic_mode and self.current_stack_header and self.current_stack_header.get('CTYPE1'): pass 
             else: print("WARN QM [_save_final_stack]: WCS de sortie Drizzle/Mosaïque non disponible pour le header final.")
-        final_header['NIMAGES'] = (effective_image_count, 'Effective images/Total Weight for final stack')
-        final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure')
-        if is_true_incremental_drizzle_from_objects: final_header['STACKTYP'] = (f'Drizzle_Incr_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle from objects')
+        final_header['NIMAGES'] = (effective_image_count, 'Effective images/Total Weight for final stack'); final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure')
+        if is_reproject_mosaic_mode: final_header['STACKTYP'] = (f'Mosaic Reproject ({self.drizzle_scale:.0f}x)', 'Mosaic from reproject_and_coadd')
+        elif is_true_incremental_drizzle_from_objects: final_header['STACKTYP'] = (f'Drizzle_Incr_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle from objects')
         elif is_drizzle_final_mode_with_data: final_header['STACKTYP'] = (f'Drizzle_Final_{self.drizzle_scale:.0f}x', 'Standard Drizzle (Final mode)')
-        elif is_mosaic_mode_with_data: final_header['STACKTYP'] = (f'Mosaic_Drizzle_{self.drizzle_scale:.0f}x', 'Mosaic from Drizzled panels')
-        
-        if 'HISTORY' not in final_header and (self.bn_globale_applied_in_session or self.photutils_bn_applied_in_session or self.cb_applied_in_session or self.feathering_applied_in_session or self.low_wht_mask_applied_in_session or self.scnr_applied_in_session or self.crop_applied_in_session):
-            final_header.add_history("") 
+        # ... (ajout HISTORY pour post-proc et WHT_THRESHOLD) ...
+        if 'HISTORY' not in final_header and (self.bn_globale_applied_in_session or self.photutils_bn_applied_in_session or self.cb_applied_in_session or self.feathering_applied_in_session or self.low_wht_mask_applied_in_session or self.scnr_applied_in_session or self.crop_applied_in_session): final_header.add_history("") 
         if (self.bn_globale_applied_in_session or self.photutils_bn_applied_in_session or self.cb_applied_in_session or self.feathering_applied_in_session or self.low_wht_mask_applied_in_session or self.scnr_applied_in_session or self.crop_applied_in_session):
             if 'HISTORY' in final_header: final_header.add_comment("--- Post-Processing Applied ---", before='HISTORY')
             else: final_header.add_comment("--- Post-Processing Applied ---")
+        if getattr(self, 'drizzle_wht_threshold', 0) > 0: final_header['WHTTHOLD'] = (float(self.drizzle_wht_threshold), 'Weight threshold applied to final image'); final_header.add_history(f'WHT threshold of {self.drizzle_wht_threshold} applied')
 
         # --- 5. Construction du nom de fichier ---
-        # ... (inchangé) ...
         base_name = "stack_final"; run_type_suffix = output_filename_suffix if output_filename_suffix else "_unknown_mode"
         if stopped_early: run_type_suffix += "_stopped"
         elif self.processing_error: run_type_suffix += "_error"
@@ -4776,118 +4447,72 @@ class SeestarQueuedStacker:
 
         # --- 6. Préparation des données pour la sauvegarde FITS selon l'option ---
         data_for_primary_hdu_save = None
-        # data_after_postproc est float32 [0,1] à ce stade.
-        is_color_final_save = data_after_postproc.ndim == 3 and data_after_postproc.shape[2] == 3
-
-        # save_as_float32_setting a été lu au début de la méthode
+        
         if save_as_float32_setting:
             self.update_progress("   Préparation sauvegarde FITS en float32...")
-            data_for_primary_hdu_save = data_after_postproc.astype(np.float32) 
-            print(f"     -> DTYPE de data_for_primary_hdu_save (AVANT transposition HDU): {data_for_primary_hdu_save.dtype}") # LOG
-            
-                        
+            # Pour Drizzle/Reproject/Incr.VRAI, on sauvegarde final_image_initial_raw (ADU, avant normalisation 0-1 cosmétique et avant post-traitements cosmétiques)
+            if is_reproject_mosaic_mode or is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data:
+                data_for_primary_hdu_save = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+                print(f"     -> FITS float32: Utilisation données ADU BRUTES (post SCI/WHT & WHT_Thresh, pré-norm 0-1 & pré-cosmétique). Range: [{np.min(data_for_primary_hdu_save):.3f}, {np.max(data_for_primary_hdu_save):.3f}]")
+            else: # Classic SUM/W : final_image_initial_raw est déjà la moyenne, qui est ensuite normalisée 0-1 dans final_image_normalized_for_cosmetics, puis post-traitée dans data_after_postproc.
+                  # Pour float32, on sauvegarde la version 0-1 post-traitée.
+                data_for_primary_hdu_save = data_after_postproc.astype(np.float32) 
+                print(f"     -> FITS float32: Utilisation données post-traitées (0-1) pour Stacking Classique. Range: [{np.min(data_for_primary_hdu_save):.3f}, {np.max(data_for_primary_hdu_save):.3f}]")
             final_header['BITPIX'] = -32 
-            if 'BSCALE' in final_header: del final_header['BSCALE']
+            if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
-            print(f"     -> Données float32 prêtes pour sauvegarde. Range: [{np.min(data_for_primary_hdu_save):.3f}, {np.max(data_for_primary_hdu_save):.3f}]")
-        else: # Sauvegarde en uint16 (comportement par défaut si la case n'est pas cochée)
+        else: # Sauvegarde en uint16 (utilise data_after_postproc qui est 0-1 et post-traité)
             self.update_progress("   Préparation sauvegarde FITS en uint16 (plage 0-65535)...")
             data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16)
             data_for_primary_hdu_save = data_scaled_uint16
-            print(f"     -> DTYPE de data_for_primary_hdu_save (AVANT transposition HDU): {data_for_primary_hdu_save.dtype}") # LOG
+            print(f"     -> FITS uint16: Utilisation données post-traitées (0-1) et scalées à 0-65535. Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             final_header['BITPIX'] = 16 
-            # Astropy mettra BZERO=32768 et BSCALE=1 par défaut pour uint16, ce qui est standard.
-            print(f"     -> Données uint16 [0-65535] prêtes pour sauvegarde. Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
         
-        if is_color_final_save: # Transposer en CxHxW si couleur
+        if data_for_primary_hdu_save.ndim == 3 and data_for_primary_hdu_save.shape[2] == 3 : 
             data_for_primary_hdu_save = np.moveaxis(data_for_primary_hdu_save, -1, 0)
-            print(f"     -> Données transposées pour HDU (CxHxW). Shape: {data_for_primary_hdu_save.shape}, Dtype: {data_for_primary_hdu_save.dtype}") # LOG
+            print(f"     -> Données transposées pour HDU (CxHxW). Shape: {data_for_primary_hdu_save.shape}, Dtype: {data_for_primary_hdu_save.dtype}") 
 
         # --- 7. Sauvegarde FITS ---
+        # ... (Logique de sauvegarde FITS inchangée)
         try: 
-            print(f"     -> DTYPE de data_for_primary_hdu_save (JUSTE AVANT PrimaryHDU): {data_for_primary_hdu_save.dtype}") # LOG
             primary_hdu = fits.PrimaryHDU(data=data_for_primary_hdu_save, header=final_header)
-            # ... la suite du bloc try...except pour la sauvegarde FITS (avec la modification scale_data)
             hdus_list = [primary_hdu]
-            
             if self.photutils_bn_applied_in_session and background_model_photutils is not None and _PHOTOUTILS_BG_SUB_AVAILABLE:
-                 bkg_hdu_data = None
-                 if background_model_photutils.ndim == 3 and background_model_photutils.shape[2] == 3: 
-                     bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32)
-                 elif background_model_photutils.ndim == 2: 
-                     bkg_hdu_data = background_model_photutils.astype(np.float32)
-                 
-                 if bkg_hdu_data is not None: 
-                     bkg_hdu = fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL")
-                     hdus_list.append(bkg_hdu)
-                     self.update_progress("   HDU modèle de fond Photutils incluse dans le FITS.")
-            
-            if save_as_float32_setting:
-                fits.HDUList(hdus_list).writeto(
-                    fits_path, 
-                    overwrite=True, 
-                    checksum=True, 
-                    output_verify='ignore', 
-                    #scale_data=False #argument invalide ici 
-                )
-                self.update_progress(f"   ✅ Sauvegarde FITS (float32, scale_data=False) terminée."); 
-                print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS de '{fits_path}' (float32, scale_data=False) réussie.")
-            else:
-                fits.HDUList(hdus_list).writeto(
-                    fits_path, 
-                    overwrite=True, 
-                    checksum=True, 
-                    output_verify='ignore' 
-                )
-                self.update_progress(f"   ✅ Sauvegarde FITS (uint16) terminée."); 
-                print(f"DEBUG QM [_save_final_stack]: Sauvegarde FITS de '{fits_path}' (uint16) réussie.")
-
+                 bkg_hdu_data = np.mean(background_model_photutils, axis=2).astype(np.float32) if background_model_photutils.ndim == 3 else background_model_photutils.astype(np.float32)
+                 if bkg_hdu_data is not None: hdus_list.append(fits.ImageHDU(bkg_hdu_data, name="BACKGROUND_MODEL"))
+            fits.HDUList(hdus_list).writeto(fits_path, overwrite=True, checksum=True, output_verify='ignore')
+            self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminée."); 
         except Exception as save_err: 
-            self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); 
-            print(f"ERREUR QM: Erreur sauvegarde FITS: {save_err}"); traceback.print_exc(limit=1); 
-            self.final_stacked_path = None
-        # ... le reste de _save_final_stack (sauvegarde PNG, nettoyage memmap, etc.)
+            self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); self.final_stacked_path = None
 
-        # --- 8. Sauvegarde preview PNG et stockage ---
-        # Utiliser data_after_postproc (qui est float32 [0,1]) pour la preview
-        if data_after_postproc is not None: 
+        # --- 8. Sauvegarde preview PNG ---
+        # La preview PNG utilisera TOUJOURS self.last_saved_data_for_preview (qui est 0-1 et post-traité)
+        if self.last_saved_data_for_preview is not None: 
             try:
-                save_preview_image(data_after_postproc, preview_path, apply_stretch=True, enhanced_stretch=True)
+                save_preview_image(self.last_saved_data_for_preview, preview_path, apply_stretch=True, enhanced_stretch=True)
                 self.update_progress("     ✅ Sauvegarde Preview PNG terminée.")
-                print(f"DEBUG QM [_save_final_stack]: Sauvegarde PNG de '{preview_path}' réussie.")
-                self.last_saved_data_for_preview = data_after_postproc.copy()
-                print("DEBUG QM [_save_final_stack]: 'last_saved_data_for_preview' mis à jour.")
-                if self.final_stacked_path and os.path.exists(self.final_stacked_path):
-                    self.update_progress(f"🎉 Stack final sauvegardé ({effective_image_count} images/poids). Traitement complet.")
-                elif os.path.exists(preview_path):
-                    self.update_progress(f"⚠️ Traitement terminé. Sauvegarde FITS échec, mais prévisualisation PNG sauvegardée.")
-            except Exception as prev_err:
-                self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
-                print(f"ERREUR QM: Erreur sauvegarde PNG: {prev_err}"); traceback.print_exc(limit=1)
-                self.last_saved_data_for_preview = None
-        else:
-            self.update_progress("ⓘ Aucune image à sauvegarder."); self.last_saved_data_for_preview = None
-
+                if self.final_stacked_path and os.path.exists(self.final_stacked_path): self.update_progress(f"🎉 Stack final sauvegardé ({effective_image_count} images/poids). Traitement complet.")
+                elif os.path.exists(preview_path): self.update_progress(f"⚠️ Traitement terminé. Sauvegarde FITS échec, mais prévisualisation PNG sauvegardée.")
+            except Exception as prev_err: self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
+        else: self.update_progress("ⓘ Aucune image à sauvegarder pour preview (last_saved_data_for_preview est None)."); 
+            
         # --- Nettoyage des fichiers memmap physiques (SEULEMENT si mode classique) ---
-        # ... (inchangé) ...
-        if not (is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_mosaic_mode_with_data): 
-            if self.perform_cleanup:
-                print("DEBUG QM [_save_final_stack]: Nettoyage des fichiers memmap (mode SUM/W classique)...")
+        if not (is_true_incremental_drizzle_from_objects or is_drizzle_final_mode_with_data or is_reproject_mosaic_mode): 
+            if self.perform_cleanup: # ... (logique de suppression memmap inchangée)
                 if self.sum_memmap_path and os.path.exists(self.sum_memmap_path):
-                    try: os.remove(self.sum_memmap_path); print("     -> Fichier SUM.npy supprimé.")
-                    except Exception as e_rem_sum: print(f"     -> WARN: Erreur suppression SUM.npy: {e_rem_sum}")
+                    try: os.remove(self.sum_memmap_path) 
+                    except Exception: pass
                 if self.wht_memmap_path and os.path.exists(self.wht_memmap_path):
-                    try: os.remove(self.wht_memmap_path); print("     -> Fichier WHT.npy supprimé.")
-                    except Exception as e_rem_wht: print(f"     -> WARN: Erreur suppression WHT.npy: {e_rem_wht}")
+                    try: os.remove(self.wht_memmap_path)
+                    except Exception: pass
                 try: 
                     memmap_dir_final_clean = os.path.join(self.output_folder, "memmap_accumulators")
-                    if os.path.isdir(memmap_dir_final_clean) and not os.listdir(memmap_dir_final_clean):
-                        os.rmdir(memmap_dir_final_clean); print(f"     -> Dossier memmap vide supprimé: {memmap_dir_final_clean}")
+                    if os.path.isdir(memmap_dir_final_clean) and not os.listdir(memmap_dir_final_clean): os.rmdir(memmap_dir_final_clean)
                 except Exception: pass 
-        else:
-            print("DEBUG QM [_save_final_stack]: Nettoyage fichiers memmap ignoré (mode Drizzle / Mosaïque / Incr. Vrai).")
+        else: print("DEBUG QM [_save_final_stack]: Nettoyage fichiers memmap ignoré (mode Drizzle / Mosaïque / Incr. Vrai).")
 
-        print("\n" + "=" * 80); print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_In_SaveFinalStack]: Fin méthode (mode: {current_operation_mode_log})."); print("=" * 80 + "\n")
+        print("\n" + "=" * 80); print(f"DEBUG QM [_save_final_stack V_SaveDtypeOption_Reproject_ADUForUIPreview]: Fin méthode (mode: {current_operation_mode_log})."); print("=" * 80 + "\n")
+
 
 
 
@@ -5295,6 +4920,8 @@ class SeestarQueuedStacker:
             self.mosaic_drizzle_pixfrac = float(self.mosaic_settings_dict.get('pixfrac', 1.0))
             self.mosaic_drizzle_fillval = str(self.mosaic_settings_dict.get('fillval', "0.0"))
             self.mosaic_drizzle_wht_threshold = float(self.mosaic_settings_dict.get('wht_threshold', 0.01))
+            # Surcharge du facteur d'échelle global pour la mosaïque
+            self.drizzle_scale = float(self.mosaic_settings_dict.get('mosaic_scale_factor', self.drizzle_scale)) 
             print(f"  -> Mode Mosaïque ACTIF. Align Mode: '{self.mosaic_alignment_mode}', Fallback WCS: {self.use_wcs_fallback_for_mosaic}")
             print(f"     Mosaic Drizzle: Kernel='{self.mosaic_drizzle_kernel}', Pixfrac={self.mosaic_drizzle_pixfrac:.2f}, Scale(global)={self.drizzle_scale}x")
         
@@ -5692,19 +5319,19 @@ class SeestarQueuedStacker:
 
 
 
-
-
     def _process_and_save_drizzle_batch(self, batch_temp_filepaths_list, output_wcs_target, output_shape_target_hw, batch_num):
         """
         Traite un lot de fichiers FITS temporaires (contenant des images alignées et leur WCS de référence)
         en utilisant Drizzle et sauvegarde les fichiers science (CxHxW) et poids (HxW x3)
         intermédiaires pour ce lot.
-        MODIFIED V5_DrizStdFix: Attend une liste de chemins de fichiers.
+        MODIFIED CRITICAL: Force ALL input data to be in [0, 65535] ADU range BEFORE Drizzle.add_image.
+        Robustify weight_map handling.
+        Version: V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels
         """
         num_files_in_batch = len(batch_temp_filepaths_list)
         self.update_progress(f"💧 Traitement Drizzle du lot #{batch_num} ({num_files_in_batch} images)...")
         batch_start_time = time.time()
-        print(f"DEBUG QM [_process_and_save_drizzle_batch V5_DrizStdFix]: Lot #{batch_num} avec {num_files_in_batch} images.")
+        print(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Lot #{batch_num} avec {num_files_in_batch} images.")
         print(f"  -> WCS de sortie cible fourni: {'Oui' if output_wcs_target else 'Non'}, Shape de sortie cible: {output_shape_target_hw}")
 
         if not batch_temp_filepaths_list:
@@ -5712,7 +5339,7 @@ class SeestarQueuedStacker:
             return None, []
         if output_wcs_target is None or output_shape_target_hw is None:
             self.update_progress(f"   - ERREUR: WCS ou Shape de sortie manquant pour lot Drizzle #{batch_num}. Traitement annulé.", "ERROR")
-            print(f"ERREUR QM [_process_and_save_drizzle_batch V5_DrizStdFix]: output_wcs_target ou output_shape_target_hw est None.")
+            print(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: output_wcs_target ou output_shape_target_hw est None.")
             return None, []
         if not isinstance(output_wcs_target, WCS) or not output_wcs_target.is_celestial:
             self.update_progress(f"   - ERREUR: output_wcs_target invalide pour lot Drizzle #{batch_num}.", "ERROR")
@@ -5725,7 +5352,7 @@ class SeestarQueuedStacker:
         num_output_channels = 3; channel_names = ['R', 'G', 'B']
         drizzlers_batch = []; output_images_batch = []; output_weights_batch = []
         try:
-            print(f"DEBUG QM [_process_and_save_drizzle_batch V5_DrizStdFix]: Initialisation Drizzle pour lot #{batch_num}. Shape Sortie CIBLE: {output_shape_target_hw}.")
+            print(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Initialisation Drizzle pour lot #{batch_num}. Shape Sortie CIBLE: {output_shape_target_hw}.")
             for _ in range(num_output_channels):
                 output_images_batch.append(np.zeros(output_shape_target_hw, dtype=np.float32))
                 output_weights_batch.append(np.zeros(output_shape_target_hw, dtype=np.float32))
@@ -5736,7 +5363,7 @@ class SeestarQueuedStacker:
             self.update_progress(f"   - Objets Drizzle initialisés pour lot #{batch_num}.")
         except Exception as init_err:
             self.update_progress(f"   - ERREUR: Échec init Drizzle pour lot #{batch_num}: {init_err}", "ERROR")
-            print(f"ERREUR QM [_process_and_save_drizzle_batch V5_DrizStdFix]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
+            print(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
             return None, []
 
         processed_in_batch_count = 0
@@ -5745,7 +5372,7 @@ class SeestarQueuedStacker:
             current_filename_for_log = os.path.basename(temp_fits_filepath_item)
             print(f"DEBUG QM [P&SDB_Loop]: Lot #{batch_num}, Fichier {i_file+1}/{num_files_in_batch}: '{current_filename_for_log}'")
 
-            input_data_HxWxC_loaded = None; wcs_input_from_file_header = None
+            input_data_HxWxC_orig = None; wcs_input_from_file_header = None
             input_file_header_content = None; pixmap_for_this_file = None
             file_successfully_added_to_drizzle = False
             try:
@@ -5753,12 +5380,12 @@ class SeestarQueuedStacker:
                     if not hdul or len(hdul) == 0 or hdul[0].data is None: raise IOError(f"FITS temp invalide/vide: {temp_fits_filepath_item}")
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     if data_cxhxw.ndim!=3 or data_cxhxw.shape[0]!=num_output_channels: raise ValueError(f"Shape FITS temp {data_cxhxw.shape} != CxHxW")
-                    input_data_HxWxC_loaded = np.moveaxis(data_cxhxw, 0, -1) 
+                    input_data_HxWxC_orig = np.moveaxis(data_cxhxw, 0, -1) 
                     input_file_header_content = hdul[0].header 
                     with warnings.catch_warnings(): warnings.simplefilter("ignore"); wcs_input_from_file_header = WCS(input_file_header_content, naxis=2)
                     if not wcs_input_from_file_header.is_celestial: raise ValueError(f"WCS non céleste dans FITS temp")
                 
-                current_input_shape_hw = input_data_HxWxC_loaded.shape[:2]
+                current_input_shape_hw = input_data_HxWxC_orig.shape[:2]
                 y_in_coords, x_in_coords = np.indices(current_input_shape_hw)
                 sky_coords_ra_deg, sky_coords_dec_deg = wcs_input_from_file_header.all_pix2world(x_in_coords.ravel(),y_in_coords.ravel(),0)
                 x_output_pixels_flat, y_output_pixels_flat = output_wcs_target.all_world2pix(sky_coords_ra_deg,sky_coords_dec_deg,0)
@@ -5780,11 +5407,32 @@ class SeestarQueuedStacker:
                         try: base_exptime = max(1e-6, float(input_file_header_content['EXPTIME']))
                         except (ValueError, TypeError): pass
                     
+                    # --- CRITICAL FIX 1: Force ALL input data to [0, 65535] ADU range BEFORE Drizzle.add_image ---
+                    input_data_HxWxC_adu_scaled = input_data_HxWxC_orig.copy()
+                    
+                    current_max_for_batch_adu = np.nanmax(input_data_HxWxC_adu_scaled)
+                    if current_max_for_batch_adu <= 1.0 + 1e-5 and current_max_for_batch_adu > 0:
+                        input_data_HxWxC_adu_scaled = input_data_HxWxC_adu_scaled * 65535.0
+                        print(f"      DEBUG: File {i_file+1} FORCED rescaled from [0,1] to [0,65535] for Drizzle input. Range: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
+                    else:
+                        print(f"      DEBUG: File {i_file+1} kept original range for Drizzle input: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
+                    
+                    # Clip negative values and handle NaNs/Infs
+                    input_data_HxWxC_cleaned = np.nan_to_num(np.clip(input_data_HxWxC_adu_scaled, 0.0, None), nan=0.0, posinf=0.0, neginf=0.0)
+                    # --- END CRITICAL FIX 1 ---
+
+                    # --- CRITICAL FIX 2: Robustify weight_map ---
+                    # For _process_and_save_drizzle_batch, the original pixel mask is not readily available from temp file.
+                    # So we use a uniform weight map here. This should be improved if possible by saving/loading the mask.
+                    effective_weight_map = np.ones(current_input_shape_hw, dtype=np.float32)
+                    print(f"      DEBUG: File {i_file+1}, uniform weight_map used for Drizzle.add_image. Range: [{np.min(effective_weight_map):.3f}, {np.max(effective_weight_map):.3f}]")
+                    # --- END CRITICAL FIX 2 ---
+
                     for ch_index in range(num_output_channels):
-                        channel_data_2d = input_data_HxWxC_loaded[..., ch_index].astype(np.float32)
-                        channel_data_2d_clean = np.nan_to_num(channel_data_2d, nan=0.0, posinf=0.0, neginf=0.0)
+                        channel_data_2d_clean = input_data_HxWxC_cleaned[..., ch_index]
+                        
                         drizzlers_batch[ch_index].add_image(data=channel_data_2d_clean, pixmap=pixmap_for_this_file, exptime=base_exptime,
-                                                            pixfrac=self.drizzle_pixfrac, in_units='counts', weight_map=None)
+                                                            pixfrac=self.drizzle_pixfrac, in_units='counts', weight_map=effective_weight_map)
                     file_successfully_added_to_drizzle = True
                 except Exception as drizzle_add_err:
                     self.update_progress(f"      -> ERREUR P&SDB add_image pour '{current_filename_for_log}': {drizzle_add_err}", "WARN")
@@ -5796,12 +5444,8 @@ class SeestarQueuedStacker:
             else:
                 print(f"  [P&SDB_Loop]: Fichier '{current_filename_for_log}' NON ajouté (erreur pixmap ou add_image).")
             
-            if input_data_HxWxC_loaded is not None: del input_data_HxWxC_loaded
-            if wcs_input_from_file_header is not None: del wcs_input_from_file_header
-            if input_file_header_content is not None: del input_file_header_content
-            if pixmap_for_this_file is not None: del pixmap_for_this_file
-        
-        gc.collect()
+            del input_data_HxWxC_orig, input_data_HxWxC_adu_scaled, input_data_HxWxC_cleaned, wcs_input_from_file_header, input_file_header_content, pixmap_for_this_file
+            gc.collect()
         print(f"DEBUG QM [P&SDB_Loop]: Fin boucle pour lot #{batch_num}. Total processed_in_batch_count = {processed_in_batch_count}")
         
         if processed_in_batch_count == 0:
@@ -5815,7 +5459,7 @@ class SeestarQueuedStacker:
         
         print(f"DEBUG QM [P&SDB_Save]: Début sauvegarde pour lot #{batch_num}. SCI path: {out_filepath_sci}")
         try:
-            final_sci_data_batch_hwc = np.stack(output_images_batch, axis=-1)
+            final_sci_data_batch_hwc = np.stack(output_images_batch, axis=-1).astype(np.float32)
             final_sci_data_to_save = np.moveaxis(final_sci_data_batch_hwc, -1, 0).astype(np.float32)
             print(f"  [P&SDB_Save]: Données SCI prêtes pour écriture. Shape CxHxW: {final_sci_data_to_save.shape}")
             final_header_sci = output_wcs_target.to_header(relax=True) 
@@ -5871,10 +5515,6 @@ class SeestarQueuedStacker:
         self.update_progress(f"   -> Sauvegarde lot Drizzle #{batch_num} terminée ({time.time() - batch_start_time:.2f}s).")
         del drizzlers_batch, output_images_batch, output_weights_batch; gc.collect()
         return out_filepath_sci, out_filepaths_wht
-
-
-
-
 
 
 

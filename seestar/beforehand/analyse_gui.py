@@ -72,7 +72,7 @@ except Exception as e_path_setup:
 
 # Importer ToolTip en utilisant le chemin absolu du package depuis la racine du projet
 try:
-    from seestar.gui.ui_utils import ToolTip 
+    from ..gui.ui_utils import ToolTip 
     print("DEBUG (analyse_gui.py): Import de 'seestar.gui.ui_utils.ToolTip' réussi.")
 except ImportError as e_tooltip:
     print(f"ERREUR CRITIQUE (analyse_gui.py): Impossible d'importer ToolTip depuis seestar.gui.ui_utils. Erreur: {e_tooltip}")
@@ -217,12 +217,6 @@ class ToolTip:
 # === Classe Principale de l'Interface Graphique ===
 class AstroImageAnalyzerGUI:
     """Interface graphique pour l'analyseur d'images astronomiques."""
-
-# === Classe Principale de l'Interface Graphique ===
-class AstroImageAnalyzerGUI:
-    """Interface graphique pour l'analyseur d'images astronomiques."""
-
-    # --- MODIFIÉ: Signature du constructeur ---
     def __init__(self, root, command_file_path=None, main_app_callback=None): # <-- AJOUTÉ command_file_path
         """
         Initialise l'interface graphique.
@@ -243,11 +237,11 @@ class AstroImageAnalyzerGUI:
             analyzer_script_path = os.path.abspath(__file__)
             beforehand_dir = os.path.dirname(analyzer_script_path)
             # Remonter d'UN niveau pour être à la racine du projet (où se trouve le dossier icon/)
-            project_root = os.path.dirname(beforehand_dir) # <-- Ajustement ici si nécessaire
+            project_root = os.path.dirname(beforehand_dir) 
             icon_rel_path = os.path.join('icon', 'icon.png') # Chemin relatif depuis la racine
             icon_path = os.path.join(project_root, icon_rel_path)
             icon_path = os.path.normpath(icon_path)
-            print(f"DEBUG (analyse_gui __init__): Chemin icône calculé: {icon_path}") # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (analyse_gui __init__): Chemin icône calculé: {icon_path}")
 
             # 2. Vérifier si le fichier existe
             if os.path.exists(icon_path):
@@ -257,47 +251,47 @@ class AstroImageAnalyzerGUI:
                 self.tk_icon = ImageTk.PhotoImage(icon_image)
                 # Appliquer à la fenêtre racine de CETTE interface (self.root)
                 self.root.iconphoto(True, self.tk_icon)
-                print(f"DEBUG (analyse_gui __init__): Icône de fenêtre définie avec succès depuis: {icon_path}") # <-- AJOUTÉ DEBUG
+                print(f"DEBUG (analyse_gui __init__): Icône de fenêtre définie avec succès depuis: {icon_path}")
             else:
-                print(f"AVERTISSEMENT (analyse_gui __init__): Fichier icône introuvable: {icon_path}. Icône par défaut utilisée.") # <-- AJOUTÉ DEBUG
+                print(f"AVERTISSEMENT (analyse_gui __init__): Fichier icône introuvable: {icon_path}. Icône par défaut utilisée.")
         except ImportError:
-             # Si Pillow n'est pas installé (bien qu'il soit dans requirements)
-             print("AVERTISSEMENT (analyse_gui __init__): Pillow (PIL/ImageTk) non trouvé. Impossible de définir l'icône.") # <-- AJOUTÉ DEBUG
-             self.tk_icon = None # Assurer que l'attribut existe même si l'import échoue
+             print("AVERTISSEMENT (analyse_gui __init__): Pillow (PIL/ImageTk) non trouvé. Impossible de définir l'icône.")
+             self.tk_icon = None 
         except Exception as e_icon:
-            print(f"ERREUR (analyse_gui __init__): Impossible de charger/définir l'icône: {e_icon}") # <-- AJOUTÉ DEBUG
-            traceback.print_exc(limit=1) # Afficher une trace limitée pour le debug
-            self.tk_icon = None # Assurer que l'attribut existe
+            print(f"ERREUR (analyse_gui __init__): Impossible de charger/définir l'icône: {e_icon}")
+            traceback.print_exc(limit=1) 
+            self.tk_icon = None
         # --- FIN AJOUT ---
 
 
         if self.command_file_path:
             print(f"DEBUG (analyse_gui __init__): Fichier de commande reçu: {self.command_file_path}")
         else:
-            # Avertissement si aucun chemin n'est fourni (le bouton "Analyser et Empiler" ne pourra pas communiquer)
             print("AVERTISSEMENT (analyse_gui __init__): Aucun chemin de fichier de commande fourni. La fonction 'Analyser et Empiler' ne communiquera pas avec le stacker.")
         # --- FIN AJOUT ---
 
         # Variables Tkinter pour lier les widgets aux données
-        self.current_lang = tk.StringVar(value='fr') # Langue actuelle (défaut: français)
-        self.current_lang.trace_add('write', self.change_language) # Appeler change_language si la variable change
+        self.current_lang = tk.StringVar(value='fr') 
+        self.current_lang.trace_add('write', self.change_language) 
 
-        self.input_dir = tk.StringVar() # Chemin dossier d'entrée
-        self.output_log = tk.StringVar() # Chemin fichier log
-        self.status_text = tk.StringVar() # Texte affiché dans la barre de statut
-        self.progress_var = tk.DoubleVar(value=0.0) # Valeur de la barre de progression (0-100)
+        self.input_dir = tk.StringVar() 
+        self.output_log = tk.StringVar() 
+        # --- NOUVEAU : Trace pour self.output_log ---
+        self.output_log.trace_add('write', lambda *args: self._update_log_button_state())
+        # --- FIN NOUVEAU ---
+        self.status_text = tk.StringVar() 
+        self.progress_var = tk.DoubleVar(value=0.0) 
 
         # Options d'analyse (Booléens)
-        self.analyze_snr = tk.BooleanVar(value=True) # Activer analyse SNR par défaut
-        # Activer détection traînées seulement si acstools est dispo ET compatible
+        self.analyze_snr = tk.BooleanVar(value=True) 
         self.detect_trails = tk.BooleanVar(value=(SATDET_AVAILABLE and SATDET_USES_SEARCHPATTERN))
-        self.sort_by_snr = tk.BooleanVar(value=True) # Trier résultats par SNR
-        self.include_subfolders = tk.BooleanVar(value=False) # Inclure sous-dossiers par défaut
+        self.sort_by_snr = tk.BooleanVar(value=True) 
+        self.include_subfolders = tk.BooleanVar(value=False) 
 
         # Paramètres Sélection SNR
-        self.snr_selection_mode = tk.StringVar(value='percent') # Mode ('percent', 'threshold', 'none')
-        self.snr_selection_value = tk.StringVar(value='80') # Valeur (%) ou seuil
-        self.snr_reject_dir = tk.StringVar() # Dossier pour images rejetées (faible SNR)
+        self.snr_selection_mode = tk.StringVar(value='percent') 
+        self.snr_selection_value = tk.StringVar(value='80') 
+        self.snr_reject_dir = tk.StringVar() 
 
         # Paramètres Détection Traînées (acstools.satdet)
         self.trail_params = {
@@ -305,20 +299,20 @@ class AstroImageAnalyzerGUI:
             'h_thresh': tk.StringVar(value="0.315"), 'line_len': tk.StringVar(value="100"),
             'small_edge': tk.StringVar(value="1"), 'line_gap': tk.StringVar(value="25")
         }
-        self.trail_reject_dir = tk.StringVar() # Dossier pour images rejetées (traînées)
+        self.trail_reject_dir = tk.StringVar() 
 
         # Action sur les images rejetées
-        self.reject_action = tk.StringVar(value='move') # ('move', 'delete', 'none')
+        self.reject_action = tk.StringVar(value='move') 
 
         # Variables d'état internes
-        self.analysis_results = [] # Liste pour stocker les résultats de l'analyse
-        self.analysis_running = False # Indicateur si une analyse est en cours
-        self.analysis_completed_successfully = False # Indicateur si la dernière analyse a réussi
-        self.tooltips = {} # Dictionnaire pour stocker les objets ToolTip
-        self.timer_running = False # Indicateur si le chronomètre tourne
-        self.timer_start_time = None # Temps de début du chronomètre
-        self.timer_job_id = None # ID du job 'after' pour le chronomètre
-        self.base_status_message = "" # Message de base pour le statut avec timer
+        self.analysis_results = [] 
+        self.analysis_running = False 
+        self.analysis_completed_successfully = False 
+        self.tooltips = {} 
+        self.timer_running = False 
+        self.timer_start_time = None 
+        self.timer_job_id = None 
+        self.base_status_message = "" 
 
         # Références aux widgets (pour traduction, activation/désactivation)
         self.widgets_refs = {}
@@ -326,15 +320,13 @@ class AstroImageAnalyzerGUI:
         self.snr_reject_dir_entry = self.detect_trails_check = self.acstools_status_label = None
         self.params_sat_frame = self.trail_reject_dir_frame = self.trail_reject_dir_entry = None
         self.analyze_button = self.visualize_button = self.open_log_button = None
-        # --- MODIFIÉ : Ajouter référence analyze_stack_button ---
-        self.analyze_stack_button = None # Sera défini dans create_widgets
-        # --- FIN MODIFIÉ ---
+        self.analyze_stack_button = None 
         self.return_button = self.progress_bar = self.status_label = self.results_text = None
         self.lang_combobox = None
         self.trail_param_labels = {}
         self.trail_param_entries = {}
         self.manage_markers_button = None
-        self.stack_after_analysis = False # Indicateur pour empiler après analyse
+        self.stack_after_analysis = False 
 
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -350,6 +342,7 @@ class AstroImageAnalyzerGUI:
         # Définir taille et taille minimale de la fenêtre
         self.root.geometry("950x850")
         self.root.minsize(950, 850)
+        self._update_log_button_state() # Pour l'état initial (si log pré-rempli par args)
 
 
 ###################################################################################################################""
@@ -463,7 +456,20 @@ class AstroImageAnalyzerGUI:
             daemon=True
         )
         analysis_thread.start()
- 
+
+    def _update_log_button_state(self):
+        """Active ou désactive le bouton 'Ouvrir Log' basé sur l'existence du fichier log."""
+        if not hasattr(self, 'open_log_button') or self.open_log_button is None:
+            # Le bouton n'est pas encore créé (pendant __init__) ou a été détruit.
+            return 
+
+        log_path = self.output_log.get()
+        # Vérifier si le chemin est non vide ET que c'est un fichier existant
+        if log_path and os.path.isfile(log_path): 
+            self._set_widget_state(self.open_log_button, tk.NORMAL)
+        else:
+            self._set_widget_state(self.open_log_button, tk.DISABLED)
+
     def _launch_analysis(self, stack_after: bool):
         """Méthode interne pour valider et lancer le thread d'analyse."""
         # Empêcher lancements multiples
@@ -1501,15 +1507,18 @@ class AstroImageAnalyzerGUI:
         directory = filedialog.askdirectory(parent=self.root, title=self._("input_dir_label"))
         if directory:
             self.input_dir.set(directory)
-            # Suggérer chemins par défaut basés sur l'entrée
-            self.output_log.set(os.path.join(directory, "analyse_resultats.log"))
+            # La modification de self.output_log déclenchera le trace qui appellera _update_log_button_state
+            self.output_log.set(os.path.join(directory, "analyse_resultats.log")) 
             self.snr_reject_dir.set(os.path.join(directory, "rejected_low_snr"))
             self.trail_reject_dir.set(os.path.join(directory, "rejected_satellite_trails"))
-            # Réinitialiser l'UI pour une nouvelle analyse potentielle
-            self.reset_ui_for_new_analysis()
+            
+            # reset_ui_for_new_analysis appellera _update_log_button_state à la fin
+            self.reset_ui_for_new_analysis() 
+            
         # Ramener la fenêtre au premier plan après la boîte de dialogue
         self.root.after(50, self.root.focus_force)
         self.root.after(100, self.root.lift)
+
 
     def browse_output_log(self):
         """Ouvre dialogue pour choisir/enregistrer fichier log."""
@@ -1520,7 +1529,11 @@ class AstroImageAnalyzerGUI:
             filetypes=[(self._("Fichiers log"), "*.log"), (self._("Tous les fichiers"), "*.*")]
         )
         if filename:
-            self.output_log.set(filename)
+            # La modification de self.output_log déclenchera le trace 
+            # qui appellera _update_log_button_state
+            self.output_log.set(filename) 
+            
+        # Ramener la fenêtre au premier plan après la boîte de dialogue
         self.root.after(50, self.root.focus_force)
         self.root.after(100, self.root.lift)
 
@@ -1643,12 +1656,26 @@ class AstroImageAnalyzerGUI:
                     self.results_text.delete(1.0, tk.END)
                     self.results_text.config(state=tk.DISABLED) # Désactiver à nouveau
             except tk.TclError: pass
-        # Désactiver boutons Visualiser et Ouvrir Log
+        
+        # Désactiver bouton Visualiser
         self._set_widget_state(self.visualize_button, tk.DISABLED)
-        self._set_widget_state(self.open_log_button, tk.DISABLED)
+        
+        # --- MODIFIÉ : Ne plus désactiver le bouton log ici directement ---
+        # L'état du bouton 'Ouvrir Log' est maintenant géré par _update_log_button_state.
+        # On l'appelle ici pour s'assurer que si un log existe pour le dossier
+        # actuellement sélectionné, le bouton reste/devient actif.
+        # --- FIN MODIFICATION ---
+        
         # Vider la liste interne des résultats
         self.analysis_results = []
         self.analysis_completed_successfully = False
+
+        # --- NOUVEAU : Mettre à jour l'état du bouton log après un reset ---
+        # Cela est important car self.output_log n'a peut-être pas changé,
+        # donc le trace ne se serait pas déclenché, mais le fichier log
+        # pourrait exister pour le dossier actuel.
+        self._update_log_button_state() 
+        # --- FIN NOUVEAU ---
 
     # --- Mise à Jour UI pendant Analyse ---
 
@@ -1787,47 +1814,45 @@ class AstroImageAnalyzerGUI:
 
 
 
+# --- DANS LA CLASSE AstroImageAnalyzerGUI ---
 
     def finalize_analysis(self, results, success):
         """Met à jour l'interface après la fin du thread d'analyse."""
-        # --- Imports Standard (os, gc déjà présents globalement) ---
-        # Pas besoin de subprocess ou sys ici pour cette version
-        print("DEBUG (analyse_gui): Entrée dans finalize_analysis.") # <-- CONSERVÉ DEBUG
-        print(f"DEBUG (analyse_gui): Paramètres reçus - success: {success}, stack_after_analysis (avant logique): {self.stack_after_analysis}") # <-- CONSERVÉ DEBUG
+        print("DEBUG (analyse_gui): Entrée dans finalize_analysis.") 
+        print(f"DEBUG (analyse_gui): Paramètres reçus - success: {success}, stack_after_analysis (avant logique): {self.stack_after_analysis}") 
 
         self._stop_timer()
         self.analysis_running = False
 
         folder_to_stack = None
-        should_write_command = False # <-- MODIFIÉ: Renommé pour clarté
+        should_write_command = False 
 
         # --- Logique pour déterminer si on doit écrire la commande ---
         if self.stack_after_analysis and success:
-            print("DEBUG (analyse_gui): Analyse réussie et intention d'empiler détectée.") # <-- CONSERVÉ DEBUG
+            print("DEBUG (analyse_gui): Analyse réussie et intention d'empiler détectée.") 
             self.update_results_text("logic_info_prefix", text="Analyse terminée avec succès, préparation pour empilage.")
             folder_to_stack = self.input_dir.get()
 
             if not folder_to_stack or not os.path.isdir(folder_to_stack):
-                print(f"DEBUG (analyse_gui): Dossier pour empilage invalide: '{folder_to_stack}'") # <-- CONSERVÉ DEBUG
+                print(f"DEBUG (analyse_gui): Dossier pour empilage invalide: '{folder_to_stack}'") 
                 self.update_results_text("logic_error_prefix", text=f"Dossier invalide ou non défini pour empiler après analyse: '{folder_to_stack}'. Empilage annulé.")
                 messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid") + "\n" + self._("Empilage annulé.", default="Stacking cancelled."), parent=self.root)
                 folder_to_stack = None
-                success = False # Marquer comme échec pour ne pas écrire la commande
-                should_write_command = False # <-- MODIFIÉ: Ne pas écrire la commande
+                success = False 
+                should_write_command = False 
             else:
-                print(f"DEBUG (analyse_gui): Dossier pour empilage validé: {folder_to_stack}") # <-- CONSERVÉ DEBUG
-                should_write_command = True # <-- MODIFIÉ: On écrira la commande
+                print(f"DEBUG (analyse_gui): Dossier pour empilage validé: {folder_to_stack}") 
+                should_write_command = True 
 
-            self.stack_after_analysis = False # Réinitialiser l'intention
+            self.stack_after_analysis = False 
         else:
-            if not success: print("DEBUG (analyse_gui): Analyse échouée, commande non écrite.") # <-- CONSERVÉ DEBUG
-            if not self.stack_after_analysis: print("DEBUG (analyse_gui): Pas d'intention d'empiler après analyse, commande non écrite.") # <-- CONSERVÉ DEBUG
-            self.stack_after_analysis = False # Réinitialiser au cas où
+            if not success: print("DEBUG (analyse_gui): Analyse échouée, commande non écrite.") 
+            if not self.stack_after_analysis: print("DEBUG (analyse_gui): Pas d'intention d'empiler après analyse, commande non écrite.") 
+            self.stack_after_analysis = False 
 
-        print(f"DEBUG (analyse_gui): État après logique décision: should_write_command={should_write_command}, folder_to_stack={folder_to_stack}") # <-- MODIFIÉ DEBUG
+        print(f"DEBUG (analyse_gui): État après logique décision: should_write_command={should_write_command}, folder_to_stack={folder_to_stack}") 
 
         # --- Mise à jour UI (Statut et Barre Progression) ---
-        # (Logique inchangée)
         self.update_progress(100.0 if success else 0.0)
         self.analysis_results = results if results else []
         self.analysis_completed_successfully = success
@@ -1841,7 +1866,6 @@ class AstroImageAnalyzerGUI:
                  action_count = sum(1 for r in self.analysis_results if r.get('action','').startswith(('moved', 'deleted')))
                  final_status_key = "status_analysis_done_some"
                  self.update_results_text("--- Analyse terminée ---")
-                 # Activer Visualiser seulement si on n'écrit PAS la commande (car on ne fermera pas)
                  if not should_write_command: self._set_widget_state(self.visualize_button, tk.NORMAL)
                  else: self._set_widget_state(self.visualize_button, tk.DISABLED)
             else:
@@ -1853,99 +1877,86 @@ class AstroImageAnalyzerGUI:
              self.update_results_text("--- Analyse terminée avec erreurs ---")
              self._set_widget_state(self.visualize_button, tk.DISABLED)
 
-        # Afficher le statut final
         if final_status_key:
-            print(f"DEBUG (analyse_gui): Affichage statut final (clé: {final_status_key})") # <-- CONSERVÉ DEBUG
+            print(f"DEBUG (analyse_gui): Affichage statut final (clé: {final_status_key})") 
             status_kwargs = {}
             if success and processed_count > 0: status_kwargs = {'processed': processed_count, 'moved': action_count, 'errors': errors_count}
             self.update_status(final_status_key, **status_kwargs)
 
         # --- Réactivation des boutons (SEULEMENT si on n'écrit PAS la commande) ---
         if not should_write_command:
-            print("DEBUG (analyse_gui): Réactivation des boutons (pas de commande écrite).") # <-- CONSERVÉ DEBUG
+            print("DEBUG (analyse_gui): Réactivation des boutons (pas de commande écrite).") 
             self._set_widget_state(self.analyze_button, tk.NORMAL)
             self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
             self._set_widget_state(self.return_button, tk.NORMAL)
             self._set_widget_state(self.manage_markers_button, tk.NORMAL)
-            if self.output_log.get() and os.path.exists(self.output_log.get()):
-                 self._set_widget_state(self.open_log_button, tk.NORMAL)
-            else:
-                 self._set_widget_state(self.open_log_button, tk.DISABLED)
-
+            # --- MODIFIÉ : Utiliser la fonction centralisée pour le bouton log ---
+            self._update_log_button_state()
+            # --- FIN MODIFICATION ---
+        
         # --- ACTION FINALE : ÉCRIRE LE FICHIER DE COMMANDE OU NON ---
         if should_write_command and folder_to_stack:
-            print(f"DEBUG (analyse_gui): Condition remplie pour écrire la commande pour: {folder_to_stack}") # <-- AJOUTÉ DEBUG
-            # --- MODIFIÉ : Écrire dans le fichier de commande ---
+            print(f"DEBUG (analyse_gui): Condition remplie pour écrire la commande pour: {folder_to_stack}") 
             if self.command_file_path:
                 try:
-                    # S'assurer que le dossier parent existe (au cas où il serait dans /tmp/app_comm)
                     command_dir = os.path.dirname(self.command_file_path)
                     os.makedirs(command_dir, exist_ok=True)
-                    print(f"DEBUG (analyse_gui): Tentative d'écriture dans {self.command_file_path}") # <-- AJOUTÉ DEBUG
+                    print(f"DEBUG (analyse_gui): Tentative d'écriture dans {self.command_file_path}") 
 
-                    # Écrire le chemin du dossier dans le fichier
                     with open(self.command_file_path, "w", encoding='utf-8') as f_cmd:
                         f_cmd.write(folder_to_stack)
 
-                    print(f"DEBUG (analyse_gui): Fichier de commande écrit avec succès.") # <-- AJOUTÉ DEBUG
+                    print(f"DEBUG (analyse_gui): Fichier de commande écrit avec succès.") 
                     self.update_results_text("logic_info_prefix", text=f"Commande d'empilement envoyée pour: {folder_to_stack}")
-
-                    # Fermer l'analyseur après avoir écrit le fichier
-                    self.update_status("Status: Commande d'empilement envoyée...") # Message final
-                    print("DEBUG (analyse_gui): Planification fermeture via after(100, self.return_or_quit)...") # <-- AJOUTÉ DEBUG
-                    self.root.after(100, self.return_or_quit) # Très court délai juste pour rafraîchir status
+                    self.update_status("Status: Commande d'empilement envoyée...") 
+                    print("DEBUG (analyse_gui): Planification fermeture via after(100, self.return_or_quit)...") 
+                    self.root.after(100, self.return_or_quit) 
 
                 except IOError as e_io:
                     err_msg = f"Impossible d'écrire le fichier de commande '{self.command_file_path}'. Empilage automatique annulé. Erreur: {e_io}"
-                    print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                    print(f"ERREUR (analyse_gui): {err_msg}") 
                     self.update_results_text("logic_error_prefix", text=err_msg)
                     messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
-                    # Réactiver les boutons car l'écriture a échoué
-                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande.") # <-- AJOUTÉ DEBUG
+                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande.") 
                     self._set_widget_state(self.analyze_button, tk.NORMAL)
                     self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
                     self._set_widget_state(self.return_button, tk.NORMAL)
                     self._set_widget_state(self.manage_markers_button, tk.NORMAL)
-                    if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
+                    # --- AJOUTÉ : Mettre à jour état bouton log aussi ici ---
+                    self._update_log_button_state()
+                    # --- FIN AJOUT ---
 
-                except Exception as e_write: # Capturer autres erreurs potentielles
-                    err_msg = f"Erreur inattendue lors de l'écriture du fichier de commande. Empilage automatique annulé. Erreur: {e_write}"
-                    print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                except Exception as e_write_cmd: 
+                    err_msg = f"Erreur inattendue lors de l'écriture du fichier de commande. Empilage automatique annulé. Erreur: {e_write_cmd}"
+                    print(f"ERREUR (analyse_gui): {err_msg}") 
                     traceback.print_exc()
                     self.update_results_text("logic_error_prefix", text=err_msg)
                     messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
-                    # Réactiver les boutons
-                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande (Exception).") # <-- AJOUTÉ DEBUG
+                    print("DEBUG (analyse_gui): Réactivation boutons après erreur écriture commande (Exception).") 
                     self._set_widget_state(self.analyze_button, tk.NORMAL)
                     self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
                     self._set_widget_state(self.return_button, tk.NORMAL)
                     self._set_widget_state(self.manage_markers_button, tk.NORMAL)
-                    if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
-
+                    # --- AJOUTÉ : Mettre à jour état bouton log aussi ici ---
+                    self._update_log_button_state()
+                    # --- FIN AJOUT ---
             else:
-                # Cas où le chemin du fichier de commande n'a pas été fourni à __init__
                 err_msg = "Erreur interne: Chemin du fichier de commande non défini. Empilage automatique impossible."
-                print(f"ERREUR (analyse_gui): {err_msg}") # <-- AJOUTÉ DEBUG
+                print(f"ERREUR (analyse_gui): {err_msg}") 
                 self.update_results_text("logic_error_prefix", text=err_msg)
                 messagebox.showerror(self._("msg_error"), err_msg, parent=self.root)
-                # Réactiver les boutons
-                print("DEBUG (analyse_gui): Réactivation boutons car command_file_path est None.") # <-- AJOUTÉ DEBUG
+                print("DEBUG (analyse_gui): Réactivation boutons car command_file_path est None.") 
                 self._set_widget_state(self.analyze_button, tk.NORMAL)
                 self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
                 self._set_widget_state(self.return_button, tk.NORMAL)
                 self._set_widget_state(self.manage_markers_button, tk.NORMAL)
-                if self.output_log.get() and os.path.exists(self.output_log.get()): self._set_widget_state(self.open_log_button, tk.NORMAL)
-            # --- FIN MODIFIÉ ---
-        # --- FIN ACTION FINALE ---
-
-        print("DEBUG (analyse_gui): Appel final à gc.collect()") # <-- CONSERVÉ DEBUG
+                # --- AJOUTÉ : Mettre à jour état bouton log aussi ici ---
+                self._update_log_button_state()
+                # --- FIN AJOUT ---
+        
+        print("DEBUG (analyse_gui): Appel final à gc.collect()") 
         gc.collect()
-        print("DEBUG (analyse_gui): Sortie de finalize_analysis.") # <-- CONSERVÉ DEBUG
-
-    # --- Le reste de la classe (méthodes inchangées) ---
-    # ... (create_widgets, toggle_sections_state, browse_..., etc.) ...
-
-
+        print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
 
 
 
@@ -2082,54 +2093,34 @@ def check_dependencies():
 ########################################################################################################################
 
 
-###alors gemini as tu vu la modification ?
-
-
-
-
-
-# --- Bloc d'Exécution Principal  ---
+# --- Bloc d'Exécution Principal ---
 if __name__ == "__main__":
-    # --- MODIFIÉ: Parsing des arguments de ligne de commande ---  # <--- Note: J'ai changé le commentaire pour refléter la correction
-    print("DEBUG (analyse_gui main): Parsing des arguments...") # <-- AJOUTÉ DEBUG
+    print("DEBUG (analyse_gui main): Parsing des arguments...")
     parser = argparse.ArgumentParser(description="Astro Image Analyzer GUI")
     parser.add_argument(
         "--input-dir",
         type=str,
         help="Optional: Pre-fill the input directory path."
     )
-    # --- NOUVEL ARGUMENT AJOUTÉ ICI ---  # <--- **** CETTE PARTIE EST MANQUANTE DANS VOTRE FICHIER ****
-    parser.add_argument(                       # <--- ****
-        "--command-file",                      # <--- ****
-        type=str,                              # <--- ****
-        metavar="CMD_FILE_PATH",               # <--- ****
-        help="Internal: Path to the command file for communicating with the main stacker GUI." # <--- ****
-    )                                          # <--- ****
-    # --- FIN NOUVEL ARGUMENT ---              # <--- ****
-    args = parser.parse_args() # <--- DOIT VENIR APRES L'AJOUT
-    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}") # <-- AJOUTÉ DEBUG
-    # --- FIN MODIFICATION ---
+    parser.add_argument(
+        "--command-file",
+        type=str,
+        metavar="CMD_FILE_PATH",
+        help="Internal: Path to the command file for communicating with the main stacker GUI."
+    )
+    args = parser.parse_args()
+    print(f"DEBUG (analyse_gui main): Arguments parsés: {args}")
 
-    root = None # Initialiser la variable racine
+    root = None
     try:
-        # Vérifier si les modules essentiels sont importables
         if 'analyse_logic' not in sys.modules: raise ImportError("analyse_logic.py could not be imported.")
         if 'translations' not in globals() or not translations: raise ImportError("zone.py is empty or could not be imported.")
 
-        # Créer la fenêtre racine Tkinter mais la cacher initialement
         root = tk.Tk(); root.withdraw()
-
-        # Vérifier les dépendances externes
         check_dependencies()
-
-        # Afficher la fenêtre principale
         root.deiconify()
-
-        # --- MODIFIÉ: Passer command_file_path au constructeur ---
-        print(f"DEBUG (analyse_gui main): Instanciation AstroImageAnalyzerGUI avec command_file='{args.command_file}'") # <-- AJOUTÉ DEBUG
-        # Passer le chemin du fichier de commande (qui sera None s'il n'est pas fourni)
-        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None) # <-- MODIFIÉ
-        # --- FIN MODIFICATION ---
+        
+        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None)
 
         # --- Pré-remplissage dossier d'entrée ---
         if args.input_dir:
@@ -2137,30 +2128,54 @@ if __name__ == "__main__":
             if os.path.isdir(input_path_from_arg):
                 print(f"INFO (analyse_gui main): Pré-remplissage dossier entrée depuis argument: {input_path_from_arg}")
                 app.input_dir.set(input_path_from_arg)
-                if not app.output_log.get(): app.output_log.set(os.path.join(input_path_from_arg, "analyse_resultats.log"))
-                if not app.snr_reject_dir.get(): app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
-                if not app.trail_reject_dir.get(): app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
+                
+                # Mettre à jour les chemins par défaut.
+                # L'appel à app.output_log.set() déclenchera le trace 
+                # et donc _update_log_button_state(), qui mettra à jour l'état du bouton.
+                default_log_path = os.path.join(input_path_from_arg, "analyse_resultats.log")
+                app.output_log.set(default_log_path) # Ceci met à jour le bouton log
+                
+                # Les autres chemins peuvent être initialisés s'ils sont vides
+                if not app.snr_reject_dir.get(): 
+                    app.snr_reject_dir.set(os.path.join(input_path_from_arg, "rejected_low_snr"))
+                if not app.trail_reject_dir.get(): 
+                    app.trail_reject_dir.set(os.path.join(input_path_from_arg, "rejected_satellite_trails"))
             else:
                 print(f"AVERTISSEMENT (analyse_gui main): Dossier d'entrée via argument invalide: {args.input_dir}")
-
-        # Lancer la boucle principale de Tkinter
-        print("DEBUG (analyse_gui main): Entrée dans root.mainloop().") # <-- AJOUTÉ DEBUG
+        
+        # --- Assurer que _update_log_button_state est appelé si aucun argument --input-dir n'est fourni ---
+        # Si input_dir n'a pas été pré-rempli, self.output_log est vide.
+        # _update_log_button_state a déjà été appelé dans __init__ après la création des widgets,
+        # donc il aura correctement désactivé le bouton si output_log était vide.
+        # Aucune action supplémentaire n'est nécessaire ici pour ce cas spécifique,
+        # car le trace sur output_log et l'appel dans __init__ couvrent les scénarios.
+        
         root.mainloop()
-        print("DEBUG (analyse_gui main): Sortie de root.mainloop().") # <-- AJOUTÉ DEBUG
 
-    # --- Gestion des Erreurs au Démarrage ---
     except ImportError as e:
         print(f"ERREUR CRITIQUE: Échec import module au démarrage: {e}", file=sys.stderr); traceback.print_exc();
         try: 
-            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides."); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
-    except SystemExit as e: # <-- AJOUTÉ: Gérer SystemExit de argparse
+            if root is None: root = tk.Tk(); root.withdraw(); 
+            messagebox.showerror("Erreur Fichier Manquant", f"Impossible de charger un module essentiel ({e}).\nVérifiez que analyse_logic.py et zone.py sont présents et valides.")
+            if root: root.destroy() # Détruire la fenêtre temporaire si elle a été créée
+        except Exception as msg_e: 
+            print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr)
+        sys.exit(1) # Assurer que l'on quitte
+    except SystemExit as e:
         print(f"DEBUG (analyse_gui main): Argparse a quitté (probablement '-h' ou erreur argument). Code: {e.code}")
         pass
     except tk.TclError as e:
-        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr); print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr); sys.exit(1)
+        print(f"Erreur Tcl/Tk: Impossible d'initialiser l'interface graphique. {e}", file=sys.stderr)
+        print("Assurez-vous d'exécuter ce script dans un environnement graphique.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e_main:
         print(f"Erreur inattendue au démarrage: {e_main}", file=sys.stderr); traceback.print_exc();
         try:
-            if root is None: root = tk.Tk(); root.withdraw(); messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}"); root.destroy()
-        except Exception as msg_e: print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr); sys.exit(1)
+            if root is None: root = tk.Tk(); root.withdraw();
+            messagebox.showerror("Erreur Inattendue", f"Une erreur s'est produite au démarrage:\n{e_main}")
+            if root: root.destroy()
+        except Exception as msg_e: 
+            print(f" -> Erreur affichage message: {msg_e}", file=sys.stderr)
+        sys.exit(1)
+
+# --- FIN DU FICHIER analyse_gui.py ---

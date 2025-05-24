@@ -200,6 +200,8 @@ class DrizzleProcessor:
                       use_local_alignment_logic: bool = False,
                       anchor_wcs_for_local: WCS = None,
                       progress_callback: callable = None
+                      #max_ctx_id=0,         
+                      #disable_ctx=True      
                       ):
         """
         Applique Drizzle à une liste de fichiers FITS d'entrée.
@@ -243,7 +245,9 @@ class DrizzleProcessor:
                     out_img=out_images_by_channel[i],  
                     out_wht=out_weights_by_channel[i],
                     kernel=self.kernel,   # kernel est pour __init__
-                    fillval=self.fillval  # fillval est pour __init__
+                    fillval=self.fillval,  # fillval est pour __init__
+                    max_ctx_id=0,         # <<< LAISSER CETTE LIGNE (forcée)
+                    disable_ctx=True      # <<< LAISSER CETTE LIGNE (forcée)
                     # pixfrac N'EST PAS pour __init__
                 )
                 drizzlers_by_channel.append(driz_ch)
