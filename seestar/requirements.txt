@@ -31,6 +31,7 @@ tqdm             # Progress bars (used by backend?)
 # --- Optional Dependencies ---
 psutil            # For automatic batch size estimation (Uncomment if needed)
 acstools          # For satellite trail detection (Uncomment if needed)
+reproject         # For mosaic
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
                            # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
