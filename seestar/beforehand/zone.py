@@ -105,7 +105,7 @@ translations = {
         'Liste dimages recommandées': "Liste d'images recommandées", 'Critère': "Critère", 'Généré le': "Généré le", 'Nombre dimages': "Nombre d'images",
         'Fichiers log': "Fichiers log", 'Tous les fichiers': "Tous les fichiers", 'Fichiers Texte': "Fichiers Texte",
 
-        # --- NOUVEAU: Textes pour la gestion des marqueurs ---
+        # --- Textes pour la gestion des marqueurs ---
         'marker_window_title': "Gérer les Marqueurs d'Analyse",
         'marker_info_label': "Dossiers marqués comme analysés (contiennent le fichier '.astro_analyzer_run_complete'):",
         'marker_none_found': "Aucun dossier marqué trouvé.",
@@ -117,7 +117,22 @@ translations = {
         'marker_delete_errors': "Erreurs lors de la suppression de certains marqueurs:\n",
         'marker_delete_selected_success': "{count} marqueur(s) supprimé(s).",
         'marker_delete_all_success': "Tous les {count} marqueur(s) trouvés ont été supprimés.",
-        # --- FIN NOUVEAU ---
+        
+        #--- texte actions SNR
+        'Aucune action SNR en attente à appliquer.': "Aucune action SNR en attente à appliquer.",
+        "L'action sur rejet est 'Ne Rien Faire'. Aucune action ne sera appliquée.": "L'action sur rejet est 'Ne Rien Faire'. Aucune action ne sera appliquée.",
+        " pour le déplacement des rejets SNR.": " pour le déplacement des rejets SNR.",
+        "\nCeci s'appliquera aux fichiers marqués pour faible SNR.": "\nCeci s'appliquera aux fichiers marqués pour faible SNR.",
+        "Application des rejets SNR...": "Application des rejets SNR...",
+        "Début application rejets SNR...": "Début application rejets SNR...",
+        "Erreur application actions SNR.": "Erreur application actions SNR.",
+        "{count} actions SNR appliquées.": "{count} actions SNR appliquées.",
+        "Fin application rejets SNR. {count} actions effectuées.": "Fin application rejets SNR. {count} actions effectuées.",
+        "Le fichier log a été mis à jour avec les actions SNR.": "Le fichier log a été mis à jour avec les actions SNR.",
+        "Échec de l'application des actions SNR.": "Échec de l'application des actions SNR.",
+        "Échec application rejets SNR.": "Échec application rejets SNR.",
+
+
     },
     'en': {
         # --- Main Window ---
@@ -198,7 +213,7 @@ translations = {
         'Liste dimages recommandées': "Recommended image list", 'Critère': "Criterion", 'Généré le': "Generated on", 'Nombre dimages': "Number of images",
         'Fichiers log': "Log Files", 'Tous les fichiers': "All Files", 'Fichiers Texte': "Text Files",
 
-        # --- NEW: Marker Management Texts ---
+        # --- Marker Management Texts ---
         'marker_window_title': "Manage Analysis Markers",
         'marker_info_label': "Folders marked as analyzed (contain the '.astro_analyzer_run_complete' marker file):",
         'marker_none_found': "No marked folders found.",
@@ -210,7 +225,24 @@ translations = {
         'marker_delete_errors': "Errors occurred while deleting some markers:\n",
         'marker_delete_selected_success': "{count} marker(s) deleted.",
         'marker_delete_all_success': "All {count} found marker(s) deleted.",
-        # --- END NEW ---
+        
+        #--- Apply SNR
+        'apply_snr_rejection_button': "Apply SNR Rejection",
+        'Des actions SNR sont en attente.': "Pending SNR actions.", # Message de statut
+        'Aucune action SNR en attente à appliquer.': "No pending SNR actions to apply.",
+        "L'action sur rejet est 'Ne Rien Faire'. Aucune action ne sera appliquée.": "Reject action is 'Do Nothing'. No file actions will be performed.",
+        " pour le déplacement des rejets SNR.": " for moving SNR rejects.", # Utilisé en suffixe de message
+        "\nCeci s'appliquera aux fichiers marqués pour faible SNR.": "\nThis will apply to files marked for low SNR.", # Utilisé en suffixe de message
+        "Application des rejets SNR...": "Applying SNR rejections...",
+        "Début application rejets SNR...": "Start applying SNR rejections...",
+        "Erreur application actions SNR.": "Error applying SNR actions.",
+        "{count} actions SNR appliquées.": "{count} SNR actions applied.",
+        "Fin application rejets SNR. {count} actions effectuées.": "End applying SNR rejections. {count} actions performed.",
+        "Le fichier log a été mis à jour avec les actions SNR.": "Log file updated with SNR actions.",
+        "Échec de l'application des actions SNR.": "Failed to apply SNR actions.",
+        "Échec application rejets SNR.": "Failed applying SNR rejections.",
+
+
     }
 }
 # --- FIN DU FICHIER zone.py ---
