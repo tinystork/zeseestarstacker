@@ -290,90 +290,88 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
         # traceback.print_exc(limit=2)
         # raise # Re-raise if you want saving errors to stop the process
 
-# ... (save_preview_image function) ...
 
+
+
+# --- DANS seestar/core/image_processing.py ---
+
+def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced_stretch=False):
+    """
+    Sauvegarde l'image (0-1 float) en PNG/JPG, avec option de stretch.
+    MODIFIED: Ajout de logs détaillés pour le debug du stretch.
+    Version: SavePreview_DebugStretch_1
+    """
+    print(f"DEBUG save_preview_image (V_SavePreview_DebugStretch_1): Appel pour '{os.path.basename(output_path)}'")
+    print(f"  Initial params: apply_stretch={apply_stretch}, enhanced_stretch={enhanced_stretch}")
+
+    if image_data_01 is None:
+        print(f"  Error: Cannot save None data to {output_path}"); return False
+    
+    print(f"  image_data_01 (entrée) - Shape: {image_data_01.shape}, Dtype: {image_data_01.dtype}, Range: [{np.nanmin(image_data_01):.4g} - {np.nanmax(image_data_01):.4g}]")
+
+    try:
+        display_data = image_data_01.astype(np.float32).copy() # Assurer float32 et copie
+
+        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 : 
+             print(f"  Warning save_preview_image: Image is flat. Saving as black for {output_path}")
+             display_data = np.zeros_like(display_data)
         
-def save_preview_image(image, output_path, apply_stretch=False, enhanced_stretch=False, color_balance=(1.0, 1.0, 1.0)):
-    """
-    Enregistre une image PNG/JPG pour la prévisualisation (normalisée 0-255 uint8).
-    Applique potentiellement un étirement et une balance des blancs pour l'aperçu.
+        stretched_data = display_data # Par défaut, si pas de stretch
 
-    Parameters:
-        image (numpy.ndarray): Image 2D (HxW) ou 3D (HxWx3) à sauvegarder (float32, 0-1 range).
-        output_path (str): Chemin du fichier PNG/JPG de sortie.
-        apply_stretch (bool): Applique un étirement automatique si True.
-        enhanced_stretch (bool): Si True et apply_stretch est True, utilise l'étirement amélioré.
-        color_balance (tuple): Facteurs (R, G, B) pour la balance des blancs de l'aperçu.
-    """
-    if image is None:
-        print(f"Warning: Attempted to save preview for None image to {output_path}")
-        return
+        if apply_stretch:
+            print(f"  DEBUG save_preview_image: apply_stretch=True. Applying stretch. enhanced_stretch={enhanced_stretch}")
+            finite_data_for_stretch = display_data[np.isfinite(display_data)]
+            
+            if finite_data_for_stretch.size < 20: 
+                print(f"  Warning save_preview_image: Not enough finite pixels for stretch. Using min/max for {output_path}")
+                bp, wp = np.nanmin(display_data), np.nanmax(display_data)
+            elif enhanced_stretch:
+                print(f"    Applying ENHANCED stretch for {output_path}")
+                bp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 0.1) # Ignorer les pixels très noirs pour bp
+                wp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 99.5)
+            else: 
+                print(f"    Applying STANDARD stretch for {output_path}")
+                bp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 1.0)
+                wp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 99.0)
 
-    preview = image.astype(np.float32).copy() # Work on a float32 copy
+            if wp <= bp + 1e-7: 
+                min_val_stretch, max_val_stretch = np.nanmin(display_data), np.nanmax(display_data)
+                if max_val_stretch > min_val_stretch + 1e-7 :
+                    bp, wp = min_val_stretch, max_val_stretch
+                else: 
+                    bp, wp = 0.0, max(1e-7, max_val_stretch) 
+            
+            print(f"    Stretch params for PNG: BP={bp:.4g}, WP={wp:.4g}")
+            stretched_data = (display_data - bp) / (wp - bp + 1e-9) 
+            print(f"  stretched_data (après stretch si appliqué) - Range: [{np.nanmin(stretched_data):.4g} - {np.nanmax(stretched_data):.4g}]")
+        else:
+            print(f"  DEBUG save_preview_image: apply_stretch=False. Using data as is (expected 0-1) for {output_path}")
+            # stretched_data est déjà display_data
 
-    # --- Apply Color Balance (only for color images) ---
-    if preview.ndim == 3 and preview.shape[-1] == 3:
-        try:
-            # Import within function to potentially resolve circular dependency issues
-            from ..tools.stretch import ColorCorrection
-            preview = ColorCorrection.white_balance(preview, *color_balance)
-        except ImportError:
-             print("Warning: Could not import ColorCorrection for preview balance.")
-        except Exception as wb_err:
-             print(f"Warning: Failed to apply color balance to preview: {wb_err}")
+        final_image_data_clipped = np.clip(stretched_data, 0.0, 1.0)
+        print(f"  final_image_data_clipped (avant *255) - Range: [{np.nanmin(final_image_data_clipped):.4g} - {np.nanmax(final_image_data_clipped):.4g}]")
+        
+        final_image_data_to_save = (final_image_data_clipped * 255).astype(np.uint8)
+        print(f"  final_image_data_to_save (uint8) - Range: [{np.min(final_image_data_to_save)} - {np.max(final_image_data_to_save)}]")
 
 
-    # --- Apply Stretch ---
-    if apply_stretch:
-        try:
-            # Determine which stretch function to use
-            if enhanced_stretch:
-                from ..tools.stretch import apply_enhanced_stretch
-                preview = apply_enhanced_stretch(preview) # Returns 0-1 float
-            else:
-                # Use a simple linear stretch based on percentiles for basic preview
-                from ..tools.stretch import apply_auto_stretch, StretchPresets
-                bp, wp = apply_auto_stretch(preview)
-                preview = StretchPresets.linear(preview, bp, wp)
-
-            preview = np.clip(preview, 0.0, 1.0) # Ensure stretch stays in 0-1
-
-        except ImportError:
-            print("Warning: Could not import stretch tools for preview generation.")
-        except Exception as e:
-            print(f"Error during preview stretch: {e}, saving non-stretched version.")
-            # Fallback: use the original (potentially color-balanced) data without stretch
-
-    # --- Convert to uint8 for saving ---
-    # Scale float (0-1) to uint8 (0-255)
-    preview_uint8 = (np.clip(preview, 0.0, 1.0) * 255.0).astype(np.uint8)
-
-    # --- Handle color conversion for OpenCV saving (expects BGR) ---
-    if preview_uint8.ndim == 3 and preview_uint8.shape[-1] == 3:
-        # Input 'preview' was HxWxRGB (float), preview_uint8 is HxWxRGB (uint8)
-        # Convert RGB to BGR for cv2.imwrite
-        preview_bgr = cv2.cvtColor(preview_uint8, cv2.COLOR_RGB2BGR)
-    elif preview_uint8.ndim == 2:
-        # Grayscale image, OpenCV handles it directly
-        preview_bgr = preview_uint8
-    else:
-        print(f"Error: Cannot save preview with shape {preview_uint8.shape}")
-        return
-
-    # --- Ensure output directory exists ---
-    try:
+        if final_image_data_to_save.ndim == 3 and final_image_data_to_save.shape[2] == 3:
+            pil_image = Image.fromarray(final_image_data_to_save, 'RGB')
+        elif final_image_data_to_save.ndim == 2: 
+            pil_image = Image.fromarray(final_image_data_to_save, 'L').convert('RGB') 
+        else:
+            print(f"  Error saving preview: Unsupported image shape {final_image_data_to_save.shape} for {output_path}.")
+            return False
+        
         output_dir = os.path.dirname(output_path)
-        if output_dir: # Only create if path includes a directory
-             os.makedirs(output_dir, exist_ok=True)
-    except OSError as e:
-        print(f"Error creating directory for preview {output_path}: {e}")
-        return # Cannot save if directory fails
-
-    # --- Save the image ---
-    try:
-        success = cv2.imwrite(output_path, preview_bgr)
-        if not success:
-             print(f"Error: cv2.imwrite failed to save preview image to {output_path}")
+        if output_dir: os.makedirs(output_dir, exist_ok=True)
+        
+        pil_image.save(output_path)
+        print(f"  Preview image saved to {output_path}")
+        return True
     except Exception as e:
         print(f"Error saving preview image to {output_path}: {e}")
-# --- END OF FILE seestar/core/image_processing.py ---
+        traceback.print_exc(limit=2)
+        return False
+
+
