@@ -432,8 +432,8 @@ class FastSeestarAligner:
         #    On passe les images N&B float32 (0-1) et tous les paramètres de configuration.
         #    L'orb_features n'est plus passé directement ici à estimate_transform.
         M_transform_matrix = self._fa.estimate_transform(
-            ref_gray=ref_gray_f32_for_align, # Image de référence N&B float32 (0-1)
-            img_gray=src_gray_f32_for_align, # Image source N&B float32 (0-1)
+            ref_gray_f32=ref_gray_f32_for_align, 
+            img_gray_f32=src_gray_f32_for_align, 
             min_matches_ratio_config=min_matches_ratio,
             min_absolute_matches_config=min_absolute_matches,
             ransac_thresh_config=ransac_thresh,
