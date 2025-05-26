@@ -70,52 +70,126 @@ class SeestarAligner:
                 print(f"[{int(progress)}%] {message}")
             else:
                 print(message)
+# --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 
-    def align_images(self, input_folder, output_folder=None, specific_files=None):
+
+
+# --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
+# ... (imports et début de la méthode inchangés) ...
+
+    def _align_image(self, img_to_align, reference_image, file_name):
         """
-        (Primarily used by QueueManager to get reference image info now)
-        Finds reference image. Standalone alignment loop is commented out.
+        Aligns a single image to the reference.
+        1. Finds transform using astroalign.find_transform on potentially normalized versions.
+        2. Extracts matrix from skimage transform object.
+        3. Applies transform to the original 'img_to_align' using cv2.warpAffine.
+        Version: AlignFix_M81_Range_7_SkimageMatrixExtract
         """
-        self.stop_processing = False
-        if output_folder is None: output_folder = os.path.join(input_folder, "aligned_lights")
+        print(f"  DEBUG ALIGNER (_align_image V_AlignFix_M81_Range_7) pour '{file_name}':") # Version Log
+        # ... (début de la méthode jusqu'à find_transform inchangé) ...
+        if img_to_align is None:
+            print(f"    Input img_to_align: None. Retour échec.")
+            return None, False 
+        
+        img_to_align_for_transform_application = img_to_align.astype(np.float32, copy=True) 
+        original_min_in = np.nanmin(img_to_align_for_transform_application)
+        original_max_in = np.nanmax(img_to_align_for_transform_application)
+        input_was_likely_01 = (original_max_in < 1.5 and original_max_in > -0.2 and original_min_in > -0.2 and original_min_in < 1.1)
+
+        print(f"    Input img_to_align (cible de warpAffine) - Range: [{original_min_in:.4g}, {original_max_in:.4g}], Dtype: {img_to_align_for_transform_application.dtype}. Input likely 0-1: {input_was_likely_01}")
+        
+        if reference_image is None:
+            self.update_progress(f"❌ Alignement impossible {file_name}: Référence non disponible.")
+            return img_to_align, False
+
+        reference_image_float = reference_image.astype(np.float32, copy=False)
+
         try:
-            os.makedirs(output_folder, exist_ok=True)
-            unaligned_folder = os.path.join(output_folder, "unaligned") # Still create for consistency
-            os.makedirs(unaligned_folder, exist_ok=True)
-        except OSError as e:
-            self.update_progress(f"❌ Erreur création dossier sortie/unaligned: {e}")
-            return None # Critical error
-        try:
-            if specific_files: files = [f for f in specific_files if f.lower().endswith(('.fit', '.fits'))]
-            else: files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.fit', '.fits'))]
-            files.sort()
-        except FileNotFoundError: self.update_progress(f"❌ Dossier d'entrée non trouvé: {input_folder}"); return None
-        except Exception as e: self.update_progress(f"❌ Erreur lecture dossier entrée: {e}"); return None
-        if not files: self.update_progress("❌ Aucun fichier .fit/.fits trouvé à traiter."); return output_folder
+            source_for_detection = img_to_align_for_transform_application
+            if not input_was_likely_01: 
+                print(f"    L'entrée est ADU. Normalisation temporaire pour find_transform.")
+                s_min_temp, s_max_temp = np.nanmin(source_for_detection), np.nanmax(source_for_detection)
+                if s_max_temp > s_min_temp + 1e-7:
+                    source_for_detection = (source_for_detection - s_min_temp) / (s_max_temp - s_min_temp)
+                else: source_for_detection = np.zeros_like(source_for_detection)
+                source_for_detection = np.clip(source_for_detection, 0.0, 1.0)
+            
+            source_2d_for_detection = source_for_detection[:, :, 1] if source_for_detection.ndim == 3 and source_for_detection.shape[2] == 3 else source_for_detection
+            ref_2d_for_detection = reference_image_float[:, :, 1] if reference_image_float.ndim == 3 and reference_image_float.shape[2] == 3 else reference_image_float
 
-        # Estimate batch size (still useful for other parts or general info)
-        if self.batch_size <= 0:
-            if files: # Check if files list is not empty
-                 sample_path = os.path.join(input_folder, files[0])
-                 try:
-                     self.batch_size = estimate_batch_size(sample_path)
-                     self.update_progress(f"🧠 Taille de lot dynamique estimée : {self.batch_size}")
-                 except Exception as est_err:
-                     self.update_progress(f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation valeur défaut 10.")
-                     self.batch_size = 10
-            else: # No files, use default batch size
-                 self.batch_size = 10
+            if source_2d_for_detection.shape != ref_2d_for_detection.shape:
+                self.update_progress(f"❌ Alignement {file_name}: Dimensions incompatibles pour détection.")
+                return img_to_align, False
+            
+            print(f"    AVANT aa.find_transform: source_2d_for_detection Range: [{np.min(source_2d_for_detection):.4g}, {np.max(source_2d_for_detection):.4g}]")
 
-        self.update_progress("⭐ Recherche/Préparation image de référence...")
-        fixed_reference_image, fixed_reference_header = self._get_reference_image(input_folder, files)
+            transform_skimage_obj, (source_matches, target_matches) = aa.find_transform(
+                source=source_2d_for_detection, 
+                target=ref_2d_for_detection
+            )
+            
+            if transform_skimage_obj is None:
+                raise aa.MaxIterError("aa.find_transform a échoué (pas de transformation trouvée)")
+            print(f"    Transformation skimage trouvée. Nb matches: {len(source_matches)}. Type de transform_skimage_obj: {type(transform_skimage_obj)}")
 
-        if fixed_reference_image is None:
-            # Error message now generated within _get_reference_image or QueueManager
-            # self.update_progress("❌ Impossible d'obtenir une image de référence valide. Arrêt.")
-            return None # Signal failure
+            # --- CORRECTION DE L'EXTRACTION DE LA MATRICE ---
+            if hasattr(transform_skimage_obj, 'params') and isinstance(transform_skimage_obj.params, np.ndarray) and transform_skimage_obj.params.shape == (3,3):
+                M_sk = transform_skimage_obj.params
+                cv2_M = M_sk[0:2, :] # Prendre les 2 premières lignes pour une matrice affine 2x3
+                print(f"    Matrice (depuis .params de l'objet skimage) pour OpenCV:\n{cv2_M}")
+            else:
+                # Si astroalign retourne directement la matrice (moins probable pour find_transform mais sécurité)
+                if isinstance(transform_skimage_obj, np.ndarray) and transform_skimage_obj.shape == (3,3):
+                    cv2_M = transform_skimage_obj[0:2, :]
+                    print(f"    Matrice (directement ndarray 3x3) pour OpenCV:\n{cv2_M}")
+                elif isinstance(transform_skimage_obj, np.ndarray) and transform_skimage_obj.shape == (2,3):
+                    cv2_M = transform_skimage_obj # C'est déjà le bon format
+                    print(f"    Matrice (directement ndarray 2x3) pour OpenCV:\n{cv2_M}")
+                else:
+                    raise TypeError(f"Type de matrice de transformation inattendu de find_transform: {type(transform_skimage_obj)}, et .params non utilisable.")
+            # --- FIN CORRECTION ---
+            
+            h_ref, w_ref = reference_image_float.shape[:2]
+            dsize_cv2 = (w_ref, h_ref)
 
-        self.update_progress(f"✅ Recherche référence terminée.")
-        return output_folder
+            if img_to_align_for_transform_application.ndim == 3:
+                aligned_img_final = np.zeros_like(img_to_align_for_transform_application)
+                for i_ch in range(img_to_align_for_transform_application.shape[2]):
+                    aligned_img_final[:,:,i_ch] = cv2.warpAffine(
+                        img_to_align_for_transform_application[:,:,i_ch], cv2_M, dsize_cv2,
+                        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
+                    )
+            else:
+                aligned_img_final = cv2.warpAffine(
+                    img_to_align_for_transform_application, cv2_M, dsize_cv2,
+                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
+                )
+            
+            print(f"    APRÈS cv2.warpAffine: aligned_img_final - Range: [{np.nanmin(aligned_img_final):.4g}, {np.nanmax(aligned_img_final):.4g}]")
+
+            aligned_img_final = np.nan_to_num(aligned_img_final.astype(np.float32, copy=False), nan=0.0)
+            
+            if input_was_likely_01:
+                aligned_img_final = np.clip(aligned_img_final, 0.0, 1.0)
+                print(f"    Sortie finale pour entrée ~0-1 (après clip [0,1]): Range: [{np.min(aligned_img_final):.4g}, {np.max(aligned_img_final):.4g}]")
+            else:
+                aligned_img_final = np.clip(aligned_img_final, 0.0, None)
+                print(f"    Sortie finale pour entrée ADU (après clip >=0): Range: [{np.min(aligned_img_final):.4g}, {np.max(aligned_img_final):.4g}]")
+
+            return aligned_img_final, True
+
+        except aa.MaxIterError as ae:
+            self.update_progress(f"⚠️ Alignement échoué {file_name}: {ae}")
+            return img_to_align, False 
+        except ValueError as ve: 
+            self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}")
+            traceback.print_exc(limit=1)
+            return img_to_align, False 
+        except Exception as e:
+            self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}")
+            traceback.print_exc(limit=3)
+            return img_to_align, False
+
 
 
 
@@ -353,21 +427,6 @@ class SeestarAligner:
             self.update_progress(f"⚠️ Erreur lors de la sauvegarde de l'image de référence: {e}")
             traceback.print_exc(limit=2)
 
-    # --- _align_image (Unchanged) ---
-    def _align_image(self, img_to_align, reference_image, file_name):
-        """Aligns a single image (float32 0-1) to the reference (float32 0-1)."""
-        if reference_image is None: self.update_progress(f"❌ Alignement impossible {file_name}: Référence non disponible."); return img_to_align, False
-        img_to_align = img_to_align.astype(np.float32); reference_image = reference_image.astype(np.float32)
-        try:
-            img_for_detection = img_to_align[:, :, 1] if img_to_align.ndim == 3 else img_to_align
-            ref_for_detection = reference_image[:, :, 1] if reference_image.ndim == 3 else reference_image
-            if img_for_detection.shape != ref_for_detection.shape: self.update_progress(f"❌ Alignement {file_name}: Dimensions incompatibles Réf={ref_for_detection.shape}, Img={img_for_detection.shape}"); return img_to_align, False
-            aligned_img, _ = aa.register(source=img_to_align, target=reference_image, max_control_points=50, detection_sigma=5, min_area=5)
-            if aligned_img is None: raise aa.MaxIterError("Alignement échoué (pas de transformation trouvée)")
-            aligned_img = np.clip(aligned_img.astype(np.float32), 0.0, 1.0); return aligned_img, True
-        except aa.MaxIterError as ae: self.update_progress(f"⚠️ Alignement échoué {file_name}: {ae}"); return img_to_align, False
-        except ValueError as ve: self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}"); return img_to_align, False
-        except Exception as e: self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}"); traceback.print_exc(limit=3); return img_to_align, False
 
 
     # ... (début de la méthode _align_batch) ...

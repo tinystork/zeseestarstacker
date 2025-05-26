@@ -23,6 +23,7 @@ from .ui_utils import ToolTip
 import sys # Pour sys.executable
 # ----------------------------------------------------
 import tempfile # <-- AJOUTÉ
+import logging
 print("-" * 20)
 print("DEBUG MW: Tentative d'importation de SeestarQueuedStacker...")
 try:
@@ -89,26 +90,72 @@ from .histogram_widget import HistogramWidget
 
 class SeestarStackerGUI:
     """ GUI principale pour Seestar. """
-    # --- MODIFIÉ: Signature du constructeur ---
 
-    def __init__(self, initial_input_dir=None, stack_immediately_from=None): # <-- AJOUTÉ stack_immediately_from
-        """Initialise l'interface graphique."""
-        print("DEBUG (GUI __init__): Initialisation SeestarStackerGUI...") # <-- AJOUTÉ DEBUG
-        print(f"DEBUG (GUI __init__): Reçu initial_input_dir='{initial_input_dir}', stack_immediately_from='{stack_immediately_from}'") # <-- AJOUTÉ DEBUG
+    def __init__(self, initial_input_dir=None, stack_immediately_from=None):
         self.root = tk.Tk()
 
-        # ... (Logique de l'icône inchangée) ...
+        # --- DÉBUT CONFIGURATION LOGGER DE BASE (Option B) ---
+        # Créer un nom de logger unique basé sur l'ID de l'objet pour éviter les conflits
+        # si plusieurs instances étaient créées (bien que peu probable pour une GUI principale).
+        self.logger = logging.getLogger(f"SeestarStackerGUI_{id(self)}")
+        self.logger.setLevel(logging.DEBUG) # Capturer tous les niveaux de logs pour ce logger
+
+        # Déterminer le chemin du fichier log (à côté de main_window.py)
+        try:
+            # Chemin du module courant (main_window.py)
+            gui_module_dir = os.path.dirname(os.path.abspath(__file__))
+            log_file_name = "seestar_gui_debug.log"
+            log_file_path = os.path.join(gui_module_dir, log_file_name)
+        except NameError: # Au cas où __file__ ne serait pas défini (très rare pour un module)
+            log_file_path = "seestar_gui_debug.log" # Fallback dans le dossier courant
+            gui_module_dir = "." # Pour le message de log
+
+        # Vérifier si un FileHandler pour CE fichier log existe déjà pour CE logger
+        # pour éviter d'ajouter plusieurs handlers au même logger écrivant dans le même fichier.
+        # Ceci est utile si __init__ pouvait être appelé plusieurs fois sur la même instance (généralement non).
+        handler_exists = False
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.FileHandler) and \
+               hasattr(handler, 'baseFilename') and \
+               os.path.normpath(handler.baseFilename) == os.path.normpath(log_file_path):
+                handler_exists = True
+                break
+        
+        if not handler_exists:
+            try:
+                # 'w' pour écraser le log à chaque lancement (facilite le débogage du dernier run)
+                # 'a' pour ajouter au log existant
+                fh = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
+                fh.setLevel(logging.DEBUG) # Le handler capture aussi tous les niveaux
+                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
+                fh.setFormatter(formatter)
+                self.logger.addHandler(fh)
+                self.logger.propagate = False # Empêcher les messages de remonter au logger root si d'autres configs existent
+                self.logger.info(f"Logger pour SeestarStackerGUI initialisé. Logs dans: {log_file_path}")
+            except Exception as e_log_init:
+                # Si la création du logger échoue, on ne peut pas utiliser self.logger, donc print.
+                print(f"ERREUR CRITIQUE: Impossible d'initialiser le FileHandler pour le logger: {e_log_init}")
+                print(f"  Les logs de SeestarStackerGUI ne seront pas écrits dans '{log_file_path}'.")
+                # On peut créer un logger "nul" pour éviter des AttributeError plus tard,
+                # mais les logs ne seront pas sauvegardés.
+                self.logger = logging.getLogger("SeestarStackerGUI_Null")
+                self.logger.addHandler(logging.NullHandler())
+        else:
+            self.logger.info(f"FileHandler pour {log_file_path} existe déjà pour ce logger. Pas de nouvel ajout.")
+        # --- FIN CONFIGURATION LOGGER DE BASE ---
+
+        self.logger.info("DEBUG (GUI __init__): Initialisation SeestarStackerGUI...") # Maintenant self.logger existe
+        self.logger.info(f"DEBUG (GUI __init__): Reçu initial_input_dir='{initial_input_dir}', stack_immediately_from='{stack_immediately_from}'")
+
         try:
             icon_path = 'icon/icon.png'
             if os.path.exists(icon_path):
                 icon_image = Image.open(icon_path); self.tk_icon = ImageTk.PhotoImage(icon_image); self.root.iconphoto(True, self.tk_icon)
-                print(f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}") # <-- AJOUTÉ DEBUG (plus détaillé)
-            else: print(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
-        except Exception as e: print(f"Error loading or setting window icon: {e}")
+                self.logger.info(f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}")
+            else: self.logger.warning(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
+        except Exception as e: self.logger.error(f"Error loading or setting window icon: {e}")
         
         self.astrometry_api_key_var = tk.StringVar()
-        # --- Initialisation des variables et objets internes ---
-        # (Identique à avant, mais ajout d'un flag pour le stack immédiat)
         self.localization = Localization("en")
         self.settings = SettingsManager()
         self.queued_stacker = SeestarQueuedStacker()
@@ -121,124 +168,87 @@ class SeestarStackerGUI:
         self.global_start_time = None
         self.additional_folders_to_process = []
         self.tooltips = {}
-        print("DEBUG (GUI __init__): Dictionnaire self.tooltips initialisé.")
-        ### Compteur pour Auto-Refresh Aperçu ###
+        self.logger.info("DEBUG (GUI __init__): Dictionnaire self.tooltips initialisé.")
         self.batches_processed_for_preview_refresh = 0
-        self.preview_auto_refresh_batch_interval = 10 # Rafraîchir tous les 10 lots
-        # --- Variables état mosaïque ---
+        self.preview_auto_refresh_batch_interval = 10 
         self.mosaic_mode_active = False
-        # self.mosaic_panel_folders = [] # Sera utilisé plus tard
-        # self.mosaic_settings = {}    # Sera utilisé plus tard
-        print("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
-        self.mosaic_settings = {}    # <<<--- AJOUTER CETTE LIGNE pour initialiser le dictionnaire
-        print("DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés.")
+        self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
+        self.mosaic_settings = {}    
+        self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés.")
 
-        # --- NOUVEAU FLAG ---
-        self._trigger_immediate_stack = False # Sera True si stack_immediately_from est valide
-        self._folder_for_immediate_stack = None # Stockera le chemin
-        # --- FIN NOUVEAU ---
+        self._trigger_immediate_stack = False 
+        self._folder_for_immediate_stack = None 
 
-        # --- Variables Pondération (Inchangé) ---
         self.use_weighting_var = tk.BooleanVar(value=False)
         self.weight_snr_var = tk.BooleanVar(value=True); self.weight_stars_var = tk.BooleanVar(value=True)
         self.snr_exponent_var = tk.DoubleVar(value=1.0); self.stars_exponent_var = tk.DoubleVar(value=0.5)
         self.min_weight_var = tk.DoubleVar(value=0.1)
-
-        # --- Initialisation Variables Tkinter ---
-        self.init_variables() # Doit être avant le chargement/application des settings
-
-        # --- Chargement Settings & Langue ---
-        self.settings.load_settings()
-        # ---  Forcer la désactivation du mode mosaïque au démarrage ---
-        #if hasattr(self.settings, 'mosaic_mode_active'):
-        #    print(f"DEBUG (GUI __init__): Valeur self.settings.mosaic_mode_active APRES load: {self.settings.mosaic_mode_active}")
-        #    self.settings.mosaic_mode_active = False # Remettre à False pour cette session
-        #    print(f"DEBUG (GUI __init__): self.settings.mosaic_mode_active FORCÉ à False pour le démarrage de l'UI.")
         
+        self._final_stretch_set_by_processing_finished = False # <--- C'EST LA LIGNE DE LA MÉTHODE 2
+
+        self.init_variables() 
+
+        self.settings.load_settings()
         self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
-        print(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.") # <-- AJOUTÉ DEBUG
+        self.logger.info(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.")
+        self.logger.info(f"DEBUG (GUI __init__): Valeur de self.settings.astrometry_api_key APRES load_settings: '{self.settings.astrometry_api_key}' (longueur: {len(self.settings.astrometry_api_key)})")
+        
+        self._auto_stretch_after_id = None
+        self._auto_wb_after_id = None
 
-        # --- AJOUT DEBUG SPÉCIFIQUE POUR LA CLÉ API ---
-        print(f"DEBUG (GUI __init__): Valeur de self.settings.astrometry_api_key APRES load_settings: '{self.settings.astrometry_api_key}' (longueur: {len(self.settings.astrometry_api_key)})")
-        # --- FIN AJOUT ---
-
-
-        # --- Gestion des arguments d'entrée (MODIFIÉ) ---
-        # Priorité 1: Stacking immédiat demandé par l'analyseur
         if stack_immediately_from and isinstance(stack_immediately_from, str) and os.path.isdir(stack_immediately_from):
-             print(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}") # <-- AJOUTÉ INFO
-             # Surcharger le dossier d'entrée avec celui de l'analyseur
-             self.input_path.set(stack_immediately_from)
-             # --- NOUVEAU: Marquer pour déclencher le stack ---
-             self._folder_for_immediate_stack = stack_immediately_from
-             self._trigger_immediate_stack = True
-             print(f"DEBUG (GUI __init__): Flag _trigger_immediate_stack mis à True.") # <-- AJOUTÉ DEBUG
-             # Optionnel: Mettre aussi à jour le setting (écrase valeur chargée)
-             # self.settings.input_folder = stack_immediately_from
-        # Priorité 2: Pré-remplissage simple demandé via --input-dir
+            self.logger.info(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}")
+            self.input_path.set(stack_immediately_from)
+            self._folder_for_immediate_stack = stack_immediately_from
+            self._trigger_immediate_stack = True
+            self.logger.info(f"DEBUG (GUI __init__): Flag _trigger_immediate_stack mis à True.")
         elif initial_input_dir and isinstance(initial_input_dir, str) and os.path.isdir(initial_input_dir):
-             print(f"INFO (GUI __init__): Pré-remplissage dossier entrée depuis argument: {initial_input_dir}") # <-- AJOUTÉ INFO
-             self.input_path.set(initial_input_dir)
-             # self.settings.input_folder = initial_input_dir # Optionnel
+            self.logger.info(f"INFO (GUI __init__): Pré-remplissage dossier entrée depuis argument: {initial_input_dir}")
+            self.input_path.set(initial_input_dir)
 
-        # --- Création Layout et Initialisation Managers (Inchangé) ---
-        self.file_handler = FileHandlingManager(self) # Doit être avant create_layout si utilisé dedans
+        self.file_handler = FileHandlingManager(self)
         self.create_layout()
         self.init_managers()
-        print("DEBUG (GUI __init__): Layout créé, managers initialisés.") # <-- AJOUTÉ DEBUG
+        self.logger.info("DEBUG (GUI __init__): Layout créé, managers initialisés.")
 
-        # --- Application Settings & UI Updates (Inchangé) ---
         self.settings.apply_to_ui(self)
-        # --- DEBUG SPÉCIFIQUE POUR LA CLÉ API ---
         try:
             api_key_val_after_apply = self.astrometry_api_key_var.get()
-            print(f"DEBUG (GUI __init__): Valeur de self.astrometry_api_key_var APRES apply_to_ui: '{api_key_val_after_apply}' (longueur: {len(api_key_val_after_apply)})")
+            self.logger.info(f"DEBUG (GUI __init__): Valeur de self.astrometry_api_key_var APRES apply_to_ui: '{api_key_val_after_apply}' (longueur: {len(api_key_val_after_apply)})")
         except Exception as e_get_var:
-            print(f"DEBUG (GUI __init__): Erreur lecture self.astrometry_api_key_var après apply_to_ui: {e_get_var}")
-        # --- FIN AJOUT ---
+            self.logger.error(f"DEBUG (GUI __init__): Erreur lecture self.astrometry_api_key_var après apply_to_ui: {e_get_var}")
+        
         if hasattr(self, '_update_spinbox_from_float'): self._update_spinbox_from_float()
         self._update_weighting_options_state()
-        self._update_drizzle_options_state() # S'assurer que les options drizzle sont à jour
+        self._update_drizzle_options_state() 
         self._update_show_folders_button_state()
         self.update_ui_language()
-
-        # --- BLOC DE DÉBOGAGE AVANT APPEL SET_PREVIEW_CALLBACK ---
-        print("--------------------")
-        print("DEBUG MW __init__: Vérification de self.queued_stacker.set_preview_callback AVANT appel...")
+        
+        self.logger.info("--------------------")
+        self.logger.info("DEBUG MW __init__: Vérification de self.queued_stacker.set_preview_callback AVANT appel...")
         if hasattr(self.queued_stacker, 'set_preview_callback') and callable(self.queued_stacker.set_preview_callback):
             import inspect
             try:
                 source_lines, start_line = inspect.getsourcelines(self.queued_stacker.set_preview_callback)
-                print(f"  Source de self.queued_stacker.set_preview_callback (ligne de début: {start_line}):")
-                for i, line_content in enumerate(source_lines[:10]): # Afficher les 10 premières lignes
-                    print(f"    L{start_line + i}: {line_content.rstrip()}")
-                
+                self.logger.info(f"  Source de self.queued_stacker.set_preview_callback (ligne de début: {start_line}):")
+                for i, line_content in enumerate(source_lines[:10]):
+                    self.logger.info(f"    L{start_line + i}: {line_content.rstrip()}")
                 source_code_str = "".join(source_lines)
                 if "_cleanup_mosaic_panel_stacks_temp()" in source_code_str or \
                    "_cleanup_drizzle_batch_outputs()" in source_code_str or \
                    "cleanup_unaligned_files()" in source_code_str:
-                    print("  ALERTE MW DEBUG: Un appel _cleanup_ SEMBLE ÊTRE PRÉSENT dans le code source de la méthode set_preview_callback attachée à l'instance !")
+                    self.logger.warning("  ALERTE MW DEBUG: Un appel _cleanup_ SEMBLE ÊTRE PRÉSENT dans le code source de la méthode set_preview_callback attachée à l'instance !")
                 else:
-                    print("  INFO MW DEBUG: Aucun appel _cleanup_ évident dans le code source de la méthode set_preview_callback attachée à l'instance.")
-
-            except TypeError:
-                print("  ERREUR MW DEBUG: Impossible d'obtenir la source pour une méthode built-in ou C (ne devrait pas être le cas ici).")
-            except IOError:
-                print("  ERREUR MW DEBUG: Impossible de lire le fichier source (très étrange).")
-            except Exception as e_inspect:
-                print(f"  ERREUR MW DEBUG: Erreur inspect: {e_inspect}")
-        else:
-            print("  ERREUR MW DEBUG: self.queued_stacker n'a pas de méthode set_preview_callback ou elle n'est pas callable.")
-        print("--------------------")
-        # --- FIN BLOC DE DÉBOGAGE ---
+                    self.logger.info("  INFO MW DEBUG: Aucun appel _cleanup_ évident dans le code source de la méthode set_preview_callback attachée à l'instance.")
+            except Exception as e_inspect: self.logger.error(f"  ERREUR MW DEBUG: Erreur inspect: {e_inspect}")
+        else: self.logger.error("  ERREUR MW DEBUG: self.queued_stacker n'a pas de méthode set_preview_callback ou elle n'est pas callable.")
+        self.logger.info("--------------------")
         
-        # --- Connexion Callbacks Backend (Inchangé) ---
         self.queued_stacker.set_progress_callback(self.update_progress_gui)
         self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)
-        print("DEBUG (GUI __init__): Callbacks backend connectés.") # <-- AJOUTÉ DEBUG
+        self.logger.info("DEBUG (GUI __init__): Callbacks backend connectés.")
 
-        # --- Configuration Fenêtre Finale (Inchangé) ---
         self.root.title(self.tr("title"))
         try: self.root.geometry(self.settings.window_geometry)
         except tk.TclError: self.root.geometry("1200x750")
@@ -246,28 +256,27 @@ class SeestarStackerGUI:
         self.root.bind("<Configure>", self._debounce_resize)
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
-        # --- Variable onglets expert ---
         self._update_final_scnr_options_state()
         self._update_photutils_bn_options_state()
         self._update_feathering_options_state()
-        # --- Variables état aperçu (Inchangé) ---
+        self._update_low_wht_mask_options_state()
+        
         self.preview_img_count = 0; self.preview_total_imgs = 0
         self.preview_current_batch = 0; self.preview_total_batches = 0
 
-        # --- Aperçu Initial & Dossiers Additionnels (Inchangé) ---
         self._try_show_first_input_image()
         self.update_additional_folders_display()
 
-        # --- NOUVEAU: Déclenchement du stacking immédiat si demandé ---
         if self._trigger_immediate_stack:
-             print("DEBUG (GUI __init__): Planification du lancement immédiat via after(500, ...).") # <-- AJOUTÉ DEBUG
-             # Utiliser 'after' pour lancer le stacking après que l'UI soit complètement chargée
-             # Un délai court (ex: 500ms) peut aider à assurer que tout est prêt
-             self.root.after(500, self._start_immediate_stack)
+            self.logger.info("DEBUG (GUI __init__): Planification du lancement immédiat via after(500, ...).")
+            self.root.after(500, self._start_immediate_stack)
         else:
-             print("DEBUG (GUI __init__): Pas de stacking immédiat demandé.") # <-- AJOUTÉ DEBUG
+            self.logger.info("DEBUG (GUI __init__): Pas de stacking immédiat demandé.")
 
-        print("DEBUG (GUI __init__): Initialisation terminée.") # <-- AJOUTÉ DEBUG
+        self.logger.info("DEBUG (GUI __init__): Initialisation SeestarStackerGUI terminée.")
+
+
+
 
 
 # --- DANS LA CLASSE SeestarStackerGUI ---
@@ -1957,25 +1966,63 @@ class SeestarStackerGUI:
 
 
 
-# --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
+
+    # DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py
 
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
         """
         Callback function triggered by the backend worker.
-        MODIFIED: Improved logic for auto preview adjustment.
-        Version: PreviewAutoRefreshFix_1
+        MODIFIED: Ajout de la vérification du verrou _final_stretch_set_by_processing_finished au début
+                pour empêcher la planification de nouveaux auto-ajustements si le traitement est en finalisation.
+        Version: V_CheckLock_Early_1
         """
-        print("[DEBUG-GUI] update_preview_from_stacker V_PreviewAutoRefreshFix_1: Called.")
+        self.logger.debug(f"[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Called.")
 
+        # --- AJOUT : Vérifier le verrou TÔT ---
+        # Si _processing_finished a déjà activé son verrou, cela signifie que le traitement est en train de se terminer
+        # ou est terminé. Dans ce cas, update_preview_from_stacker (appelé par le backend qui finit ses tâches)
+        # doit seulement mettre à jour les données et rafraîchir, SANS replanifier d'auto-stretch/WB qui
+        # écraseraient l'état final mis en place par _processing_finished.
+        if hasattr(self, '_final_stretch_set_by_processing_finished') and self._final_stretch_set_by_processing_finished:
+            self.logger.info("  [PF_StackerCB V_CheckLock_Early_1] VERROU FINAL ACTIF. update_preview_from_stacker va seulement mettre à jour les données et rafraîchir l'aperçu sans planifier d'auto-ajustements.")
+            
+            if stack_data is not None:
+                # Mettre à jour les données de l'aperçu
+                self.current_preview_data = stack_data.copy()
+                self.current_stack_header = stack_header.copy() if stack_header else None
+                self.preview_img_count = img_count
+                self.preview_total_imgs = total_imgs
+                self.preview_current_batch = current_batch
+                self.preview_total_batches = total_batches
+                
+                self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Données mises à jour. Appel refresh_preview (recalculate_histogram=True).")
+                # On peut recalculer l'histogramme ici car c'est une mise à jour PENDANT les dernières étapes
+                # et _processing_finished refera un refresh final avec son propre calcul d'histogramme.
+                self.refresh_preview(recalculate_histogram=True) 
+                
+                if self.current_stack_header:
+                    try:
+                        self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
+                    except tk.TclError: 
+                        self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de update_image_info (fenêtre possiblement détruite).")
+            else:
+                self.logger.info("  [PF_StackerCB V_CheckLock_Early_1] Reçu stack_data None alors que le verrou final est actif. Pas de mise à jour de l'aperçu.")
+            
+            self.logger.debug("[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Sortie anticipée car verrou final actif.")
+            return # NE PAS planifier de nouveaux after si le verrou final est posé
+        # --- FIN AJOUT ---
+
+        # Si on arrive ici, c'est que _final_stretch_set_by_processing_finished est False (traitement en cours normalement)
         if stack_data is None:
-            print("[DEBUG-GUI] update_preview_from_stacker: Received None stack_data. Skipping update.")
+            self.logger.info("[DEBUG-GUI] update_preview_from_stacker: Received None stack_data (et verrou final non actif). Skipping visual update.")
+            if stack_header and hasattr(self, 'current_stack_header'):
+                self.current_stack_header = stack_header.copy()
+                try:
+                    self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
+                except tk.TclError: pass
             return
 
-        try:
-            print(f"  [PF_StackerCB] stack_data - Shape: {stack_data.shape}, Type: {stack_data.dtype}, Min: {np.nanmin(stack_data):.4f}, Max: {np.nanmax(stack_data):.4f}")
-        except Exception as e:
-            print(f"  [PF_StackerCB] Error getting info for stack_data: {e}")
-
+        # Mise à jour des données de l'aperçu
         self.current_preview_data = stack_data.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
@@ -1983,94 +2030,183 @@ class SeestarStackerGUI:
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
         
-        self.batches_processed_for_preview_refresh += 1
-        print(f"  [PF_StackerCB] Preview refresh counter: {self.batches_processed_for_preview_refresh}/{self.preview_auto_refresh_batch_interval}")
+        trigger_auto_adjust = False
+        # Vérifier si le worker est toujours considéré comme actif par le QueuedStacker
+        # et si l'UI pense que le traitement est en cours (self.processing)
+        is_worker_actually_running = hasattr(self, 'queued_stacker') and self.queued_stacker and self.queued_stacker.is_running()
 
-        # Mettre à jour le nom du stack/compteurs dans PreviewManager pour le prochain dessin
-        if hasattr(self.preview_manager, 'update_stack_name_and_counts'):
-            # PreviewManager utilisera self.preview_img_count etc. lors de son update_preview
-            pass
-
-        if self.batches_processed_for_preview_refresh >= self.preview_auto_refresh_batch_interval:
-            print(f"  [PF_StackerCB] Seuil de {self.preview_auto_refresh_batch_interval} lots atteint. Déclenchement Auto WB & Auto Stretch.")
-            self.update_progress_gui("ⓘ Auto-ajustement de l'aperçu...", None)
+        if self.processing and is_worker_actually_running:
+            self.batches_processed_for_preview_refresh += 1
+            self.logger.debug(f"  [PF_StackerCB V_CheckLock_Early_1] Processing ACTIVE & Worker RUNNING. Preview refresh counter: {self.batches_processed_for_preview_refresh}/{self.preview_auto_refresh_batch_interval}")
             
-            # Appliquer Auto WB. apply_auto_white_balance() appelle refresh_preview()
-            self.apply_auto_white_balance() 
-            
-            # Planifier apply_auto_stretch pour s'exécuter après que la WB et son refresh_preview aient eu lieu.
-            # apply_auto_stretch() appelle aussi refresh_preview().
-            self.root.after(200, self.apply_auto_stretch) # Délai un peu plus long pour être sûr
-            
-            self.batches_processed_for_preview_refresh = 0
+            if self.batches_processed_for_preview_refresh >= self.preview_auto_refresh_batch_interval:
+                trigger_auto_adjust = True
+                self.batches_processed_for_preview_refresh = 0 
         else:
-            # Rafraîchissement normal sans auto-ajustement des paramètres de stretch/WB
-            print("  [PF_StackerCB] -> Appel direct refresh_preview.")
-            self.refresh_preview()
+            self.logger.info(f"  [PF_StackerCB V_CheckLock_Early_1] Processing INACTIVE or Worker STOPPED (avant application verrou final). Auto-adjust SKIPPED. self.processing={self.processing}, worker_running={is_worker_actually_running}")
+        
+        if trigger_auto_adjust:
+            self.logger.info(f"  [PF_StackerCB V_CheckLock_Early_1] Seuil de {self.preview_auto_refresh_batch_interval} lots atteint. Déclenchement Auto WB & Auto Stretch.")
+            self.update_progress_gui("ⓘ Auto-ajustement de l'apercu...", None)
+            
+            # Annuler les appels 'after' précédents pour auto_wb avant d'en planifier de nouveaux
+            if hasattr(self, '_auto_wb_after_id') and self._auto_wb_after_id:
+                try: 
+                    self.root.after_cancel(self._auto_wb_after_id)
+                    self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Appel _auto_wb_after_id précédent annulé.")
+                except tk.TclError: 
+                    self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError annulation _auto_wb_after_id (déjà exécuté/invalide?).")
+                except Exception as e_cancel_wb_upd:
+                    self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] Erreur inattendue annulation _auto_wb_after_id: {e_cancel_wb_upd}")
+                self._auto_wb_after_id = None # Réinitialiser
+            
+            # Planifier apply_auto_white_balance
+            try:
+                self._auto_wb_after_id = self.root.after(50, self.apply_auto_white_balance)
+                self.logger.debug(f"    [PF_StackerCB V_CheckLock_Early_1] Nouvel appel apply_auto_white_balance planifié avec ID: {self._auto_wb_after_id}")
+            except tk.TclError as e_after_wb: # Si la fenêtre est en train de se fermer
+                self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de apply_auto_white_balance: {e_after_wb}")
+                self._auto_wb_after_id = None
+
+            # Annuler les appels 'after' précédents pour auto_stretch avant d'en planifier de nouveaux
+            if hasattr(self, '_auto_stretch_after_id') and self._auto_stretch_after_id:
+                try: 
+                    self.root.after_cancel(self._auto_stretch_after_id)
+                    self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Appel _auto_stretch_after_id précédent annulé.")
+                except tk.TclError: 
+                    self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError annulation _auto_stretch_after_id (déjà exécuté/invalide?).")
+                except Exception as e_cancel_stretch_upd:
+                    self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] Erreur inattendue annulation _auto_stretch_after_id: {e_cancel_stretch_upd}")
+                self._auto_stretch_after_id = None # Réinitialiser
+            
+            # Planifier apply_auto_stretch
+            try:
+                self._auto_stretch_after_id = self.root.after(300, self.apply_auto_stretch) # Délai plus long
+                self.logger.debug(f"    [PF_StackerCB V_CheckLock_Early_1] Nouvel appel apply_auto_stretch planifié avec ID: {self._auto_stretch_after_id}")
+            except tk.TclError as e_after_stretch: # Si la fenêtre est en train de se fermer
+                self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de apply_auto_stretch: {e_after_stretch}")
+                self._auto_stretch_after_id = None
+        else:
+            # Si pas d'auto-ajustement ce coup-ci, rafraîchir simplement l'aperçu
+            self.logger.debug("  [PF_StackerCB V_CheckLock_Early_1] -> Appel direct refresh_preview (pas d'auto-adjust ce coup-ci).")
+            self.refresh_preview(recalculate_histogram=True) # Recalculer l'histogramme est généralement souhaité ici
 
         if self.current_stack_header:
             try:
-                self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h))
-            except tk.TclError:
-                pass
-        print("[DEBUG-GUI] update_preview_from_stacker V_PreviewAutoRefreshFix_1: Exiting.")
+                self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
+            except tk.TclError: pass
+        
+        self.logger.debug("[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Exiting.")
+
+
+
+
+
+
+
 
 
     def apply_auto_stretch(self):
-        """Applique un étirement automatique à l'aperçu et sélectionne Asinh."""
-        if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch tools not available."); return
+        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        if hasattr(self, '_final_stretch_set_by_processing_finished') and self._final_stretch_set_by_processing_finished:
+            self.logger.warning(f"APPLY_AUTO_STRETCH (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré.")
+            self.logger.warning("  Pile d'appels pour cet appel ignoré à apply_auto_stretch:")
+            for line in traceback.format_stack():
+                self.logger.warning(f"    {line.strip()}")
+            return # Sortir tôt pour ne pas modifier le stretch
+        # --- FIN DU BLOC DE VERROU ---
         
+        # Si on arrive ici, le verrou n'était pas actif OU l'attribut n'existait pas (ce dernier cas ne devrait pas arriver après __init__)
+        self.logger.debug(">>>> Début SeestarStackerGUI.apply_auto_stretch (après vérif verrou)")
+        self.logger.debug("     Pile d'appels pour apply_auto_stretch:")
+        for line in traceback.format_stack():
+            self.logger.debug(f"       {line.strip()}")
+
+        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
+        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
+        # est plus spécifique pour la phase post-traitement. Si un auto-stretch est appelé PENDANT le traitement,
+        # c'est (pour l'instant) considéré comme normal (ex: par update_preview_from_stacker).
+
+        if not _tools_available: 
+            messagebox.showerror(self.tr("error"), "Stretch tools not available.")
+            self.logger.warning("apply_auto_stretch: Tentative d'utilisation alors que _tools_available est False.")
+            return
+
         data_to_analyze = None
-        # Priorité aux données après WB du PreviewManager si disponibles
+        # Priorité 1: Données après WB du PreviewManager
         if hasattr(self, 'preview_manager') and self.preview_manager.image_data_wb is not None:
             data_to_analyze = self.preview_manager.image_data_wb
-            print("DEBUG GUI (apply_auto_stretch): Utilisation de self.preview_manager.image_data_wb pour l'analyse.")
+            self.logger.debug("  apply_auto_stretch: Utilisation de self.preview_manager.image_data_wb pour l'analyse.")
+        # Priorité 2: current_preview_data avec gains UI
         elif self.current_preview_data is not None:
-            print("DEBUG GUI (apply_auto_stretch): Fallback: Utilisation de self.current_preview_data avec les gains UI actuels pour l'analyse.")
+            self.logger.info("  apply_auto_stretch: Fallback -> Utilisation de self.current_preview_data avec les gains UI actuels pour l'analyse.")
             if self.current_preview_data.ndim == 3:
-                try:
-                    r=self.preview_r_gain.get(); g=self.preview_g_gain.get(); b=self.preview_b_gain.get()
-                    data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r, g, b)
-                except Exception: data_to_analyze = self.current_preview_data # Erreur lecture gains, utiliser data brute
-            else:
+                try: 
+                    r_gain = self.preview_r_gain.get()
+                    g_gain = self.preview_g_gain.get()
+                    b_gain = self.preview_b_gain.get()
+                    data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r_gain, g_gain, b_gain)
+                    self.logger.debug(f"    apply_auto_stretch: WB appliquée avec R={r_gain:.2f}, G={g_gain:.2f}, B={b_gain:.2f}")
+                except tk.TclError as e_tcl: # Erreur lecture des gains (fenêtre en fermeture?)
+                    self.logger.warning(f"    apply_auto_stretch: Erreur TclError lecture gains WB ({e_tcl}), utilisation current_preview_data brut.")
+                    data_to_analyze = self.current_preview_data
+                except Exception as e_wb:
+                    self.logger.error(f"    apply_auto_stretch: Erreur application WB manuelle pour auto-stretch: {e_wb}")
+                    data_to_analyze = self.current_preview_data # Fallback
+            else: # Données N&B
                 data_to_analyze = self.current_preview_data
         else:
+            self.logger.warning("apply_auto_stretch: Aucune donnée d'aperçu disponible.")
             messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch requires an image preview."))
             return
 
-        if data_to_analyze is None: # Sécurité supplémentaire
+        if data_to_analyze is None: # Double sécurité
+            self.logger.error("apply_auto_stretch: data_to_analyze est None après les tentatives de récupération.")
             messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch: No data to analyze."))
             return
 
         try:
-            bp, wp = calculate_auto_stretch(data_to_analyze) # Devrait retourner BP/WP dans la plage de data_to_analyze
-            
-            # Les sliders de l'UI attendent du 0-1.
-            # calculate_auto_stretch est censé retourner des BP/WP normalisés 0-1.
-            # Si ce n'est pas le cas, il faudrait le corriger ou re-normaliser ici.
-            # Pour l'instant, on suppose que calculate_auto_stretch retourne du 0-1.
-            # Si data_to_analyze était ADU, calculate_auto_stretch devrait normaliser en interne.
-            # Le log nous dira si bp, wp sont bien 0-1.
-            print(f"DEBUG GUI (apply_auto_stretch): calculate_auto_stretch a retourné BP={bp:.4f}, WP={wp:.4f}")
+            # calculate_auto_stretch est censé opérer sur des données déjà balancées en couleur
+            # et retourne des BP/WP normalisés à la plage des données d'entrée.
+            bp_calc, wp_calc = calculate_auto_stretch(data_to_analyze)
+            self.logger.info(f"  apply_auto_stretch: calculate_auto_stretch sur données (approx range [{np.nanmin(data_to_analyze):.3f}-{np.nanmax(data_to_analyze):.3f}]) a retourné BP={bp_calc:.4f}, WP={wp_calc:.4f}")
 
-            self.preview_black_point.set(round(bp, 4))
-            self.preview_white_point.set(round(wp, 4))
-            self.preview_stretch_method.set("Asinh") # Mettre Asinh par défaut après auto-stretch
+            min_data_val = np.nanmin(data_to_analyze)
+            max_data_val = np.nanmax(data_to_analyze)
+            range_data = max_data_val - min_data_val
+            if range_data < 1e-9: range_data = 1.0 
 
-            if hasattr(self, 'histogram_widget'):
-                # HistogramWidget.set_range attend des valeurs 0-1 venant des sliders
-                self.histogram_widget.set_range(bp, wp) 
+            bp_ui_01 = (bp_calc - min_data_val) / range_data
+            wp_ui_01 = (wp_calc - min_data_val) / range_data
+
+            bp_ui_01 = np.clip(bp_ui_01, 0.0, 1.0)
+            wp_ui_01 = np.clip(wp_ui_01, 0.0, 1.0)
+            if wp_ui_01 <= bp_ui_01 + 1e-4: wp_ui_01 = min(1.0, bp_ui_01 + 1e-4)
+            if bp_ui_01 >= wp_ui_01 - 1e-4: bp_ui_01 = max(0.0, wp_ui_01 - 1e-4)
             
-            self.update_progress_gui(f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp:.3f} WP={wp:.3f}", None)
-            self.refresh_preview() # Indispensable pour voir le résultat de l'auto-stretch
+            self.logger.info(f"  apply_auto_stretch: Valeurs pour UI (0-1): BP_UI={bp_ui_01:.4f}, WP_UI={wp_ui_01:.4f}")
+
+            self.preview_black_point.set(round(bp_ui_01, 4))
+            self.preview_white_point.set(round(wp_ui_01, 4))
+            self.preview_stretch_method.set("Asinh") 
+            
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                self.logger.debug("  apply_auto_stretch: Appel histogram_widget.set_range.")
+                self.histogram_widget.set_range(bp_ui_01, wp_ui_01) 
+            
+            self.update_progress_gui(f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp_ui_01:.3f} WP={wp_ui_01:.3f}", None)
+            
+            self.logger.debug("  apply_auto_stretch: Appel refresh_preview (recalculate_histogram=True).")
+            self.refresh_preview(recalculate_histogram=True) # Un AutoStretch manuel doit rafraîchir l'histogramme
         except Exception as e:
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}")
+            self.logger.error(f"apply_auto_stretch: Erreur pendant calcul/application: {e}")
+            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"); 
             traceback.print_exc(limit=2)
+        # --- FIN DE VOTRE CODE ORIGINAL ---
+        self.logger.debug("<<<< Fin SeestarStackerGUI.apply_auto_stretch")
 
 
 
-
-# --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def refresh_preview(self, recalculate_histogram=True): # <--- SIGNATURE CORRIGÉE ICI
         """
@@ -2296,41 +2432,79 @@ class SeestarStackerGUI:
 ################################################################################################################################################################
 
 
+
     def apply_auto_white_balance(self):
-        if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."); return
-        if self.current_preview_data is None or self.current_preview_data.ndim != 3: messagebox.showwarning(self.tr("warning"), self.tr("Auto WB requires a color image preview.")); return
+        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        if hasattr(self, '_final_stretch_set_by_processing_finished') and self._final_stretch_set_by_processing_finished:
+            self.logger.warning(f"APPLY_AUTO_WHITE_BALANCE (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré.")
+            self.logger.warning("  Pile d'appels pour cet appel ignoré à apply_auto_white_balance:")
+            for line in traceback.format_stack():
+                self.logger.warning(f"    {line.strip()}")
+            return # Important pour ne pas exécuter le reste de la fonction ni déclencher de refresh
+        # --- FIN DU BLOC DE VERROU ---
+                
+        self.logger.debug(">>>> Début SeestarStackerGUI.apply_auto_white_balance (après vérif verrou)")
+        self.logger.debug("     Pile d'appels pour apply_auto_white_balance:")
+        for line in traceback.format_stack():
+            self.logger.debug(f"       {line.strip()}")
+
+        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
+        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
+        # est plus spécifique pour la phase post-traitement.
+
+        if not _tools_available: 
+            messagebox.showerror(self.tr("error"), "Stretch/Color tools not available.")
+            self.logger.warning("apply_auto_white_balance: Tentative d'utilisation alors que _tools_available est False.")
+            return
+            
+        if self.current_preview_data is None or self.current_preview_data.ndim != 3: 
+            messagebox.showwarning(self.tr("warning"), self.tr("Auto WB requires a color image preview."))
+            self.logger.warning("apply_auto_white_balance: Aucune donnée d'aperçu couleur disponible.")
+            return
+            
         try:
+            self.logger.debug("  apply_auto_white_balance: Appel de calculate_auto_wb...")
             r_gain, g_gain, b_gain = calculate_auto_wb(self.current_preview_data)
-            self.preview_r_gain.set(round(r_gain, 3)); self.preview_g_gain.set(round(g_gain, 3)); self.preview_b_gain.set(round(b_gain, 3))
-            self.update_progress_gui(f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}", None); self.refresh_preview()
-        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}"); traceback.print_exc(limit=2)
+            self.logger.info(f"  apply_auto_white_balance: calculate_auto_wb a retourné Gains R={r_gain:.3f}, G={g_gain:.3f}, B={b_gain:.3f}")
+            
+            self.preview_r_gain.set(round(r_gain, 3))
+            self.preview_g_gain.set(round(g_gain, 3))
+            self.preview_b_gain.set(round(b_gain, 3))
+            
+            self.update_progress_gui(f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}", None)
+            
+            self.logger.debug("  apply_auto_white_balance: Appel refresh_preview (recalculate_histogram=True).")
+            # Un AutoWB manuel doit rafraîchir l'histogramme car les données analysées par l'histogramme (après WB) changent.
+            self.refresh_preview(recalculate_histogram=True) 
+        except Exception as e: 
+            self.logger.error(f"apply_auto_white_balance: Erreur pendant calcul/application: {e}")
+            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}")
+            traceback.print_exc(limit=2)
+        # --- FIN DE VOTRE CODE ORIGINAL ---
+        self.logger.debug("<<<< Fin SeestarStackerGUI.apply_auto_white_balance")
+
+
+
+
 
     def reset_white_balance(self): self.preview_r_gain.set(1.0); self.preview_g_gain.set(1.0); self.preview_b_gain.set(1.0); self.refresh_preview()
+ 
+ 
+
+ 
     def reset_brightness_contrast_saturation(self): self.preview_brightness.set(1.0); self.preview_contrast.set(1.0); self.preview_saturation.set(1.0); self.refresh_preview()
 
-    def apply_auto_stretch(self):
-        if not _tools_available: messagebox.showerror(self.tr("error"), "Stretch tools not available."); return
-        data_to_analyze = None
-        if hasattr(self, 'preview_manager') and self.preview_manager.image_data_wb is not None: data_to_analyze = self.preview_manager.image_data_wb
-        elif self.current_preview_data is not None:
-            print("Warning AutoStretch: Using current WB settings for analysis.")
-            if self.current_preview_data.ndim == 3:
-                try: r=self.preview_r_gain.get(); g=self.preview_g_gain.get(); b=self.preview_b_gain.get(); data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r, g, b)
-                except Exception: data_to_analyze = self.current_preview_data
-            else: data_to_analyze = self.current_preview_data
-        else: messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch requires an image preview.")); return
-        try:
-            bp, wp = calculate_auto_stretch(data_to_analyze)
-            self.preview_black_point.set(round(bp, 4)); self.preview_white_point.set(round(wp, 4))
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.set_range(bp, wp)
-            self.update_progress_gui(f"Auto Stretch appliqué (Aperçu): BP={bp:.3f} WP={wp:.3f}", None); self.refresh_preview()
-        except Exception as e: messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"); traceback.print_exc(limit=2)
+ 
+ 
 
     def reset_stretch(self):
         default_method = "Asinh"; default_bp = 0.01; default_wp = 0.99; default_gamma = 1.0
         self.preview_stretch_method.set(default_method); self.preview_black_point.set(default_bp); self.preview_white_point.set(default_wp); self.preview_gamma.set(default_gamma)
         if hasattr(self, 'histogram_widget'): self.histogram_widget.set_range(default_bp, default_wp); self.histogram_widget.reset_zoom()
         self.refresh_preview()
+
+
+
 
     # --- NOUVELLE MÉTHODE pour gérer la requête d'ajout ---
     def handle_add_folder_request(self, folder_path):
@@ -2645,6 +2819,68 @@ class SeestarStackerGUI:
         try: self._after_id_resize = self.root.after(300, self._refresh_preview_on_resize)
         except tk.TclError: pass
 
+
+
+    def _refresh_final_preview_and_histo(self):
+        """
+        Méthode dédiée pour le refresh final pour s'assurer de l'ordre et que
+        l'histogramme est mis à jour avec les bonnes données AVANT que set_range et
+        l'aperçu PreviewManager ne soient mis à jour.
+        Version: V_FinalRefreshOrder_1
+        """
+        print("DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Appel.")
+        
+        # S'assurer que les données temporaires pour l'histogramme existent
+        current_data_for_histo = getattr(self, '_temp_data_for_final_histo', None)
+        if current_data_for_histo is None:
+            print("  -> _temp_data_for_final_histo non trouvé. Tentative avec self.current_preview_data pour l'histogramme.")
+            # En fallback, si _temp_data_for_final_histo n'est pas là, on utilise current_preview_data
+            # qui a été mis à jour avec cosmetic_01_data_for_preview_from_backend.
+            # Pour le mode classique, c'est [0,1]. Pour Drizzle/Mosaïque, c'est aussi [0,1] cosmétique.
+            current_data_for_histo = self.current_preview_data 
+        
+        if current_data_for_histo is None:
+            print("  -> Aucune donnée disponible pour l'histogramme final. Annulation refresh.")
+            return
+
+        try:
+            # 1. Mettre à jour l'histogramme avec les données d'analyse (ceci appelle plot_histogram)
+            #    plot_histogram va configurer les axes X et Y, et dessiner les barres.
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                print(f"  -> Appel histogram_widget.update_histogram avec données (Shape: {current_data_for_histo.shape})")
+                self.histogram_widget.update_histogram(current_data_for_histo)
+            
+            # 2. Lire les valeurs BP/WP des sliders (qui ont été settées à 0.01/0.95 dans _processing_finished)
+            bp_ui = self.preview_black_point.get()
+            wp_ui = self.preview_white_point.get()
+            
+            # 3. Mettre à jour les lignes BP/WP de l'histogramme avec ces valeurs UI.
+            #    set_range convertira ces BP/WP UI (0-1) en l'échelle des données de l'histogramme
+            #    et DESSINERA les lignes.
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                print(f"  -> Appel histogram_widget.set_range avec BP_UI={bp_ui:.4f}, WP_UI={wp_ui:.4f}")
+                self.histogram_widget.set_range(bp_ui, wp_ui)
+        except tk.TclError as e:
+            print(f"  Erreur TclError pendant la mise à jour de l'histogramme: {e}")
+            # Continuer pour essayer de rafraîchir l'aperçu
+        except Exception as e_histo:
+            print(f"  Erreur inattendue pendant la mise à jour de l'histogramme: {e_histo}")
+            traceback.print_exc(limit=1)
+
+        # 4. Mettre à jour l'aperçu visuel (PreviewManager)
+        #    Il lira les paramètres UI (y compris BP/WP à 0.01/0.95) pour stretcher self.current_preview_data.
+        #    On ne recalcule PAS l'histogramme ici, car il vient d'être fait.
+        print("  -> Appel self.refresh_preview (recalculate_histogram=False)")
+        self.refresh_preview(recalculate_histogram=False) 
+        
+        if hasattr(self, '_temp_data_for_final_histo'):
+            self._temp_data_for_final_histo = None # Nettoyer la donnée temporaire
+        
+        print("DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Fin.")
+
+
+
+
     def _refresh_preview_on_resize(self):
         if hasattr(self, 'preview_manager'): self.preview_manager.trigger_redraw()
         if hasattr(self, 'histogram_widget') and self.histogram_widget.winfo_exists():
@@ -2902,69 +3138,97 @@ class SeestarStackerGUI:
 
 
 
+###################################################################################################################################################
+
+
+
+    def _execute_final_auto_stretch(self, original_lock_state_before_after):
+        self.logger.info(">>>> Entrée dans _execute_final_auto_stretch (appelé par after depuis _processing_finished)")
+        # Le verrou est _final_stretch_set_by_processing_finished (mis à True à la fin de _processing_finished)
+        # On s'assure qu'il est bien False pour que apply_auto_stretch s'exécute
+        # Puis on le remet à True.
+
+        # Sauvegarder l'état actuel du verrou (qui devrait être True ici)
+        current_lock_state_at_execution = self._final_stretch_set_by_processing_finished
+        
+        self.logger.info(f"     _execute_final_auto_stretch: État du verrou avant exécution apply_auto_stretch: {current_lock_state_at_execution}")
+        
+        # Forcer le verrou à False pour cet appel spécifique
+        self._final_stretch_set_by_processing_finished = False
+        self.logger.info(f"     _execute_final_auto_stretch: Verrou temporairement mis à {self._final_stretch_set_by_processing_finished} pour apply_auto_stretch.")
+        
+        try:
+            self.apply_auto_stretch()
+        finally:
+            # Rétablir l'état du verrou qu'il avait au moment où _processing_finished a activé le verrou,
+            # ou simplement le forcer à True. Forcer à True est plus simple.
+            self._final_stretch_set_by_processing_finished = True
+            self.logger.info(f"     _execute_final_auto_stretch: Verrou final rétabli à {self._final_stretch_set_by_processing_finished} après apply_auto_stretch.")
+        self.logger.info("<<<< Sortie de _execute_final_auto_stretch")
+
+
 
 
 #############################################################################################################################################
 
 
 
-
-
     def _processing_finished(self):
-        """
-        Actions finales à exécuter dans le thread GUI après la fin ou l'arrêt
-        du thread de traitement du backend (QueuedStacker).
-        MODIFIED:
-        - Initial UI stretch parameters for Preview tab are set based on a robust auto-stretch
-          (percentiles for ADU data) of the data that the HistogramWidget will display.
-        - Default stretch method set to Asinh.
-        - Added try-except blocks for robustness.
-        Version: V_ProcessingFinished_RobustHistoStretch_UIFix_3_TryExcept
-        """
+        self.logger.info(">>>> Entrée dans SeestarStackerGUI._processing_finished (V_FinalAutoStretchLogic_2_DirectCall)") # Log d'entrée avec version
+
+        # Annuler tout appel différé qui aurait pu être planifié pour auto_stretch
+        if hasattr(self, '_auto_stretch_after_id') and self._auto_stretch_after_id:
+            try:
+                self.root.after_cancel(self._auto_stretch_after_id)
+                self.logger.info("     _processing_finished: Appel différé _auto_stretch_after_id ANNULÉ.")
+            except tk.TclError:
+                self.logger.warning("     _processing_finished: Erreur TclError lors de l'annulation de _auto_stretch_after_id (déjà exécuté ou invalide?).")
+            except Exception as e_cancel_stretch:
+                self.logger.error(f"     _processing_finished: Erreur inattendue lors de l'annulation de _auto_stretch_after_id: {e_cancel_stretch}")
+            self._auto_stretch_after_id = None 
+        
+        if hasattr(self, '_auto_wb_after_id') and self._auto_wb_after_id: 
+            try:
+                self.root.after_cancel(self._auto_wb_after_id)
+                self.logger.info("     _processing_finished: Appel différé _auto_wb_after_id ANNULÉ.")
+            except tk.TclError:
+                self.logger.warning("     _processing_finished: Erreur TclError lors de l'annulation de _auto_wb_after_id (déjà exécuté ou invalide?).")
+            except Exception as e_cancel_wb:
+                self.logger.error(f"     _processing_finished: Erreur inattendue lors de l'annulation de _auto_wb_after_id: {e_cancel_wb}")
+            self._auto_wb_after_id = None 
+
         if not self.processing:
-            print("DEBUG GUI [_processing_finished V_ProcessingFinished_RobustHistoStretch_UIFix_3_TryExcept]: Appel ignoré, self.processing est déjà False.")
+            self.logger.warning("     _processing_finished appelé mais self.processing est déjà False. Sortie anticipée.")
             return
 
-        print("\n" + "="*60)
-        print("DEBUG GUI [_processing_finished V_ProcessingFinished_RobustHistoStretch_UIFix_3_TryExcept]: Entrée dans la méthode.")
-        print("="*60)
-        
+        self.logger.info("     _processing_finished: self.processing mis à False.")
         self.processing = False 
         
         # --- Section 1: Finalisation Barre de Progression et Timer ---
         try:
-            print("  [PF Section 1] Finalisation Barre de Progression et Timer...")
+            self.logger.info("  [PF_S1] _processing_finished: Finalisation Barre de Progression et Timer...")
             if hasattr(self, 'progress_manager') and self.progress_manager:
                 self.progress_manager.stop_timer()
                 if hasattr(self.progress_manager, 'progress_bar') and self.progress_manager.progress_bar.winfo_exists():
                     pb = self.progress_manager.progress_bar
                     if pb['mode'] == 'indeterminate': pb.stop(); pb.config(mode='determinate')
-                    is_error_backend = hasattr(self, "queued_stacker") and getattr(self.queued_stacker, "processing_error", None) is not None
-                    is_stopped_early_backend = hasattr(self, "queued_stacker") and getattr(self.queued_stacker, "stop_processing_flag_for_gui", False)
+                    is_error_backend = hasattr(self, "queued_stacker") and self.queued_stacker and getattr(self.queued_stacker, "processing_error", None) is not None
+                    is_stopped_early_backend = hasattr(self, "queued_stacker") and self.queued_stacker and getattr(self.queued_stacker, "stop_processing_flag_for_gui", False)
                     if not is_error_backend and not is_stopped_early_backend : pb.configure(value=100)
-            print("  [PF Section 1] OK.")
+            self.logger.info("  [PF_S1] _processing_finished: Barre/Timer OK.")
         except Exception as e_s1:
-            print(f"  [PF Section 1] ERREUR: {e_s1}"); traceback.print_exc(limit=1)
+            self.logger.error(f"  [PF_S1] _processing_finished: ERREUR Barre/Timer: {e_s1}\n{traceback.format_exc(limit=1)}")
 
         # --- Section 2: Récupération des informations du backend ---
-        # (Logique inchangée)
-        print("  [PF Section 2] Récupération des informations du backend...")
-        # ... (toute la logique de récupération des variables depuis q_stacker reste ici) ...
+        self.logger.info("  [PF_S2] _processing_finished: Récupération des informations du backend...")
         final_stack_path = None; processing_error_details = None; images_stacked = 0
-        aligned_count = 0; failed_align_count = 0; failed_stack_count = 0; skipped_count = 0
-        processed_files_count = 0; total_exposure = 0.0; was_stopped_by_user = False
-        source_folders_with_unaligned_in_run = set()
-        raw_adu_data_for_histo_from_backend = None
-        cosmetic_01_data_for_preview_from_backend = None
-        final_header_for_ui_preview = None
-        save_as_float32_backend_setting = False
-        photutils_applied_this_run_backend = False; bn_globale_applied_this_run_backend = False
-        cb_applied_in_session_backend = False; scnr_applied_this_run_backend = False
-        crop_applied_this_run_backend = False; feathering_applied_this_run_backend = False
-        low_wht_mask_applied_this_run_backend = False; photutils_params_used_backend = {}
-        input_folder_path_for_unaligned_button = self.input_path.get()
-        is_drizzle_result = False; final_stack_type_for_summary = "Unknown"
+        # ... (copiez ici TOUT le bloc de récupération des variables depuis q_stacker comme dans votre version précédente de _processing_finished) ...
+        # Assurez-vous que les lignes suivantes sont bien présentes et correctes :
         q_stacker = getattr(self, "queued_stacker", None)
+        cosmetic_01_data_for_preview_from_backend = None
+        raw_adu_data_for_histo_from_backend = None
+        final_header_for_ui_preview = None
+        save_as_float32_backend_setting = False # Valeur par défaut
 
         if q_stacker is not None:
             final_stack_path = getattr(q_stacker, 'final_stacked_path', None)
@@ -2981,31 +3245,33 @@ class SeestarStackerGUI:
             bn_globale_applied_this_run_backend = getattr(q_stacker, 'bn_globale_applied_in_session', False)
             cb_applied_in_session_backend = getattr(q_stacker, 'cb_applied_in_session', False)
             scnr_applied_this_run_backend = getattr(q_stacker, 'scnr_applied_in_session', False)
-            crop_applied_this_run_backend = getattr(q_stacker, 'crop_applied_in_session', False)
+            crop_applied_this_run_backend = getattr(q_stacker, 'crop_applied_in_session', False) 
             feathering_applied_this_run_backend = getattr(q_stacker, 'feathering_applied_in_session', False)
             low_wht_mask_applied_this_run_backend = getattr(q_stacker, 'low_wht_mask_applied_in_session', False)
-            photutils_params_used_backend = getattr(q_stacker, 'photutils_params_used_in_session', {}).copy()
+            photutils_params_used_backend = getattr(q_stacker, 'photutils_params_used_in_session', {}).copy() 
             raw_adu_data_for_histo_from_backend = getattr(q_stacker, 'raw_adu_data_for_ui_histogram', None)
-            cosmetic_01_data_for_preview_from_backend = getattr(q_stacker, 'last_saved_data_for_preview', None)
+            cosmetic_01_data_for_preview_from_backend = getattr(q_stacker, 'last_saved_data_for_preview', None) # Devrait être [0,1] NON-stretché
             final_header_for_ui_preview = getattr(q_stacker, 'current_stack_header', fits.Header())
             save_as_float32_backend_setting = getattr(q_stacker, 'save_final_as_float32', False)
-
             is_drizzle_result = (drizzle_active_session_backend and not was_stopped_by_user and
-                                 processing_error_details is None and final_stack_path is not None and
-                                 ("_drizzle" in os.path.basename(final_stack_path).lower() or
-                                  "_mosaic" in os.path.basename(final_stack_path).lower() or
-                                  "_reproject" in os.path.basename(final_stack_path).lower() ))
+                                processing_error_details is None and final_stack_path is not None and
+                                ("_drizzle" in os.path.basename(final_stack_path).lower() or
+                                "_mosaic" in os.path.basename(final_stack_path).lower() or
+                                "_reproject" in os.path.basename(final_stack_path).lower() ))
             if is_drizzle_result:
                 images_stacked = aligned_count if drizzle_mode_backend == "Final" or "_mosaic" in os.path.basename(final_stack_path).lower() or "_reproject" in os.path.basename(final_stack_path).lower() else images_in_cumulative_from_backend
             else: images_stacked = images_in_cumulative_from_backend
         else:
             processing_error_details = "Backend (QueuedStacker) non trouvé."
-        print(f"  [PF Section 2] Infos backend OK. Erreur: {processing_error_details}, Stack: {final_stack_path}")
+            # ... (autres initialisations par défaut pour les variables normalement lues du backend)
 
+        self.logger.info(f"  [PF_S2] _processing_finished: Infos backend OK. Erreur: {processing_error_details}, Stack: {final_stack_path}")
 
         # --- Section 3: Message de statut final ---
-        # (Logique inchangée)
+        # (Code original repris du log - ce bloc reste inchangé)
         status_text_for_log = self.tr("stacking_finished")
+        # ... (toute la logique pour définir status_text_for_log et final_stack_type_for_summary)
+        # ... (jusqu'à l'appel à self.progress_manager.update_progress)
         if was_stopped_by_user: status_text_for_log = self.tr('processing_stopped')
         elif processing_error_details: status_text_for_log = f"{self.tr('stacking_error_msg')} {processing_error_details}"; final_stack_type_for_summary = "Erreur"
         elif not (final_stack_path and os.path.exists(final_stack_path)): status_text_for_log = self.tr("Terminé (Aucun stack final créé)", default="Finished (No final stack created)"); final_stack_type_for_summary = "Aucun"
@@ -3016,125 +3282,85 @@ class SeestarStackerGUI:
         else: final_stack_type_for_summary = "Classique"; status_text_for_log = self.tr("stacking_classic_complete", default="Classic Stacking Complete")
         try:
             if hasattr(self, 'progress_manager') and self.progress_manager:
-                 self.progress_manager.update_progress(status_text_for_log, 100 if not processing_error_details else self.progress_manager.progress_bar['value'])
-        except Exception as e_s3: print(f"  [PF Section 3] ERREUR: {e_s3}"); traceback.print_exc(limit=1)
+                self.progress_manager.update_progress(status_text_for_log, 100 if not processing_error_details else self.progress_manager.progress_bar['value'])
+        except Exception as e_s3: self.logger.error(f"  [PF_S3] _processing_finished: ERREUR Message Statut Final: {e_s3}\n{traceback.format_exc(limit=1)}")
+
 
         # --- Section 4: Mise à jour de l'Aperçu et de l'Histogramme ---
-        print("  [PF Section 4] Mise à jour Aperçu/Histogramme final...")
+        self.logger.info("  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final...")
         try:
             data_to_display_in_preview_canvas = None
-            data_to_analyze_in_histogram = None
+            self._temp_data_for_final_histo = None 
             preview_load_error_msg = None
 
+            # cosmetic_01_data_for_preview_from_backend est la donnée [0,1] NON STRETCHÉE envoyée par le backend
             if cosmetic_01_data_for_preview_from_backend is not None:
                 data_to_display_in_preview_canvas = cosmetic_01_data_for_preview_from_backend
-                print("    Utilisation 'last_saved_data_for_preview' (0-1 cosmétique) pour APERÇU VISUEL.")
+                self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1] non-stretché) pour self.current_preview_data.")
                 if save_as_float32_backend_setting and raw_adu_data_for_histo_from_backend is not None:
-                    data_to_analyze_in_histogram = raw_adu_data_for_histo_from_backend
-                    print("    Utilisation 'raw_adu_data_for_ui_histogram' (ADU) pour ANALYSE HISTOGRAMME.")
+                    self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend # ADU-like pour histo
+                    self.logger.info("    [PF_S4] Utilisation 'raw_adu_data_for_ui_histogram' (ADU-like) pour _temp_data_for_final_histo.")
                 else:
-                    data_to_analyze_in_histogram = cosmetic_01_data_for_preview_from_backend
-                    print("    Utilisation 'last_saved_data_for_preview' (0-1 cosmétique) pour ANALYSE HISTOGRAMME.")
-            elif final_stack_path and os.path.exists(final_stack_path) and raw_adu_data_for_histo_from_backend is not None:
-                print("    'last_saved_data_for_preview' est None. Fallback: Utilisation 'raw_adu_data_for_ui_histogram' (ADU) pour ANALYSE HISTOGRAMME.")
-                data_to_analyze_in_histogram = raw_adu_data_for_histo_from_backend
-                print("    Tentative de normalisation de raw_adu_data pour APERÇU VISUEL.")
+                    self._temp_data_for_final_histo = cosmetic_01_data_for_preview_from_backend # [0,1] pour histo
+                    self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1]) pour _temp_data_for_final_histo.")
+            elif raw_adu_data_for_histo_from_backend is not None: 
+                self.logger.warning("    [PF_S4] 'last_saved_data_for_preview' est None. Fallback.")
+                self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend
+                # ... (logique de normalisation pour data_to_display_in_preview_canvas si besoin)
                 try:
                     temp_min = np.nanmin(raw_adu_data_for_histo_from_backend); temp_max = np.nanmax(raw_adu_data_for_histo_from_backend)
                     if np.isfinite(temp_min) and np.isfinite(temp_max) and temp_max > temp_min + 1e-7:
                         data_to_display_in_preview_canvas = (raw_adu_data_for_histo_from_backend - temp_min) / (temp_max - temp_min)
                         data_to_display_in_preview_canvas = np.clip(data_to_display_in_preview_canvas, 0.0, 1.0)
                     else: data_to_display_in_preview_canvas = np.zeros_like(raw_adu_data_for_histo_from_backend)
-                except Exception as e_norm: preview_load_error_msg = f"Erreur normalisation ADU pour aperçu: {e_norm}"
+                except Exception as e_norm: preview_load_error_msg = f"Erreur normalisation ADU pour apercu: {e_norm}"; self.logger.error(f"      [PF_S4] {preview_load_error_msg}")
+
             else:
-                preview_load_error_msg = "Aucune donnée d'aperçu final (ni cosmétique, ni ADU brute) du backend."
+                preview_load_error_msg = "Aucune donnee d'apercu final du backend."
+                self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
             if data_to_display_in_preview_canvas is not None:
-                self.current_preview_data = data_to_display_in_preview_canvas
+                self.current_preview_data = data_to_display_in_preview_canvas # C'est maintenant [0,1] NON stretché
                 self.current_stack_header = final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
                 
-                bp_ui_01_final, wp_ui_01_final = 0.01, 0.99 # Fallback pour sliders UI (0-1)
-                bp_histo_direct, wp_histo_direct = 0.0, 1.0 # Fallback pour lignes histo (sera dans l'échelle des données)
-
-                if data_to_analyze_in_histogram is not None:
-                    print("    Calcul BP/WP initiaux pour histogramme...")
-                    try:
-                        is_adu_data_for_histo = (data_to_analyze_in_histogram is raw_adu_data_for_histo_from_backend and
-                                                 save_as_float32_backend_setting and
-                                                 np.nanmax(data_to_analyze_in_histogram) > 1.5) # Heuristique ADU
-                        
-                        min_val_histo_data_local = np.nanmin(data_to_analyze_in_histogram) # Min/max locaux des données pour l'histo
-                        max_val_histo_data_local = np.nanmax(data_to_analyze_in_histogram)
-
-                        if is_adu_data_for_histo:
-                            print("      Données ADU détectées pour histo. Utilisation percentiles robustes pour BP/WP directs.")
-                            finite_vals = data_to_analyze_in_histogram[np.isfinite(data_to_analyze_in_histogram)]
-                            if finite_vals.size > 50:
-                                bp_histo_direct = np.percentile(finite_vals, 0.5)
-                                wp_histo_direct = np.percentile(finite_vals, 99.5)
-                                if wp_histo_direct <= bp_histo_direct + 1e-7 * max(1.0, max_val_histo_data_local):
-                                    bp_histo_direct = min_val_histo_data_local
-                                    wp_histo_direct = max_val_histo_data_local
-                            else: 
-                                bp_histo_direct = min_val_histo_data_local
-                                wp_histo_direct = max_val_histo_data_local
-                            print(f"      Percentiles ADU directs: BP_histo={bp_histo_direct:.4g}, WP_histo={wp_histo_direct:.4g}")
-                        else: 
-                            print("      Données 0-1 (ou faible dyn ADU) pour histo. Utilisation calculate_auto_stretch.")
-                            # calculate_auto_stretch est censé retourner des valeurs dans la plage 0-1
-                            bp_histo_direct_01, wp_histo_direct_01 = calculate_auto_stretch(data_to_analyze_in_histogram)
-                            # On les utilise directement pour l'histogramme car il sera sur une plage 0-1
-                            bp_histo_direct = bp_histo_direct_01 
-                            wp_histo_direct = wp_histo_direct_01
-                            print(f"      calculate_auto_stretch (sur données 0-1) a donné: BP_histo={bp_histo_direct:.4g}, WP_histo={wp_histo_direct:.4g}")
-                        
-                        # Normaliser bp_histo_direct et wp_histo_direct vers 0-1 pour les sliders UI
-                        range_histo_data_for_norm_sliders = max_val_histo_data_local - min_val_histo_data_local
-                        if range_histo_data_for_norm_sliders < 1e-9: range_histo_data_for_norm_sliders = 1.0
-
-                        bp_ui_01_final = (bp_histo_direct - min_val_histo_data_local) / range_histo_data_for_norm_sliders
-                        wp_ui_01_final = (wp_histo_direct - min_val_histo_data_local) / range_histo_data_for_norm_sliders
-                        
-                        bp_ui_01_final = np.clip(bp_ui_01_final, 0.0, 1.0)
-                        wp_ui_01_final = np.clip(wp_ui_01_final, 0.0, 1.0)
-                        if wp_ui_01_final <= bp_ui_01_final + 1e-4: wp_ui_01_final = min(1.0, bp_ui_01_final + 1e-4)
-                        if bp_ui_01_final >= wp_ui_01_final - 1e-4: bp_ui_01_final = max(0.0, wp_ui_01_final - 1e-4)
-                        print(f"      Valeurs finales pour sliders UI (0-1): BP_UI={bp_ui_01_final:.4f}, WP_UI={wp_ui_01_final:.4f}")
-
-                    except Exception as e_auto_s:
-                        print(f"    Erreur calcul BP/WP initiaux pour histogramme: {e_auto_s}. Utilisation de BP/WP par défaut."); traceback.print_exc(limit=1)
-                        # Les fallbacks pour bp_ui_01_final, wp_ui_01_final et bp_histo_direct, wp_histo_direct sont déjà là.
-                
-                self.preview_black_point.set(bp_ui_01_final)
-                self.preview_white_point.set(wp_ui_01_final)
+                # Reset des gains WB et autres ajustements cosmétiques
                 self.preview_r_gain.set(1.0); self.preview_g_gain.set(1.0); self.preview_b_gain.set(1.0)
-                self.preview_stretch_method.set("Asinh") # Méthode préférée pour le final
+                # self.preview_stretch_method.set("Asinh") # Sera réglé par apply_auto_stretch
                 self.preview_gamma.set(1.0)
+                self.preview_brightness.set(1.0); self.preview_contrast.set(1.0); self.preview_saturation.set(1.0)
+                self.logger.info("    [PF_S4] Gains WB, Gamma, BCS remis à leurs valeurs par défaut pour l'aperçu final.")
+
+                # Mettre à jour l'histogramme AVANT d'appeler l'auto-stretch qui va lire ses données.
+                if hasattr(self, 'histogram_widget') and self.histogram_widget and self._temp_data_for_final_histo is not None:
+                    self.logger.info(f"    [PF_S4] Mise à jour de l'histogramme avec _temp_data_for_final_histo (Shape: {self._temp_data_for_final_histo.shape}) AVANT appel apply_auto_stretch.")
+                    self.histogram_widget.update_histogram(self._temp_data_for_final_histo)
                 
-                if hasattr(self, 'histogram_widget') and self.histogram_widget:
-                    self.histogram_widget.update_histogram(data_to_analyze_in_histogram) # Envoie ADU ou 0-1
-                    # histogram_widget.set_range attend des valeurs 0-1 des sliders.
-                    # Il convertira en interne vers l'échelle de data_to_analyze_in_histogram.
-                    self.histogram_widget.set_range(bp_ui_01_final, wp_ui_01_final)
+                # Activer temporairement le verrou à False pour permettre à cet auto-stretch final de passer
+                self.logger.info("    [PF_S4] APPEL DIRECT apply_auto_stretch pour le stretch final (verrou sera True après).")
+                self._final_stretch_set_by_processing_finished = False # Permettre à l'appel suivant de passer
+                self.apply_auto_stretch() # Appel direct
+                # Le verrou sera remis à True plus bas.
                 
-                self.root.after(50, self.refresh_preview) 
                 if self.current_stack_header: self.update_image_info(self.current_stack_header)
             else:
-                if not preview_load_error_msg: preview_load_error_msg = "Données d'aperçu final non disponibles."
+                if not preview_load_error_msg: preview_load_error_msg = "Donnees d'apercu final non disponibles."
                 if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(preview_load_error_msg)
                 if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
-            print(f"  [PF Section 4] OK. Erreur chargement aperçu: {preview_load_error_msg}")
+
+            self.logger.info(f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}")
         except Exception as e_s4:
-            print(f"  [PF Section 4] ERREUR CRITIQUE: {e_s4}"); traceback.print_exc(limit=2)
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(f"Erreur MAJEURE mise à jour aperçu final: {e_s4}")
+            self.logger.error(f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}")
+            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
             processing_error_details = f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
 
 
         # --- Section 5: Génération et Affichage du Résumé ---
-        print("  [PF Section 5] Génération et Affichage du Résumé...")
+        # (Code original repris du log - ce bloc reste inchangé)
+        self.logger.info("  [PF_S5] _processing_finished: Génération et Affichage du Résumé...")
+        # ... (toute la logique de création de summary_lines) ...
+        # ... (jusqu'à l'appel à self.root.after(150, lambda: self._show_summary_dialog(...))) ...
         try:
-            # ... (logique de création du résumé inchangée) ...
             summary_lines = []
             summary_title = self.tr("processing_report_title")
             summary_lines.append(f"{self.tr('Status', default='Status')}: {status_text_for_log}")
@@ -3152,11 +3378,11 @@ class SeestarStackerGUI:
             if photutils_applied_this_run_backend:
                 params_str_list = []; photutils_params_to_log = ['box_size','filter_size','sigma_clip_val','exclude_percentile']
                 for p_key in photutils_params_to_log:
-                     if p_key in photutils_params_used_backend:
-                         val = photutils_params_used_backend[p_key]
-                         p_name_short = p_key.replace("photutils_bn_","").replace("_val","").replace("_percentile","%").replace("filter_size","Filt").replace("box_size","Box").replace("sigma_clip","Sig").title()
-                         params_str_list.append(f"{p_name_short}={val:.1f}" if isinstance(val,float) else f"{p_name_short}={val}")
-                params_str = ", ".join(params_str_list) if params_str_list else "Défauts"
+                    if p_key in photutils_params_used_backend: 
+                        val = photutils_params_used_backend[p_key]
+                        p_name_short = p_key.replace("photutils_bn_","").replace("_val","").replace("_percentile","%").replace("filter_size","Filt").replace("box_size","Box").replace("sigma_clip","Sig").title()
+                        params_str_list.append(f"{p_name_short}={val:.1f}" if isinstance(val,float) else f"{p_name_short}={val}")
+                params_str = ", ".join(params_str_list) if params_str_list else "Defaults"
                 summary_lines.append(f"  - {self.tr('Photutils 2D Background', default='Photutils 2D Background')}: {self.tr('Yes', default='Yes')} ({params_str})")
             else: summary_lines.append(f"  - {self.tr('Photutils 2D Background', default='Photutils 2D Background')}: {self.tr('No', default='No')}")
             summary_lines.append(f"  - {self.tr('Edge/Chroma Correction (CB)', default='Edge/Chroma Correction (CB)')}: {'Yes' if cb_applied_in_session_backend else 'No'}")
@@ -3166,7 +3392,7 @@ class SeestarStackerGUI:
             scnr_amount_sum = getattr(q_stacker, 'final_scnr_amount', 0.0) if q_stacker else 0.0
             scnr_lum_sum = getattr(q_stacker, 'final_scnr_preserve_luminosity', '?') if q_stacker else '?'
             crop_perc_decimal_sum = getattr(q_stacker, 'final_edge_crop_percent_decimal', 0.0) if q_stacker else 0.0
-            scnr_info_summary = f"{self.tr('Yes', default='Yes')} (Cible: {scnr_target_sum}, Force: {scnr_amount_sum:.2f}, Prés.Lum: {scnr_lum_sum})" if scnr_applied_this_run_backend else self.tr('No', default='No')
+            scnr_info_summary = f"{self.tr('Yes', default='Yes')} (Cible: {scnr_target_sum}, Force: {scnr_amount_sum:.2f}, Pres.Lum: {scnr_lum_sum})" if scnr_applied_this_run_backend else self.tr('No', default='No') 
             summary_lines.append(f"  - {self.tr('Final SCNR', default='Final SCNR')}: {scnr_info_summary}")
             crop_info_summary = f"{self.tr('Yes', default='Yes')} ({crop_perc_decimal_sum*100.0:.1f}%)" if crop_applied_this_run_backend else self.tr('No', default='No')
             summary_lines.append(f"  - {self.tr('Final Edge Crop', default='Final Edge Crop')}: {crop_info_summary}")
@@ -3174,67 +3400,121 @@ class SeestarStackerGUI:
             if final_stack_path and os.path.exists(final_stack_path): summary_lines.append(f"\n{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path}")
             elif final_stack_path: summary_lines.append(f"{self.tr('Final Stack File', default='Final Stack File')}:\n  {final_stack_path} ({self.tr('Not Found!', default='Not Found!')})")
             else: summary_lines.append(self.tr('Final Stack File: Not created or not found.', default='Final Stack File: Not created or not found.'))
-            if preview_load_error_msg: summary_lines.append(f"\nNote Aperçu UI: {preview_load_error_msg}")
+            if preview_load_error_msg: summary_lines.append(f"\nNote Apercu UI: {preview_load_error_msg}")
             full_summary_text_for_dialog = "\n".join(summary_lines)
-
             can_open_output_folder_button = self.output_path.get() and os.path.isdir(self.output_path.get()) and \
-                                         ( (final_stack_path and os.path.exists(final_stack_path)) or not processing_error_details )
-            
-            # Afficher le résumé seulement si pas arrêté par l'utilisateur SANS fichier, OU si erreur mais fichier quand même
+                                            ( (final_stack_path and os.path.exists(final_stack_path)) or not processing_error_details )
             show_summary = True
             if was_stopped_by_user and not (final_stack_path and os.path.exists(final_stack_path)):
-                show_summary = False
-                print("--- Processing Stopped by User, No Final File (Summary Dialog Skipped) ---")
-                print(full_summary_text_for_dialog); print("-------------------------------------------------------------")
+                show_summary = False; self.logger.info("--- Processing Stopped by User, No Final File (Summary Dialog Skipped) ---")
             elif processing_error_details and not (final_stack_path and os.path.exists(final_stack_path)):
-                show_summary = False # Erreur et pas de fichier, le message d'erreur global suffit
-                messagebox.showerror(self.tr("error"), f"{status_text_for_log}", parent=self.root)
-
-
+                show_summary = False
+                self.root.after(100, lambda: messagebox.showerror(self.tr("error"), f"{status_text_for_log}", parent=self.root))
             if show_summary:
-                 self.root.after(100, lambda: self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run, input_folder_path_for_unaligned_button))
-            print(f"  [PF Section 5] OK.")
+                self.logger.info("    [PF_S5] Planification affichage dialogue résumé...")
+                self.root.after(150, lambda: self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run, input_folder_path_for_unaligned_button))
+            self.logger.info("  [PF_S5] _processing_finished: Résumé OK.")
         except Exception as e_s5:
-            print(f"  [PF Section 5] ERREUR CRITIQUE: {e_s5}"); traceback.print_exc(limit=2)
-            messagebox.showerror("Erreur Résumé Critique", f"Erreur majeure lors de la génération du résumé:\n{e_s5}", parent=self.root)
-            processing_error_details = f"{processing_error_details or ''} Erreur UI Résumé: {e_s5}"
-
+            self.logger.error(f"  [PF_S5] _processing_finished: ERREUR CRITIQUE Résumé: {e_s5}\n{traceback.format_exc(limit=2)}")
+            messagebox.showerror("Erreur Resume Critique", f"Erreur majeure lors de la generation du resume:\n{e_s5}", parent=self.root) 
+            processing_error_details = f"{processing_error_details or ''} Erreur UI Resume: {e_s5}" 
 
         # --- Section 6: Réinitialisation de l'état de l'UI ---
-        print("  [PF Section 6] Réinitialisation de l'état de l'UI...")
+        self.logger.info("  [PF_S6] _processing_finished: Réinitialisation de l'état de l'UI...")
+        # ... (Code de _set_parameter_widgets_state(tk.NORMAL) etc. - reste inchangé) ...
         try:
             self._set_parameter_widgets_state(tk.NORMAL)
             if hasattr(self, "start_button") and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
             if hasattr(self, "stop_button") and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.DISABLED)
-            # Le bouton Open Output est géré par la logique du résumé (can_open_output_folder_button)
-            # Mais au cas où le résumé ne s'affiche pas, on le met à jour ici aussi.
-            can_open_output_final = self.output_path.get() and os.path.isdir(self.output_path.get()) and \
-                                  ( (final_stack_path and os.path.exists(final_stack_path)) or (not processing_error_details and not was_stopped_by_user) )
-
+            can_open_output_final = bool(self.output_path.get() and os.path.isdir(self.output_path.get()) and \
+                                    ( (final_stack_path and os.path.exists(final_stack_path)) or \
+                                    (not processing_error_details and not was_stopped_by_user) )
+                                    )
             if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists():
-                 self.open_output_button.config(state=tk.NORMAL if can_open_output_final else tk.DISABLED)
-
+                self.open_output_button.config(state=tk.NORMAL if can_open_output_final else tk.DISABLED)
             if hasattr(self, "remaining_time_var"): self.remaining_time_var.set("00:00:00")
             self.additional_folders_to_process = []
             self.update_additional_folders_display()
             self.update_remaining_files()
-            print(f"  [PF Section 6] OK.")
+            self.logger.info("  [PF_S6] _processing_finished: UI OK.")
         except Exception as e_s6:
-            print(f"  [PF Section 6] ERREUR CRITIQUE: {e_s6}"); traceback.print_exc(limit=1)
-            # Si la réinitialisation de l'UI plante, c'est un problème.
-            # On pourrait essayer de forcer certains boutons au cas où.
-            if hasattr(self, "start_button"): self.start_button.config(state=tk.NORMAL)
-            if hasattr(self, "stop_button"): self.stop_button.config(state=tk.DISABLED)
+            self.logger.error(f"  [PF_S6] _processing_finished: ERREUR CRITIQUE UI: {e_s6}\n{traceback.format_exc(limit=1)}")
+            if hasattr(self, "start_button") and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL) 
+            if hasattr(self, "stop_button") and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.DISABLED)
 
+
+        # --- Activation FINALE du verrou ---
+        self.logger.info("     _processing_finished: Activation du verrou _final_stretch_set_by_processing_finished = True (après l'auto-stretch final).")
+        self._final_stretch_set_by_processing_finished = True
+        
+        # Nettoyer _temp_data_for_final_histo si elle a été utilisée
+        if hasattr(self, '_temp_data_for_final_histo'):
+            self.logger.info("     _processing_finished: Nettoyage _temp_data_for_final_histo après utilisation.")
+            self._temp_data_for_final_histo = None
 
         if 'gc' in globals() or 'gc' in locals(): gc.collect()
-        print("="*60)
-        print("DEBUG GUI [_processing_finished V_ProcessingFinished_RobustHistoStretch_UIFix_3_TryExcept]: Fin de la méthode.")
-        print("="*60 + "\n")
+        self.logger.info("<<<< Sortie de SeestarStackerGUI._processing_finished (V_FinalAutoStretchLogic_2_DirectCall)")
+        # --- FIN DU CODE MODIFIÉ ---
 
 
 
 
+    def _refresh_final_preview_and_histo_direct(self):
+        # --- DÉBUT DU CODE MODIFIÉ ---
+        self.logger.info(">>>> Entrée dans SeestarStackerGUI._refresh_final_preview_and_histo_direct (V_DirectFinalRefresh_2_OrderCheck_LogComplet)") # Version Log
+        
+        # Récupérer les données qui ont été préparées par _processing_finished
+        current_data_for_histo = getattr(self, '_temp_data_for_final_histo', None)
+        if current_data_for_histo is None:
+            self.logger.info("     _refresh_final_preview_and_histo_direct: _temp_data_for_final_histo non trouvé. Utilisation de self.current_preview_data pour l'histogramme.")
+            current_data_for_histo = self.current_preview_data 
+        
+        if current_data_for_histo is None:
+            self.logger.warning("     _refresh_final_preview_and_histo_direct: Aucune donnée disponible pour l'histogramme final. Tentative d'effacement de l'aperçu.")
+            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview("No final data for preview.")
+            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            self.logger.info("<<<< Sortie de SeestarStackerGUI._refresh_final_preview_and_histo_direct (données histo manquantes)")
+            return
+
+        try:
+            # 1. Mettre à jour l'histogramme avec les données d'analyse.
+            #    Ceci appelle plot_histogram qui DESSINE LES BARRES et CONFIGURE LES AXES X et Y.
+            #    Les lignes BP/WP ne sont PAS dessinées par plot_histogram.
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                self.logger.info(f"     _refresh_final_preview_and_histo_direct: Appel histogram_widget.update_histogram avec données (Shape: {current_data_for_histo.shape})")
+                self.histogram_widget.update_histogram(current_data_for_histo)
+            
+            # 2. Lire les valeurs BP/WP des sliders UI (qui ont été settées par _processing_finished)
+            bp_ui = self.preview_black_point.get()
+            wp_ui = self.preview_white_point.get()
+            self.logger.info(f"     _refresh_final_preview_and_histo_direct: Valeurs lues depuis UI pour set_range: BP_UI={bp_ui:.4f}, WP_UI={wp_ui:.4f}")
+            
+            # 3. Mettre à jour les LIGNES BP/WP de l'histogramme avec ces valeurs UI.
+            #    set_range convertit BP/WP UI (0-1) à l'échelle des données affichées
+            #    par l'histogramme et DESSINE/MET À JOUR les lignes.
+            if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                self.logger.info(f"     _refresh_final_preview_and_histo_direct: Appel histogram_widget.set_range avec BP_UI={bp_ui:.4f}, WP_UI={wp_ui:.4f} depuis les sliders.")
+                self.histogram_widget.set_range(bp_ui, wp_ui)
+        except tk.TclError as e:
+            self.logger.error(f"     _refresh_final_preview_and_histo_direct: Erreur TclError pendant la mise à jour de l'histogramme: {e}")
+        except Exception as e_histo:
+            self.logger.error(f"     _refresh_final_preview_and_histo_direct: Erreur inattendue pendant la mise à jour de l'histogramme: {e_histo}")
+            traceback.print_exc(limit=1)
+
+        # 4. Mettre à jour l'aperçu visuel (PreviewManager).
+        #    Il lira les paramètres UI (y compris BP/WP, méthode, etc.) pour stretcher self.current_preview_data.
+        #    IMPORTANT: Ne pas recalculer l'histogramme ici (recalculate_histogram=False)
+        #    car il vient d'être configuré (barres et lignes).
+        self.logger.info("     _refresh_final_preview_and_histo_direct: Appel self.refresh_preview(recalculate_histogram=False).")
+        self.refresh_preview(recalculate_histogram=False) 
+        
+        # Nettoyer la donnée temporaire après utilisation
+        if hasattr(self, '_temp_data_for_final_histo'):
+            self.logger.info("     _refresh_final_preview_and_histo_direct: Nettoyage de _temp_data_for_final_histo.")
+            self._temp_data_for_final_histo = None 
+        
+        self.logger.info("<<<< Sortie de SeestarStackerGUI._refresh_final_preview_and_histo_direct (V_DirectFinalRefresh_2_OrderCheck_LogComplet)")
+        # --- FIN DU CODE MODIFIÉ ---
 
 ################################################################################################################################################
   
@@ -3604,6 +3884,10 @@ class SeestarStackerGUI:
             # Lire depuis self.settings
             
         )
+        self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)") # Optionnel, mais bon pour le log
+        self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
+        self._final_stretch_set_by_processing_finished = False
+        
         print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
         # --- 7. Gérer résultat démarrage backend ---
