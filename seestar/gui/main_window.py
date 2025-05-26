@@ -3410,9 +3410,23 @@ class SeestarStackerGUI:
             elif processing_error_details and not (final_stack_path and os.path.exists(final_stack_path)):
                 show_summary = False
                 self.root.after(100, lambda: messagebox.showerror(self.tr("error"), f"{status_text_for_log}", parent=self.root))
+            
             if show_summary:
-                self.logger.info("    [PF_S5] Planification affichage dialogue résumé...")
-                self.root.after(150, lambda: self._show_summary_dialog(summary_title, full_summary_text_for_dialog, can_open_output_folder_button, source_folders_with_unaligned_in_run, input_folder_path_for_unaligned_button))
+                 self.logger.info("    [PF_S5] Planification affichage dialogue résumé...")
+                 # --- CORRECTION FINALE ET SIMPLIFIÉE ---
+                 self.root.after(150, lambda title_arg=summary_title, 
+                                                text_arg=full_summary_text_for_dialog, 
+                                                can_open_arg=can_open_output_folder_button, 
+                                                unaligned_sources_arg=source_folders_with_unaligned_in_run, 
+                                                # Lire et capturer la valeur de self.input_path.get() ICI
+                                                input_path_for_button_arg=self.input_path.get(): 
+                                      self._show_summary_dialog(title_arg, 
+                                                                text_arg, 
+                                                                can_open_arg, 
+                                                                unaligned_sources_arg, 
+                                                                input_path_for_button_arg)) # Utiliser l'argument capturé
+                 # --- FIN MODIFICATION ---            
+            
             self.logger.info("  [PF_S5] _processing_finished: Résumé OK.")
         except Exception as e_s5:
             self.logger.error(f"  [PF_S5] _processing_finished: ERREUR CRITIQUE Résumé: {e_s5}\n{traceback.format_exc(limit=2)}")
