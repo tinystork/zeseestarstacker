@@ -108,6 +108,7 @@ def apply_denoise(image, strength=1):
     image_uint8 = (np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
 
     denoised_uint8 = None
+    denoised_bgr_uint8 = None
     h_param = float(strength) # Parameter 'h' in OpenCV functions
 
     try:
@@ -170,7 +171,7 @@ def apply_denoise(image, strength=1):
                     use_cuda = False # Fallback
 
              # Fallback to CPU if CUDA not available or failed
-             if not use_cuda or denoised_uint8 is None:
+             if not use_cuda or denoised_bgr_uint8 is None:
                  # print(f"DEBUG: Using CPU denoising (color) h={h_param}, hColor={h_param}")
                  denoised_bgr_uint8 = cv2.fastNlMeansDenoisingColored(
                      image_bgr_uint8, None, h=h_param, hColor=h_param,
