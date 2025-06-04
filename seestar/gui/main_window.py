@@ -740,19 +740,22 @@ class SeestarStackerGUI:
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
 
         norm_frame = ttk.Frame(self.options_frame); norm_frame.pack(fill=tk.X, padx=5, pady=(5,0))
-        ttk.Label(norm_frame, text="Normalization:").pack(side=tk.LEFT)
+        self.norm_method_label = ttk.Label(norm_frame, text=self.tr("stacking_norm_method_label", default="Normalization:"))
+        self.norm_method_label.pack(side=tk.LEFT)
         self.stack_norm_combo = ttk.Combobox(norm_frame, textvariable=self.stack_norm_method_var,
                                              values=("none", "linear_fit", "sky_mean"), state="readonly", width=15)
         self.stack_norm_combo.pack(side=tk.LEFT, padx=(5,0))
 
         weight_frame = ttk.Frame(self.options_frame); weight_frame.pack(fill=tk.X, padx=5, pady=(2,0))
-        ttk.Label(weight_frame, text="Weighting:").pack(side=tk.LEFT)
+        self.weight_method_label = ttk.Label(weight_frame, text=self.tr("stacking_weight_method_label", default="Weighting:"))
+        self.weight_method_label.pack(side=tk.LEFT)
         self.stack_weight_combo = ttk.Combobox(weight_frame, textvariable=self.stack_weight_method_var,
                                                values=("none", "noise_variance", "noise_fwhm"), state="readonly", width=15)
         self.stack_weight_combo.pack(side=tk.LEFT, padx=(5,0))
 
         reject_frame = ttk.Frame(self.options_frame); reject_frame.pack(fill=tk.X, padx=5, pady=(2,0))
-        ttk.Label(reject_frame, text="Rejection:").pack(side=tk.LEFT)
+        self.reject_algo_label = ttk.Label(reject_frame, text=self.tr("stacking_reject_algo_label", default="Rejection:"))
+        self.reject_algo_label.pack(side=tk.LEFT)
         self.stack_reject_combo = ttk.Combobox(reject_frame, textvariable=self.stack_reject_algo_var,
                                                values=("kappa_sigma", "winsorized_sigma_clip", "linear_fit_clip"),
                                                state="readonly", width=20)
@@ -772,13 +775,16 @@ class SeestarStackerGUI:
         self.kappa_high_spinbox.pack(side=tk.LEFT, padx=(0,5))
 
         winsor_frame = ttk.Frame(self.options_frame); winsor_frame.pack(fill=tk.X, padx=20, pady=(2,0))
-        self.winsor_limits_label = ttk.Label(winsor_frame, text="Winsor Limits:")
+        self.winsor_limits_label = ttk.Label(winsor_frame, text=self.tr("stacking_winsor_limits_label", default="Winsor Limits:"))
         self.winsor_limits_label.pack(side=tk.LEFT, padx=(0,2))
         self.winsor_limits_entry = ttk.Entry(winsor_frame, textvariable=self.stacking_winsor_limits_str_var, width=10)
         self.winsor_limits_entry.pack(side=tk.LEFT, padx=(0,5))
+        self.winsor_note_label = ttk.Label(winsor_frame, text=self.tr("stacking_winsor_note", default="(e.g., 0.05,0.05 for 5% each side)"))
+        self.winsor_note_label.pack(side=tk.LEFT, padx=(5,0))
 
         final_frame = ttk.Frame(self.options_frame); final_frame.pack(fill=tk.X, padx=5, pady=(2,0))
-        ttk.Label(final_frame, text="Final Combine:").pack(side=tk.LEFT)
+        self.final_combine_label = ttk.Label(final_frame, text=self.tr("stacking_final_combine_label", default="Final Combine:"))
+        self.final_combine_label.pack(side=tk.LEFT)
         self.stack_final_combo = ttk.Combobox(final_frame, textvariable=self.stack_final_combine_var,
                                               values=("mean", "median"), state="readonly", width=15)
         self.stack_final_combo.pack(side=tk.LEFT, padx=(5,0))
@@ -1143,9 +1149,13 @@ class SeestarStackerGUI:
                 if not self.winsor_limits_entry.winfo_ismapped():
                     self.winsor_limits_label.pack(side=tk.LEFT, padx=(0,2))
                     self.winsor_limits_entry.pack(side=tk.LEFT, padx=(0,5))
+                    if hasattr(self, 'winsor_note_label'):
+                        self.winsor_note_label.pack(side=tk.LEFT, padx=(5,0))
             else:
                 self.winsor_limits_label.pack_forget()
                 self.winsor_limits_entry.pack_forget()
+                if hasattr(self, 'winsor_note_label'):
+                    self.winsor_note_label.pack_forget()
 
 
 
@@ -1604,7 +1614,15 @@ class SeestarStackerGUI:
             "hot_pixel_threshold": 'hot_pixel_threshold_label', "neighborhood_size": 'neighborhood_size_label',
             "weighting_metrics_label": 'weight_metrics_label', "snr_exponent_label": 'snr_exp_label',
             "stars_exponent_label": 'stars_exp_label', "min_weight_label": 'min_w_label',
-            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'), 
+            "stacking_norm_method_label": 'norm_method_label',
+            "stacking_weight_method_label": 'weight_method_label',
+            "stacking_reject_algo_label": 'reject_algo_label',
+            "stacking_kappa_low_label": 'kappa_low_label',
+            "stacking_kappa_high_label": 'kappa_high_label',
+            "stacking_winsor_limits_label": 'winsor_limits_label',
+            "stacking_winsor_note": 'winsor_note_label',
+            "stacking_final_combine_label": 'final_combine_label',
+            "wb_r": getattr(self, 'wb_r_ctrls', {}).get('label'),
             "wb_g": getattr(self, 'wb_g_ctrls', {}).get('label'), 
             "wb_b": getattr(self, 'wb_b_ctrls', {}).get('label'),
             "stretch_method": 'stretch_method_label',
