@@ -32,6 +32,7 @@ EN_TRANSLATIONS = {
     'Folders': "Folders",
     'input_folder': "Input:",
     'output_folder': "Output:",
+    'output_filename_label': "Filename:",
     'reference_image': "Reference (Opt.):",
     'options': "Stacking Options",
     'stacking_method': "Method:",
