@@ -61,7 +61,6 @@ EN_TRANSLATIONS = {
     'weight_method_none': "None",
     'weight_method_noise_variance': "Noise Variance (1/σ²)",
     'weight_method_noise_fwhm': "Noise + FWHM",
-    'stacking_reject_algo_label': "Rejection Algorithm:",
     'reject_algo_kappa_sigma': "Kappa-Sigma Clip",
     'reject_algo_winsorized_sigma_clip': "Winsorized Sigma Clip",
     'reject_algo_linear_fit_clip': "Linear Fit Clip",

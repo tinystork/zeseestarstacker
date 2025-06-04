@@ -755,14 +755,6 @@ class SeestarStackerGUI:
                                                values=("none", "noise_variance", "noise_fwhm"), state="readonly", width=15)
         self.stack_weight_combo.pack(side=tk.LEFT, padx=(5,0))
 
-        reject_frame = ttk.Frame(self.options_frame); reject_frame.pack(fill=tk.X, padx=5, pady=(2,0))
-        self.reject_algo_label = ttk.Label(reject_frame, text=self.tr("stacking_reject_algo_label", default="Rejection:"))
-        self.reject_algo_label.pack(side=tk.LEFT)
-        self.stack_reject_combo = ttk.Combobox(reject_frame, textvariable=self.stack_reject_algo_var,
-                                               values=("kappa_sigma", "winsorized_sigma_clip", "linear_fit_clip"),
-                                               state="readonly", width=20)
-        self.stack_reject_combo.pack(side=tk.LEFT, padx=(5,0))
-        self.stack_reject_combo.bind("<<ComboboxSelected>>", self._toggle_kappa_visibility)
 
         kappa_frame = ttk.Frame(self.options_frame); kappa_frame.pack(fill=tk.X, padx=20, pady=(2,0))
         self.kappa_low_label = ttk.Label(kappa_frame, text="Kappa Low:")
@@ -1117,26 +1109,11 @@ class SeestarStackerGUI:
 
         show_kappa = False
         show_winsor = False
-        if method:
-            if method == "kappa_sigma":
-                show_kappa = True
-            elif method == "winsorized_sigma_clip":
-                show_kappa = True
-                show_winsor = True
-            else:
-                show_kappa = False
-        else:
-            selected_algo = None
-            if hasattr(self, 'stack_reject_algo_var'):
-                try:
-                    selected_algo = self.stack_reject_algo_var.get()
-                except tk.TclError:
-                    selected_algo = None
-            if selected_algo == "kappa_sigma":
-                show_kappa = True
-            elif selected_algo == "winsorized_sigma_clip":
-                show_kappa = True
-                show_winsor = True
+        if method == "kappa_sigma":
+            show_kappa = True
+        elif method == "winsorized_sigma_clip":
+            show_kappa = True
+            show_winsor = True
         
         # Kappa parameter widgets using pack
         if hasattr(self, 'kappa_low_spinbox') and hasattr(self, 'kappa_high_spinbox'):
@@ -1644,7 +1621,6 @@ class SeestarStackerGUI:
             "stars_exponent_label": 'stars_exp_label', "min_weight_label": 'min_w_label',
             "stacking_norm_method_label": 'norm_method_label',
             "stacking_weight_method_label": 'weight_method_label',
-            "stacking_reject_algo_label": 'reject_algo_label',
             "stacking_kappa_low_label": 'kappa_low_label',
             "stacking_kappa_high_label": 'kappa_high_label',
             "stacking_winsor_limits_label": 'winsor_limits_label',
@@ -2887,7 +2863,6 @@ class SeestarStackerGUI:
         if hasattr(self, 'browse_ref_button'): processing_widgets.append(self.browse_ref_button)
         if hasattr(self, 'stack_norm_combo'): processing_widgets.append(self.stack_norm_combo)
         if hasattr(self, 'stack_weight_combo'): processing_widgets.append(self.stack_weight_combo)
-        if hasattr(self, 'stack_reject_combo'): processing_widgets.append(self.stack_reject_combo)
         if hasattr(self, 'kappa_low_spinbox'): processing_widgets.append(self.kappa_low_spinbox)
         if hasattr(self, 'kappa_high_spinbox'): processing_widgets.append(self.kappa_high_spinbox)
         if hasattr(self, 'winsor_limits_entry'): processing_widgets.append(self.winsor_limits_entry)
