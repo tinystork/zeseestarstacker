@@ -31,6 +31,7 @@ FR_TRANSLATIONS = {
     'Folders': "Dossiers",
     'input_folder': "Entrée :",
     'output_folder': "Sortie :",
+    'output_filename_label': "Nom de fichier :",
     'reference_image': "Référence (Opt.) :",
     'options': "Options d'Empilement",
     'stacking_method': "Méthode :",
