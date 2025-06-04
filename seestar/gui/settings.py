@@ -60,6 +60,7 @@ class SettingsManager:
             # ... (toutes les lectures existantes pour les autres paramètres restent ici, inchangées) ...
             self.input_folder = getattr(gui_instance, 'input_path', tk.StringVar(value=default_values_from_code.get('input_folder', ''))).get()
             self.output_folder = getattr(gui_instance, 'output_path', tk.StringVar(value=default_values_from_code.get('output_folder', ''))).get()
+            self.output_filename = getattr(gui_instance, 'output_filename_var', tk.StringVar(value=default_values_from_code.get('output_filename', ''))).get()
             self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar(value=default_values_from_code.get('reference_image_path', ''))).get()
             self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=default_values_from_code.get('stacking_mode', 'kappa-sigma'))).get()
             self.kappa = getattr(gui_instance, 'kappa', tk.DoubleVar(value=default_values_from_code.get('kappa', 2.5))).get()
@@ -197,6 +198,7 @@ class SettingsManager:
             # ... (toutes les applications existantes pour les autres paramètres restent ici, inchangées) ...
             getattr(gui_instance, 'input_path', tk.StringVar()).set(self.input_folder or "")
             getattr(gui_instance, 'output_path', tk.StringVar()).set(self.output_folder or "")
+            getattr(gui_instance, 'output_filename_var', tk.StringVar()).set(self.output_filename or "")
             getattr(gui_instance, 'reference_image_path', tk.StringVar()).set(self.reference_image_path or "")
             getattr(gui_instance, 'stacking_mode', tk.StringVar()).set(self.stacking_mode)
             getattr(gui_instance, 'kappa', tk.DoubleVar()).set(self.kappa)
@@ -353,6 +355,7 @@ class SettingsManager:
         # --- Paramètres de Traitement de Base ---
         defaults_dict['input_folder'] = ""
         defaults_dict['output_folder'] = ""
+        defaults_dict['output_filename'] = ""
         defaults_dict['reference_image_path'] = ""
         defaults_dict['bayer_pattern'] = "GRBG" 
         defaults_dict['batch_size'] = 0 
@@ -647,6 +650,7 @@ class SettingsManager:
                 messages.append("Clé API Astrometry invalide (pas une chaîne), réinitialisée.")
                 self.astrometry_api_key = defaults_fallback['astrometry_api_key']
             else: self.astrometry_api_key = current_api_key.strip()
+            self.output_filename = str(getattr(self, 'output_filename', defaults_fallback['output_filename'])).strip()
             print("    -> Validating Feathering...")
             self.apply_feathering = bool(getattr(self, 'apply_feathering', defaults_fallback['apply_feathering']))
             try:
@@ -806,6 +810,7 @@ class SettingsManager:
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             'input_folder': str(self.input_folder),
             'output_folder': str(self.output_folder),
+            'output_filename': str(self.output_filename),
             'reference_image_path': str(self.reference_image_path),
             'bayer_pattern': str(self.bayer_pattern),
             'stacking_mode': str(self.stacking_mode),

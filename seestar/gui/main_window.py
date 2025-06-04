@@ -328,6 +328,7 @@ class SeestarStackerGUI:
         
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
+        self.output_filename_var = tk.StringVar()
         self.reference_image_path = tk.StringVar()
         self.stacking_mode = tk.StringVar(value="kappa-sigma") 
         self.kappa = tk.DoubleVar(value=2.5)
@@ -725,6 +726,7 @@ class SeestarStackerGUI:
         self.folders_frame.pack(fill=tk.X, pady=5, padx=5)
         in_subframe = ttk.Frame(self.folders_frame); in_subframe.pack(fill=tk.X, padx=5, pady=(5, 2)); self.input_label = ttk.Label(in_subframe, text="Input:", width=10, anchor="w"); self.input_label.pack(side=tk.LEFT); self.browse_input_button = ttk.Button(in_subframe, text="Browse...", command=self.file_handler.browse_input, width=10); self.browse_input_button.pack(side=tk.RIGHT); self.input_entry = ttk.Entry(in_subframe, textvariable=self.input_path); self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)); self.input_entry.bind("<FocusOut>", self._update_show_folders_button_state); self.input_entry.bind("<KeyRelease>", self._update_show_folders_button_state)
         out_subframe = ttk.Frame(self.folders_frame); out_subframe.pack(fill=tk.X, padx=5, pady=(2, 5)); self.output_label = ttk.Label(out_subframe, text="Output:", width=10, anchor="w"); self.output_label.pack(side=tk.LEFT); self.browse_output_button = ttk.Button(out_subframe, text="Browse...", command=self.file_handler.browse_output, width=10); self.browse_output_button.pack(side=tk.RIGHT); self.output_entry = ttk.Entry(out_subframe, textvariable=self.output_path); self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        fname_frame = ttk.Frame(self.folders_frame); fname_frame.pack(fill=tk.X, padx=5, pady=(0, 5)); self.output_filename_label = ttk.Label(fname_frame, text=self.tr("output_filename_label", default="Filename:"), width=10, anchor="w"); self.output_filename_label.pack(side=tk.LEFT); self.output_filename_entry = ttk.Entry(fname_frame, textvariable=self.output_filename_var); self.output_filename_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         ref_frame = ttk.Frame(self.folders_frame); ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5)); self.reference_label = ttk.Label(ref_frame, text="Reference (Opt.):", width=10, anchor="w"); self.reference_label.pack(side=tk.LEFT); self.browse_ref_button = ttk.Button(ref_frame, text="Browse...", command=self.file_handler.browse_reference, width=10); self.browse_ref_button.pack(side=tk.RIGHT); self.ref_entry = ttk.Entry(ref_frame, textvariable=self.reference_image_path); self.ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.options_frame = ttk.LabelFrame(tab_stacking, text="Stacking Options")
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
@@ -3838,6 +3840,7 @@ class SeestarStackerGUI:
         processing_started = self.queued_stacker.start_processing(
             input_dir=self.settings.input_folder,
             output_dir=self.settings.output_folder,
+            output_filename=self.settings.output_filename,
             reference_path_ui=self.settings.reference_image_path,
             initial_additional_folders=folders_to_pass_to_backend,
             stacking_mode=self.settings.stacking_mode,

@@ -258,6 +258,7 @@ class SeestarQueuedStacker:
         self.queue = Queue(); self.folders_lock = threading.Lock(); self.processing_thread = None
         self.processed_files = set(); self.additional_folders = []; self.current_folder = None
         self.output_folder = None; self.unaligned_folder = None; self.drizzle_temp_dir = None
+        self.output_filename = ""
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
@@ -4486,10 +4487,19 @@ class SeestarQueuedStacker:
             elif is_reproject_mosaic_mode and self.current_stack_header and self.current_stack_header.get('CTYPE1'): pass 
         final_header['NIMAGES'] = (effective_image_count, 'Effective images/Total Weight for final stack'); final_header['TOTEXP']  = (round(self.total_exposure_seconds, 2), '[s] Approx total exposure')
         final_header['HISTORY'] = f"Final stack type: {current_operation_mode_log_fits}"
-        base_name = "stack_final"; run_type_suffix = output_filename_suffix if output_filename_suffix else "_unknown_mode"
-        if stopped_early: run_type_suffix += "_stopped"
-        elif self.processing_error: run_type_suffix += "_error"
-        fits_path = os.path.join(self.output_folder, f"{base_name}{run_type_suffix}.fit"); preview_path  = os.path.splitext(fits_path)[0] + ".png"
+        if getattr(self, 'output_filename', ""):
+            base_name = self.output_filename.strip()
+            if not base_name.lower().endswith('.fit'):
+                base_name += '.fit'
+            fits_path = os.path.join(self.output_folder, base_name)
+            preview_path = os.path.splitext(fits_path)[0] + '.png'
+        else:
+            base_name = "stack_final"
+            run_type_suffix = output_filename_suffix if output_filename_suffix else "_unknown_mode"
+            if stopped_early: run_type_suffix += "_stopped"
+            elif self.processing_error: run_type_suffix += "_error"
+            fits_path = os.path.join(self.output_folder, f"{base_name}{run_type_suffix}.fit")
+            preview_path  = os.path.splitext(fits_path)[0] + ".png"
         self.final_stacked_path = fits_path; self.update_progress(f"Chemin FITS final: {os.path.basename(fits_path)}")
 
         # --- ÉTAPE 5: Préparation des données pour la SAUVEGARDE FITS ---
@@ -4784,6 +4794,7 @@ class SeestarQueuedStacker:
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def start_processing(self, input_dir, output_dir, reference_path_ui=None,
+                         output_filename="",
                          initial_additional_folders=None,
                          stacking_mode="kappa-sigma", kappa=2.5,
                          batch_size=10, correct_hot_pixels=True, hot_pixel_threshold=3.0,
@@ -4841,6 +4852,7 @@ class SeestarQueuedStacker:
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
+        print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
         if self.processing_active:
@@ -4876,6 +4888,8 @@ class SeestarQueuedStacker:
             self.update_progress(f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}", "ERROR")
             return False
         print(f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'")
+
+        self.output_filename = str(output_filename).strip()
         
         self.local_solver_preference = str(local_solver_preference) 
         self.astap_path = str(astap_path)
