@@ -288,10 +288,12 @@ class AstroImageAnalyzerGUI:
         self.progress_var = tk.DoubleVar(value=0.0) 
 
         # Options d'analyse (Booléens)
-        self.analyze_snr = tk.BooleanVar(value=True) 
-        self.detect_trails = tk.BooleanVar(value=(SATDET_AVAILABLE and SATDET_USES_SEARCHPATTERN))
-        self.sort_by_snr = tk.BooleanVar(value=True) 
-        self.include_subfolders = tk.BooleanVar(value=False) 
+        self.analyze_snr = tk.BooleanVar(value=True)
+        # By default, do not enable trail detection even if the capability is
+        # available. Users can activate it manually.
+        self.detect_trails = tk.BooleanVar(value=False)
+        self.sort_by_snr = tk.BooleanVar(value=True)
+        self.include_subfolders = tk.BooleanVar(value=False)
 
         # Paramètres Sélection SNR
         self.snr_selection_mode = tk.StringVar(value='percent') 
