@@ -3797,6 +3797,30 @@ class SeestarQueuedStacker:
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=False)
         except Exception as e: print(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
+    def _stack_winsorized_sigma(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05)):
+        from scipy.stats.mstats import winsorize
+        from astropy.stats import sigma_clipped_stats
+        arr = np.stack([im for im in images], axis=0).astype(np.float32)
+        arr_w = winsorize(arr, limits=winsor_limits, axis=0)
+        try:
+            _, med, std = sigma_clipped_stats(arr_w, sigma=3.0, axis=0, maxiters=5)
+        except TypeError:
+            _, med, std = sigma_clipped_stats(arr_w, sigma_lower=3.0, sigma_upper=3.0, axis=0, maxiters=5)
+        low = med - kappa * std
+        high = med + kappa * std
+        mask = (arr >= low) & (arr <= high)
+        arr_clip = np.where(mask, arr, np.nan)
+        if weights is not None:
+            w = np.asarray(weights)[:, None, None]
+            if arr.ndim == 4:
+                w = w[..., None]
+            sum_w = np.nansum(w * mask, axis=0)
+            sum_d = np.nansum(arr_clip * w, axis=0)
+            result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
+        else:
+            result = np.nanmean(arr_clip, axis=0)
+        return result.astype(np.float32)
+
 ################################################################################################################################################
 
 
@@ -3947,7 +3971,9 @@ class SeestarQueuedStacker:
         kappa_val_for_header = float(self.kappa) # Assurer float
 
         try:
-            if is_color_batch:
+            if stack_method_used_for_header == 'winsorized-sigma':
+                stacked_batch_data_np = self._stack_winsorized_sigma(valid_images_for_ccdproc, weight_scalars_for_ccdproc, kappa_val_for_header)
+            elif is_color_batch:
                 self.update_progress(f"   -> Combinaison couleur par canal avec ccdproc.combine ({num_valid_images_for_processing} images/canal)...")
                 stacked_channels_list = []
                 

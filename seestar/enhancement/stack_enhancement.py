@@ -42,7 +42,7 @@ class StackEnhancer:
         default_config = {
             'drizzle_scale': 2.0,       # Facteur d'échelle Drizzle
             'drizzle_pixfrac': 1.0,     # Fraction de pixel Drizzle
-            'normalization': 'skimage', # 'astropy' | 'skimage' | 'basic' | 'none' <-- Ajouté 'none'
+            'normalization': 'skimage', # 'astropy' | 'skimage' | 'basic' | 'linear_fit' | 'sky_mean' | 'none'
             'clahe_params': {'clip_limit': 2.0, 'tile_grid_size': (8, 8)},
             'edge_crop_percent': 0.05   # % à rogner sur chaque bord (0 = pas de rognage)
         }
@@ -54,7 +54,7 @@ class StackEnhancer:
                 if 'drizzle_scale' in config: self.config['drizzle_scale'] = float(config['drizzle_scale'])
                 if 'drizzle_pixfrac' in config: self.config['drizzle_pixfrac'] = float(config['drizzle_pixfrac'])
                 # Accepter 'none' pour la normalisation
-                if 'normalization' in config and config['normalization'] in ['astropy', 'skimage', 'basic', 'none']:
+                if 'normalization' in config and config['normalization'] in ['astropy', 'skimage', 'basic', 'linear_fit', 'sky_mean', 'none']:
                     self.config['normalization'] = str(config['normalization'])
                 elif 'normalization' in config:
                     print(f"Warning: Invalid normalization method '{config['normalization']}'. Using default.")
@@ -90,6 +90,12 @@ class StackEnhancer:
         # Ne pas logger si 'none'
         if method != 'none':
             print(f"... Normalisation des images (méthode: {method})...")
+        if method in ['linear_fit', 'sky_mean']:
+            if method == 'linear_fit':
+                return self._normalize_images_linear_fit(images, reference_index=0)
+            else:
+                return self._normalize_images_sky_mean(images, reference_index=0)
+
         normalized_images = []
         for i, img in enumerate(images):
             try:
@@ -128,6 +134,94 @@ class StackEnhancer:
         if method != 'none':
              print(f"... Normalisation terminée ({len(normalized_images)} images).")
         return normalized_images
+
+    def _normalize_images_linear_fit(self, images, reference_index=0, low_percentile=25.0, high_percentile=90.0):
+        normalized = []
+        if not images:
+            return []
+        if not (0 <= reference_index < len(images)) or images[reference_index] is None:
+            return [img.copy() if img is not None else None for img in images]
+
+        ref = images[reference_index].astype(np.float32, copy=False)
+        is_color = ref.ndim == 3 and ref.shape[-1] == 3
+        num_channels = ref.shape[-1] if is_color else 1
+        ref_stats = []
+        for c in range(num_channels):
+            ref_ch = ref[..., c] if is_color else ref
+            low = np.nanpercentile(ref_ch, low_percentile)
+            high = np.nanpercentile(ref_ch, high_percentile)
+            ref_stats.append((low, high))
+        for i, img in enumerate(images):
+            if img is None:
+                normalized.append(None)
+                continue
+            if i == reference_index:
+                normalized.append(ref.copy())
+                continue
+            cur = img.astype(np.float32, copy=False)
+            if cur.shape != ref.shape:
+                normalized.append(cur.copy())
+                continue
+            cur = cur.copy()
+            for c in range(num_channels):
+                ch = cur[..., c] if is_color else cur
+                low_s = np.nanpercentile(ch, low_percentile)
+                high_s = np.nanpercentile(ch, high_percentile)
+                ref_low, ref_high = ref_stats[c]
+                a = 1.0
+                b = 0.0
+                d_src = high_s - low_s
+                d_ref = ref_high - ref_low
+                if abs(d_src) > 1e-5:
+                    if abs(d_ref) > 1e-5:
+                        a = d_ref / d_src
+                        b = ref_low - a * low_s
+                    else:
+                        b = ref_low - low_s
+                else:
+                    if abs(d_ref) > 1e-5:
+                        a = 0.0
+                        b = ref_low
+                    else:
+                        b = ref_low - low_s
+                transformed = a * ch + b
+                if is_color:
+                    cur[..., c] = transformed
+                else:
+                    cur = transformed
+            normalized.append(cur)
+        return normalized
+
+    def _normalize_images_sky_mean(self, images, reference_index=0, sky_percentile=25.0):
+        if not images:
+            return []
+        if not (0 <= reference_index < len(images)) or images[reference_index] is None:
+            return [img.copy() if img is not None else None for img in images]
+
+        ref = images[reference_index].astype(np.float32, copy=True)
+        if ref.ndim == 3 and ref.shape[-1] == 3:
+            luminance_ref = 0.299 * ref[...,0] + 0.587 * ref[...,1] + 0.114 * ref[...,2]
+            ref_sky = np.nanpercentile(luminance_ref, sky_percentile)
+        else:
+            ref_sky = np.nanpercentile(ref, sky_percentile)
+        out = []
+        for i, img in enumerate(images):
+            if img is None:
+                out.append(None)
+                continue
+            cur = img.astype(np.float32, copy=True)
+            if i == reference_index:
+                out.append(cur)
+                continue
+            if cur.ndim == 3 and cur.shape[-1] == 3:
+                luminance = 0.299 * cur[...,0] + 0.587 * cur[...,1] + 0.114 * cur[...,2]
+                sky = np.nanpercentile(luminance, sky_percentile)
+            else:
+                sky = np.nanpercentile(cur, sky_percentile)
+            if np.isfinite(sky):
+                cur += (ref_sky - sky)
+            out.append(cur)
+        return out
 
     def _apply_clahe(self, img):
         """

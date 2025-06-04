@@ -244,6 +244,7 @@ L'application sauvegarde vos paramètres (chemins, paramètres de traitement, aj
 
 **(English)**
 Quality weighting aims to improve the final stack by giving more importance to the "best" images. It analyzes frames based on SNR (Signal-to-Noise Ratio) and Star Count/Sharpness. Use the GUI controls (Enable, Metrics, Exponents, Min Weight) to tune its behavior. See `quality weighting explained.txt` for details.
+Experimental weighting methods based on noise variance or FWHM are also available.
 
 **(Français)**
 La pondération par qualité vise à améliorer le stack final en donnant plus d'importance aux "meilleures" images. Elle analyse les images selon le SNR (Rapport Signal/Bruit) et le Nombre/Netteté des Étoiles. Utilisez les contrôles de l'interface (Activer, Métriques, Exposants, Poids Min) pour ajuster son comportement. Voir `quality weighting explained.txt` pour les détails.
