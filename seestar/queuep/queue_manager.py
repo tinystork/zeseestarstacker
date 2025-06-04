@@ -4042,13 +4042,10 @@ class SeestarQueuedStacker:
         
         print(f"     - Carte de poids/couverture 2D du lot calculée. Shape: {batch_coverage_map_2d.shape}, Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}]")
 
-        # --- 6. Création de l'en-tête d'information (comme avant, mais utilise num_valid_images_for_processing) ---
-        stack_info_header = fits.Header()
-        stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Valid images combined in this batch') # ASCII
-        final_method_str_for_hdr = stack_method_used_for_header # Peut être "kappa-sigma(K)"
-        if stack_method_used_for_header in ['kappa-sigma', 'winsorized-sigma']: final_method_str_for_hdr = f"kappa-sigma({kappa_val_for_header:.1f})"
-        stack_info_header['STACKMETH'] = (final_method_str_for_hdr, 'CCDProc method for this batch')
-        if 'kappa-sigma' in final_method_str_for_hdr: stack_info_header['KAPPA'] = (kappa_val_for_header, 'Kappa value for clipping')
+        # --- 6. Mise à jour de l'en-tête d'information ---
+        if stack_info_header is None:
+            stack_info_header = fits.Header()
+        stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Valid images combined in this batch')  # ASCII
         
         stack_info_header['WGHT_APP'] = (quality_weighting_was_effectively_applied, 'Quality weights (scalar) used by ccdproc_combine')
         if quality_weighting_was_effectively_applied:
