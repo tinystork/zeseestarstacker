@@ -33,7 +33,6 @@ from ccdproc import CCDData, combine as ccdproc_combine
 from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
-from astropy.wcs.utils import proj_plane_pixel_scales
 from reproject.mosaicking import reproject_and_coadd
 from reproject import reproject_interp 
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
@@ -2455,7 +2454,6 @@ class SeestarQueuedStacker:
                     if det_cd_reco > 1e-20: anchor_pix_scale_deg = np.sqrt(det_cd_reco)
                     else: raise ValueError("Det CD reconstruit trop faible")
                 else:
-                    from astropy.wcs.utils import proj_plane_pixel_scales
                     if anchor_wcs.is_celestial and hasattr(anchor_wcs,'array_shape') and anchor_wcs.array_shape and anchor_wcs.array_shape[0]>0:
                         scales_dpp = proj_plane_pixel_scales(anchor_wcs); anchor_pix_scale_deg = np.mean(np.abs(scales_dpp))
                     else: raise ValueError("Fallback échelle")
@@ -5133,7 +5131,6 @@ class SeestarQueuedStacker:
                          print(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
 
                     try:
-                        from astropy.wcs.utils import proj_plane_pixel_scales 
                         scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
                         avg_scale_deg_per_pix = np.mean(np.abs(scales_deg_per_pix))
                         
