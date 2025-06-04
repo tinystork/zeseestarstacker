@@ -12,6 +12,7 @@ import math
 import os
 from queue import Queue, Empty # Essentiel pour la classe
 import shutil
+import tempfile
 import threading              # Essentiel pour la classe (Lock)
 import time
 import traceback
