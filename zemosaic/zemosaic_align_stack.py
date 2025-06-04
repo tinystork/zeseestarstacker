@@ -63,10 +63,15 @@ except ImportError:
 ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = False
 make_radial_weight_map_func = None
 try:
-    from zemosaic_utils import make_radial_weight_map
+    from .zemosaic_utils import make_radial_weight_map
     make_radial_weight_map_func = make_radial_weight_map
     ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
-except ImportError as e_util_rad:
+except Exception:
+    try:
+        from zemosaic_utils import make_radial_weight_map
+        make_radial_weight_map_func = make_radial_weight_map
+        ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
+    except ImportError as e_util_rad:
         print(f"AVERT (zemosaic_align_stack): Radial weighting: Erreur import make_radial_weight_map: {e_util_rad}")
 
 

@@ -26,21 +26,29 @@ except ImportError as e_loc:
 
 # --- Configuration Import ---
 try:
-    import zemosaic_config 
+    from . import zemosaic_config
     ZEMOSAIC_CONFIG_AVAILABLE = True
-except ImportError as e_config:
-    ZEMOSAIC_CONFIG_AVAILABLE = False
-    zemosaic_config = None
-    print(f"AVERTISSEMENT (zemosaic_gui): 'zemosaic_config.py' non trouvé: {e_config}")
+except Exception:
+    try:
+        import zemosaic_config
+        ZEMOSAIC_CONFIG_AVAILABLE = True
+    except ImportError as e_config:
+        ZEMOSAIC_CONFIG_AVAILABLE = False
+        zemosaic_config = None
+        print(f"AVERTISSEMENT (zemosaic_gui): 'zemosaic_config.py' non trouvé: {e_config}")
 
 # --- Worker Import ---
 try:
-    from zemosaic_worker import run_hierarchical_mosaic
+    from .zemosaic_worker import run_hierarchical_mosaic
     ZEMOSAIC_WORKER_AVAILABLE = True
-except ImportError as e_worker:
-    ZEMOSAIC_WORKER_AVAILABLE = False
-    run_hierarchical_mosaic = None
-    print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
+except Exception:
+    try:
+        from zemosaic_worker import run_hierarchical_mosaic
+        ZEMOSAIC_WORKER_AVAILABLE = True
+    except ImportError as e_worker:
+        ZEMOSAIC_WORKER_AVAILABLE = False
+        run_hierarchical_mosaic = None
+        print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
 
 
 

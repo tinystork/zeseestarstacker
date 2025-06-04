@@ -87,7 +87,8 @@ pip install numpy astropy reproject opencv-python photutils scipy psutil
 
 2. 🚀 Launch ZeMosaic
 Once the dependencies are installed:
-python run_zemosaic.py
+python -m zemosaic.run_zemosaic
+Running it as a module ensures internal imports resolve correctly.
 
 The GUI will open. From there:
 
@@ -111,7 +112,8 @@ Click "Start Hierarchical Mosaic"
 🖥️ How to Run
 After installing Python and dependencies:
 
-python run_zemosaic.py
+python -m zemosaic.run_zemosaic
+Running it as a module ensures internal imports resolve correctly.
 Use the GUI to:
 
 Choose your input/output folders
