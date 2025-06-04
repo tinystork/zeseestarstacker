@@ -1202,12 +1202,14 @@ class SeestarStackerGUI:
                 print(f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}") # <-- AJOUTÉ DEBUG
 
                 # --- Traitement du fichier ---
-                file_content = None
+                folder_path = None
+                ref_path = None
                 try:
-                    # Lire le contenu (chemin du dossier)
                     with open(self.analyzer_command_file_path, 'r', encoding='utf-8') as f_cmd:
-                        file_content = f_cmd.read().strip()
-                    print(f"DEBUG (GUI): Contenu fichier commande lu: '{file_content}'") # <-- AJOUTÉ DEBUG
+                        lines = [ln.strip() for ln in f_cmd.readlines()]
+                    folder_path = lines[0] if lines else None
+                    ref_path = lines[1] if len(lines) > 1 else None
+                    print(f"DEBUG (GUI): Contenu fichier commande lu: '{lines}'")
 
                     # Supprimer le fichier IMMÉDIATEMENT après lecture réussie
                     try:
@@ -1228,8 +1230,8 @@ class SeestarStackerGUI:
                     return # Sortir pour cette itération
 
                 # --- Agir sur le contenu lu ---
-                if file_content and os.path.isdir(file_content):
-                    analyzed_folder_path = os.path.abspath(file_content)
+                if folder_path and os.path.isdir(folder_path):
+                    analyzed_folder_path = os.path.abspath(folder_path)
                     print(f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}") # <-- AJOUTÉ INFO
 
                     # Mettre à jour le champ d'entrée
@@ -1249,6 +1251,11 @@ class SeestarStackerGUI:
                         self.output_path.set(default_output)
                         self.settings.output_folder = default_output
 
+                    if ref_path:
+                        print(f"DEBUG (GUI): Référence recommandée reçue: {ref_path}")
+                        self.reference_image_path.set(ref_path)
+                        self.settings.reference_image_path = ref_path
+
                     # Démarrer le stacking
                     print("DEBUG (GUI): Appel de self.start_processing() suite à commande analyseur...") # <-- AJOUTÉ DEBUG
                     self.start_processing()
@@ -1257,7 +1264,7 @@ class SeestarStackerGUI:
                     return # Sortir de la méthode
 
                 else:
-                    print(f"AVERTISSEMENT (GUI): Contenu fichier commande invalide ('{file_content}') ou n'est pas un dossier. Fichier supprimé.")
+                    print(f"AVERTISSEMENT (GUI): Contenu fichier commande invalide ('{lines}') ou n'est pas un dossier. Fichier supprimé.")
                     # Replanifier la vérification car le contenu était invalide
                     if hasattr(self.root, 'after'): # Vérifier si root existe toujours
                         self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file) # Replanifier dans 1s

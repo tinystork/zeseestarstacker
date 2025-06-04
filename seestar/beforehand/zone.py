@@ -62,6 +62,7 @@ translations = {
         'return_button_text': "Retour",
         'export_button': "Exporter Liste Recommandée (.txt)",
         'Fermer': "Fermer",
+        'use_best_reference_button': 'Envoyer Référence',
         'Exporter Toutes Conservées': "Exporter Toutes Conservées",
 
         # --- Textes acstools status ---
@@ -171,6 +172,7 @@ translations = {
         'quit_button': "Quit", 'return_button_text': "Return", 'export_button': "Export Recommended List (.txt)",
         'Fermer': "Close", 'Exporter Toutes Conservées': "Export All Kept",
 
+        'use_best_reference_button': 'Send Reference',
         # --- acstools status text ---
         'acstools_ok': "(acstools available)", 'acstools_missing': "(acstools not found or incompatible)", 'acstools_sig_error': "(detsat function incompatible)",
 

@@ -124,6 +124,7 @@ FR_TRANSLATIONS = {
     'apply_low_wht_mask_label': "Appliquer Masque Bas WHT (Anti-Bandes)",
     'low_wht_percentile_label': "Percentile Bas WHT :",
     'low_wht_soften_px_label': "Adoucir Masque (px) :",
+    'use_best_reference_button': 'Utiliser la meilleure référence',
     
     
     # --- Section Format de Sortie FITS ---

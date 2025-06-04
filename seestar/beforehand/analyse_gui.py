@@ -310,10 +310,11 @@ class AstroImageAnalyzerGUI:
         self.reject_action = tk.StringVar(value='move') 
 
         # Variables d'état internes
-        self.analysis_results = [] 
-        self.analysis_running = False 
-        self.analysis_completed_successfully = False 
-        self.tooltips = {} 
+        self.analysis_results = []
+        self.analysis_running = False
+        self.analysis_completed_successfully = False
+        self.best_reference_path = None
+        self.tooltips = {}
         self.timer_running = False 
         self.timer_start_time = None 
         self.timer_job_id = None 
@@ -1188,7 +1189,10 @@ class AstroImageAnalyzerGUI:
             print("DEBUG AG: Appel du callback du script principal (_on_analyzer_closed)...")
             # --------------------
             try:
-                self.main_app_callback() # <--- Appel callback
+                if self.best_reference_path is not None:
+                    self.main_app_callback(reference_path=self.best_reference_path)
+                else:
+                    self.main_app_callback()
                 # --- Ajout Debug ---
                 print("DEBUG AG: Callback principal exécuté.")
                 # --------------------
@@ -1495,6 +1499,16 @@ class AstroImageAnalyzerGUI:
         self.widgets_refs['analyse_stack_button'] = self.analyze_stack_button # Référencer pour traduction
         # <--- FIN NOUVEAU --->
 
+        self.send_reference_button = ttk.Button(
+            button_frame,
+            text='',
+            command=self.send_reference_to_main,
+            width=18,
+            state=tk.DISABLED
+        )
+        self.send_reference_button.pack(side=tk.LEFT, padx=5)
+        self.widgets_refs['send_reference_button'] = self.send_reference_button
+
         self.visualize_button = ttk.Button(button_frame, text="", command=self.visualize_results, width=18)
         self.visualize_button.pack(side=tk.LEFT, padx=5); self.visualize_button.config(state=tk.DISABLED) # Désactivé au début
         self.widgets_refs['visualize_button'] = self.visualize_button # Référencer
@@ -1599,6 +1613,7 @@ class AstroImageAnalyzerGUI:
         try:
             if self.analyze_button: self.analyze_button.config(text=self._("analyse_button"))
             if self.analyze_stack_button: self.analyze_stack_button.config(text=self._("analyse_stack_button"))
+            if self.send_reference_button: self.send_reference_button.config(text=self._("use_best_reference_button"))
             if self.visualize_button: self.visualize_button.config(text=self._("visualize_button"))
             if self.open_log_button: self.open_log_button.config(text=self._("open_log_button"))
             # Texte du bouton Quitter/Retour dépend si un callback est fourni
@@ -1775,6 +1790,9 @@ class AstroImageAnalyzerGUI:
         
         self.analysis_results = [] # Toujours vider les résultats en mémoire
         self.analysis_completed_successfully = False # Réinitialiser l'état de succès de la *dernière* analyse
+        self.best_reference_path = None
+        if hasattr(self, 'send_reference_button') and self.send_reference_button:
+            self._set_widget_state(self.send_reference_button, tk.DISABLED)
                                                  # car on prépare une NOUVELLE analyse.
 
         # Mettre à jour l'état des boutons log et visu basé sur le fichier log actuel
@@ -2013,6 +2031,8 @@ class AstroImageAnalyzerGUI:
         self.update_progress(100.0 if success else 0.0)
         self.analysis_results = results if results else []
         self.analysis_completed_successfully = success
+        self.best_reference_path = self._get_best_reference()
+        self._set_widget_state(self.send_reference_button, tk.NORMAL if self.best_reference_path else tk.DISABLED)
         final_status_key = ""
         processed_count = 0 ; action_count = 0 ; errors_count = 0
 
@@ -2075,10 +2095,13 @@ class AstroImageAnalyzerGUI:
         if should_write_command and folder_to_stack:
             if self.command_file_path:
                 try:
-                    # ... (écriture fichier commande) ...
-                    self.root.after(100, self.return_or_quit) 
+                    with open(self.command_file_path, 'w', encoding='utf-8') as f:
+                        f.write(folder_to_stack + "\n")
+                        if self.best_reference_path:
+                            f.write(self.best_reference_path + "\n")
+                    self.root.after(100, self.return_or_quit)
                 except Exception as e_write_cmd:
-                    # ... (gestion erreur écriture) ...
+                    print(f"Error writing command file: {e_write_cmd}")
                     self._set_widget_state(self.analyze_button, tk.NORMAL)
                     self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
                     self._set_widget_state(self.return_button, tk.NORMAL)
@@ -2098,9 +2121,34 @@ class AstroImageAnalyzerGUI:
                 if hasattr(self, 'apply_snr_button') and self.apply_snr_button:
                      self._set_widget_state(self.apply_snr_button, tk.DISABLED)
         
-        print("DEBUG (analyse_gui): Appel final à gc.collect()") 
+        print("DEBUG (analyse_gui): Appel final à gc.collect()")
         gc.collect()
         print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
+
+    def _get_best_reference(self):
+        valid = [r for r in self.analysis_results
+                 if r.get('status') == 'ok' and r.get('action') == 'kept'
+                    and r.get('rejected_reason') is None
+                    and 'snr' in r and np.isfinite(r['snr'])]
+        return max(valid, key=lambda r: r['snr'])['path'] if valid else None
+
+    def send_reference_to_main(self):
+        """Envoie le chemin de référence calculé au GUI principal."""
+        if not self.best_reference_path:
+            return
+        if self.command_file_path:
+            try:
+                with open(self.command_file_path, 'w', encoding='utf-8') as f:
+                    folder = self.input_dir.get() or ''
+                    f.write(folder + "\n")
+                    f.write(self.best_reference_path + "\n")
+            except Exception as e:
+                print(f"Error writing reference to command file: {e}")
+        elif callable(self.main_app_callback):
+            try:
+                self.main_app_callback(reference_path=self.best_reference_path)
+            except TypeError:
+                self.main_app_callback()
 
     def apply_pending_snr_actions_gui(self):
         """
