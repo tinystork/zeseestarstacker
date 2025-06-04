@@ -321,18 +321,19 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
         if apply_stretch:
             print(f"  DEBUG save_preview_image: apply_stretch=True. Applying stretch. enhanced_stretch={enhanced_stretch}")
             finite_data_for_stretch = display_data[np.isfinite(display_data)]
-            
-            if finite_data_for_stretch.size < 20: 
+            finite_nonzero = finite_data_for_stretch[finite_data_for_stretch > 0.001]
+
+            if finite_nonzero.size < 20:
                 print(f"  Warning save_preview_image: Not enough finite pixels for stretch. Using min/max for {output_path}")
                 bp, wp = np.nanmin(display_data), np.nanmax(display_data)
             elif enhanced_stretch:
                 print(f"    Applying ENHANCED stretch for {output_path}")
-                bp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 0.1) # Ignorer les pixels très noirs pour bp
-                wp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 99.5)
-            else: 
+                bp = np.percentile(finite_nonzero, 0.1) # Ignorer les pixels très noirs pour bp
+                wp = np.percentile(finite_nonzero, 99.5)
+            else:
                 print(f"    Applying STANDARD stretch for {output_path}")
-                bp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 1.0)
-                wp = np.percentile(finite_data_for_stretch[finite_data_for_stretch > 0.001], 99.0)
+                bp = np.percentile(finite_nonzero, 1.0)
+                wp = np.percentile(finite_nonzero, 99.0)
 
             if wp <= bp + 1e-7: 
                 min_val_stretch, max_val_stretch = np.nanmin(display_data), np.nanmax(display_data)
