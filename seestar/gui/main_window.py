@@ -1134,7 +1134,9 @@ class SeestarStackerGUI:
                 sys.executable,
                 analyzer_script_path,
                 "--input-dir", input_folder,
-                "--command-file", self.analyzer_command_file_path # <-- AJOUTÉ: Passer le chemin fichier commande
+                "--command-file", self.analyzer_command_file_path,
+                "--lang", self.settings.language,
+                "--lock-lang",
             ]
             print(f"DEBUG (GUI): Commande lancement analyseur: {' '.join(command)}") # <-- AJOUTÉ DEBUG
 

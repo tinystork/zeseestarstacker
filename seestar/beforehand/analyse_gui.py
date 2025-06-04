@@ -218,15 +218,18 @@ class ToolTip:
 # === Classe Principale de l'Interface Graphique ===
 class AstroImageAnalyzerGUI:
     """Interface graphique pour l'analyseur d'images astronomiques."""
-    def __init__(self, root, command_file_path=None, main_app_callback=None): # <-- AJOUTÉ command_file_path
+    def __init__(self, root, command_file_path=None, main_app_callback=None,
+                 initial_lang='fr', lock_language=False):
         """
         Initialise l'interface graphique.
 
         Args:
             root (tk.Tk or tk.Toplevel): La fenêtre racine ou Toplevel pour cette interface.
-            command_file_path (str, optional): Chemin vers le fichier à utiliser pour
-                                               la communication avec le GUI principal.
+            command_file_path (str, optional): Chemin vers le fichier à utiliser
+                                               pour la communication avec le GUI principal.
             main_app_callback (callable, optional): Fonction à appeler lors de la fermeture (Retour).
+            initial_lang (str): Langue initiale de l'interface.
+            lock_language (bool): Si vrai, la sélection de langue sera désactivée.
         """
         self.root = root
         self.main_app_callback = main_app_callback # Callback pour retourner au script appelant
@@ -272,8 +275,9 @@ class AstroImageAnalyzerGUI:
         # --- FIN AJOUT ---
 
         # Variables Tkinter pour lier les widgets aux données
-        self.current_lang = tk.StringVar(value='fr') 
-        self.current_lang.trace_add('write', self.change_language) 
+        self.current_lang = tk.StringVar(value=initial_lang)
+        self.lock_language = lock_language
+        self.current_lang.trace_add('write', self.change_language)
 
         self.input_dir = tk.StringVar() 
         self.output_log = tk.StringVar() 
@@ -1326,7 +1330,14 @@ class AstroImageAnalyzerGUI:
         lang_label.pack(side=tk.LEFT, padx=(0, 5))
         self.widgets_refs['lang_label'] = lang_label
         lang_options = sorted([lang for lang in translations.keys()]) # Options de langue disponibles
-        self.lang_combobox = ttk.Combobox(lang_frame, textvariable=self.current_lang, values=lang_options, state="readonly", width=5)
+        combo_state = "disabled" if self.lock_language else "readonly"
+        self.lang_combobox = ttk.Combobox(
+            lang_frame,
+            textvariable=self.current_lang,
+            values=lang_options,
+            state=combo_state,
+            width=5,
+        )
         self.lang_combobox.pack(side=tk.LEFT)
 
         # --- Cadre Analyse SNR ---
@@ -2420,6 +2431,17 @@ if __name__ == "__main__":
         metavar="CMD_FILE_PATH",
         help="Internal: Path to the command file for communicating with the main stacker GUI."
     )
+    parser.add_argument(
+        "--lang",
+        type=str,
+        default="fr",
+        help="Interface language (e.g. 'en' or 'fr')."
+    )
+    parser.add_argument(
+        "--lock-lang",
+        action="store_true",
+        help="Disable language selection in the GUI."
+    )
     args = parser.parse_args()
     print(f"DEBUG (analyse_gui main): Arguments parsés: {args}")
 
@@ -2439,7 +2461,13 @@ if __name__ == "__main__":
         root.deiconify()
         
         # Instancier l'application GUI
-        app = AstroImageAnalyzerGUI(root, command_file_path=args.command_file, main_app_callback=None)
+        app = AstroImageAnalyzerGUI(
+            root,
+            command_file_path=args.command_file,
+            main_app_callback=None,
+            initial_lang=args.lang,
+            lock_language=args.lock_lang,
+        )
 
         # --- Pré-remplissage dossier d'entrée ---
         if args.input_dir:
