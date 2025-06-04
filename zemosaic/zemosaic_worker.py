@@ -61,12 +61,41 @@ zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
 zemosaic_astrometry, ZEMOSAIC_ASTROMETRY_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 
-try: import zemosaic_utils; ZEMOSAIC_UTILS_AVAILABLE = True; logger.info("Module 'zemosaic_utils' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
-try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.info("Module 'zemosaic_astrometry' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
-try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
+try:
+    from . import zemosaic_utils as zemosaic_utils
+    ZEMOSAIC_UTILS_AVAILABLE = True
+    logger.info("Module 'zemosaic_utils' importé (relatif).")
+except Exception:
+    try:
+        import zemosaic_utils as zemosaic_utils
+        ZEMOSAIC_UTILS_AVAILABLE = True
+        logger.info("Module 'zemosaic_utils' importé (absolu).")
+    except ImportError as e:
+        logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
+
+try:
+    from . import zemosaic_astrometry as zemosaic_astrometry
+    ZEMOSAIC_ASTROMETRY_AVAILABLE = True
+    logger.info("Module 'zemosaic_astrometry' importé (relatif).")
+except Exception:
+    try:
+        import zemosaic_astrometry as zemosaic_astrometry
+        ZEMOSAIC_ASTROMETRY_AVAILABLE = True
+        logger.info("Module 'zemosaic_astrometry' importé (absolu).")
+    except ImportError as e:
+        logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
+
+try:
+    from . import zemosaic_align_stack as zemosaic_align_stack
+    ZEMOSAIC_ALIGN_STACK_AVAILABLE = True
+    logger.info("Module 'zemosaic_align_stack' importé (relatif).")
+except Exception:
+    try:
+        import zemosaic_align_stack as zemosaic_align_stack
+        ZEMOSAIC_ALIGN_STACK_AVAILABLE = True
+        logger.info("Module 'zemosaic_align_stack' importé (absolu).")
+    except ImportError as e:
+        logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 
 
 

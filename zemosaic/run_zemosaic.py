@@ -12,8 +12,8 @@ print(f"Chemin de travail actuel (CWD): {sys.path[0]}") # sys.path[0] est géné
 
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
-    from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
-    print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI ---")
+    from .zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+    print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI (relatif) ---")
 
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
     if ZEMOSAIC_WORKER_AVAILABLE:
@@ -32,25 +32,30 @@ try:
             print(f"ERREUR (run_zemosaic): zemosaic_worker importé mais n'a pas d'attribut __file__ (très étrange).")
 
 except ImportError as e:
-    print(f"ERREUR CRITIQUE (run_zemosaic): Impossible d'importer ZeMosaicGUI depuis zemosaic_gui.py: {e}")
-    print("  Veuillez vérifier que zemosaic_gui.py est présent et que toutes ses dépendances Python sont installées.")
-    
     try:
-        root_err = tk.Tk()
-        root_err.withdraw()
-        messagebox.showerror("Erreur de Lancement Fatale",
-                             f"Impossible d'importer le module GUI principal (zemosaic_gui.py).\n"
-                             f"Erreur: {e}\n\n"
-                             "Veuillez vérifier les logs console pour plus de détails.")
-        root_err.destroy()
-    except Exception as tk_err:
-        print(f"  Erreur Tkinter lors de la tentative d'affichage de la messagebox: {tk_err}")
-    
-    ZEMOSAIC_WORKER_AVAILABLE = False 
-    ZeMosaicGUI = None
+        from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+        print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI (absolu) ---")
+    except ImportError as e2:
+        print(f"ERREUR CRITIQUE (run_zemosaic): Impossible d'importer ZeMosaicGUI depuis zemosaic_gui.py: {e2}")
+        print("  Veuillez vérifier que zemosaic_gui.py est présent et que toutes ses dépendances Python sont installées.")
+
+        try:
+            root_err = tk.Tk()
+            root_err.withdraw()
+            messagebox.showerror("Erreur de Lancement Fatale",
+                                 f"Impossible d'importer le module GUI principal (zemosaic_gui.py).\n"
+                                 f"Erreur: {e2}\n\n"
+                                 "Veuillez vérifier les logs console pour plus de détails.")
+            root_err.destroy()
+        except Exception as tk_err:
+            print(f"  Erreur Tkinter lors de la tentative d'affichage de la messagebox: {tk_err}")
+
+        ZEMOSAIC_WORKER_AVAILABLE = False
+        ZeMosaicGUI = None
 
 print("--- run_zemosaic.py: FIN DES IMPORTS ---")
-print(f"DEBUG (run_zemosaic): sys.path complet: \n{'\n'.join(sys.path)}")
+import os
+print(f"DEBUG (run_zemosaic): sys.path complet: {os.linesep}{os.linesep.join(sys.path)}")
 print("-" * 50)
 
 
