@@ -78,6 +78,8 @@ class SettingsManager:
                                                tk.StringVar(value=default_values_from_code.get('stack_winsor_limits', '0.05,0.05'))).get()
             self.stack_final_combine = getattr(gui_instance, 'stack_final_combine_var',
                                                tk.StringVar(value=default_values_from_code.get('stack_final_combine', 'mean'))).get()
+            self.stack_method = getattr(gui_instance, 'stack_method_var',
+                                        tk.StringVar(value=default_values_from_code.get('stack_method', 'kappa_sigma'))).get()
             self.batch_size = getattr(gui_instance, 'batch_size', tk.IntVar(value=default_values_from_code.get('batch_size', 0))).get()
             self.correct_hot_pixels = getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar(value=default_values_from_code.get('correct_hot_pixels', True))).get()
             self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=default_values_from_code.get('hot_pixel_threshold', 3.0))).get()
@@ -223,6 +225,7 @@ class SettingsManager:
             getattr(gui_instance, 'stacking_kappa_high_var', tk.DoubleVar()).set(self.stack_kappa_high)
             getattr(gui_instance, 'stacking_winsor_limits_str_var', tk.StringVar()).set(self.stack_winsor_limits)
             getattr(gui_instance, 'stack_final_combine_var', tk.StringVar()).set(self.stack_final_combine)
+            getattr(gui_instance, 'stack_method_var', tk.StringVar()).set(self.stack_method)
             getattr(gui_instance, 'batch_size', tk.IntVar()).set(self.batch_size)
             getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar()).set(self.correct_hot_pixels)
             getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar()).set(self.hot_pixel_threshold)
@@ -389,6 +392,7 @@ class SettingsManager:
         defaults_dict['stack_kappa_high'] = 3.0
         defaults_dict['stack_winsor_limits'] = "0.05,0.05"
         defaults_dict['stack_final_combine'] = "mean"
+        defaults_dict['stack_method'] = "kappa_sigma"
         defaults_dict['correct_hot_pixels'] = True
         defaults_dict['hot_pixel_threshold'] = 3.0 
         defaults_dict['neighborhood_size'] = 5 
@@ -547,6 +551,28 @@ class SettingsManager:
                 messages.append(f"Voisinage Px Chauds ('{original}') invalide, réinitialisé à {self.neighborhood_size}")
 
             # --- Validation des Options de Stacking avancées ---
+            valid_methods = ['mean', 'median', 'kappa_sigma', 'winsorized_sigma_clip', 'linear_fit_clip']
+            self.stack_method = str(getattr(self, 'stack_method', defaults_fallback['stack_method']))
+            if self.stack_method not in valid_methods:
+                messages.append(f"Méthode de stack invalide ('{self.stack_method}'), réinitialisée à '{defaults_fallback['stack_method']}'")
+                self.stack_method = defaults_fallback['stack_method']
+
+            if self.stack_method == 'mean':
+                self.stack_final_combine = 'mean'
+                self.stack_reject_algo = 'none'
+            elif self.stack_method == 'median':
+                self.stack_final_combine = 'median'
+                self.stack_reject_algo = 'none'
+            elif self.stack_method == 'kappa_sigma':
+                self.stack_final_combine = 'mean'
+                self.stack_reject_algo = 'kappa_sigma'
+            elif self.stack_method == 'winsorized_sigma_clip':
+                self.stack_final_combine = 'mean'
+                self.stack_reject_algo = 'winsorized_sigma_clip'
+            elif self.stack_method == 'linear_fit_clip':
+                self.stack_final_combine = 'mean'
+                self.stack_reject_algo = 'linear_fit_clip'
+
             valid_norm_methods = ['none', 'linear_fit', 'sky_mean']
             self.stack_norm_method = str(getattr(self, 'stack_norm_method', defaults_fallback['stack_norm_method']))
             if self.stack_norm_method not in valid_norm_methods:
@@ -912,6 +938,7 @@ class SettingsManager:
             'stack_kappa_high': float(self.stack_kappa_high),
             'stack_winsor_limits': str(self.stack_winsor_limits),
             'stack_final_combine': str(self.stack_final_combine),
+            'stack_method': str(self.stack_method),
             'batch_size': int(self.batch_size),
             'correct_hot_pixels': bool(self.correct_hot_pixels),
             'hot_pixel_threshold': float(self.hot_pixel_threshold),

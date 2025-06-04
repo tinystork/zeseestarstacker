@@ -71,6 +71,12 @@ FR_TRANSLATIONS = {
     'stacking_final_combine_label': "Combinaison Finale :",
     'combine_method_mean': "Moyenne",
     'combine_method_median': "Médiane",
+    'stack_method_label': "Méthode :",
+    'method_mean': "Moyenne",
+    'method_median': "Médiane",
+    'method_kappa_sigma': "Kappa-Sigma Clip",
+    'method_winsorized_sigma_clip': "Winsorized Sigma Clip",
+    'method_linear_fit_clip': "Linear Fit Clip",
     
     ### Traductions SCNR Final ###
     'apply_final_scnr_label': "Appliquer SCNR Final (Vert)",

@@ -332,6 +332,8 @@ class SeestarStackerGUI:
         self.reference_image_path = tk.StringVar()
         self.stacking_mode = tk.StringVar(value="kappa-sigma")
         self.kappa = tk.DoubleVar(value=2.5)
+        # New unified stacking method variable
+        self.stack_method_var = tk.StringVar(value="kappa_sigma")
         # --- New stacking option variables ---
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
@@ -791,7 +793,17 @@ class SeestarStackerGUI:
 
         method_kappa_scnr_frame = ttk.Frame(self.options_frame); method_kappa_scnr_frame.pack(fill=tk.X, padx=0, pady=(5, 0))
         mk_line1_frame = ttk.Frame(method_kappa_scnr_frame); mk_line1_frame.pack(fill=tk.X, padx=5)
-        self.stacking_method_label = ttk.Label(mk_line1_frame, text="Method:"); self.stacking_method_label.grid(row=0, column=0, sticky=tk.W, padx=(0,2)); self.stacking_combo = ttk.Combobox(mk_line1_frame, textvariable=self.stacking_mode, values=("mean", "median", "kappa-sigma", "winsorized-sigma"), width=14, state="readonly"); self.stacking_combo.grid(row=0, column=1, sticky=tk.W, padx=(0,8)); self.stacking_combo.bind("<<ComboboxSelected>>", self._toggle_kappa_visibility); self.kappa_label = ttk.Label(mk_line1_frame, text="Kappa:"); self.kappa_label.grid(row=0, column=2, sticky=tk.W, padx=(0,2)); self.kappa_spinbox = ttk.Spinbox(mk_line1_frame, from_=1.0, to=5.0, increment=0.1, textvariable=self.kappa, width=5); self.kappa_spinbox.grid(row=0, column=3, sticky=tk.W, padx=(0,0))
+        self.stack_method_label = ttk.Label(mk_line1_frame, text=self.tr("stack_method_label", default="Method:"))
+        self.stack_method_label.grid(row=0, column=0, sticky=tk.W, padx=(0,2))
+        self.method_combo = ttk.Combobox(
+            mk_line1_frame,
+            textvariable=self.stack_method_var,
+            values=("mean", "median", "kappa_sigma", "winsorized_sigma_clip", "linear_fit_clip"),
+            width=22,
+            state="readonly"
+        )
+        self.method_combo.grid(row=0, column=1, sticky=tk.W, padx=(0,8))
+        self.method_combo.bind("<<ComboboxSelected>>", self._on_method_combo_change)
         scnr_options_subframe_in_stacking = ttk.Frame(method_kappa_scnr_frame); scnr_options_subframe_in_stacking.pack(fill=tk.X, padx=5, pady=(5,2))
         self.apply_final_scnr_check = ttk.Checkbutton(scnr_options_subframe_in_stacking, text="Apply Final SCNR (Green)", variable=self.apply_final_scnr_var, command=self._update_final_scnr_options_state); self.apply_final_scnr_check.pack(anchor=tk.W, pady=(0,2))
         self.scnr_params_frame = ttk.Frame(scnr_options_subframe_in_stacking); self.scnr_params_frame.pack(fill=tk.X, padx=(20, 0))
@@ -964,9 +976,9 @@ class SeestarStackerGUI:
         self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
         print("DEBUG (GUI create_layout): Panneau droit rempli.")
 
-        self._store_widget_references() 
-        self._toggle_kappa_visibility() 
-        self._update_final_scnr_options_state() 
+        self._store_widget_references()
+        self._on_method_combo_change()
+        self._update_final_scnr_options_state()
         self._update_photutils_bn_options_state() 
         self._update_feathering_options_state() 
         self._update_low_wht_mask_options_state() 
@@ -1096,41 +1108,37 @@ class SeestarStackerGUI:
 ##############################################################################################################################
     def _toggle_kappa_visibility(self, event=None):
         """Affiche ou cache les widgets Kappa en fonction de la méthode de stacking, en utilisant grid."""
-        selected_algo = None
-        if hasattr(self, 'stack_reject_algo_var'):
+        method = None
+        if hasattr(self, 'stack_method_var'):
             try:
-                selected_algo = self.stack_reject_algo_var.get()
+                method = self.stack_method_var.get()
             except tk.TclError:
-                selected_algo = None
+                method = None
 
         show_kappa = False
         show_winsor = False
-        if selected_algo:
-            if selected_algo == "kappa_sigma":
+        if method:
+            if method == "kappa_sigma":
                 show_kappa = True
-            elif selected_algo == "winsorized_sigma_clip":
+            elif method == "winsorized_sigma_clip":
                 show_kappa = True
                 show_winsor = True
             else:
                 show_kappa = False
         else:
-            mode = self.stacking_mode.get()
-            if mode == "kappa-sigma":
+            selected_algo = None
+            if hasattr(self, 'stack_reject_algo_var'):
+                try:
+                    selected_algo = self.stack_reject_algo_var.get()
+                except tk.TclError:
+                    selected_algo = None
+            if selected_algo == "kappa_sigma":
                 show_kappa = True
-            elif mode == "winsorized-sigma":
+            elif selected_algo == "winsorized_sigma_clip":
                 show_kappa = True
                 show_winsor = True
         
-        # Old single kappa widgets
-        if hasattr(self, 'kappa_label') and hasattr(self, 'kappa_spinbox'):
-            if show_kappa and not (hasattr(self, 'kappa_low_spinbox')):
-                self.kappa_label.grid(row=0, column=2, sticky=tk.W, padx=(0,2))
-                self.kappa_spinbox.grid(row=0, column=3, sticky=tk.W, padx=(0,5))
-            else:
-                self.kappa_label.grid_remove()
-                self.kappa_spinbox.grid_remove()
-
-        # New kappa parameter widgets using pack
+        # Kappa parameter widgets using pack
         if hasattr(self, 'kappa_low_spinbox') and hasattr(self, 'kappa_high_spinbox'):
             if show_kappa:
                 if not self.kappa_low_spinbox.winfo_ismapped():
@@ -1156,6 +1164,26 @@ class SeestarStackerGUI:
                 self.winsor_limits_entry.pack_forget()
                 if hasattr(self, 'winsor_note_label'):
                     self.winsor_note_label.pack_forget()
+
+    def _on_method_combo_change(self, event=None):
+        """Update internal vars when method selection changes."""
+        method = self.stack_method_var.get()
+        if method == "mean":
+            self.stack_final_combine_var.set("mean")
+            self.stack_reject_algo_var.set("none")
+        elif method == "median":
+            self.stack_final_combine_var.set("median")
+            self.stack_reject_algo_var.set("none")
+        elif method == "kappa_sigma":
+            self.stack_final_combine_var.set("mean")
+            self.stack_reject_algo_var.set("kappa_sigma")
+        elif method == "winsorized_sigma_clip":
+            self.stack_final_combine_var.set("mean")
+            self.stack_reject_algo_var.set("winsorized_sigma_clip")
+        elif method == "linear_fit_clip":
+            self.stack_final_combine_var.set("mean")
+            self.stack_reject_algo_var.set("linear_fit_clip")
+        self._toggle_kappa_visibility()
 
 
 
@@ -1606,8 +1634,8 @@ class SeestarStackerGUI:
         # --- Labels (étiquettes simples) & Checkbuttons (pour leur texte) ---
         labels_and_checks_keys = { 
             "input_folder": 'input_label', "output_folder": 'output_label',
-            "reference_image": 'reference_label', "stacking_method": 'stacking_method_label',
-            "kappa_value": 'kappa_label', "batch_size": 'batch_size_label',
+            "reference_image": 'reference_label', "stack_method_label": 'stack_method_label',
+            "batch_size": 'batch_size_label',
             "drizzle_scale_label": 'drizzle_scale_label', "drizzle_mode_label": 'drizzle_mode_label',
             "drizzle_kernel_label": 'drizzle_kernel_label', "drizzle_pixfrac_label": 'drizzle_pixfrac_label',
             "drizzle_wht_threshold_label": 'drizzle_wht_label',
@@ -2857,8 +2885,6 @@ class SeestarStackerGUI:
         if hasattr(self, 'browse_output_button'): processing_widgets.append(self.browse_output_button)
         if hasattr(self, 'ref_entry'): processing_widgets.append(self.ref_entry)
         if hasattr(self, 'browse_ref_button'): processing_widgets.append(self.browse_ref_button)
-        if hasattr(self, 'stacking_combo'): processing_widgets.append(self.stacking_combo)
-        if hasattr(self, 'kappa_spinbox'): processing_widgets.append(self.kappa_spinbox)
         if hasattr(self, 'stack_norm_combo'): processing_widgets.append(self.stack_norm_combo)
         if hasattr(self, 'stack_weight_combo'): processing_widgets.append(self.stack_weight_combo)
         if hasattr(self, 'stack_reject_combo'): processing_widgets.append(self.stack_reject_combo)

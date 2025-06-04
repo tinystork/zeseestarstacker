@@ -72,6 +72,12 @@ EN_TRANSLATIONS = {
     'stacking_final_combine_label': "Final Combine:",
     'combine_method_mean': "Mean",
     'combine_method_median': "Median",
+    'stack_method_label': "Method:",
+    'method_mean': "Mean",
+    'method_median': "Median",
+    'method_kappa_sigma': "Kappa-Sigma Clip",
+    'method_winsorized_sigma_clip': "Winsorized Sigma Clip",
+    'method_linear_fit_clip': "Linear Fit Clip",
 
 
     # SCNR Translations ###
