@@ -64,6 +64,20 @@ class SettingsManager:
             self.reference_image_path = getattr(gui_instance, 'reference_image_path', tk.StringVar(value=default_values_from_code.get('reference_image_path', ''))).get()
             self.stacking_mode = getattr(gui_instance, 'stacking_mode', tk.StringVar(value=default_values_from_code.get('stacking_mode', 'kappa-sigma'))).get()
             self.kappa = getattr(gui_instance, 'kappa', tk.DoubleVar(value=default_values_from_code.get('kappa', 2.5))).get()
+            self.stack_norm_method = getattr(gui_instance, 'stack_norm_method_var',
+                                             tk.StringVar(value=default_values_from_code.get('stack_norm_method', 'none'))).get()
+            self.stack_weight_method = getattr(gui_instance, 'stack_weight_method_var',
+                                               tk.StringVar(value=default_values_from_code.get('stack_weight_method', 'none'))).get()
+            self.stack_reject_algo = getattr(gui_instance, 'stack_reject_algo_var',
+                                            tk.StringVar(value=default_values_from_code.get('stack_reject_algo', 'kappa_sigma'))).get()
+            self.stack_kappa_low = getattr(gui_instance, 'stacking_kappa_low_var',
+                                          tk.DoubleVar(value=default_values_from_code.get('stack_kappa_low', 3.0))).get()
+            self.stack_kappa_high = getattr(gui_instance, 'stacking_kappa_high_var',
+                                           tk.DoubleVar(value=default_values_from_code.get('stack_kappa_high', 3.0))).get()
+            self.stack_winsor_limits = getattr(gui_instance, 'stacking_winsor_limits_str_var',
+                                               tk.StringVar(value=default_values_from_code.get('stack_winsor_limits', '0.05,0.05'))).get()
+            self.stack_final_combine = getattr(gui_instance, 'stack_final_combine_var',
+                                               tk.StringVar(value=default_values_from_code.get('stack_final_combine', 'mean'))).get()
             self.batch_size = getattr(gui_instance, 'batch_size', tk.IntVar(value=default_values_from_code.get('batch_size', 0))).get()
             self.correct_hot_pixels = getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar(value=default_values_from_code.get('correct_hot_pixels', True))).get()
             self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=default_values_from_code.get('hot_pixel_threshold', 3.0))).get()
@@ -202,6 +216,13 @@ class SettingsManager:
             getattr(gui_instance, 'reference_image_path', tk.StringVar()).set(self.reference_image_path or "")
             getattr(gui_instance, 'stacking_mode', tk.StringVar()).set(self.stacking_mode)
             getattr(gui_instance, 'kappa', tk.DoubleVar()).set(self.kappa)
+            getattr(gui_instance, 'stack_norm_method_var', tk.StringVar()).set(self.stack_norm_method)
+            getattr(gui_instance, 'stack_weight_method_var', tk.StringVar()).set(self.stack_weight_method)
+            getattr(gui_instance, 'stack_reject_algo_var', tk.StringVar()).set(self.stack_reject_algo)
+            getattr(gui_instance, 'stacking_kappa_low_var', tk.DoubleVar()).set(self.stack_kappa_low)
+            getattr(gui_instance, 'stacking_kappa_high_var', tk.DoubleVar()).set(self.stack_kappa_high)
+            getattr(gui_instance, 'stacking_winsor_limits_str_var', tk.StringVar()).set(self.stack_winsor_limits)
+            getattr(gui_instance, 'stack_final_combine_var', tk.StringVar()).set(self.stack_final_combine)
             getattr(gui_instance, 'batch_size', tk.IntVar()).set(self.batch_size)
             getattr(gui_instance, 'correct_hot_pixels', tk.BooleanVar()).set(self.correct_hot_pixels)
             getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar()).set(self.hot_pixel_threshold)
@@ -359,9 +380,16 @@ class SettingsManager:
         defaults_dict['reference_image_path'] = ""
         defaults_dict['bayer_pattern'] = "GRBG" 
         defaults_dict['batch_size'] = 0 
-        defaults_dict['stacking_mode'] = "kappa-sigma" 
-        defaults_dict['kappa'] = 2.5 
-        defaults_dict['correct_hot_pixels'] = True 
+        defaults_dict['stacking_mode'] = "kappa-sigma"
+        defaults_dict['kappa'] = 2.5
+        defaults_dict['stack_norm_method'] = "none"
+        defaults_dict['stack_weight_method'] = "none"
+        defaults_dict['stack_reject_algo'] = "kappa_sigma"
+        defaults_dict['stack_kappa_low'] = 3.0
+        defaults_dict['stack_kappa_high'] = 3.0
+        defaults_dict['stack_winsor_limits'] = "0.05,0.05"
+        defaults_dict['stack_final_combine'] = "mean"
+        defaults_dict['correct_hot_pixels'] = True
         defaults_dict['hot_pixel_threshold'] = 3.0 
         defaults_dict['neighborhood_size'] = 5 
         defaults_dict['cleanup_temp'] = True 
@@ -517,6 +545,68 @@ class SettingsManager:
             except (ValueError, TypeError):
                 original = self.neighborhood_size; self.neighborhood_size = defaults_fallback['neighborhood_size']
                 messages.append(f"Voisinage Px Chauds ('{original}') invalide, réinitialisé à {self.neighborhood_size}")
+
+            # --- Validation des Options de Stacking avancées ---
+            valid_norm_methods = ['none', 'linear_fit', 'sky_mean']
+            self.stack_norm_method = str(getattr(self, 'stack_norm_method', defaults_fallback['stack_norm_method']))
+            if self.stack_norm_method not in valid_norm_methods:
+                messages.append(f"Méthode de normalisation invalide ('{self.stack_norm_method}'), réinitialisée à '{defaults_fallback['stack_norm_method']}'")
+                self.stack_norm_method = defaults_fallback['stack_norm_method']
+
+            valid_weight_methods = ['none', 'noise_variance', 'noise_fwhm']
+            self.stack_weight_method = str(getattr(self, 'stack_weight_method', defaults_fallback['stack_weight_method']))
+            if self.stack_weight_method not in valid_weight_methods:
+                messages.append(f"Méthode de pondération invalide ('{self.stack_weight_method}'), réinitialisée à '{defaults_fallback['stack_weight_method']}'")
+                self.stack_weight_method = defaults_fallback['stack_weight_method']
+
+            valid_reject_algos = ['none', 'kappa_sigma', 'winsorized_sigma_clip', 'linear_fit_clip']
+            self.stack_reject_algo = str(getattr(self, 'stack_reject_algo', defaults_fallback['stack_reject_algo']))
+            if self.stack_reject_algo not in valid_reject_algos:
+                messages.append(f"Algorithme de rejet invalide ('{self.stack_reject_algo}'), réinitialisé à '{defaults_fallback['stack_reject_algo']}'")
+                self.stack_reject_algo = defaults_fallback['stack_reject_algo']
+
+            try:
+                self.stack_kappa_low = float(self.stack_kappa_low)
+                if not (0.1 <= self.stack_kappa_low <= 10.0):
+                    original = self.stack_kappa_low
+                    self.stack_kappa_low = np.clip(self.stack_kappa_low, 0.1, 10.0)
+                    messages.append(f"Kappa Low ({original}) hors limites [0.1, 10.0], ajusté à {self.stack_kappa_low}")
+            except (ValueError, TypeError):
+                original = self.stack_kappa_low
+                self.stack_kappa_low = defaults_fallback['stack_kappa_low']
+                messages.append(f"Kappa Low ('{original}') invalide, réinitialisé à {self.stack_kappa_low}")
+
+            try:
+                self.stack_kappa_high = float(self.stack_kappa_high)
+                if not (0.1 <= self.stack_kappa_high <= 10.0):
+                    original = self.stack_kappa_high
+                    self.stack_kappa_high = np.clip(self.stack_kappa_high, 0.1, 10.0)
+                    messages.append(f"Kappa High ({original}) hors limites [0.1, 10.0], ajusté à {self.stack_kappa_high}")
+            except (ValueError, TypeError):
+                original = self.stack_kappa_high
+                self.stack_kappa_high = defaults_fallback['stack_kappa_high']
+                messages.append(f"Kappa High ('{original}') invalide, réinitialisé à {self.stack_kappa_high}")
+
+            winsor_str = str(getattr(self, 'stack_winsor_limits', defaults_fallback['stack_winsor_limits']))
+            parsed = None
+            try:
+                parts = [p.strip() for p in winsor_str.split(',')]
+                if len(parts) != 2:
+                    raise ValueError('format')
+                low_val = float(parts[0]); high_val = float(parts[1])
+                if not (0.0 <= low_val < 0.5 and 0.0 <= high_val < 0.5 and (low_val + high_val) < 1.0):
+                    raise ValueError('range')
+                parsed = f"{low_val},{high_val}"
+            except Exception:
+                messages.append(f"Limites Winsor invalides ('{winsor_str}'), réinitialisées à {defaults_fallback['stack_winsor_limits']}")
+                parsed = defaults_fallback['stack_winsor_limits']
+            self.stack_winsor_limits = parsed
+
+            valid_combine = ['mean', 'median']
+            self.stack_final_combine = str(getattr(self, 'stack_final_combine', defaults_fallback['stack_final_combine']))
+            if self.stack_final_combine not in valid_combine:
+                messages.append(f"Méthode de combinaison finale invalide ('{self.stack_final_combine}'), réinitialisée à '{defaults_fallback['stack_final_combine']}'")
+                self.stack_final_combine = defaults_fallback['stack_final_combine']
 
 
             # --- Quality Weighting Validation ---
@@ -815,6 +905,13 @@ class SettingsManager:
             'bayer_pattern': str(self.bayer_pattern),
             'stacking_mode': str(self.stacking_mode),
             'kappa': float(self.kappa),
+            'stack_norm_method': str(self.stack_norm_method),
+            'stack_weight_method': str(self.stack_weight_method),
+            'stack_reject_algo': str(self.stack_reject_algo),
+            'stack_kappa_low': float(self.stack_kappa_low),
+            'stack_kappa_high': float(self.stack_kappa_high),
+            'stack_winsor_limits': str(self.stack_winsor_limits),
+            'stack_final_combine': str(self.stack_final_combine),
             'batch_size': int(self.batch_size),
             'correct_hot_pixels': bool(self.correct_hot_pixels),
             'hot_pixel_threshold': float(self.hot_pixel_threshold),
