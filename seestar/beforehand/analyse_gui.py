@@ -566,7 +566,7 @@ class AstroImageAnalyzerGUI:
         if hasattr(self, 'visualize_button') and self.visualize_button:
             self._set_widget_state(self.visualize_button, tk.NORMAL if can_visualize else tk.DISABLED)
 
-# --- DANS analyse_gui.py ---
+
 
     def _launch_analysis(self, stack_after: bool):
         """Méthode interne pour valider et lancer le thread d'analyse."""
