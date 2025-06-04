@@ -1,0 +1,31 @@
+zemosaic/
+│
+├── run_zemosaic.py               # Script principal de lancement
+├── zemosaic.spec                 # Fichier PyInstaller pour générer l'exe
+├── requirements.txt              # Dépendances
+├── README.md                     # Documentation
+│
+├── icon/                         # Icônes de l'application
+│   └── zemosaic.ico              # Icône principale .ico
+│
+├── locales/                      # Fichiers de traduction
+│   ├── en.json
+│   └── fr.json
+│
+├── compile/                      # Outils de compilation
+│   └── build_zemosaic.bat        # Script batch de compilation
+│
+├── zemosaic_gui.py               # Interface Tkinter
+├── zemosaic_worker.py            # Thread principal de traitement
+├── zemosaic_align_stack.py       # Fonctions d'alignement
+├── zemosaic_astrometry.py        # Appel ASTAP
+├── zemosaic_localization.py      # Gestion des langues
+├── zemosaic_utils.py             # Fonctions utilitaires
+├── zemosaic_config.py            # Configuration de l'interface
+│
+├── test.py                       # Script de test
+│
+├── .venv/                        # (IGNORÉ) Environnement virtuel Python
+├── build/                        # (IGNORÉ) Temporaire PyInstaller
+├── dist/                         # (IGNORÉ) Contient le .exe généré
+└── __pycache__/                  # (IGNORÉ) Fichiers compilés Python
