@@ -3970,46 +3970,87 @@ class SeestarQueuedStacker:
         except Exception:
             pass
 
-        tile_path, _ = create_master_tile(
-            seestar_stack_group_info=seestar_stack_group_info,
-            tile_id=current_batch_num,
-            output_temp_dir=temp_cache_dir,
-            stack_norm_method=getattr(settings, 'stack_norm_method', 'none'),
-            stack_weight_method=getattr(settings, 'stack_weight_method', 'none'),
-            stack_reject_algo=getattr(settings, 'stack_reject_algo', 'kappa_sigma'),
-            stack_kappa_low=float(getattr(settings, 'stack_kappa_low', 3.0)),
-            stack_kappa_high=float(getattr(settings, 'stack_kappa_high', 3.0)),
-            parsed_winsor_limits=winsor_tuple,
-            stack_final_combine=getattr(settings, 'stack_final_combine', 'mean'),
-            apply_radial_weight=False,
-            radial_feather_fraction=0.8,
-            radial_shape_power=2.0,
-            min_radial_weight_floor=0.0,
-            astap_exe_path_global='',
-            astap_data_dir_global='',
-            astap_search_radius_global=0.0,
-            astap_downsample_global=0,
-            astap_sensitivity_global=0,
-            astap_timeout_seconds_global=0,
-            progress_callback=self.update_progress
-        )
+        all_have_wcs = all(info.get('wcs') is not None for info in seestar_stack_group_info)
 
         stacked_batch_data_np = None
         stack_info_header = None
-        if tile_path and os.path.exists(tile_path):
-            try:
-                with fits.open(tile_path, memmap=False) as hdul:
-                    data_cxhxw = hdul[0].data.astype(np.float32)
-                    stack_info_header = hdul[0].header
-                if data_cxhxw.ndim == 3:
-                    stacked_batch_data_np = np.moveaxis(data_cxhxw, 0, -1)
-                else:
-                    stacked_batch_data_np = data_cxhxw
-            except Exception:
-                self.update_progress(f"❌ Erreur lecture FITS empilé pour le lot {current_batch_num}.")
-                traceback.print_exc(limit=1)
+
+        if all_have_wcs:
+            tile_path, _ = create_master_tile(
+                seestar_stack_group_info=seestar_stack_group_info,
+                tile_id=current_batch_num,
+                output_temp_dir=temp_cache_dir,
+                stack_norm_method=getattr(settings, 'stack_norm_method', 'none'),
+                stack_weight_method=getattr(settings, 'stack_weight_method', 'none'),
+                stack_reject_algo=getattr(settings, 'stack_reject_algo', 'kappa_sigma'),
+                stack_kappa_low=float(getattr(settings, 'stack_kappa_low', 3.0)),
+                stack_kappa_high=float(getattr(settings, 'stack_kappa_high', 3.0)),
+                parsed_winsor_limits=winsor_tuple,
+                stack_final_combine=getattr(settings, 'stack_final_combine', 'mean'),
+                apply_radial_weight=False,
+                radial_feather_fraction=0.8,
+                radial_shape_power=2.0,
+                min_radial_weight_floor=0.0,
+                astap_exe_path_global='',
+                astap_data_dir_global='',
+                astap_search_radius_global=0.0,
+                astap_downsample_global=0,
+                astap_sensitivity_global=0,
+                astap_timeout_seconds_global=0,
+                progress_callback=self.update_progress
+            )
+
+            if tile_path and os.path.exists(tile_path):
+                try:
+                    with fits.open(tile_path, memmap=False) as hdul:
+                        data_cxhxw = hdul[0].data.astype(np.float32)
+                        stack_info_header = hdul[0].header
+                    if data_cxhxw.ndim == 3:
+                        stacked_batch_data_np = np.moveaxis(data_cxhxw, 0, -1)
+                    else:
+                        stacked_batch_data_np = data_cxhxw
+                except Exception:
+                    self.update_progress(f"❌ Erreur lecture FITS empilé pour le lot {current_batch_num}.")
+                    traceback.print_exc(limit=1)
+            else:
+                self.update_progress(f"❌ create_master_tile a échoué pour le lot {current_batch_num}.")
         else:
-            self.update_progress(f"❌ create_master_tile a échoué pour le lot {current_batch_num}.")
+            self.update_progress(f"⚠️ WCS manquant pour certaines images du lot {current_batch_num}. Stacking classique utilisé.")
+            try:
+                weights_for_stack = weight_scalars_for_ccdproc
+                if getattr(settings, 'stack_reject_algo', 'none') == 'winsorized_sigma_clip':
+                    if is_color_batch:
+                        channels = []
+                        for c in range(3):
+                            imgs = [img[..., c] for img in valid_images_for_ccdproc]
+                            channels.append(
+                                self._stack_winsorized_sigma(imgs, weights_for_stack,
+                                                             kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
+                                                             winsor_limits=winsor_tuple))
+                        stacked_batch_data_np = np.stack(channels, axis=-1)
+                    else:
+                        stacked_batch_data_np = self._stack_winsorized_sigma(valid_images_for_ccdproc,
+                                                                            weights_for_stack,
+                                                                            kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
+                                                                            winsor_limits=winsor_tuple)
+                else:
+                    method_arr = 'average'
+                    if is_color_batch:
+                        channels = []
+                        for c in range(3):
+                            imgs = [img[..., c] for img in valid_images_for_ccdproc]
+                            combined = ccdproc_combine(imgs, method=method_arr, sigma_clip=False,
+                                                       weights=weights_for_stack)
+                            channels.append(np.array(combined, dtype=np.float32))
+                        stacked_batch_data_np = np.stack(channels, axis=-1)
+                    else:
+                        combined = ccdproc_combine(valid_images_for_ccdproc, method=method_arr, sigma_clip=False,
+                                                   weights=weights_for_stack)
+                        stacked_batch_data_np = np.array(combined, dtype=np.float32)
+                stack_info_header = fits.Header()
+            except Exception:
+                self.update_progress(f"❌ Erreur stacking classique pour le lot {current_batch_num}.")
+                traceback.print_exc(limit=1)
 
         shutil.rmtree(temp_cache_dir, ignore_errors=True)
 
