@@ -3631,7 +3631,7 @@ class SeestarQueuedStacker:
         dans les accumulateurs memmap globaux SUM et WHT.
 
         Args:
-            stacked_batch_data_np (np.ndarray): Image MOYENNE du lot (HWC ou HW, float32, 0-1).
+            stacked_batch_data_np (np.ndarray): Image MOYENNE du lot (HWC ou HW, float32, même échelle que les entrées).
             stack_info_header (fits.Header): En-tête info du lot (contient NIMAGES physiques).
             batch_coverage_map_2d (np.ndarray): Carte de poids/couverture 2D (HW, float32)
                                                 pour ce lot spécifique.
@@ -3703,7 +3703,7 @@ class SeestarQueuedStacker:
                 return
 
             # Préparer les données pour l'accumulation (types et shapes)
-            # stacked_batch_data_np est déjà float32, 0-1
+            # stacked_batch_data_np est déjà en float32
             # batch_coverage_map_2d est déjà float32
             
             # Calculer le signal total à ajouter à SUM: ImageMoyenneDuLot * SaCarteDeCouverturePondérée
@@ -3840,7 +3840,7 @@ class SeestarQueuedStacker:
         Args:
             batch_items_with_masks (list): Liste de tuples:
                 [(aligned_data, header, scores, wcs_obj, valid_pixel_mask_2d), ...].
-                - aligned_data: HWC ou HW, float32, 0-1.
+                - aligned_data: HWC ou HW, float32, dans une échelle cohérente (ADU ou 0-1).
                 - valid_pixel_mask_2d: HW bool, True où aligned_data a des pixels valides.
             current_batch_num (int): Numéro du lot pour les logs.
             total_batches_est (int): Estimation totale des lots pour les logs.
@@ -4016,14 +4016,7 @@ class SeestarQueuedStacker:
         if stacked_batch_data_np is None:
             return None, None, None
 
-        min_val_batch, max_val_batch = np.nanmin(stacked_batch_data_np), np.nanmax(stacked_batch_data_np)
-        if np.isfinite(min_val_batch) and np.isfinite(max_val_batch) and max_val_batch > min_val_batch:
-            stacked_batch_data_np = (stacked_batch_data_np - min_val_batch) / (max_val_batch - min_val_batch)
-        elif np.isfinite(max_val_batch) and max_val_batch == min_val_batch:
-            stacked_batch_data_np = np.full_like(stacked_batch_data_np, 0.5)
-        else:
-            stacked_batch_data_np = np.zeros_like(stacked_batch_data_np)
-        stacked_batch_data_np = np.clip(stacked_batch_data_np, 0.0, 1.0).astype(np.float32)
+        stacked_batch_data_np = stacked_batch_data_np.astype(np.float32)
 
 
         # --- 5. NOUVEAU : Calculer batch_coverage_map_2d (HxW, float32) ---
