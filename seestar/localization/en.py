@@ -358,5 +358,6 @@ EN_TRANSLATIONS = {
     'low_wht_soften_px_label': "Soften Mask (px):",
 
 
+    'use_best_reference_button': 'Use Recommended Reference',
 }
 # --- END OF FILE seestar/localization/en.py ---
