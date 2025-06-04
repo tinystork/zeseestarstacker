@@ -3831,7 +3831,9 @@ class SeestarQueuedStacker:
 
     def _stack_batch(self, batch_items_with_masks, current_batch_num=0, total_batches_est=0):
         """
-        Combine un lot d'images alignées en utilisant ccdproc.combine.
+        Combine un lot d'images alignées en utilisant ZeMosaic.
+        La mosaïque finale est produite par la fonction create_master_tile
+        de ZeMosaic plutôt que par ccdproc.combine.
         Calcule et applique les poids qualité scalaires si activé.
         NOUVEAU: Calcule et retourne une carte de couverture/poids 2D pour le lot.
 
