@@ -124,7 +124,7 @@ def apply_denoise(image, strength=1):
                     # Note: CUDA version might have slightly different parameter names/needs
                     # Adjust templateWindowSize and searchWindowSize if needed
                     dn = cv2.cuda.createFastNlMeansDenoising()
-                    gpu_denoised = dn.compute(gpu_frame, h=h_param) # Result is also a GpuMat
+                    gpu_denoised = dn.apply(gpu_frame, h_param)  # GPU processing
 
                     # Download result back from GPU memory to CPU memory
                     denoised_uint8 = gpu_denoised.download()
@@ -157,7 +157,7 @@ def apply_denoise(image, strength=1):
                      # Create color denoising object and apply
                      # Note: CUDA version might handle hColor differently or automatically
                      dn = cv2.cuda.createFastNlMeansDenoisingColored()
-                     gpu_denoised = dn.compute(gpu_frame, h_luminance=h_param, h_color=h_param)
+                     gpu_denoised = dn.apply(gpu_frame, h_param, h_param)
 
                      denoised_bgr_uint8 = gpu_denoised.download()
                      # print("DEBUG: CUDA color denoising successful.")
