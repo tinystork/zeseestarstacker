@@ -11,6 +11,7 @@ import traceback
 import gc
 import warnings # Ajouté pour warnings
 import cv2
+from typing import TYPE_CHECKING
 
 # --- Imports Astropy ---
 from astropy.wcs import WCS, FITSFixedWarning
@@ -47,19 +48,10 @@ except ImportError:
     _OO_DRIZZLE_AVAILABLE = False
     Drizzle = None # Factice si non disponible
 
-# Depuis le gestionnaire de queue (pour type hinting et accès méthodes/attributs)
-# Utiliser un import conditionnel ou juste le type hinting si possible
-# Tenter d'importer SeestarQueuedStacker pour type hinting et accès aux attributs
-# Cela peut créer une dépendance circulaire si mosaic_processor est importé trop tôt par queue_manager.
-# Une meilleure solution serait de passer les attributs nécessaires explicitement.
-# Pour l'instant, on essaie l'import.
-try:
+# Depuis le gestionnaire de queue (pour type hinting)
+# Utiliser TYPE_CHECKING pour éviter tout import circulaire au runtime
+if TYPE_CHECKING:
     from ..queuep.queue_manager import SeestarQueuedStacker
-    print("DEBUG [MosaicProcessor Import]: SeestarQueuedStacker importé (pour type hint).")
-except ImportError:
-    SeestarQueuedStacker = None # Type hint factice
-    # Cette erreur est logguée par queue_manager s'il ne peut pas importer ceci.
-    # print("ERREUR [MosaicProcessor Import]: SeestarQueuedStacker manquant.")
 
 # --- Constantes ---
 PANEL_GROUPING_THRESHOLD_DEG = 0.3 # Seuil pour regrouper les panneaux
