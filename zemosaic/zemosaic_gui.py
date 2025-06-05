@@ -84,8 +84,7 @@ class ZeMosaicGUI:
         else:
             # Dictionnaire de configuration de secours si zemosaic_config.py n'est pas trouvé
             # ou si le chargement échoue.
-            self.config = { 
-                "astap_executable_path": "", "astap_data_directory_path": "",
+            self.config = {
                 "astap_default_search_radius": 3.0, "astap_default_downsample": 2,
                 "astap_default_sensitivity": 100, "language": "en",
                 "stacking_normalize_method": "none",
@@ -960,8 +959,8 @@ class ZeMosaicGUI:
         # 1. RÉCUPÉRER TOUTES les valeurs des variables Tkinter
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
-        astap_exe = self.config.get("astap_executable_path", "")
-        astap_data = self.config.get("astap_data_directory_path", "")
+        astap_exe = ""
+        astap_data = ""
         
         try:
             astap_radius_val = self.config.get("astap_default_search_radius", 3.0)
