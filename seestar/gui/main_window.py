@@ -3368,8 +3368,22 @@ class SeestarStackerGUI:
         # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try: self.root.after_idle(self.update_additional_folders_display)
-            except tk.TclError: pass 
-            return 
+            except tk.TclError: pass
+            return
+
+        eta_prefix = "ETA_UPDATE:"
+        if isinstance(message, str) and message.startswith(eta_prefix):
+            eta_str = message.split(":", 1)[1]
+            if hasattr(self, "progress_manager") and self.progress_manager:
+                pm = self.progress_manager
+                if hasattr(pm, "set_remaining") and callable(pm.set_remaining):
+                    pm.set_remaining(eta_str)
+                elif hasattr(pm, "remaining_time_var"):
+                    try:
+                        pm.remaining_time_var.set(eta_str)
+                    except Exception:
+                        pass
+            return
 
         actual_message_to_log = message
         log_level_for_pm = None # Sera "WARN" pour notre message spécial, sinon None (par défaut)

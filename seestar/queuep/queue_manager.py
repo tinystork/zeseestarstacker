@@ -690,6 +690,18 @@ class SeestarQueuedStacker:
             if progress is not None: print(f"[{int(progress)}%] {message}")
             else: print(message)
 
+    def _send_eta_update(self):
+        """Compute and send remaining time estimation to the GUI."""
+        if not hasattr(self, "_eta_start_time") or self._eta_start_time is None:
+            return
+        if self.total_batches_estimated > 0 and self.stacked_batches_count > 0:
+            elapsed = time.monotonic() - self._eta_start_time
+            eta_sec = (elapsed / self.stacked_batches_count) * max(self.total_batches_estimated - self.stacked_batches_count, 0)
+            hours, rem = divmod(int(eta_sec), 3600)
+            minutes, seconds = divmod(rem, 60)
+            eta_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            self.update_progress(f"ETA_UPDATE:{eta_str}", None)
+
 ########################################################################################################################################################
     
 
@@ -1390,6 +1402,7 @@ class SeestarQueuedStacker:
         self.processing_active = True
         self.processing_error = None
         # start_time_session = time.monotonic() # Décommenter si besoin
+        self._eta_start_time = time.monotonic()
 
         reference_image_data_for_global_alignment = None
         reference_header_for_global_alignment = None
@@ -1837,6 +1850,7 @@ class SeestarQueuedStacker:
                         # --- Gestion des lots pour Stacking Classique ou Drizzle Standard ---
                         if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
                             self.stacked_batches_count += 1
+                            self._send_eta_update()
                             print(f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd.")
                             if self.drizzle_active_session: # Drizzle Standard Final
                                 print(f"    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final).")
@@ -1980,8 +1994,9 @@ class SeestarQueuedStacker:
                 print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif self.drizzle_active_session:' (NON-MOSAÏQUE) ***")
                 print(f"DEBUG QM [_worker/Finalize DrizzleStd]: Mode Drizzle Standard: {self.drizzle_mode}")
 
-                if current_batch_items_with_masks_for_stack_batch: 
+                if current_batch_items_with_masks_for_stack_batch:
                     self.stacked_batches_count += 1
+                    self._send_eta_update()
                     num_in_partial_batch = len(current_batch_items_with_masks_for_stack_batch)
                     progress_info_partial_log = f"(Lot PARTIEL {self.stacked_batches_count}/{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})"
                     
@@ -2033,8 +2048,9 @@ class SeestarQueuedStacker:
             elif not self.is_mosaic_run and not self.drizzle_active_session: 
                 # ... (logique inchangée pour stacking classique) ...
                 print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif not self.is_mosaic_run and not self.drizzle_active_session:' (CLASSIQUE) ***")
-                if current_batch_items_with_masks_for_stack_batch: 
+                if current_batch_items_with_masks_for_stack_batch:
                     self.stacked_batches_count += 1
+                    self._send_eta_update()
                     self.update_progress(f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)...")
                     self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch, 
