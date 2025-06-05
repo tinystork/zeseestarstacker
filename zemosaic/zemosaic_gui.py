@@ -107,6 +107,7 @@ class ZeMosaicGUI:
             'astap_data_dir': os.environ.get('ZEMOSAIC_ASTAP_DATA_DIR'),
             'local_ansvr_path': os.environ.get('ZEMOSAIC_LOCAL_ANSVR_PATH'),
             'api_key': os.environ.get('ZEMOSAIC_ASTROMETRY_API_KEY'),
+            'local_solver_preference': os.environ.get('ZEMOSAIC_LOCAL_SOLVER_PREFERENCE'),
             'astap_search_radius': None,
         }
         if os.environ.get('ZEMOSAIC_ASTAP_SEARCH_RADIUS'):
@@ -1047,7 +1048,7 @@ class ZeMosaicGUI:
         # ... (autres logs d'info) ...
 
         solver_settings = {
-            'local_solver_preference': 'astap',
+            'local_solver_preference': self.env_solver_settings.get('local_solver_preference', 'none'),
             'astap_path': astap_exe,
             'astap_data_dir': astap_data,
             'astap_search_radius': astap_radius_val,
