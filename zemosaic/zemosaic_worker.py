@@ -58,7 +58,6 @@ except Exception as e_reproject_other_final: logger.critical(f"Erreur import 're
 
 # --- Local Project Module Imports ---
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
-zemosaic_astrometry, ZEMOSAIC_ASTROMETRY_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 AstrometrySolver, ASTROMETRY_SOLVER_AVAILABLE = None, False
 
@@ -74,17 +73,6 @@ except Exception:
     except ImportError as e:
         logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
 
-try:
-    from . import zemosaic_astrometry as zemosaic_astrometry
-    ZEMOSAIC_ASTROMETRY_AVAILABLE = True
-    logger.info("Module 'zemosaic_astrometry' importé (relatif).")
-except Exception:
-    try:
-        import zemosaic_astrometry as zemosaic_astrometry
-        ZEMOSAIC_ASTROMETRY_AVAILABLE = True
-        logger.info("Module 'zemosaic_astrometry' importé (absolu).")
-    except ImportError as e:
-        logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
 
 try:
     from . import zemosaic_align_stack as zemosaic_align_stack
@@ -438,36 +426,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
-    if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
-        _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
-        wcs_brute = zemosaic_astrometry.solve_with_astap(
-            image_fits_path=file_path,
-            original_fits_header=header_orig,
-            astap_exe_path=solver_settings.get('astap_path'),
-            astap_data_dir=solver_settings.get('astap_data_dir'),
-            search_radius_deg=solver_settings.get('astap_search_radius'),
-            downsample_factor=solver_settings.get('astap_downsample'),
-            sensitivity=solver_settings.get('astap_sensitivity'),
-            timeout_sec=solver_settings.get('astap_timeout_sec', 180),
-            update_original_header_in_place=True,
-            progress_callback=progress_callback
-
-        )
-        try:
-            wcs_brute = solver_instance.solve(
-                file_path,
-                header_orig,
-                settings=solver_settings,
-                update_header_with_solution=True
-            )
-        except Exception as e_solve:
-            _pcb_local("getwcs_warn_solver_failed", lvl="WARN", filename=filename, error=str(e_solve))
-            wcs_brute = None
-        if wcs_brute:
-            _pcb_local("getwcs_info_solver_solved", lvl="INFO_DETAIL", filename=filename)
-        else:
-            _pcb_local("getwcs_warn_solver_failed", lvl="WARN", filename=filename)
-    elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
+    if wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
         _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
         # Action de déplacement sera gérée par le check suivant
 
@@ -1214,7 +1173,6 @@ def run_hierarchical_mosaic(
     if not (ASTROPY_AVAILABLE and WCS and SkyCoord and Angle and fits and u): error_messages_deps.append("Astropy")
     if not (REPROJECT_AVAILABLE and find_optimal_celestial_wcs and reproject_and_coadd and reproject_interp): error_messages_deps.append("Reproject")
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils): error_messages_deps.append("zemosaic_utils")
-    if not (ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry): error_messages_deps.append("zemosaic_astrometry")
     if not (ZEMOSAIC_ALIGN_STACK_AVAILABLE and zemosaic_align_stack): error_messages_deps.append("zemosaic_align_stack")
     try: import psutil
     except ImportError: error_messages_deps.append("psutil")
