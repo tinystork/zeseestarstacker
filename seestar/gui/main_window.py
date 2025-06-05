@@ -14,11 +14,11 @@ import numpy as np
 from astropy.io import fits
 import traceback
 import math
-import platform # NOUVEL import
-import subprocess # NOUVEL import
+import platform  # NOUVEL import
+import subprocess  # NOUVEL import
+import gc  #
 from pathlib import Path
-import gc #
-from PIL import Image, ImageTk 
+from PIL import Image, ImageTk
 from .ui_utils import ToolTip
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys # Pour sys.executable
@@ -3188,8 +3188,10 @@ class SeestarStackerGUI:
         """Launch the ZeMosaic application in a separate process."""
         self.logger.info("run_zemosaic called. Launching run_zemosaic.py...")
         try:
+            # Ensure imports inside run_zemosaic work even if the GUI was
+            # started from another directory by using the project root as cwd
             project_root = Path(__file__).resolve().parents[2]
-            # Use the module form to ensure imports inside run_zemosaic work
+
             subprocess.Popen(
                 [sys.executable, "-m", "zemosaic.run_zemosaic"],
                 cwd=str(project_root),
