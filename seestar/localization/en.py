@@ -77,6 +77,11 @@ EN_TRANSLATIONS = {
     'method_kappa_sigma': "Kappa-Sigma Clip",
     'method_winsorized_sigma_clip': "Winsorized Sigma Clip",
     'method_linear_fit_clip': "Linear Fit Clip",
+    'kappa_sigma': 'Kappa-Sigma Clip',
+    'winsorized_sigma_clip': 'Winsorized Sigma Clip',
+    'linear_fit_clip': 'Linear Fit Clip',
+    'linear_fit': 'Linear Fit (Sky)',
+    'noise_variance': 'Noise Variance (1/σ²)',
 
 
     # SCNR Translations ###
