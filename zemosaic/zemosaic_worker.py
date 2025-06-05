@@ -1163,6 +1163,7 @@ def run_hierarchical_mosaic(
     PROGRESS_WEIGHT_PHASE5_ASSEMBLY = 15; PROGRESS_WEIGHT_PHASE6_SAVE = 8
     PROGRESS_WEIGHT_PHASE7_CLEANUP = 2
     current_global_progress = 0
+    smoothed_eta = None
     
     error_messages_deps = []
     if not (ASTROPY_AVAILABLE and WCS and SkyCoord and Angle and fits and u): error_messages_deps.append("Astropy")
@@ -1306,7 +1307,12 @@ def run_hierarchical_mosaic(
                 current_progress_in_run_percent = base_progress_phase1 + (files_processed_count_ph1 / max(1, num_total_raw_files)) * PROGRESS_WEIGHT_PHASE1_RAW_SCAN
                 time_per_percent_point_global = (time.monotonic() - start_time_total_run) / max(1, current_progress_in_run_percent) if current_progress_in_run_percent > 0 else (time.monotonic() - start_time_total_run)
                 total_eta_sec = eta_phase1_sec + (100 - current_progress_in_run_percent) * time_per_percent_point_global
-                update_gui_eta(total_eta_sec)
+                smoothed_eta = (
+                    total_eta_sec
+                    if smoothed_eta is None
+                    else 0.3 * total_eta_sec + 0.7 * smoothed_eta
+                )
+                update_gui_eta(smoothed_eta)
 
     # Construire la liste finale des informations des fichiers traités avec succès
     all_raw_files_processed_info = [
@@ -1407,7 +1413,12 @@ def run_hierarchical_mosaic(
             current_progress_in_run_percent_ph3 = base_progress_phase3 + (tiles_processed_count_ph3 / max(1, num_seestar_stacks_to_process)) * PROGRESS_WEIGHT_PHASE3_MASTER_TILES
             time_per_percent_point_global_ph3 = (time.monotonic() - start_time_total_run) / max(1, current_progress_in_run_percent_ph3) if current_progress_in_run_percent_ph3 > 0 else (time.monotonic() - start_time_total_run)
             total_eta_sec_ph3 = eta_phase3_sec + (100 - current_progress_in_run_percent_ph3) * time_per_percent_point_global_ph3
-            update_gui_eta(total_eta_sec_ph3)
+            smoothed_eta = (
+                total_eta_sec_ph3
+                if smoothed_eta is None
+                else 0.3 * total_eta_sec_ph3 + 0.7 * smoothed_eta
+            )
+            update_gui_eta(smoothed_eta)
             
     master_tiles_results_list = [master_tiles_results_list_temp[i] for i in sorted(master_tiles_results_list_temp.keys())]
     del master_tiles_results_list_temp; gc.collect() 
