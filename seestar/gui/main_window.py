@@ -3194,14 +3194,17 @@ class SeestarStackerGUI:
     def _open_mosaic_settings_window(self):
         """Open the Mosaic settings window inside the main GUI."""
         self.logger.info("_open_mosaic_settings_window called.")
-        try:
-            if (
-                hasattr(self, "_mosaic_settings_window_instance")
-                and self._mosaic_settings_window_instance
-                and self._mosaic_settings_window_instance.winfo_exists()
-            ):
+        if (
+            hasattr(self, "_mosaic_settings_window_instance")
+            and self._mosaic_settings_window_instance
+            and self._mosaic_settings_window_instance.winfo_exists()
+        ):
+            try:
                 self._mosaic_settings_window_instance.lift()
                 self._mosaic_settings_window_instance.focus_force()
+            except tk.TclError:
+                self._mosaic_settings_window_instance = None
+            else:
                 return
 
         # Créer et afficher la nouvelle fenêtre modale
