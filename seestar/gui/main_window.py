@@ -16,6 +16,7 @@ import traceback
 import math
 import platform # NOUVEL import
 import subprocess # NOUVEL import
+from pathlib import Path
 import gc #
 from PIL import Image, ImageTk 
 from .ui_utils import ToolTip
@@ -3187,8 +3188,12 @@ class SeestarStackerGUI:
         """Launch the ZeMosaic application in a separate process."""
         self.logger.info("run_zemosaic called. Launching run_zemosaic.py...")
         try:
+            project_root = Path(__file__).resolve().parents[2]
             # Use the module form to ensure imports inside run_zemosaic work
-            subprocess.Popen([sys.executable, "-m", "zemosaic.run_zemosaic"])
+            subprocess.Popen(
+                [sys.executable, "-m", "zemosaic.run_zemosaic"],
+                cwd=str(project_root),
+            )
             self.logger.info("run_zemosaic.py launched successfully")
         except Exception as e:
             self.logger.error(f"Failed to launch run_zemosaic.py: {e}")
