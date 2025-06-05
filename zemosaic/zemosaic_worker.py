@@ -347,9 +347,8 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     _log_and_callback("clusterstacks_info_finished", num_groups=len(groups), level="INFO", callback=progress_callback)
     return groups
 
-def get_wcs_and_pretreat_raw_file(file_path: str,
-                                  solver_instance,
-                                  solver_settings: dict,
+def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
+
                                   progress_callback: callable):
     filename = os.path.basename(file_path)
     # Utiliser une fonction helper pour les logs internes à cette fonction si _log_and_callback
@@ -439,10 +438,20 @@ def get_wcs_and_pretreat_raw_file(file_path: str,
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
-    if wcs_brute is None and ASTROMETRY_SOLVER_AVAILABLE and solver_instance:
-        _pcb_local(
-            f"    WCS non trouvé/valide dans header. Appel solver.solve pour '{filename}'.",
-            lvl="DEBUG_DETAIL"
+    if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
+        _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
+        wcs_brute = zemosaic_astrometry.solve_with_astap(
+            image_fits_path=file_path,
+            original_fits_header=header_orig,
+            astap_exe_path=solver_settings.get('astap_path'),
+            astap_data_dir=solver_settings.get('astap_data_dir'),
+            search_radius_deg=solver_settings.get('astap_search_radius'),
+            downsample_factor=solver_settings.get('astap_downsample'),
+            sensitivity=solver_settings.get('astap_sensitivity'),
+            timeout_sec=solver_settings.get('astap_timeout_sec', 180),
+            update_original_header_in_place=True,
+            progress_callback=progress_callback
+
         )
         try:
             wcs_brute = solver_instance.solve(
@@ -543,13 +552,6 @@ def create_master_tile(
     radial_shape_power: float,           # Pourrait être une constante ou configurable
     min_radial_weight_floor: float,
     # --- FIN NOUVEAUX PARAMÈTRES ---
-    # Paramètres ASTAP (pourraient être enlevés si plus du tout utilisés ici)
-    astap_exe_path_global: str, 
-    astap_data_dir_global: str, 
-    astap_search_radius_global: float, 
-    astap_downsample_global: int, 
-    astap_sensitivity_global: int, 
-    astap_timeout_seconds_global: int, 
     progress_callback: callable
 ):
     """
@@ -1165,11 +1167,7 @@ def assemble_final_mosaic_with_reproject_coadd(
 def run_hierarchical_mosaic(
     input_folder: str,
     output_folder: str,
-    astap_exe_path: str,
-    astap_data_dir_param: str,
-    astap_search_radius_config: float,
-    astap_downsample_config: int,
-    astap_sensitivity_config: int,
+    solver_settings: dict,
     cluster_threshold_config: float,
     progress_callback: callable,
     stack_norm_method: str,
@@ -1227,7 +1225,14 @@ def run_hierarchical_mosaic(
     pcb("CHRONO_START_REQUEST", prog=None, lvl="CHRONO_LEVEL")
     _log_memory_usage(progress_callback, "Début Run Hierarchical Mosaic")
     pcb("run_info_processing_started", prog=current_global_progress, lvl="INFO")
-    pcb(f"  Config ASTAP: Exe='{os.path.basename(astap_exe_path) if astap_exe_path else 'N/A'}', Data='{os.path.basename(astap_data_dir_param) if astap_data_dir_param else 'N/A'}', Radius={astap_search_radius_config}deg, Downsample={astap_downsample_config}, Sens={astap_sensitivity_config}", prog=None, lvl="DEBUG_DETAIL")
+    pcb(
+        f"  Config Solver: Exe='{os.path.basename(solver_settings.get('astap_path', '')) if solver_settings.get('astap_path') else 'N/A'}', "
+        f"Data='{os.path.basename(solver_settings.get('astap_data_dir', '')) if solver_settings.get('astap_data_dir') else 'N/A'}', "
+        f"Radius={solver_settings.get('astap_search_radius', 'N/A')}deg, Downsample={solver_settings.get('astap_downsample', 'N/A')}, "
+        f"Sens={solver_settings.get('astap_sensitivity', 'N/A')}",
+        prog=None,
+        lvl="DEBUG_DETAIL",
+    )
     pcb(f"  Config Workers (GUI): Base demandé='{num_base_workers_config}' (0=auto)", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Options Stacking (Master Tuiles): Norm='{stack_norm_method}', Weight='{stack_weight_method}', Reject='{stack_reject_algo}', Combine='{stack_final_combine}', RadialWeight={apply_radial_weight_config} (Feather={radial_feather_fraction_config if apply_radial_weight_config else 'N/A'}, Power={radial_shape_power_config if apply_radial_weight_config else 'N/A'}, Floor={min_radial_weight_floor_config if apply_radial_weight_config else 'N/A'})", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Options Assemblage Final: Méthode='{final_assembly_method_config}'", prog=None, lvl="DEBUG_DETAIL")
@@ -1313,7 +1318,6 @@ def run_hierarchical_mosaic(
             executor_ph1.submit(
                 get_wcs_and_pretreat_raw_file,
                 f_path,
-                astrometry_solver,
                 solver_settings,
                 progress_callback
             ): f_path for f_path in fits_file_paths
@@ -1438,18 +1442,22 @@ def run_hierarchical_mosaic(
         future_to_group_index = { 
             executor_ph3.submit(
                 create_master_tile,
-                sg_info_list, 
-                i_stk, # tile_id
+                sg_info_list,
+                i_stk,  # tile_id
                 temp_master_tile_storage_dir,
-                stack_norm_method, stack_weight_method, stack_reject_algo,
-                stack_kappa_low, stack_kappa_high, parsed_winsor_limits,
+                stack_norm_method,
+                stack_weight_method,
+                stack_reject_algo,
+                stack_kappa_low,
+                stack_kappa_high,
+                parsed_winsor_limits,
                 stack_final_combine,
-                apply_radial_weight_config, radial_feather_fraction_config,
-                radial_shape_power_config, min_radial_weight_floor_config, 
-                astap_exe_path, astap_data_dir_param, astap_search_radius_config, 
-                astap_downsample_config, astap_sensitivity_config, 180, # timeout ASTAP         
+                apply_radial_weight_config,
+                radial_feather_fraction_config,
+                radial_shape_power_config,
+                min_radial_weight_floor_config,
                 progress_callback
-            ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups) 
+            ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups)
         }
         for future in as_completed(future_to_group_index):
             group_index_original = future_to_group_index[future]
