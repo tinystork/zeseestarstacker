@@ -9,10 +9,15 @@ import warnings
 import time
 import tempfile
 import traceback
-import subprocess # Pour appeler les solveurs locaux
-import shutil # Pour trouver les exécutables
+import subprocess  # Pour appeler les solveurs locaux
+import shutil  # Pour trouver les exécutables
 import gc
-import glob # <<< AJOUTER CET IMPORT EN HAUT DU FICHIER
+import glob  # <<< AJOUTER CET IMPORT EN HAUT DU FICHIER
+import logging
+
+logger = logging.getLogger(__name__)
+if not logger.hasHandlers():
+    logger.addHandler(logging.NullHandler())
 # --- Dépendances Astropy/Astroquery (comme avant) ---
 _ASTROQUERY_AVAILABLE = False
 _ASTROPY_AVAILABLE = False
@@ -24,7 +29,8 @@ try:
     _ASTROQUERY_AVAILABLE = True
     # print("DEBUG [AstrometrySolverModule]: astroquery.astrometry_net importé.") # Moins verbeux
 except ImportError:
-    print("WARNING [AstrometrySolverModule]: astroquery non installée. Plate-solving web Astrometry.net désactivé.")
+    logger.warning(
+        "AstrometrySolver: astroquery non installée. Plate-solving web Astrometry.net désactivé.")
 
 try:
     from astropy.io import fits
@@ -35,7 +41,8 @@ try:
     warnings.filterwarnings('ignore', category=AstropyWarning) # Pour d'autres avertissements astropy
     # print("DEBUG [AstrometrySolverModule]: astropy.io.fits et astropy.wcs importés.")
 except ImportError:
-     print("ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
+    logger.error(
+        "ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
 
 
 
@@ -51,12 +58,19 @@ def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default
     source_of_pixsize = "default (func)" # Source par défaut si pas de header ou clé
     source_of_focal = "default (func)"   # Source par défaut
 
-    log_func = print # Fallback sur print si pas de solver_instance pour loguer
+    def _default_log(msg, level="INFO"):
+        level_upper = str(level).upper()
+        lvl = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARN": logging.WARNING,
+            "ERROR": logging.ERROR,
+        }.get(level_upper, logging.INFO)
+        logger.log(lvl, msg)
+
+    log_func = _default_log
     if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
         log_func = solver_instance._log
-    elif solver_instance : # Si solver_instance est passé mais n'a pas _log (ne devrait pas arriver)
-        def temp_log(msg, level="DEBUG"): print(f"TempLog (solver_instance sans _log): {msg}")
-        log_func = temp_log
 
 
     log_func(f"CFG ScaleEst: Tentative lecture FITS '{os.path.basename(fits_path)}' pour échelle.", "DEBUG")
@@ -138,10 +152,19 @@ def _generate_astrometry_cfg_auto(fits_file_for_scale_estimation,
     Génère un fichier .cfg pour solve-field qui LISTE EXPLICITEMENT les fichiers d'index
     trouvés dans le répertoire d'index fourni.
     """
-    log_func = print
+    def _default_log(msg, level="INFO"):
+        level_upper = str(level).upper()
+        lvl = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARN": logging.WARNING,
+            "ERROR": logging.ERROR,
+        }.get(level_upper, logging.INFO)
+        logger.log(lvl, msg)
+
+    log_func = _default_log
     if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
         log_func = solver_instance._log
-    # ... (logique temp_log)
 
     log_func(f"CFG AutoGen (List Indexes V1): Début pour index_dir '{index_directory_path}'", "INFO")
 
@@ -218,13 +241,15 @@ class AstrometrySolver:
     """
     Classe pour orchestrer la résolution astrométrique en utilisant différents solveurs.
     """
-    def __init__(self, progress_callback=None):
+    def __init__(self, progress_callback=None, verbose=False):
         """
         Initialise le solveur.
         Args:
             progress_callback (callable, optional): Callback pour les messages de progression.
         """
         self.progress_callback = progress_callback
+        self.verbose = verbose
+        self.logger = logger
         if not _ASTROPY_AVAILABLE:
             self._log("ERREUR CRITIQUE: Astropy n'est pas disponible. AstrometrySolver ne peut fonctionner.", "ERROR")
             raise ImportError("Astropy est requis pour AstrometrySolver.")
@@ -244,17 +269,26 @@ class AstrometrySolver:
             "ERROR": "   ❌ [AstrometrySolver ERROR]",
             "DEBUG": "      [AstrometrySolver DEBUG]"
         }
-        prefix = prefix_map.get(level.upper(), prefix_map["INFO"])
-        
-        print(f"!!!! FORCED PRINT IN _log: {prefix} {message}") # FORCER PRINT ICI
+        level_upper = str(level).upper()
+        if level_upper == "DEBUG" and not self.verbose:
+            return
 
-        # if self.progress_callback and callable(self.progress_callback): 
-        #     try:
-        #         self.progress_callback(f"{prefix} {message}", None)    
-        #     except Exception:
-        #         print(f"{prefix} {message}") 
-        # else:
-        #     print(f"{prefix} {message}")
+        prefix = prefix_map.get(level_upper, prefix_map["INFO"])
+        full_msg = f"{prefix} {message}"
+
+        if self.progress_callback and callable(self.progress_callback):
+            try:
+                self.progress_callback(full_msg, None)
+            except Exception:
+                self.logger.log(logging.ERROR, "Progress callback failed for log message")
+
+        log_level = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARN": logging.WARNING,
+            "ERROR": logging.ERROR,
+        }.get(level_upper, logging.INFO)
+        self.logger.log(log_level, full_msg)
 
 
     def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
@@ -282,9 +316,13 @@ class AstrometrySolver:
 
         # !!!!! TEST DE DÉBOGAGE IMMÉDIAT !!!!!
         if hasattr(self, 'default_pixel_size_um_for_cfg'):
-            print(f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg EXISTS, valeur = {self.default_pixel_size_um_for_cfg}")
+            self._log(
+                f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg EXISTS, valeur = {self.default_pixel_size_um_for_cfg}",
+                "DEBUG")
         else:
-            print(f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg N'EXISTE PAS !!! dir(self) = {dir(self)}")
+            self._log(
+                f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg N'EXISTE PAS !!! dir(self) = {dir(self)}",
+                "DEBUG")
             # Optionnel : lever une exception ici pour arrêter net si c'est le cas
             # raise AttributeError("FORCED STOP: default_pixel_size_um_for_cfg manquant au début de solve()")
         # !!!!! FIN TEST DE DÉBOGAGE !!!!!
@@ -308,16 +346,34 @@ class AstrometrySolver:
         anet_web_timeout = settings.get('astrometry_net_timeout_sec', 300)
 
         # <<< AJOUT DES LOGS DE DEBUG SPÉCIFIQUES >>>
-        print(f"!!!! DEBUG AstrometrySolver.solve: VALEUR LUE POUR astap_search_radius DEPUIS settings DICT = {astap_search_radius_from_settings} (type: {type(astap_search_radius_from_settings)})")
-        print(f"!!!! DEBUG AstrometrySolver.solve: Dictionnaire 'settings' reçu COMPLET par solve(): {settings}")
+        self._log(
+            f"!!!! DEBUG AstrometrySolver.solve: VALEUR LUE POUR astap_search_radius DEPUIS settings DICT = {astap_search_radius_from_settings} (type: {type(astap_search_radius_from_settings)})",
+            "DEBUG",
+        )
+        self._log(
+            f"!!!! DEBUG AstrometrySolver.solve: Dictionnaire 'settings' reçu COMPLET par solve(): {settings}",
+            "DEBUG",
+        )
         # <<< FIN AJOUT DES LOGS DE DEBUG >>>
 
         # Logs existants pour confirmer les valeurs utilisées
-        print(f"DEBUG (AstrometrySolver.solve): Préférence solveur: '{solver_preference}'")
-        print(f"DEBUG (AstrometrySolver.solve): ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}")
-        print(f"DEBUG (AstrometrySolver.solve): Ansvr Path/Config: '{ansvr_config_path}', Timeout: {ansvr_timeout}")
-        print(f"DEBUG (AstrometrySolver.solve): API Key Web: {'Présente' if api_key else 'Absente'}, Timeout Web: {anet_web_timeout}")
-        print(f"DEBUG (AstrometrySolver.solve): Scale Est (pour Web/Ansvr): {scale_est}, Scale Tol: {scale_tol}")
+        self._log(f"DEBUG (AstrometrySolver.solve): Préférence solveur: '{solver_preference}'", "DEBUG")
+        self._log(
+            f"DEBUG (AstrometrySolver.solve): ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
+            "DEBUG",
+        )
+        self._log(
+            f"DEBUG (AstrometrySolver.solve): Ansvr Path/Config: '{ansvr_config_path}', Timeout: {ansvr_timeout}",
+            "DEBUG",
+        )
+        self._log(
+            f"DEBUG (AstrometrySolver.solve): API Key Web: {'Présente' if api_key else 'Absente'}, Timeout Web: {anet_web_timeout}",
+            "DEBUG",
+        )
+        self._log(
+            f"DEBUG (AstrometrySolver.solve): Scale Est (pour Web/Ansvr): {scale_est}, Scale Tol: {scale_tol}",
+            "DEBUG",
+        )
 
         local_solver_attempted_and_failed = False
 
@@ -341,11 +397,17 @@ class AstrometrySolver:
         elif solver_preference == "ansvr":
             if ansvr_config_path: 
                 self._log("Priorité au solveur local: Astrometry.net Local (solve-field).", "INFO")
-                print(f"!!!!!! DEBUG AstrometrySolver.solve: PRÉPARATION APPEL _try_solve_local_ansvr pour {os.path.basename(image_path)}") 
+                self._log(
+                    f"!!!!!! DEBUG AstrometrySolver.solve: PRÉPARATION APPEL _try_solve_local_ansvr pour {os.path.basename(image_path)}",
+                    "DEBUG",
+                )
                 wcs_solution = self._try_solve_local_ansvr(image_path, fits_header, ansvr_config_path,
                                                            scale_est, scale_tol, ansvr_timeout,
                                                            update_header_with_solution)
-                print(f"!!!!!! DEBUG AstrometrySolver.solve: RETOUR DE _try_solve_local_ansvr pour {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}") 
+                self._log(
+                    f"!!!!!! DEBUG AstrometrySolver.solve: RETOUR DE _try_solve_local_ansvr pour {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}",
+                    "DEBUG",
+                )
                 if wcs_solution:
                     self._log("Solution trouvée avec Astrometry.net Local (solve-field).", "INFO")
                     return wcs_solution
@@ -405,8 +467,9 @@ class AstrometrySolver:
 
         # --- Section 0: Log d'entrée et validation initiale de image_path ---
         base_img_name_for_log = os.path.basename(image_path) if image_path and isinstance(image_path, str) else "INVALID_IMAGE_PATH"
-        entry_msg = f"!!!!!! _try_solve_local_ansvr: ENTRÉE (Test SANS COPIE FITS V2) POUR {base_img_name_for_log} !!!!!!"
-        print(entry_msg) 
+        entry_msg = (
+            f"!!!!!! _try_solve_local_ansvr: ENTRÉE (Test SANS COPIE FITS V2) POUR {base_img_name_for_log} !!!!!!"
+        )
         self._log(entry_msg, "ERROR")
 
         self._log(f"LocalAnsvr (Test SANS COPIE FITS V2): Tentative résolution pour '{base_img_name_for_log}'.", "INFO")
