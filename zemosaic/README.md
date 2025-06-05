@@ -102,6 +102,20 @@ Adjust stacking & mosaic settings
 
 Click "Start Hierarchical Mosaic"
 
+When ZeMosaic is launched from **Seestar Stacker**, solver settings are
+automatically forwarded via environment variables. You can also set them
+manually before launching:
+
+```
+ZEMOSAIC_ASTAP_PATH=/path/to/astap
+ZEMOSAIC_ASTAP_DATA_DIR=/path/to/catalogs
+ZEMOSAIC_LOCAL_ANSVR_PATH=/path/to/ansvr.cfg
+ZEMOSAIC_ASTROMETRY_API_KEY=your_key
+ZEMOSAIC_ASTAP_SEARCH_RADIUS=3.0
+```
+
+These values prefill the solver configuration when the GUI starts.
+
 📁 Requirements Summary
 ✅ Python 3.9 or newer
 

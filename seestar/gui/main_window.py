@@ -3191,10 +3191,25 @@ class SeestarStackerGUI:
             # Ensure imports inside run_zemosaic work even if the GUI was
             # started from another directory by using the project root as cwd
             project_root = Path(__file__).resolve().parents[2]
+            env = os.environ.copy()
+            if getattr(self.settings, "astap_path", ""):
+                env["ZEMOSAIC_ASTAP_PATH"] = str(self.settings.astap_path)
+            if getattr(self.settings, "astap_data_dir", ""):
+                env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
+            if getattr(self.settings, "local_ansvr_path", ""):
+                env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
+            if getattr(self.settings, "astrometry_api_key", ""):
+                env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
+            try:
+                radius_val = float(getattr(self.settings, "astap_search_radius", 0))
+                env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)
+            except Exception:
+                pass
 
             subprocess.Popen(
                 [sys.executable, "-m", "zemosaic.run_zemosaic"],
                 cwd=str(project_root),
+                env=env,
             )
             self.logger.info("run_zemosaic.py launched successfully")
         except Exception as e:

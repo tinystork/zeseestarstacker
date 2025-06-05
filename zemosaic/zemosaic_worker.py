@@ -1178,6 +1178,13 @@ def run_hierarchical_mosaic(
     PROGRESS_WEIGHT_PHASE7_CLEANUP = 2
     current_global_progress = 0
     smoothed_eta = None
+
+    solver_settings = solver_settings.copy() if isinstance(solver_settings, dict) else {}
+    astap_exe_path = solver_settings.get('astap_path', '')
+    astap_data_dir_param = solver_settings.get('astap_data_dir')
+    astap_search_radius_config = solver_settings.get('astap_search_radius', 3.0)
+    api_key_param = solver_settings.get('api_key')
+    local_ansvr_path_param = solver_settings.get('local_ansvr_path')
     
     error_messages_deps = []
     if not (ASTROPY_AVAILABLE and WCS and SkyCoord and Angle and fits and u): error_messages_deps.append("Astropy")
@@ -1207,23 +1214,20 @@ def run_hierarchical_mosaic(
 
     # --- Initialisation du solveur astrométrique ---
     astrometry_solver = None
-    solver_settings = {}
     if ASTROMETRY_SOLVER_AVAILABLE:
         try:
             astrometry_solver = AstrometrySolver(progress_callback=progress_callback)
-            solver_settings = {
-                'local_solver_preference': 'astap',
-                'api_key': None,
-                'astap_path': astap_exe_path,
-                'astap_data_dir': astap_data_dir_param,
-                'astap_search_radius': astap_search_radius_config,
-                'local_ansvr_path': None,
-                'scale_est_arcsec_per_pix': None,
-                'scale_tolerance_percent': 20,
-                'ansvr_timeout_sec': 120,
-                'astap_timeout_sec': 180,
-                'astrometry_net_timeout_sec': 300,
-            }
+            solver_settings.setdefault('local_solver_preference', 'astap')
+            solver_settings.setdefault('api_key', api_key_param)
+            solver_settings.setdefault('astap_path', astap_exe_path)
+            solver_settings.setdefault('astap_data_dir', astap_data_dir_param)
+            solver_settings.setdefault('astap_search_radius', astap_search_radius_config)
+            solver_settings.setdefault('local_ansvr_path', local_ansvr_path_param)
+            solver_settings.setdefault('scale_est_arcsec_per_pix', None)
+            solver_settings.setdefault('scale_tolerance_percent', 20)
+            solver_settings.setdefault('ansvr_timeout_sec', 120)
+            solver_settings.setdefault('astap_timeout_sec', 180)
+            solver_settings.setdefault('astrometry_net_timeout_sec', 300)
         except Exception as e_solver_inst:
             pcb("run_warn_solver_init_failed", prog=None, lvl="WARN", error=str(e_solver_inst))
             astrometry_solver = None
