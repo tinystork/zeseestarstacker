@@ -24,6 +24,7 @@ translations = {
         'status_analysis_done_errors': "Analyse terminée avec des erreurs critiques.",
         'status_log_error': "Erreur écriture log",
         'status_dir_create_error': "Erreur création dossier: {e}",
+        'status_custom': "{text}",
 
         # --- Cadres ---
         'config_frame_title': "Configuration Générale",
@@ -38,6 +39,7 @@ translations = {
         'output_log_label': "Fichier log:",
         'include_subfolders_label': "Inclure les sous-dossiers",
         'lang_label': "Langue:",
+        'status_label': "Statut :",
         'analyze_snr_check_label': "Activer l'analyse SNR",
         'snr_select_mode_label': "Mode de Sélection SNR:",
         'snr_mode_percent': "Top Pourcentage (%)",
@@ -64,6 +66,7 @@ translations = {
         'Fermer': "Fermer",
         'use_best_reference_button': 'Envoyer Référence',
         'Exporter Toutes Conservées': "Exporter Toutes Conservées",
+        'apply_snr_rejection_button': "Appliquer Rejet SNR",
 
         # --- Textes acstools status ---
         'acstools_ok': "(acstools disponible)", 'acstools_missing': "(acstools non trouvé ou incompatible)", 'acstools_sig_error': "(fonction detsat incompatible)",
@@ -91,6 +94,7 @@ translations = {
 
         # --- Infobulles (Tooltips) ---
         'tooltip_sigma': "Sigma du filtre Gaussien avant détection contours (flou). Défaut: 2.0", 'tooltip_low_thresh': "Seuil bas Canny (0-1). Détecte bords potentiels. Bas=Sensible bruit. Défaut acstools: 0.1", 'tooltip_h_thresh': "Seuil haut Canny (0-1). Ancre bords forts. >= Low Thr. Bas=Permissif. Défaut acstools: 0.5", 'tooltip_line_len': "Longueur min. (px) segment final pour être une traînée. Défaut acstools: 150", 'tooltip_small_edge': "Longueur min. (px) contour initial (par Canny). Filtre bruit avant Hough. Défaut acstools: 60", 'tooltip_line_gap': "Écart max (px) pour joindre segments. Défaut acstools: 75", 'tooltip_snr_value': "Entrez % (ex: 80) ou seuil SNR (ex: 5.5). Ignoré si Tout Garder.",
+        'tooltip_apply_snr_rejection': "Appliquer les rejets SNR différés",
 
         # --- Textes Logique ---
         'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Avertissement: ", 'logic_error_prefix': "Erreur: ",
@@ -148,6 +152,7 @@ translations = {
         'status_analysis_done_no_valid': "Analysis finished. No processable images found or all folders were skipped.", # Modified
         'status_analysis_done_errors': "Analysis finished with critical errors.",
         'status_log_error': "Log writing error", 'status_dir_create_error': "Folder creation error: {e}",
+        'status_custom': "{text}",
 
         # --- Frames ---
         'config_frame_title': "General Configuration", 'snr_frame_title': "SNR Analysis & Selection", 'trail_frame_title': "Trail Detection", 'action_frame_title': "Action on Rejected Images", 'display_options_frame_title': "Display Options", 'results_frame_title': "Results / Log",
@@ -156,6 +161,7 @@ translations = {
         'input_dir_label': "Input Folder:", 'output_log_label': "Log File:",
         'include_subfolders_label': "Include Subfolders", # <-- NEW
         'lang_label': "Language:",
+        'status_label': "Status:",
         'analyze_snr_check_label': "Enable SNR analysis", 'snr_select_mode_label': "SNR Selection Mode:", 'snr_mode_percent': "Top Percent (%)", 'snr_mode_threshold': "SNR Threshold (>)",
         'snr_mode_none': "Keep All", 'snr_reject_dir_label': "Reject Folder (Low SNR):",
         'detect_trails_check_label': "Enable trail detection",
@@ -200,6 +206,7 @@ translations = {
 
         # --- Tooltips ---
         'tooltip_sigma': "Sigma of Gaussian filter before edge detection (blur). Default: 2.0", 'tooltip_low_thresh': "Lower Canny threshold (0-1). Detects potential edges. Lower=Noisier. acstools default: 0.1", 'tooltip_h_thresh': "Upper Canny threshold (0-1). Anchors strong edges. >= Low Thr. Lower=Permissive. acstools default: 0.5", 'tooltip_line_len': "Min. length (px) of final line segment to be a trail. acstools default: 150", 'tooltip_small_edge': "Min. length (px) of initial edge segment (Canny). Filters noise before Hough. acstools default: 60", 'tooltip_line_gap': "Max allowed gap (px) to link segments. acstools default: 75", 'tooltip_snr_value': "Enter % (e.g., 80) or SNR threshold (e.g., 5.5). Ignored if Keep All.",
+        'tooltip_apply_snr_rejection': "Apply pending SNR rejections",
 
         # --- Logic Texts ---
         'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Warning: ", 'logic_error_prefix': "Error: ",

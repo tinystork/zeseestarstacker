@@ -1400,13 +1400,17 @@ class AstroImageAnalyzerGUI:
         apply_snr_frame.grid(row=3, column=0, columnspan=5, sticky=tk.E, padx=5, pady=(5,2)) # sticky=tk.E pour aligner à droite
 
         self.apply_snr_button = ttk.Button(
-            apply_snr_frame, 
-            text="Appliquer Rejet SNR", # Le texte sera mis à jour par change_language
-            command=self.apply_pending_snr_actions_gui, # Nouvelle méthode à créer
-            state=tk.DISABLED # Désactivé initialement
+            apply_snr_frame,
+            text=self._("apply_snr_rejection_button", default="Apply SNR Rejection"),
+            command=self.apply_pending_snr_actions_gui,
+            state=tk.DISABLED
         )
         self.apply_snr_button.pack(side=tk.RIGHT) # Ou grid si vous préférez
         self.widgets_refs['apply_snr_rejection_button'] = self.apply_snr_button # Pour la traduction du texte
+        self.tooltips['apply_snr_button'] = ToolTip(
+            self.apply_snr_button,
+            lambda: self._('tooltip_apply_snr_rejection', default='Apply pending SNR actions')
+        )
 
         # --- Cadre Détection Traînées ---
         trail_frame = ttk.LabelFrame(main_frame, text="", padding="10")
@@ -1618,6 +1622,8 @@ class AstroImageAnalyzerGUI:
             if self.send_reference_button: self.send_reference_button.config(text=self._("use_best_reference_button"))
             if self.visualize_button: self.visualize_button.config(text=self._("visualize_button"))
             if self.open_log_button: self.open_log_button.config(text=self._("open_log_button"))
+            if self.apply_snr_button:
+                self.apply_snr_button.config(text=self._("apply_snr_rejection_button"))
             # Texte du bouton Quitter/Retour dépend si un callback est fourni
             if self.return_button:
                 btn_text = self._("return_button_text") if self.main_app_callback else self._("quit_button")
