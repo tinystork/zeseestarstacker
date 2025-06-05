@@ -102,6 +102,19 @@ class ZeMosaicGUI:
                 "num_processing_workers": 0 # 0 pour auto, anciennement -1
             }
 
+        self.env_solver_settings = {
+            'astap_path': os.environ.get('ZEMOSAIC_ASTAP_PATH'),
+            'astap_data_dir': os.environ.get('ZEMOSAIC_ASTAP_DATA_DIR'),
+            'local_ansvr_path': os.environ.get('ZEMOSAIC_LOCAL_ANSVR_PATH'),
+            'api_key': os.environ.get('ZEMOSAIC_ASTROMETRY_API_KEY'),
+            'astap_search_radius': None,
+        }
+        if os.environ.get('ZEMOSAIC_ASTAP_SEARCH_RADIUS'):
+            try:
+                self.env_solver_settings['astap_search_radius'] = float(os.environ['ZEMOSAIC_ASTAP_SEARCH_RADIUS'])
+            except ValueError:
+                self.env_solver_settings['astap_search_radius'] = None
+
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
             self.localizer = ZeMosaicLocalization(language_code=default_lang_from_config)
@@ -959,11 +972,14 @@ class ZeMosaicGUI:
         # 1. RÉCUPÉRER TOUTES les valeurs des variables Tkinter
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
-        astap_exe = ""
-        astap_data = ""
+        astap_exe = self.env_solver_settings.get('astap_path') or ""
+        astap_data = self.env_solver_settings.get('astap_data_dir') or ""
         
         try:
-            astap_radius_val = self.config.get("astap_default_search_radius", 3.0)
+            if self.env_solver_settings.get('astap_search_radius') is not None:
+                astap_radius_val = self.env_solver_settings['astap_search_radius']
+            else:
+                astap_radius_val = self.config.get("astap_default_search_radius", 3.0)
             astap_downsample_val = self.config.get("astap_default_downsample", 2)
             astap_sensitivity_val = self.config.get("astap_default_sensitivity", 100)
             cluster_thresh_val = self.cluster_threshold_var.get()
@@ -1037,6 +1053,8 @@ class ZeMosaicGUI:
             'astap_search_radius': astap_radius_val,
             'astap_downsample': astap_downsample_val,
             'astap_sensitivity': astap_sensitivity_val,
+            'api_key': self.env_solver_settings.get('api_key'),
+            'local_ansvr_path': self.env_solver_settings.get('local_ansvr_path'),
         }
 
         worker_args = (
