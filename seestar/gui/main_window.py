@@ -2898,58 +2898,32 @@ class SeestarStackerGUI:
         else: self._save_settings_and_destroy()
 
     def run_zemosaic(self):
-        """Stub method to launch ZeMosaic."""
-        self.logger.info("run_zemosaic called - stub implementation.")
+        """Open the Mosaic settings window."""
+        self.logger.info("run_zemosaic called.")
         try:
-            self._open_mosaic_settings_window()
+            if (
+                hasattr(self, "_mosaic_settings_window_instance")
+                and self._mosaic_settings_window_instance
+                and self._mosaic_settings_window_instance.winfo_exists()
+            ):
+                self._mosaic_settings_window_instance.lift()
+                self._mosaic_settings_window_instance.focus_force()
+                return
+
+            mosaic_window = MosaicSettingsWindow(parent_gui=self)
+            self._mosaic_settings_window_instance = mosaic_window
+
         except Exception as e:
             self.logger.error(f"Error launching mosaic settings: {e}")
-
-    def _open_mosaic_settings_window(self):
-        """
-        Ouvre la fenêtre modale pour configurer les options de mosaïque.
-        """
-        print("DEBUG (GUI): Clic sur bouton 'Mosaïque...' - Appel de _open_mosaic_settings_window.")
-        # --- AJOUT DEBUG ---
-        current_api_key_in_main_gui_var = "NOT_FOUND"
-        if hasattr(self, 'astrometry_api_key_var'):
-            try:
-                current_api_key_in_main_gui_var = self.astrometry_api_key_var.get()
-                print(f"DEBUG (GUI _open_mosaic_settings_window): Valeur de self.astrometry_api_key_var.get() = '{current_api_key_in_main_gui_var}' (longueur: {len(current_api_key_in_main_gui_var)})")
-            except tk.TclError:
-                print("DEBUG (GUI _open_mosaic_settings_window): Erreur TclError lecture astrometry_api_key_var (fenêtre détruite?)")
-        else:
-            print("DEBUG (GUI _open_mosaic_settings_window): self.astrometry_api_key_var N'EXISTE PAS sur self (SeestarStackerGUI).")
-        # --- FIN AJOUT DEBUG ---
-
-        # Vérifier si une instance existe déjà (sécurité, normalement inutile car modal)
-        # (Optionnel, mais peut être utile pour le développement)
-        if hasattr(self, '_mosaic_settings_window_instance') and self._mosaic_settings_window_instance and self._mosaic_settings_window_instance.winfo_exists():
-            print("DEBUG (GUI): Fenêtre de paramètres mosaïque déjà ouverte. Mise au premier plan.")
-            self._mosaic_settings_window_instance.lift()
-            self._mosaic_settings_window_instance.focus_force()
-            return
-
-        # Créer et afficher la nouvelle fenêtre modale
-        try:
-            print("DEBUG (GUI): Création de l'instance MosaicSettingsWindow...")
-            # Passer 'self' (l'instance SeestarStackerGUI) à la fenêtre enfant
-            # pour qu'elle puisse mettre à jour le flag mosaic_mode_active etc.
-            mosaic_window = MosaicSettingsWindow(parent_gui=self)
-            self._mosaic_settings_window_instance = mosaic_window # Stocker référence (optionnel)
-            print("DEBUG (GUI): Instance MosaicSettingsWindow créée.")
-            # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.
-
-        except Exception as e:
-            error_msg = f"Erreur création fenêtre paramètres mosaïque: {e}"
-            print(f"ERREUR (GUI): {error_msg}")
-            traceback.print_exc(limit=2)
             messagebox.showerror(
                 self.tr("error", default="Error"),
-                self.tr("mosaic_window_create_error", default="Could not open Mosaic settings window.") + f"\n{e}",
-                parent=self.root
+                self.tr(
+                    "mosaic_window_create_error",
+                    default="Could not open Mosaic settings window.",
+                )
+                + f"\n{e}",
+                parent=self.root,
             )
-            # Assurer la réinitialisation de la référence si erreur
             self._mosaic_settings_window_instance = None
 
 
