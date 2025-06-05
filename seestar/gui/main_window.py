@@ -2861,9 +2861,11 @@ class SeestarStackerGUI:
                         break # Exit loop if Tkinter objects are gone
                     except Exception as eta_err:
                         print(f"Warning: Error calculating ETA: {eta_err}")
+                        traceback.print_exc(limit=2)
                         try:
-                             self.remaining_time_var.set("Error")
-                        except tk.TclError: break # Exit loop
+                            self.remaining_time_var.set("--:--:--")
+                        except tk.TclError:
+                            break
 
                 else: # Not enough info for ETA yet
                     try:
