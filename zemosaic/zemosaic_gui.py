@@ -1095,11 +1095,21 @@ class ZeMosaicGUI:
         self._log_message("log_key_processing_started", level="INFO")
         # ... (autres logs d'info) ...
 
+        solver_settings = {
+            'local_solver_preference': 'astap',
+            'astap_path': astap_exe,
+            'astap_data_dir': astap_data,
+            'astap_search_radius': astap_radius_val,
+            'astap_downsample': astap_downsample_val,
+            'astap_sensitivity': astap_sensitivity_val,
+        }
+
         worker_args = (
-            input_dir, output_dir, astap_exe, astap_data, 
-            astap_radius_val, astap_downsample_val, astap_sensitivity_val, 
-            cluster_thresh_val, 
-            self._log_message, 
+            input_dir,
+            output_dir,
+            solver_settings,
+            cluster_thresh_val,
+            self._log_message,
             stack_norm_method,
             stack_weight_method,
             stack_reject_algo,
