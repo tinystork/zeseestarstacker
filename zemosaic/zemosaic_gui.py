@@ -128,11 +128,6 @@ class ZeMosaicGUI:
         # --- Tkinter Variables ---
         self.input_dir_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
-        self.astap_exe_path_var = tk.StringVar(value=self.config.get("astap_executable_path", ""))
-        self.astap_data_dir_var = tk.StringVar(value=self.config.get("astap_data_directory_path", ""))
-        self.astap_search_radius_var = tk.DoubleVar(value=self.config.get("astap_default_search_radius", 3.0))
-        self.astap_downsample_var = tk.IntVar(value=self.config.get("astap_default_downsample", 2))
-        self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
         self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
         
@@ -384,32 +379,12 @@ class ZeMosaicGUI:
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
 
-        # --- ASTAP Configuration Frame ---
-        astap_cfg_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        # ... (contenu de astap_cfg_frame) ...
-        astap_cfg_frame.pack(fill=tk.X, pady=(0,10)); astap_cfg_frame.columnconfigure(1, weight=1)
-        self.translatable_widgets["astap_config_frame_title"] = astap_cfg_frame
-        ttk.Label(astap_cfg_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = astap_cfg_frame.grid_slaves(row=0,column=0)[0]
-        ttk.Entry(astap_cfg_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = astap_cfg_frame.grid_slaves(row=0,column=2)[0]
-        ttk.Label(astap_cfg_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = astap_cfg_frame.grid_slaves(row=1,column=0)[0]
-        ttk.Entry(astap_cfg_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = astap_cfg_frame.grid_slaves(row=1,column=2)[0]
-
         # --- Parameters Frame ---
         params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
         # ... (contenu de params_frame) ...
         params_frame.pack(fill=tk.X, pady=(0,10))
-        self.translatable_widgets["mosaic_astap_params_frame_title"] = params_frame
-        param_row_idx = 0 
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        self.translatable_widgets["mosaic_params_frame_title"] = params_frame
+        param_row_idx = 0
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
         
@@ -784,36 +759,6 @@ class ZeMosaicGUI:
         dir_path = filedialog.askdirectory(title=self._tr("browse_output_title", "Select Output Folder"))
         if dir_path: self.output_dir_var.set(dir_path)
 
-    def _browse_and_save_astap_exe(self):
-        title = self._tr("select_astap_exe_title", "Select ASTAP Executable")
-        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
-            new_path = zemosaic_config.ask_and_set_astap_path(self.config)
-            if new_path: self.astap_exe_path_var.set(new_path)
-            elif not self.config.get("astap_executable_path"):
-                messagebox.showwarning(self._tr("astap_path_title", "ASTAP Path"),
-                                       self._tr("astap_exe_not_set_warning", "ASTAP executable path is not set."),
-                                       parent=self.root)
-        else:
-            filetypes_loc = [(self._tr("executable_files", "Executable Files"), "*.exe"), (self._tr("all_files", "All Files"), "*.*")] if os.name == 'nt' else [(self._tr("all_files", "All Files"), "*")]
-            exe_path = filedialog.askopenfilename(title=self._tr("select_astap_exe_no_save_title", "Select ASTAP Executable (Not Saved)"), filetypes=filetypes_loc)
-            if exe_path: self.astap_exe_path_var.set(exe_path)
-
-    def _browse_and_save_astap_data_dir(self):
-        title = self._tr("select_astap_data_dir_title", "Select ASTAP Data Directory")
-        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
-            new_data_dir = zemosaic_config.ask_and_set_astap_data_dir_path(self.config)
-            if new_data_dir: self.astap_data_dir_var.set(new_data_dir)
-            elif not self.config.get("astap_data_directory_path"):
-                messagebox.showwarning(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
-                                       self._tr("astap_data_dir_not_set_warning", "ASTAP data directory path is not set."),
-                                       parent=self.root)
-        else:
-            dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_no_save_title", "Select ASTAP Data Directory (Not Saved)"))
-            if dir_path: self.astap_data_dir_var.set(dir_path)
-            
-    def _browse_astap_data_dir(self): # Fallback non-saving browse
-        dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_title_simple", "Select ASTAP Data Directory"))
-        if dir_path: self.astap_data_dir_var.set(dir_path)
 
 
 
@@ -1015,13 +960,13 @@ class ZeMosaicGUI:
         # 1. RÉCUPÉRER TOUTES les valeurs des variables Tkinter
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
-        astap_exe = self.astap_exe_path_var.get() 
-        astap_data = self.astap_data_dir_var.get()
+        astap_exe = self.config.get("astap_executable_path", "")
+        astap_data = self.config.get("astap_data_directory_path", "")
         
         try:
-            astap_radius_val = self.astap_search_radius_var.get()
-            astap_downsample_val = self.astap_downsample_var.get()
-            astap_sensitivity_val = self.astap_sensitivity_var.get()
+            astap_radius_val = self.config.get("astap_default_search_radius", 3.0)
+            astap_downsample_val = self.config.get("astap_default_downsample", 2)
+            astap_sensitivity_val = self.config.get("astap_default_sensitivity", 100)
             cluster_thresh_val = self.cluster_threshold_var.get()
             
             stack_norm_method = self.stacking_normalize_method_var.get()
@@ -1061,15 +1006,6 @@ class ZeMosaicGUI:
             os.makedirs(output_dir, exist_ok=True)
         except OSError as e: 
             messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
-        if not (astap_exe and os.path.isfile(astap_exe)): 
-            messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
-        if not (astap_data and os.path.isdir(astap_data)): 
-            if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
-                                          self._tr("astap_data_dir_missing_or_invalid_continue_q", 
-                                                   path=astap_data,
-                                                   default_path=self.config.get("astap_data_directory_path","")),
-                                          icon='warning', parent=self.root):
-                return
 
 
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
