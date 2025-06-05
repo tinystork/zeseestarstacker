@@ -885,7 +885,7 @@ class SeestarStackerGUI:
         self.start_button = ttk.Button(control_frame, text="Start", command=self.start_processing, style=accent_style); self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED); self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(control_frame, text="Analyze Input Folder", command=self._launch_folder_analyzer, state=tk.DISABLED); self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        self.mosaic_options_button = ttk.Button(control_frame, text="Mosaic...", command=self._open_mosaic_settings_window); self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        self.mosaic_options_button = ttk.Button(control_frame, text="Mosaic...", command=self.run_zemosaic); self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.local_solver_button = ttk.Button(control_frame, text=self.tr("local_solver_button_text", default="Local Solvers..."), command=self._open_local_solver_settings_window); self.local_solver_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.open_output_button = ttk.Button(control_frame, text="Open Output", command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text="Add Folder", command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
@@ -2897,8 +2897,13 @@ class SeestarStackerGUI:
             else: return
         else: self._save_settings_and_destroy()
 
-
-
+    def run_zemosaic(self):
+        """Stub method to launch ZeMosaic."""
+        self.logger.info("run_zemosaic called - stub implementation.")
+        try:
+            self._open_mosaic_settings_window()
+        except Exception as e:
+            self.logger.error(f"Error launching mosaic settings: {e}")
 
     def _open_mosaic_settings_window(self):
         """
