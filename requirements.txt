@@ -28,7 +28,7 @@ matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
 
 # --- Optional Dependencies ---
-psutil            # For automatic batch size estimation (Uncomment if needed)
+# psutil          # Optional: enables memory usage logging and batch size estimation
 acstools          # For satellite trail detection (Uncomment if needed)
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
                            # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
