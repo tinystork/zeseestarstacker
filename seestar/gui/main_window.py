@@ -334,6 +334,8 @@ class SeestarStackerGUI:
         self.kappa = tk.DoubleVar(value=2.5)
         # New unified stacking method variable
         self.stack_method_var = tk.StringVar(value="kappa_sigma")
+        # Display variable for localized labels in the combobox
+        self.stack_method_display_var = tk.StringVar()
         # --- New stacking option variables ---
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
@@ -789,13 +791,32 @@ class SeestarStackerGUI:
         self.stack_method_label.grid(row=0, column=0, sticky=tk.W, padx=(0,2))
         self.method_combo = ttk.Combobox(
             mk_line1_frame,
-            textvariable=self.stack_method_var,
-            values=("mean", "median", "kappa_sigma", "winsorized_sigma_clip", "linear_fit_clip"),
+            textvariable=self.stack_method_display_var,
             width=22,
             state="readonly"
         )
         self.method_combo.grid(row=0, column=1, sticky=tk.W, padx=(0,8))
         self.method_combo.bind("<<ComboboxSelected>>", self._on_method_combo_change)
+
+        # Mapping between internal keys and displayed labels for the stacking method
+        self.method_keys = [
+            "mean",
+            "median",
+            "kappa_sigma",
+            "winsorized_sigma_clip",
+            "linear_fit_clip",
+        ]
+        self.method_key_to_label = {}
+        self.method_label_to_key = {}
+        for k in self.method_keys:
+            label = self.tr(f"method_{k}", default=k.replace("_", " ").title())
+            self.method_key_to_label[k] = label
+            self.method_label_to_key[label] = k
+        self.method_combo["values"] = list(self.method_key_to_label.values())
+        # Set display variable based on current internal value
+        self.stack_method_display_var.set(
+            self.method_key_to_label.get(self.stack_method_var.get(), self.stack_method_var.get())
+        )
         scnr_options_subframe_in_stacking = ttk.Frame(method_kappa_scnr_frame); scnr_options_subframe_in_stacking.pack(fill=tk.X, padx=5, pady=(5,2))
         self.apply_final_scnr_check = ttk.Checkbutton(scnr_options_subframe_in_stacking, text=self.tr("apply_final_scnr_label", default="Apply Final SCNR (Green)"), variable=self.apply_final_scnr_var, command=self._update_final_scnr_options_state); self.apply_final_scnr_check.pack(anchor=tk.W, pady=(0,2))
         self.scnr_params_frame = ttk.Frame(scnr_options_subframe_in_stacking); self.scnr_params_frame.pack(fill=tk.X, padx=(20, 0))
@@ -1144,7 +1165,10 @@ class SeestarStackerGUI:
 
     def _on_method_combo_change(self, event=None):
         """Update internal vars when method selection changes."""
-        method = self.stack_method_var.get()
+        # Convert displayed label back to internal key
+        display_value = self.stack_method_display_var.get()
+        method = self.method_label_to_key.get(display_value, display_value)
+        self.stack_method_var.set(method)
         if method == "mean":
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("none")
@@ -1815,6 +1839,18 @@ class SeestarStackerGUI:
                     elif isinstance(widget, ttk.LabelFrame): widget.config(text=translation)
             except tk.TclError: pass
             except Exception as e: print(f"Debug: Error updating widget '{key}': {e}")
+
+        # Refresh stacking method combobox with localized labels
+        if hasattr(self, 'method_combo'):
+            self.method_key_to_label = {}
+            self.method_label_to_key = {}
+            for k in self.method_keys:
+                label = self.tr(f"method_{k}", default=k.replace('_', ' ').title())
+                self.method_key_to_label[k] = label
+                self.method_label_to_key[label] = k
+            self.method_combo['values'] = list(self.method_key_to_label.values())
+            current_key = self.stack_method_var.get()
+            self.stack_method_display_var.set(self.method_key_to_label.get(current_key, current_key))
         # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
