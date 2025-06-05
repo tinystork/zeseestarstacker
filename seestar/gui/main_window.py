@@ -3200,6 +3200,8 @@ class SeestarStackerGUI:
                 env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
             if getattr(self.settings, "astrometry_api_key", ""):
                 env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
+            if getattr(self.settings, "local_solver_preference", ""):
+                env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
             try:
                 radius_val = float(getattr(self.settings, "astap_search_radius", 0))
                 env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)

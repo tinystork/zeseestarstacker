@@ -112,6 +112,7 @@ ZEMOSAIC_ASTAP_DATA_DIR=/path/to/catalogs
 ZEMOSAIC_LOCAL_ANSVR_PATH=/path/to/ansvr.cfg
 ZEMOSAIC_ASTROMETRY_API_KEY=your_key
 ZEMOSAIC_ASTAP_SEARCH_RADIUS=3.0
+ZEMOSAIC_LOCAL_SOLVER_PREFERENCE=astap
 ```
 
 These values prefill the solver configuration when the GUI starts.
