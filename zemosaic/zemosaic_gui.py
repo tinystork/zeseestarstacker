@@ -17,7 +17,7 @@ except ImportError:
     print("AVERT GUI: Pillow (PIL) non installé. L'icône PNG ne peut pas être chargée.")
 # --- Import du module de localisation ---
 try:
-    from locales.zemosaic_localization import ZeMosaicLocalization
+    from .locales.zemosaic_localization import ZeMosaicLocalization
     ZEMOSAIC_LOCALIZATION_AVAILABLE = True
 except ImportError as e_loc:
     ZEMOSAIC_LOCALIZATION_AVAILABLE = False
