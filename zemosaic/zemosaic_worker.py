@@ -60,6 +60,7 @@ except Exception as e_reproject_other_final: logger.critical(f"Erreur import 're
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
 zemosaic_astrometry, ZEMOSAIC_ASTROMETRY_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
+AstrometrySolver, ASTROMETRY_SOLVER_AVAILABLE = None, False
 
 try:
     from . import zemosaic_utils as zemosaic_utils
@@ -96,6 +97,15 @@ except Exception:
         logger.info("Module 'zemosaic_align_stack' importé (absolu).")
     except ImportError as e:
         logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
+
+try:
+    from seestar.alignment.astrometry_solver import AstrometrySolver
+    ASTROMETRY_SOLVER_AVAILABLE = True
+    logger.info("Classe 'AstrometrySolver' importée depuis seestar.alignment.")
+except Exception as e:
+    ASTROMETRY_SOLVER_AVAILABLE = False
+    AstrometrySolver = None
+    logger.error(f"Import 'AstrometrySolver' échoué: {e}.")
 
 
 
@@ -337,9 +347,9 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     _log_and_callback("clusterstacks_info_finished", num_groups=len(groups), level="INFO", callback=progress_callback)
     return groups
 
-def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_data_dir: str, 
-                                  astap_search_radius: float, astap_downsample: int, 
-                                  astap_sensitivity: int, astap_timeout_seconds: int, 
+def get_wcs_and_pretreat_raw_file(file_path: str,
+                                  solver_instance,
+                                  solver_settings: dict,
                                   progress_callback: callable):
     filename = os.path.basename(file_path)
     # Utiliser une fonction helper pour les logs internes à cette fonction si _log_and_callback
@@ -429,18 +439,25 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
-    if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
-        _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
-        wcs_brute = zemosaic_astrometry.solve_with_astap(
-            image_fits_path=file_path, original_fits_header=header_orig, 
-            astap_exe_path=astap_exe_path, astap_data_dir=astap_data_dir, 
-            search_radius_deg=astap_search_radius, downsample_factor=astap_downsample, 
-            sensitivity=astap_sensitivity, timeout_sec=astap_timeout_seconds, 
-            update_original_header_in_place=True, # Important que le header soit mis à jour
-            progress_callback=progress_callback
+    if wcs_brute is None and ASTROMETRY_SOLVER_AVAILABLE and solver_instance:
+        _pcb_local(
+            f"    WCS non trouvé/valide dans header. Appel solver.solve pour '{filename}'.",
+            lvl="DEBUG_DETAIL"
         )
-        if wcs_brute: _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
-        else: _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
+        try:
+            wcs_brute = solver_instance.solve(
+                file_path,
+                header_orig,
+                settings=solver_settings,
+                update_header_with_solution=True
+            )
+        except Exception as e_solve:
+            _pcb_local("getwcs_warn_solver_failed", lvl="WARN", filename=filename, error=str(e_solve))
+            wcs_brute = None
+        if wcs_brute:
+            _pcb_local("getwcs_info_solver_solved", lvl="INFO_DETAIL", filename=filename)
+        else:
+            _pcb_local("getwcs_warn_solver_failed", lvl="WARN", filename=filename)
     elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
         _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
         # Action de déplacement sera gérée par le check suivant
@@ -1215,6 +1232,29 @@ def run_hierarchical_mosaic(
     pcb(f"  Options Stacking (Master Tuiles): Norm='{stack_norm_method}', Weight='{stack_weight_method}', Reject='{stack_reject_algo}', Combine='{stack_final_combine}', RadialWeight={apply_radial_weight_config} (Feather={radial_feather_fraction_config if apply_radial_weight_config else 'N/A'}, Power={radial_shape_power_config if apply_radial_weight_config else 'N/A'}, Floor={min_radial_weight_floor_config if apply_radial_weight_config else 'N/A'})", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Options Assemblage Final: Méthode='{final_assembly_method_config}'", prog=None, lvl="DEBUG_DETAIL")
 
+    # --- Initialisation du solveur astrométrique ---
+    astrometry_solver = None
+    solver_settings = {}
+    if ASTROMETRY_SOLVER_AVAILABLE:
+        try:
+            astrometry_solver = AstrometrySolver(progress_callback=progress_callback)
+            solver_settings = {
+                'local_solver_preference': 'astap',
+                'api_key': None,
+                'astap_path': astap_exe_path,
+                'astap_data_dir': astap_data_dir_param,
+                'astap_search_radius': astap_search_radius_config,
+                'local_ansvr_path': None,
+                'scale_est_arcsec_per_pix': None,
+                'scale_tolerance_percent': 20,
+                'ansvr_timeout_sec': 120,
+                'astap_timeout_sec': 180,
+                'astrometry_net_timeout_sec': 300,
+            }
+        except Exception as e_solver_inst:
+            pcb("run_warn_solver_init_failed", prog=None, lvl="WARN", error=str(e_solver_inst))
+            astrometry_solver = None
+
     time_per_raw_file_wcs = None; time_per_master_tile_creation = None
     cache_dir_name = ".zemosaic_img_cache"; temp_image_cache_dir = os.path.join(output_folder, cache_dir_name)
     try:
@@ -1271,16 +1311,12 @@ def run_hierarchical_mosaic(
     with ThreadPoolExecutor(max_workers=actual_num_workers_ph1, thread_name_prefix="ZeMosaic_Ph1_") as executor_ph1:
         future_to_filepath_ph1 = { 
             executor_ph1.submit(
-                get_wcs_and_pretreat_raw_file, 
-                f_path, 
-                astap_exe_path, 
-                astap_data_dir_param, 
-                astap_search_radius_config, 
-                astap_downsample_config, 
-                astap_sensitivity_config, 
-                180, # astap_timeout_seconds
+                get_wcs_and_pretreat_raw_file,
+                f_path,
+                astrometry_solver,
+                solver_settings,
                 progress_callback
-            ): f_path for f_path in fits_file_paths 
+            ): f_path for f_path in fits_file_paths
         }
         
         for future in as_completed(future_to_filepath_ph1):
