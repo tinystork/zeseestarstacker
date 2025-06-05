@@ -2898,8 +2898,23 @@ class SeestarStackerGUI:
         else: self._save_settings_and_destroy()
 
     def run_zemosaic(self):
-        """Open the Mosaic settings window."""
-        self.logger.info("run_zemosaic called.")
+        """Launch the external Zemosaic GUI."""
+        self.logger.info("run_zemosaic called. Launching zemosaic_gui...")
+        try:
+            subprocess.Popen([sys.executable, "-m", "zemosaic_gui"])
+            self.logger.info("zemosaic_gui launched successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to launch zemosaic_gui: {e}")
+            messagebox.showerror(
+                self.tr("error", default="Error"),
+                self.tr("mosaic_window_create_error", default="Could not open Mosaic settings window.")
+                + f"\n{e}",
+                parent=self.root,
+            )
+
+    def _open_mosaic_settings_window(self):
+        """Open the Mosaic settings window inside the main GUI."""
+        self.logger.info("_open_mosaic_settings_window called.")
         try:
             if (
                 hasattr(self, "_mosaic_settings_window_instance")
