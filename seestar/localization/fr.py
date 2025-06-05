@@ -76,6 +76,11 @@ FR_TRANSLATIONS = {
     'method_kappa_sigma': "Kappa-Sigma Clip",
     'method_winsorized_sigma_clip': "Winsorized Sigma Clip",
     'method_linear_fit_clip': "Linear Fit Clip",
+    'kappa_sigma': 'Kappa-Sigma Clip',
+    'winsorized_sigma_clip': 'Winsorized Sigma Clip',
+    'linear_fit_clip': 'Linear Fit Clip',
+    'linear_fit': 'Ajustement Linéaire (Fond Ciel)',
+    'noise_variance': 'Variance Bruit (1/σ²)',
     
     ### Traductions SCNR Final ###
     'apply_final_scnr_label': "Appliquer SCNR Final (Vert)",
