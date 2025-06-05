@@ -37,7 +37,6 @@ from scipy.spatial import ConvexHull
 from reproject.mosaicking import reproject_and_coadd
 from reproject import reproject_interp
 from seestar.gui.settings import SettingsManager
-from zemosaic.zemosaic_worker import create_master_tile
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -3990,6 +3989,8 @@ class SeestarQueuedStacker:
 
         stacked_batch_data_np = None
         stack_info_header = None
+
+        from zemosaic.zemosaic_worker import create_master_tile
 
         if all_have_wcs:
             tile_path, _ = create_master_tile(
