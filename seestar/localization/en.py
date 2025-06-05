@@ -331,7 +331,7 @@ EN_TRANSLATIONS = {
     'mosaic_error_converting_spinbox': "Error converting Spinbox value: {error_details}",
     
     # --- LocalSolverSettingsWindow ---   
-    'local_solver_button_text': "Local Solvers...",
+    'local_solver_button_text': "Solver Config",
     'local_solver_window_create_error': "Could not open Local Solvers settings window.",
     'local_solver_general_options_frame': "General Local Solver Options",
     'local_solver_use_priority_label': "Prioritize local solvers over Astrometry.net (if paths are set)",
