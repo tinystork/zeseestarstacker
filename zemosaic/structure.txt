@@ -18,7 +18,6 @@ zemosaic/
 ├── zemosaic_gui.py               # Interface Tkinter
 ├── zemosaic_worker.py            # Thread principal de traitement
 ├── zemosaic_align_stack.py       # Fonctions d'alignement
-├── zemosaic_astrometry.py        # Appel ASTAP
 ├── zemosaic_localization.py      # Gestion des langues
 ├── zemosaic_utils.py             # Fonctions utilitaires
 ├── zemosaic_config.py            # Configuration de l'interface
