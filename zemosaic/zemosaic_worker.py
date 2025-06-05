@@ -582,14 +582,33 @@ def create_master_tile(
     ref_path_raw = ref_info_for_tile.get('path_raw', 'UnknownRawRef')
     pcb_tile(f"{func_id_log_base}_info_reference_set", prog=None, lvl="DEBUG_DETAIL", ref_index=reference_image_index_in_group, ref_filename=os.path.basename(ref_path_raw), tile_id=tile_id)
 
-    pcb_tile(f"{func_id_log_base}_info_loading_from_cache_started", prog=None, lvl="DEBUG_DETAIL", num_images=len(seestar_stack_group_info), tile_id=tile_id)
+    num_images_total = len(seestar_stack_group_info)
+    pcb_tile(
+        f"{func_id_log_base}_info_loading_from_cache_started",
+        prog=None,
+        lvl="DEBUG_DETAIL",
+        num_images=num_images_total,
+        tile_id=tile_id,
+    )
+
+    start_time_loading = time.monotonic() if hasattr(time, "monotonic") else None
     
     tile_images_data_HWC_adu = []
     tile_original_raw_headers = [] # Liste des dictionnaires de header originaux
 
     for i, raw_file_info in enumerate(seestar_stack_group_info):
         cached_image_file_path = raw_file_info.get('path_preprocessed_cache')
-        original_raw_path = raw_file_info.get('path_raw', 'UnknownRawPathForTileImg') # Plus descriptif
+        original_raw_path = raw_file_info.get('path_raw', 'UnknownRawPathForTileImg')
+
+        pcb_tile(
+            f"{func_id_log_base}_debug_loading_image",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            index=i + 1,
+            total=num_images_total,
+            filename=os.path.basename(original_raw_path),
+            tile_id=tile_id,
+        )
 
         if not (cached_image_file_path and os.path.exists(cached_image_file_path)):
             pcb_tile(f"{func_id_log_base}_warn_cache_file_missing", prog=None, lvl="WARN", filename=os.path.basename(original_raw_path), cache_path=cached_image_file_path, tile_id=tile_id)
@@ -607,7 +626,18 @@ def create_master_tile(
             
             tile_images_data_HWC_adu.append(img_data_adu)
             # Stocker le dict de header, pas l'objet fits.Header, car c'est ce qui est dans raw_file_info
-            tile_original_raw_headers.append(raw_file_info.get('header')) 
+            tile_original_raw_headers.append(raw_file_info.get('header'))
+
+            if start_time_loading is not None and num_images_total > 1:
+                elapsed = time.monotonic() - start_time_loading
+                eta_seconds = (elapsed / (i + 1)) * (num_images_total - i - 1)
+                h, rem = divmod(int(eta_seconds), 3600)
+                m, s = divmod(rem, 60)
+                pcb_tile(
+                    f"ETA_UPDATE:{h:02d}:{m:02d}:{s:02d}",
+                    prog=None,
+                    lvl="ETA_LEVEL",
+                )
         except MemoryError as e_mem_load_cache:
              pcb_tile(f"{func_id_log_base}_error_memory_loading_cache", prog=None, lvl="ERROR", filename=os.path.basename(cached_image_file_path), error=str(e_mem_load_cache), tile_id=tile_id)
              del tile_images_data_HWC_adu, tile_original_raw_headers; gc.collect(); return None, None
