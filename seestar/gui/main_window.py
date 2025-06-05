@@ -14,10 +14,11 @@ import numpy as np
 from astropy.io import fits
 import traceback
 import math
-import platform # NOUVEL import
-import subprocess # NOUVEL import
-import gc #
-from PIL import Image, ImageTk 
+import platform  # NOUVEL import
+import subprocess  # NOUVEL import
+import gc  #
+from pathlib import Path
+from PIL import Image, ImageTk
 from .ui_utils import ToolTip
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys # Pour sys.executable
@@ -1017,7 +1018,14 @@ class SeestarStackerGUI:
         self.start_button = ttk.Button(control_frame, text="Start", command=self.start_processing, style=accent_style); self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED); self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(control_frame, text="Analyze Input Folder", command=self._launch_folder_analyzer, state=tk.DISABLED); self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        self.mosaic_options_button = ttk.Button(control_frame, text="Mosaic...", command=self._open_mosaic_settings_window); self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
+        # Launch the external ZeMosaic application instead of the built-in
+        # mosaic settings window when the "Mosaic..." button is clicked.
+        self.mosaic_options_button = ttk.Button(
+            control_frame,
+            text="Mosaic...",
+            command=self.run_zemosaic,
+        )
+        self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.local_solver_button = ttk.Button(control_frame, text=self.tr("local_solver_button_text", default="Local Solvers..."), command=self._open_local_solver_settings_window); self.local_solver_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.open_output_button = ttk.Button(control_frame, text="Open Output", command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text="Add Folder", command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
@@ -3177,13 +3185,19 @@ class SeestarStackerGUI:
         else: self._save_settings_and_destroy()
 
     def run_zemosaic(self):
-        """Launch the external Zemosaic GUI."""
-        self.logger.info("run_zemosaic called. Launching zemosaic_gui...")
+        """Launch the ZeMosaic application in a separate process."""
+        self.logger.info("run_zemosaic called. Launching run_zemosaic.py...")
         try:
-            subprocess.Popen([sys.executable, "-m", "zemosaic_gui"])
-            self.logger.info("zemosaic_gui launched successfully")
+            # Ensure imports inside run_zemosaic work even if the GUI was
+            # started from another directory by using the project root as cwd
+            project_root = Path(__file__).resolve().parents[2]
+            subprocess.Popen(
+                [sys.executable, "-m", "zemosaic.run_zemosaic"],
+                cwd=str(project_root),
+            )
+            self.logger.info("run_zemosaic.py launched successfully")
         except Exception as e:
-            self.logger.error(f"Failed to launch zemosaic_gui: {e}")
+            self.logger.error(f"Failed to launch run_zemosaic.py: {e}")
             messagebox.showerror(
                 self.tr("error", default="Error"),
                 self.tr("mosaic_window_create_error", default="Could not open Mosaic settings window.")
