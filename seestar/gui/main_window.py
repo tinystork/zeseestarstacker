@@ -3191,6 +3191,7 @@ class SeestarStackerGUI:
             # Ensure imports inside run_zemosaic work even if the GUI was
             # started from another directory by using the project root as cwd
             project_root = Path(__file__).resolve().parents[2]
+
             subprocess.Popen(
                 [sys.executable, "-m", "zemosaic.run_zemosaic"],
                 cwd=str(project_root),
