@@ -367,7 +367,7 @@ FR_TRANSLATIONS = {
     'mosaic_error_converting_spinbox': "Erreur de conversion d'une valeur de Spinbox : {error_details}",
    
     # --- LocalSolverSettingsWindow ---   
-    'local_solver_button_text': "Solveurs Locaux...",
+    'local_solver_button_text': "Config Solveur",
     'local_solver_window_create_error': "Impossible d'ouvrir la fenêtre de configuration des Solveurs Locaux.",
     'local_solver_general_options_frame': "Options Générales des Solveurs Locaux",
     'local_solver_use_priority_label': "Prioriser les solveurs locaux sur Astrometry.net (si chemins configurés)",
