@@ -163,6 +163,31 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         ttk.Radiobutton(solver_choice_frame, text=self.parent_gui.tr("local_solver_choice_astap", default="Use ASTAP (local)"), variable=self.local_solver_choice_var, value="astap", command=self._on_solver_choice_change).pack(anchor=tk.W, pady=2)
         ttk.Radiobutton(solver_choice_frame, text=self.parent_gui.tr("local_solver_choice_ansvr", default="Use Astrometry.net Local (solve-field)"), variable=self.local_solver_choice_var, value="ansvr", command=self._on_solver_choice_change).pack(anchor=tk.W, pady=2)
 
+        # --- Cadre Clé API (utilise la variable du GUI parent) ---
+        api_key_frame = ttk.LabelFrame(main_frame,
+                                       text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"),
+                                       padding="5")
+        api_key_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        api_key_inner = ttk.Frame(api_key_frame)
+        api_key_inner.pack(fill=tk.X, padx=5, pady=(5, 0))
+        ttk.Label(api_key_inner,
+                  text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"),
+                  width=10).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(api_key_inner, textvariable=self.parent_gui.astrometry_api_key_var, show="*", width=40).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(api_key_frame,
+                  text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"),
+                  foreground="gray", font=("Arial", 8)).pack(anchor=tk.W, padx=10, pady=(2,5))
+
+        api_key_help_text_static = self.parent_gui.tr(
+            "msw_api_key_help_static",
+            default="Used for Astrometry.net web service:\n"
+                    "- If 'Astrometry.net per Panel' is chosen and no local solver is active.\n"
+                    "- As a final fallback if chosen local solvers fail (for anchor or panels)."
+        )
+        ttk.Label(api_key_frame, text=api_key_help_text_static, font=("Arial", 8, "italic"), justify=tk.LEFT, wraplength=380).pack(anchor=tk.W, padx=10, pady=(0,5))
+
         # --- Configuration ASTAP (inchangée par rapport à ta version précédente) ---
         self.astap_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("local_solver_astap_frame_title", default="ASTAP Configuration"), padding="10")
         self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -490,6 +515,10 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.astap_data_dir = astap_data_dir
         setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius) # Sauvegarder le rayon
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
+        try:
+            self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()
+        except Exception:
+            self.parent_gui.settings.astrometry_api_key = ''
         
         print(f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Ansvr Local='{local_ansvr_path}'") # DEBUG
         print("  LocalSolverSettingsWindow: Paramètres mis à jour dans parent_gui.settings.")

@@ -34,8 +34,6 @@ class MosaicSettingsWindow(tk.Toplevel):
         # Toutes ces variables doivent être définies AVANT l'appel à self._build_ui()
         self.local_mosaic_active_var = tk.BooleanVar(value=self.settings.get('enabled', initial_mosaic_state))
         self.local_mosaic_align_mode_var = tk.StringVar(value=self.settings.get('alignment_mode', 'local_fast_fallback'))
-        initial_api_key = getattr(self.parent_gui.settings, 'astrometry_api_key', '') 
-        self.local_api_key_var = tk.StringVar(value=initial_api_key) 
 
         # Ces variables pour les options Drizzle Mosaïque doivent être définies ici
         self.local_mosaic_scale_var = tk.StringVar(value=str(self.settings.get('mosaic_scale_factor', 2))) # <<< CELLE-CI ÉTAIT LE PROBLÈME
@@ -169,47 +167,8 @@ class MosaicSettingsWindow(tk.Toplevel):
             if fmt_value: spin_options["format"] = fmt_value
             ttk.Spinbox(param_frame, **spin_options).pack(side=tk.LEFT, padx=2)
 
-        # --- 4. Cadre Clé API ---
-        self.api_key_frame = ttk.LabelFrame(main_frame, 
-                                            text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"),
-                                            padding="5")
-        self.api_key_frame.pack(fill=tk.X, pady=5, padx=5)
-        
-        # Cadre interne pour l'Entry et son label (pour un meilleur alignement)
-        api_key_inner_frame = ttk.Frame(self.api_key_frame) # Parent est self.api_key_frame
-        api_key_inner_frame.pack(fill=tk.X, padx=5, pady=(5,0)) # Un peu de padding en haut
 
-        api_key_label = ttk.Label(api_key_inner_frame, 
-                                  text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"),
-                                  width=10)
-        api_key_label.pack(side=tk.LEFT, padx=(0,5))
-        
-        self.api_key_entry = ttk.Entry(api_key_inner_frame, textvariable=self.local_api_key_var, show="*", width=40)
-        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True) # Retiré padx=5 ici, géré par api_key_inner_frame
-
-        # Label d'aide original (Get your key...)
-        api_help_label = ttk.Label(self.api_key_frame, # Parent est self.api_key_frame
-                                   text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"),
-                                   foreground="gray", font=("Arial", 8))
-        api_help_label.pack(anchor=tk.W, padx=10, pady=(2,5)) # padx=10 pour l'indenter un peu
-        
-        # Nouveau label statique d'information
-        api_key_help_text_static = self.parent_gui.tr( # Renommé la variable pour éviter conflit
-            "msw_api_key_help_static", # Nouvelle clé de traduction pour ce texte plus long
-            default="Used for Astrometry.net web service:\n"
-                    "- If 'Astrometry.net per Panel' is chosen and no local solver is active.\n"
-                    "- As a final fallback if chosen local solvers fail (for anchor or panels)."
-        )
-        self.api_key_static_note_label = ttk.Label(
-            self.api_key_frame,  # <<< UTILISER self.api_key_frame ICI
-            text=api_key_help_text_static, 
-            font=("Arial", 8, "italic"), 
-            justify=tk.LEFT,
-            wraplength=380 
-        )
-        self.api_key_static_note_label.pack(anchor=tk.W, padx=10, pady=(0, 5)) # padx=10 pour l'indenter
-
-        # --- 5. Cadre Options Drizzle Mosaïque ---
+        # --- 4. Cadre Options Drizzle Mosaïque ---
         self.drizzle_options_frame = ttk.LabelFrame(main_frame, 
                                                   text=self.parent_gui.tr("mosaic_drizzle_options_frame", default="Mosaic Drizzle Options"), # Clé existante
                                                   padding="5")
@@ -324,7 +283,6 @@ class MosaicSettingsWindow(tk.Toplevel):
         print(f"  _update_options_state: is_mosaic_enabled={is_mosaic_enabled} -> main_frames_state set to: '{main_frames_state}'")
         
         toggle_frame_children_state(self.alignment_mode_frame, main_frames_state)
-        toggle_frame_children_state(self.api_key_frame, main_frames_state)
         toggle_frame_children_state(self.drizzle_options_frame, main_frames_state) # Contient pixfrac_spinbox et wht_spinbox
         
         # Visibilité et état du cadre FastAligner
@@ -334,7 +292,7 @@ class MosaicSettingsWindow(tk.Toplevel):
         if hasattr(self, 'fastaligner_options_frame'):
             if show_fa_opts:
                 if not self.fastaligner_options_frame.winfo_ismapped():
-                    self.fastaligner_options_frame.pack(fill=tk.X, pady=5, padx=5, before=self.api_key_frame)
+                    self.fastaligner_options_frame.pack(fill=tk.X, pady=5, padx=5, before=self.drizzle_options_frame)
                 print(f"  _update_options_state: Applying state NORMAL to children of fastaligner_options_frame.")
                 toggle_frame_children_state(self.fastaligner_options_frame, tk.NORMAL)
             else:
@@ -377,7 +335,10 @@ class MosaicSettingsWindow(tk.Toplevel):
 
         is_mosaic_enabled_ui = self.local_mosaic_active_var.get() 
         selected_align_method = self.local_mosaic_align_mode_var.get() 
-        api_key_value = self.local_api_key_var.get().strip()
+        try:
+            api_key_value = self.parent_gui.astrometry_api_key_var.get().strip()
+        except Exception:
+            api_key_value = getattr(self.parent_gui.settings, 'astrometry_api_key', '').strip()
 
         # Initialisation de api_key_potentially_needed à False pour garantir sa définition
         api_key_potentially_needed = False 
@@ -429,7 +390,6 @@ class MosaicSettingsWindow(tk.Toplevel):
         # --- FIN CONSTRUCTION DU DICTIONNAIRE ---
         
         self.parent_gui.settings.mosaic_settings = settings_dict_to_save
-        self.parent_gui.settings.astrometry_api_key = api_key_value 
         
         if hasattr(self.parent_gui, '_update_mosaic_status_indicator'):
             self.parent_gui._update_mosaic_status_indicator()
