@@ -388,5 +388,7 @@ EN_TRANSLATIONS = {
 
 
     'use_best_reference_button': 'Use Recommended Reference',
+    'status_label': 'Status:',
+    'apply_snr_rejection': 'Apply SNR Rejection',
 }
 # --- END OF FILE seestar/localization/en.py ---

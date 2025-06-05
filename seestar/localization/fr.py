@@ -154,6 +154,8 @@ FR_TRANSLATIONS = {
     'low_wht_percentile_label': "Percentile Bas WHT :",
     'low_wht_soften_px_label': "Adoucir Masque (px) :",
     'use_best_reference_button': 'Utiliser la meilleure référence',
+    'status_label': 'Statut :',
+    'apply_snr_rejection': 'Appliquer le rejet SNR',
     
     
     # --- Section Format de Sortie FITS ---
