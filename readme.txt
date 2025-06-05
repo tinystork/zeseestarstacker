@@ -69,18 +69,18 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Python:** 3.8 or higher recommended.
 *   **Required Packages:** Listed in `requirements.txt`. Install them using pip:
     ```bash
-    pip install numpy opencv-python astropy astroalign tqdm psutil matplotlib Pillow scikit-image
+    pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   `psutil` is optional but highly recommended for automatic batch size estimation.
+    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation.
 
 **(Français)**
 
 *   **Python :** 3.8 ou supérieur recommandé.
 *   **Packages Requis :** Listés dans `requirements.txt`. Installez-les avec pip :
     ```bash
-    pip install numpy opencv-python astropy astroalign tqdm psutil matplotlib Pillow scikit-image
+    pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   `psutil` est optionnel mais fortement recommandé pour l'estimation automatique de la taille des lots.
+    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots.
 
 ---
 

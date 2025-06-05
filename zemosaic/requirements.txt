@@ -4,5 +4,5 @@ reproject
 astroalign
 opencv-python-headless
 tk
-psutil
+# psutil  # optional, only for memory usage logging
 Photutils
