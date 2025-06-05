@@ -473,6 +473,36 @@ class PreviewManager:
         if abs(self._view_offset_x) > 1e-6 or abs(self._view_offset_y) > 1e-6: self._view_offset_x = 0.0; self._view_offset_y = 0.0; needs_redraw = True
         if needs_redraw and self.last_displayed_pil_image: self._redraw_canvas()
 
+    def zoom_full_size(self):
+        """Display the current image at 100% with top-left anchoring."""
+        if self.last_displayed_pil_image is None:
+            return
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w <= 0 or canvas_h <= 0:
+            return
+        img_w, img_h = self.last_displayed_pil_image.size
+        self.zoom_level = 1.0
+        self._view_offset_x = img_w / 2 - canvas_w / 2
+        self._view_offset_y = img_h / 2 - canvas_h / 2
+        self._redraw_canvas()
+
+    def zoom_fit(self):
+        """Fit the current image within the canvas while preserving aspect ratio."""
+        if self.last_displayed_pil_image is None:
+            return
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w <= 0 or canvas_h <= 0:
+            return
+        img_w, img_h = self.last_displayed_pil_image.size
+        if img_w == 0 or img_h == 0:
+            return
+        self.zoom_level = min(canvas_w / img_w, canvas_h / img_h)
+        self._view_offset_x = 0
+        self._view_offset_y = 0
+        self._redraw_canvas()
+
     def _start_pan(self, event):
         if self.last_displayed_pil_image is None: return
         self._is_panning = True; self._pan_start_x = event.x; self._pan_start_y = event.y

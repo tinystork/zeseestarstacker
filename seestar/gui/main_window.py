@@ -1030,6 +1030,11 @@ class SeestarStackerGUI:
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2); self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
         self.preview_frame = ttk.LabelFrame(right_frame, text="Preview")
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0); self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        zoom_btn_frame = ttk.Frame(self.preview_frame); zoom_btn_frame.pack(fill=tk.X, pady=(2, 2))
+        self.zoom_100_button = ttk.Button(zoom_btn_frame, text="Zoom 100%", command=lambda: self.preview_manager.zoom_full_size())
+        self.zoom_100_button.pack(side=tk.LEFT, padx=5)
+        self.zoom_fit_button = ttk.Button(zoom_btn_frame, text="Zoom Fit", command=lambda: self.preview_manager.zoom_fit())
+        self.zoom_fit_button.pack(side=tk.LEFT, padx=5)
         self.histogram_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5))
         control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))
         self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
@@ -1779,7 +1784,8 @@ class SeestarStackerGUI:
             "show_folders_button_text": 'show_folders_button', "copy_log_button_text": 'copy_log_button',
             "open_output_button_text": 'open_output_button', "analyze_folder_button": 'analyze_folder_button',
             "local_solver_button_text": 'local_solver_button',
-            "Mosaic...": 'mosaic_options_button', "reset_expert_button": 'reset_expert_button'
+            "Mosaic...": 'mosaic_options_button', "reset_expert_button": 'reset_expert_button',
+            "zoom_100_button": 'zoom_100_button', "zoom_fit_button": 'zoom_fit_button'
         }
         for key, attr_name in buttons_keys.items():
             self.widgets_to_translate[key] = getattr(self, attr_name, None)
@@ -2288,6 +2294,14 @@ class SeestarStackerGUI:
         self.preview_total_imgs = total_imgs
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
+
+        try:
+            bp_auto, wp_auto = calculate_auto_stretch(self.current_preview_data)
+            self.preview_black_point.set(round(float(bp_auto), 4))
+            self.preview_white_point.set(round(float(wp_auto), 4))
+            self.preview_stretch_method.set("Asinh")
+        except Exception as e_auto:
+            self.logger.error(f"Auto-stretch calculation failed: {e_auto}")
         
         trigger_auto_adjust = False
         # Vérifier si le worker est toujours considéré comme actif par le QueuedStacker
