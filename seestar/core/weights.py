@@ -29,6 +29,12 @@ def _calculate_image_weights_noise_variance(image_list, progress_callback=None):
             var = std ** 2 if np.isfinite(std) and std > 1e-9 else np.inf
             min_var = var if np.isfinite(var) else 1e-9
             w = (min_var / var if np.isfinite(var) and var > 0 else 1e-6) * np.ones_like(data, dtype=np.float32)
+
+        # Normalise each weight map so its maximum value is 1.0
+        w_max = np.nanmax(w)
+        if np.isfinite(w_max) and w_max > 0:
+            w = w / w_max
+
         weights.append(w)
     return weights
 
@@ -95,5 +101,12 @@ def _calculate_image_weights_noise_fwhm(image_list, progress_callback=None):
         median_fwhm = np.nanmedian(fwhms)
         min_fwhm = max(0.5, np.nanmin(fwhms))
         scalar_weight = min_fwhm / median_fwhm if median_fwhm > 0 else 1.0
-        weights.append(np.full_like(data, scalar_weight, dtype=np.float32))
+        w = np.full_like(data, scalar_weight, dtype=np.float32)
+
+        # Normalise weight map so the maximum equals 1.0
+        w_max = np.nanmax(w)
+        if np.isfinite(w_max) and w_max > 0:
+            w = w / w_max
+
+        weights.append(w)
     return weights
