@@ -3176,33 +3176,33 @@ class SeestarStackerGUI:
             else: return
         else: self._save_settings_and_destroy()
 
-
-
+    def run_zemosaic(self):
+        """Launch the external Zemosaic GUI."""
+        self.logger.info("run_zemosaic called. Launching zemosaic_gui...")
+        try:
+            subprocess.Popen([sys.executable, "-m", "zemosaic_gui"])
+            self.logger.info("zemosaic_gui launched successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to launch zemosaic_gui: {e}")
+            messagebox.showerror(
+                self.tr("error", default="Error"),
+                self.tr("mosaic_window_create_error", default="Could not open Mosaic settings window.")
+                + f"\n{e}",
+                parent=self.root,
+            )
 
     def _open_mosaic_settings_window(self):
-        """
-        Ouvre la fenêtre modale pour configurer les options de mosaïque.
-        """
-        print("DEBUG (GUI): Clic sur bouton 'Mosaïque...' - Appel de _open_mosaic_settings_window.")
-        # --- AJOUT DEBUG ---
-        current_api_key_in_main_gui_var = "NOT_FOUND"
-        if hasattr(self, 'astrometry_api_key_var'):
-            try:
-                current_api_key_in_main_gui_var = self.astrometry_api_key_var.get()
-                print(f"DEBUG (GUI _open_mosaic_settings_window): Valeur de self.astrometry_api_key_var.get() = '{current_api_key_in_main_gui_var}' (longueur: {len(current_api_key_in_main_gui_var)})")
-            except tk.TclError:
-                print("DEBUG (GUI _open_mosaic_settings_window): Erreur TclError lecture astrometry_api_key_var (fenêtre détruite?)")
-        else:
-            print("DEBUG (GUI _open_mosaic_settings_window): self.astrometry_api_key_var N'EXISTE PAS sur self (SeestarStackerGUI).")
-        # --- FIN AJOUT DEBUG ---
-
-        # Vérifier si une instance existe déjà (sécurité, normalement inutile car modal)
-        # (Optionnel, mais peut être utile pour le développement)
-        if hasattr(self, '_mosaic_settings_window_instance') and self._mosaic_settings_window_instance and self._mosaic_settings_window_instance.winfo_exists():
-            print("DEBUG (GUI): Fenêtre de paramètres mosaïque déjà ouverte. Mise au premier plan.")
-            self._mosaic_settings_window_instance.lift()
-            self._mosaic_settings_window_instance.focus_force()
-            return
+        """Open the Mosaic settings window inside the main GUI."""
+        self.logger.info("_open_mosaic_settings_window called.")
+        try:
+            if (
+                hasattr(self, "_mosaic_settings_window_instance")
+                and self._mosaic_settings_window_instance
+                and self._mosaic_settings_window_instance.winfo_exists()
+            ):
+                self._mosaic_settings_window_instance.lift()
+                self._mosaic_settings_window_instance.focus_force()
+                return
 
         # Créer et afficher la nouvelle fenêtre modale
         try:
