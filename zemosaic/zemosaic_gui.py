@@ -834,8 +834,17 @@ class ZeMosaicGUI:
                     def update_eta_label():
                         if hasattr(self.eta_var,'set') and callable(self.eta_var.set):
                             try: self.eta_var.set(eta_string_from_worker)
-                            except tk.TclError: pass 
+                            except tk.TclError: pass
                     if self.root.winfo_exists(): self.root.after_idle(update_eta_label)
+                if hasattr(self, 'progress_manager') and self.progress_manager:
+                    pm = self.progress_manager
+                    if hasattr(pm, 'set_remaining') and callable(pm.set_remaining):
+                        pm.set_remaining(eta_string_from_worker)
+                    elif hasattr(pm, 'remaining_time_var'):
+                        try:
+                            pm.remaining_time_var.set(eta_string_from_worker)
+                        except Exception:
+                            pass
                 is_control_message = True
             elif message_key_or_raw == "CHRONO_START_REQUEST":
                 if self.root.winfo_exists(): self.root.after_idle(self._start_gui_chrono)
