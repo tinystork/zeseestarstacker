@@ -27,8 +27,12 @@ class ProgressManager:
         self.progress_bar = progress_bar
         self.status_text = status_text
         self.remaining_time_var = remaining_time_var
+        try:
+            self.remaining_time_var.set("--:--:--")
+        except tk.TclError:
+            pass
         self.elapsed_time_var = elapsed_time_var
-        self.start_time = None 
+        self.start_time = None
         self.timer_id = None
         
         try:
@@ -137,6 +141,14 @@ class ProgressManager:
                  print("Warning: ProgressManager cannot schedule UI update (no valid root).")
         except Exception as e:
              print(f"Error scheduling UI update in ProgressManager: {e}")
+
+    def set_remaining(self, time_str):
+        """Update the remaining time display variable."""
+        try:
+            if hasattr(self.remaining_time_var, 'set'):
+                self.remaining_time_var.set(str(time_str))
+        except tk.TclError:
+            pass
 
 
 
