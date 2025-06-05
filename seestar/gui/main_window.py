@@ -339,6 +339,9 @@ class SeestarStackerGUI:
         # --- New stacking option variables ---
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
+        # Display variables for localization of normalization and weighting methods
+        self.stack_norm_display_var = tk.StringVar()
+        self.stack_weight_display_var = tk.StringVar()
         self.stack_reject_algo_var = tk.StringVar(value="kappa_sigma")
         self.stack_final_combine_var = tk.StringVar(value="mean")
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
@@ -746,16 +749,52 @@ class SeestarStackerGUI:
         norm_frame = ttk.Frame(self.options_frame); norm_frame.pack(fill=tk.X, padx=5, pady=(5,0))
         self.norm_method_label = ttk.Label(norm_frame, text=self.tr("stacking_norm_method_label", default="Normalization:"))
         self.norm_method_label.pack(side=tk.LEFT)
-        self.stack_norm_combo = ttk.Combobox(norm_frame, textvariable=self.stack_norm_method_var,
-                                             values=("none", "linear_fit", "sky_mean"), state="readonly", width=15)
+        self.stack_norm_combo = ttk.Combobox(
+            norm_frame,
+            textvariable=self.stack_norm_display_var,
+            width=22,
+            state="readonly"
+        )
         self.stack_norm_combo.pack(side=tk.LEFT, padx=(5,0))
+        self.stack_norm_combo.bind("<<ComboboxSelected>>", self._on_norm_combo_change)
+
+        # Mapping between internal keys and displayed labels for normalization method
+        self.norm_method_keys = ["none", "linear_fit", "sky_mean"]
+        self.norm_key_to_label = {}
+        self.norm_label_to_key = {}
+        for k in self.norm_method_keys:
+            label = self.tr(f"norm_method_{k}", default=k.replace("_", " ").title())
+            self.norm_key_to_label[k] = label
+            self.norm_label_to_key[label] = k
+        self.stack_norm_combo["values"] = list(self.norm_key_to_label.values())
+        self.stack_norm_display_var.set(
+            self.norm_key_to_label.get(self.stack_norm_method_var.get(), self.stack_norm_method_var.get())
+        )
 
         weight_frame = ttk.Frame(self.options_frame); weight_frame.pack(fill=tk.X, padx=5, pady=(2,0))
         self.weight_method_label = ttk.Label(weight_frame, text=self.tr("stacking_weight_method_label", default="Weighting:"))
         self.weight_method_label.pack(side=tk.LEFT)
-        self.stack_weight_combo = ttk.Combobox(weight_frame, textvariable=self.stack_weight_method_var,
-                                               values=("none", "noise_variance", "noise_fwhm"), state="readonly", width=15)
+        self.stack_weight_combo = ttk.Combobox(
+            weight_frame,
+            textvariable=self.stack_weight_display_var,
+            width=22,
+            state="readonly"
+        )
         self.stack_weight_combo.pack(side=tk.LEFT, padx=(5,0))
+        self.stack_weight_combo.bind("<<ComboboxSelected>>", self._on_weight_combo_change)
+
+        # Mapping between internal keys and displayed labels for weighting method
+        self.weight_method_keys = ["none", "noise_variance", "noise_fwhm"]
+        self.weight_key_to_label = {}
+        self.weight_label_to_key = {}
+        for k in self.weight_method_keys:
+            label = self.tr(f"weight_method_{k}", default=k.replace("_", " ").title())
+            self.weight_key_to_label[k] = label
+            self.weight_label_to_key[label] = k
+        self.stack_weight_combo["values"] = list(self.weight_key_to_label.values())
+        self.stack_weight_display_var.set(
+            self.weight_key_to_label.get(self.stack_weight_method_var.get(), self.stack_weight_method_var.get())
+        )
 
 
         kappa_frame = ttk.Frame(self.options_frame); kappa_frame.pack(fill=tk.X, padx=20, pady=(2,0))
@@ -1185,6 +1224,18 @@ class SeestarStackerGUI:
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("linear_fit_clip")
         self._toggle_kappa_visibility()
+
+    def _on_norm_combo_change(self, event=None):
+        """Update internal var when normalization selection changes."""
+        display_value = self.stack_norm_display_var.get()
+        key = self.norm_label_to_key.get(display_value, display_value)
+        self.stack_norm_method_var.set(key)
+
+    def _on_weight_combo_change(self, event=None):
+        """Update internal var when weighting selection changes."""
+        display_value = self.stack_weight_display_var.get()
+        key = self.weight_label_to_key.get(display_value, display_value)
+        self.stack_weight_method_var.set(key)
 
 
 
@@ -1851,6 +1902,26 @@ class SeestarStackerGUI:
             self.method_combo['values'] = list(self.method_key_to_label.values())
             current_key = self.stack_method_var.get()
             self.stack_method_display_var.set(self.method_key_to_label.get(current_key, current_key))
+        if hasattr(self, 'stack_norm_combo'):
+            self.norm_key_to_label = {}
+            self.norm_label_to_key = {}
+            for k in self.norm_method_keys:
+                label = self.tr(f"norm_method_{k}", default=k.replace('_', ' ').title())
+                self.norm_key_to_label[k] = label
+                self.norm_label_to_key[label] = k
+            self.stack_norm_combo['values'] = list(self.norm_key_to_label.values())
+            current_norm = self.stack_norm_method_var.get()
+            self.stack_norm_display_var.set(self.norm_key_to_label.get(current_norm, current_norm))
+        if hasattr(self, 'stack_weight_combo'):
+            self.weight_key_to_label = {}
+            self.weight_label_to_key = {}
+            for k in self.weight_method_keys:
+                label = self.tr(f"weight_method_{k}", default=k.replace('_', ' ').title())
+                self.weight_key_to_label[k] = label
+                self.weight_label_to_key[label] = k
+            self.stack_weight_combo['values'] = list(self.weight_key_to_label.values())
+            current_weight = self.stack_weight_method_var.get()
+            self.stack_weight_display_var.set(self.weight_key_to_label.get(current_weight, current_weight))
         # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
