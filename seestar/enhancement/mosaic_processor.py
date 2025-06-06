@@ -360,6 +360,115 @@ def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
         return None, None
 
 
+def calculate_final_mosaic_grid_dynamic_wcs(
+        fits_paths,
+        drizzle_scale_factor,
+        solver_mode,
+        solver_cfg_path,
+        astrometry_api_key):
+    """Calcule dynamiquement le WCS final d'une mosaïque à partir d'une liste de
+    fichiers FITS.
+
+    Pour chaque fichier de ``fits_paths``, la fonction tente d'abord de charger
+    le WCS depuis le header. Si ce WCS est absent ou invalide, un solveur
+    astrométrique est appelé via :func:`solve_image_wcs` pour déterminer la
+    solution.
+
+    Les WCS valides ainsi obtenus (ainsi que les dimensions correspondantes) sont
+    ensuite transmis à :func:`_calculate_final_mosaic_grid_optimized` qui se
+    charge de calculer le WCS et la ``shape`` de sortie en tenant compte
+    ``drizzle_scale_factor``.
+
+    Args:
+        fits_paths (list): Liste de chemins vers les fichiers FITS des panneaux.
+        drizzle_scale_factor (float): Facteur d'échelle Drizzle pour la sortie.
+        solver_mode (str): Mode du solveur à utiliser (ex. ``"astap"`` ou
+            ``"ansvr"``).
+        solver_cfg_path (str): Chemin vers le fichier de configuration du
+            solveur, si nécessaire.
+        astrometry_api_key (str): Clé API pour le service web Astrometry.net le
+            cas échéant.
+
+    Returns:
+        tuple: ``(output_wcs, output_shape_hw)`` ou ``(None, None)`` si aucune
+        solution WCS valide n'a pu être obtenue.
+    """
+
+    panel_wcs_list = []
+    panel_shapes_hw = []
+
+    for fp in fits_paths:
+        file_name = os.path.basename(fp)
+        header = None
+        shape_hw = None
+
+        try:
+            with fits.open(fp, memmap=False) as hdul:
+                header = hdul[0].header
+                data_shape = hdul[0].data.shape if hdul[0].data is not None else None
+        except Exception as e_read:
+            print(f"   -> ERREUR ouverture FITS '{file_name}': {e_read}")
+            continue
+
+        if data_shape is not None and len(data_shape) >= 2:
+            shape_hw = (int(data_shape[0]), int(data_shape[1]))
+        else:
+            naxis1 = header.get('NAXIS1')
+            naxis2 = header.get('NAXIS2')
+            if naxis1 and naxis2:
+                shape_hw = (int(naxis2), int(naxis1))
+
+        wcs_obj = None
+        if header is not None:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', FITSFixedWarning)
+                    wcs_tmp = WCS(header, naxis=2)
+                if wcs_tmp.is_celestial:
+                    wcs_obj = wcs_tmp
+                    print(f"      - {file_name}: WCS chargé depuis le header.")
+            except Exception as e_wcs:
+                print(f"      - {file_name}: WCS header invalide ({e_wcs}).")
+
+        if wcs_obj is None:
+            try:
+                print(f"      - {file_name}: résolution WCS via solveur ({solver_mode})...")
+                wcs_obj = solve_image_wcs(
+                    fp,
+                    solver_mode=solver_mode,
+                    solver_cfg_path=solver_cfg_path,
+                    astrometry_api_key=astrometry_api_key,
+                )
+                if wcs_obj and wcs_obj.is_celestial:
+                    print(f"      - {file_name}: WCS obtenu par résolution.")
+                else:
+                    print(f"      - {file_name}: échec de la résolution WCS.")
+                    wcs_obj = None
+            except Exception as e_solve:
+                print(f"      - {file_name}: erreur solveur ({e_solve}).")
+                wcs_obj = None
+
+        if wcs_obj is not None and shape_hw is not None:
+            try:
+                wcs_obj.pixel_shape = (shape_hw[1], shape_hw[0])
+            except Exception:
+                pass
+            panel_wcs_list.append(wcs_obj)
+            panel_shapes_hw.append(shape_hw)
+        else:
+            print(f"      - {file_name}: panneau ignoré (WCS ou shape invalide).")
+
+    if not panel_wcs_list:
+        print("ERREUR [DynWCSGrid]: Aucun WCS valide collecté depuis les fichiers.")
+        return None, None
+
+    return _calculate_final_mosaic_grid_optimized(
+        panel_wcs_list,
+        panel_shapes_hw,
+        drizzle_scale_factor,
+    )
+
+
 def process_mosaic_from_aligned_files(
         aligned_panel_info_list: list,
         output_wcs: WCS,              # WCS de la grille de sortie Drizzle finale
