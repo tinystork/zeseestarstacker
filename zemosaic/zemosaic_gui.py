@@ -8,6 +8,9 @@ import traceback
 import time
 import subprocess
 import sys
+import logging
+
+logger = logging.getLogger("ZeMosaicGUI")
 
 try:
     from PIL import Image, ImageTk # Importe depuis Pillow
@@ -115,6 +118,18 @@ class ZeMosaicGUI:
                 self.env_solver_settings['astap_search_radius'] = float(os.environ['ZEMOSAIC_ASTAP_SEARCH_RADIUS'])
             except ValueError:
                 self.env_solver_settings['astap_search_radius'] = None
+
+        effective_solver_config = {
+            'astap_path': self.env_solver_settings.get('astap_path') or '',
+            'astap_data_dir': self.env_solver_settings.get('astap_data_dir') or '',
+            'local_ansvr_path': self.env_solver_settings.get('local_ansvr_path') or '',
+            'api_key': self.env_solver_settings.get('api_key') or '',
+            'local_solver_preference': self.env_solver_settings.get('local_solver_preference') or 'none',
+            'astap_search_radius': self.env_solver_settings['astap_search_radius']
+                if self.env_solver_settings.get('astap_search_radius') is not None
+                else self.config.get('astap_default_search_radius', 3.0)
+        }
+        logger.info("Effective solver settings: %s", effective_solver_config)
 
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
