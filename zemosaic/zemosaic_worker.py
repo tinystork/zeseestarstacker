@@ -55,11 +55,16 @@ except Exception as e_astro_other_imp: logger.critical(f"Erreur import Astropy: 
 REPROJECT_AVAILABLE = False
 SHAPELY_AVAILABLE = True
 find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = None, None, None
+
 try:
-    from reproject.mosaicking import find_optimal_celestial_wcs as actual_find_optimal_wcs
-    from reproject.mosaicking import reproject_and_coadd as actual_reproject_coadd
+    from reproject.mosaicking import (
+        find_optimal_celestial_wcs as actual_find_optimal_wcs,
+        reproject_and_coadd as actual_reproject_coadd,
+    )
     from reproject import reproject_interp as actual_reproject_interp
-    find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = actual_find_optimal_wcs, actual_reproject_coadd, actual_reproject_interp
+    find_optimal_celestial_wcs = actual_find_optimal_wcs
+    reproject_and_coadd = actual_reproject_coadd
+    reproject_interp = actual_reproject_interp
     REPROJECT_AVAILABLE = True
     logger.info("Bibliothèque 'reproject' importée.")
 except ImportError as e_reproject_final:
@@ -84,6 +89,29 @@ if REPROJECT_AVAILABLE:
         logger.warning(
             "Module 'shapely' manquant: find_optimal_celestial_wcs sera ignoré."
         )
+
+if find_optimal_celestial_wcs is None:
+    try:
+        from seestar.enhancement.mosaic_processor import find_optimal_celestial_wcs as seestar_find_optimal
+        find_optimal_celestial_wcs = seestar_find_optimal
+        logger.info(
+            "find_optimal_celestial_wcs chargé depuis seestar.enhancement.mosaic_processor"
+        )
+    except Exception as e_alt_focw:
+        logger.warning(
+            f"Import alternatif find_optimal_celestial_wcs échoué: {e_alt_focw}"
+        )
+        try:
+            from reproject.mosaicking import find_optimal_celestial_wcs as fallback_find_optimal
+            find_optimal_celestial_wcs = fallback_find_optimal
+            logger.info(
+                "find_optimal_celestial_wcs chargé en dernier recours depuis reproject.mosaicking"
+            )
+        except Exception as e_last:
+            find_optimal_celestial_wcs = None
+            logger.error(
+                f"find_optimal_celestial_wcs indisponible: {e_last}"
+            )
 
 if not REPROJECT_AVAILABLE:
     logger.error(
@@ -317,7 +345,22 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
 
     if not inputs_for_optimal_wcs_calc:
         _log_and_callback("calcgrid_error_no_wcs_for_optimal_calc", level="ERROR", callback=progress_callback); return None, None
-        
+
+    if find_optimal_celestial_wcs is None:
+        if CALC_GRID_OPTIMIZED_AVAILABLE and _calculate_final_mosaic_grid_optimized:
+            _log_and_callback(
+                "CalcGrid: find_optimal_celestial_wcs missing, using optimized fallback.",
+                level="WARN",
+                callback=progress_callback,
+            )
+            return _calculate_final_mosaic_grid_optimized(
+                panel_wcs_list_to_use,
+                panel_shapes_hw_list_to_use,
+                drizzle_scale_factor,
+            )
+        _log_and_callback("calcgrid_error_find_optimal_wcs_unavailable", level="ERROR", callback=progress_callback)
+        return None, None
+
     try:
         sum_of_pixel_scales_deg = 0.0
         count_of_valid_scales = 0
