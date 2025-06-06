@@ -8,6 +8,7 @@ import gc
 import logging
 import inspect  # Pas utilisé directement ici, mais peut être utile pour des introspections futures
 import tempfile
+import warnings
 # psutil is used purely for optional memory logging
 try:
     import psutil
@@ -43,7 +44,7 @@ ASTROPY_AVAILABLE = False
 WCS, SkyCoord, Angle, fits, u = None, None, None, None, None
 try:
     from astropy.io import fits as actual_fits
-    from astropy.wcs import WCS as actual_WCS
+    from astropy.wcs import WCS as actual_WCS, FITSFixedWarning
     from astropy.coordinates import SkyCoord as actual_SkyCoord, Angle as actual_Angle
     from astropy import units as actual_u
     fits, WCS, SkyCoord, Angle, u = actual_fits, actual_WCS, actual_SkyCoord, actual_Angle, actual_u
@@ -287,6 +288,36 @@ def _log_memory_usage(progress_callback: callable, context_message: str = ""): #
 
 
 
+# --- Helper pour charger un fichier WCS adjoint (.wcs) ---
+def _load_wcs_sidecar(fits_path: str):
+    """Return a WCS object from ``<fits_path>.wcs`` if it exists."""
+    if not (ASTROPY_AVAILABLE and WCS and fits):
+        return None
+
+    sidecar_path = os.path.splitext(fits_path)[0] + ".wcs"
+    if not os.path.exists(sidecar_path):
+        return None
+
+    try:
+        with open(sidecar_path, "r") as f:
+            wcs_text = f.read().replace("\r\n", "\n").replace("\r", "\n")
+        hdr = fits.Header.fromstring(wcs_text, sep="\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = WCS(hdr, naxis=2)
+        if wcs_obj and wcs_obj.is_celestial:
+            if wcs_obj.pixel_shape is None:
+                w = hdr.get("NAXIS1")
+                h = hdr.get("NAXIS2")
+                if w and h:
+                    wcs_obj.pixel_shape = (int(w), int(h))
+            return wcs_obj
+    except Exception as e:
+        logger.warning(f"Sidecar WCS parse failed for {os.path.basename(sidecar_path)}: {e}")
+    return None
+
+
+# --- Fonctions Utilitaires Internes au Worker ---
 # --- Fonctions Utilitaires Internes au Worker ---
 def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: list,
                                  drizzle_scale_factor: float = 1.0, progress_callback: callable = None):
@@ -609,7 +640,17 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
         except Exception as e_wcs_hdr:
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
-            
+
+    if wcs_brute is None:
+        wcs_sidecar = _load_wcs_sidecar(file_path)
+        if wcs_sidecar is not None:
+            wcs_brute = wcs_sidecar
+            try:
+                header_orig.update(wcs_sidecar.to_header(relax=True))
+            except Exception:
+                pass
+            _pcb_local("getwcs_info_wcs_loaded_from_sidecar", lvl="DEBUG_DETAIL", filename=filename)
+
     if wcs_brute is None:
         if solver_instance:
             logger.info(f"Trying WCS resolution for {file_path} via solve()...")
