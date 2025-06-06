@@ -3,9 +3,19 @@ import sys  # Ajout pour sys.path et sys.modules
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
+import os
 import logging
 
-logging.basicConfig(level=logging.INFO)
+# Determine verbosity from environment variable or command-line flag
+_verbose_env = os.getenv("SEESTAR_VERBOSE", "")
+_verbose_flag = "-v" in sys.argv or "--verbose" in sys.argv
+if _verbose_flag:
+    # Remove the flag so Tkinter doesn't see it
+    sys.argv = [a for a in sys.argv if a not in ("-v", "--verbose")]
+log_level = logging.DEBUG if (
+    _verbose_flag or str(_verbose_env).lower() in ("1", "true", "yes")
+) else logging.INFO
+logging.basicConfig(level=log_level)
 logger = logging.getLogger("ZeMosaicRunner")
 
 # --- Impression de débogage initiale ---
