@@ -167,6 +167,7 @@ class SettingsManager:
             self.astap_data_dir = getattr(self, 'astap_data_dir', default_values_from_code.get('astap_data_dir', ''))
             self.astap_search_radius = getattr(self, 'astap_search_radius', default_values_from_code.get('astap_search_radius', 30.0))
             self.local_ansvr_path = getattr(self, 'local_ansvr_path', default_values_from_code.get('local_ansvr_path', ''))
+            self.use_radec_hints = getattr(gui_instance, 'use_radec_hints_var', tk.BooleanVar(value=default_values_from_code.get('use_radec_hints', True))).get()
             
             print(f"DEBUG SM (update_from_ui V_SaveAsFloat32_1): Valeurs solveurs locaux (après lecture/conservation de self): " # Version Log
                   f"Pref='{self.local_solver_preference}', ASTAP Path='{self.astap_path}', ASTAP Radius={self.astap_search_radius}")
@@ -344,11 +345,12 @@ class SettingsManager:
             if hasattr(gui_instance, '_update_final_scnr_options_state'): gui_instance._update_final_scnr_options_state()
             if hasattr(gui_instance, '_update_photutils_bn_options_state'): gui_instance._update_photutils_bn_options_state()
             if hasattr(gui_instance, '_update_feathering_options_state'): gui_instance._update_feathering_options_state()
-            if hasattr(gui_instance, '_update_low_wht_mask_options_state'): 
+            if hasattr(gui_instance, '_update_low_wht_mask_options_state'):
                 gui_instance._update_low_wht_mask_options_state()
 
             getattr(gui_instance, 'astap_search_radius_var', tk.DoubleVar()).set(self.astap_search_radius)
             print(f"DEBUG (Settings apply_to_ui): astap_search_radius appliqué à l'UI (valeur: {self.astap_search_radius})")
+            getattr(gui_instance, 'use_radec_hints_var', tk.BooleanVar()).set(self.use_radec_hints)
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
             print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # Version Log (ancienne)
@@ -449,10 +451,11 @@ class SettingsManager:
 
         # --- Paramètres Solveurs Locaux ---
         defaults_dict['local_solver_preference'] = "none" 
-        defaults_dict['astap_path'] = ""                   
-        defaults_dict['astap_data_dir'] = ""  
-        defaults_dict['astap_search_radius'] = 3.0 
-        defaults_dict['local_ansvr_path'] = ""            
+        defaults_dict['astap_path'] = ""
+        defaults_dict['astap_data_dir'] = ""
+        defaults_dict['astap_search_radius'] = 3.0
+        defaults_dict['use_radec_hints'] = True
+        defaults_dict['local_ansvr_path'] = ""
         
         defaults_dict['mosaic_mode_active'] = False
         defaults_dict['mosaic_settings'] = {
@@ -858,6 +861,7 @@ class SettingsManager:
                 self.astap_data_dir = defaults_fallback['astap_data_dir']
             else:
                 self.astap_data_dir = current_astap_data_dir.strip()
+            self.use_radec_hints = bool(getattr(self, 'use_radec_hints', True))
             try:
                 current_astap_radius = float(getattr(self, 'astap_search_radius', defaults_fallback['astap_search_radius']))
                 if not (0.0 <= current_astap_radius <= 180.0): 
@@ -1003,6 +1007,7 @@ class SettingsManager:
             'astap_path': str(getattr(self, 'astap_path', "")),
             'astap_data_dir': str(getattr(self, 'astap_data_dir', "")),
             'astap_search_radius': float(getattr(self, 'astap_search_radius', 30.0)), # Maintenu comme avant
+            'use_radec_hints': bool(getattr(self, 'use_radec_hints', True)),
             'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
         }
 

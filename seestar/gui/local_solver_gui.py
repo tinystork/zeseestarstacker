@@ -56,6 +56,10 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         )
         print(f"DEBUG (LocalSolverSettingsWindow __init__): astap_search_radius_var initialisée à {self.astap_search_radius_var.get()}.") # DEBUG
 
+        self.use_radec_hints_var = tk.BooleanVar(
+            value=getattr(self.parent_gui.settings, 'use_radec_hints', True)
+        )
+
 
         self.local_ansvr_path_var = tk.StringVar(
             value=getattr(self.parent_gui.settings, 'local_ansvr_path', "")
@@ -211,6 +215,12 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             width=6,
             format="%.2f",
         ).pack(side=tk.LEFT)
+
+        ttk.Checkbutton(
+            self.astap_frame,
+            text=self.parent_gui.tr("use_radec_hints_label", default="Use FITS RA/DEC hints"),
+            variable=self.use_radec_hints_var,
+        ).pack(anchor=tk.W)
 
 
         # --- MODIFICATION : Configuration Astrometry.net Local (ansvr) avec deux boutons ---
@@ -492,6 +502,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         astap_path = self.astap_path_var.get().strip()
         astap_data_dir = self.astap_data_dir_var.get().strip()
         astap_radius = self.astap_search_radius_var.get() # Lire la valeur du DoubleVar
+        use_radec_hints = self.use_radec_hints_var.get()
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
 
         # Valider que si un solveur est choisi, son chemin principal est rempli
@@ -522,6 +533,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.astap_path = astap_path
         self.parent_gui.settings.astap_data_dir = astap_data_dir
         setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius) # Sauvegarder le rayon
+        self.parent_gui.settings.use_radec_hints = use_radec_hints
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         try:
             self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()

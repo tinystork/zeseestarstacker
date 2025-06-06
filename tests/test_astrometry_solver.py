@@ -107,3 +107,52 @@ def test_default_radius_used_when_missing(tmp_path, monkeypatch):
 
     assert "radius" in captured
     assert captured["radius"] == astrometry_solver.ASTAP_DEFAULT_SEARCH_RADIUS
+
+
+def test_use_radec_hints_toggle(tmp_path, monkeypatch):
+    img = np.ones((5, 5), dtype=np.float32)
+    hdr = fits.Header()
+    hdr["RA"] = 123.4
+    hdr["DEC"] = -50.1
+    fits_path = tmp_path / "hint.fits"
+    fits.writeto(fits_path, img, hdr, overwrite=True)
+
+    solver = AstrometrySolver()
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check, cwd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    header = fits.getheader(fits_path)
+
+    solver._try_solve_astap(
+        str(fits_path),
+        header,
+        "astap.exe",
+        str(tmp_path),
+        1.0,
+        None,
+        None,
+        5,
+        False,
+        use_radec_hints=False,
+    )
+    assert "-ra" not in captured["cmd"]
+
+    solver._try_solve_astap(
+        str(fits_path),
+        header,
+        "astap.exe",
+        str(tmp_path),
+        1.0,
+        None,
+        None,
+        5,
+        False,
+        use_radec_hints=True,
+    )
+    assert "-ra" in captured["cmd"]
