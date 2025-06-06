@@ -1228,6 +1228,7 @@ def assemble_final_mosaic_with_reproject_coadd(
     re_solve_cropped_tiles: bool = False,
     solver_settings: dict | None = None,
     solver_instance=None,
+    alignment_solver_choice: str | None = None,
     # --- FIN NOUVEAUX PARAMÈTRES ---
 ):
     """
@@ -1424,6 +1425,49 @@ def assemble_final_mosaic_with_reproject_coadd(
                     )
             # --- FIN APPLICATION DU ROGNAGE ---
 
+            alignment_ok = True
+            if solver_instance and hasattr(solver_instance, "align_to_reference_wcs"):
+                try:
+                    align_res = solver_instance.align_to_reference_wcs(
+                        data_to_use_for_assembly,
+                        wcs_to_use_for_assembly,
+                        final_output_wcs,
+                        solver=alignment_solver_choice,
+                    )
+                    if isinstance(align_res, tuple):
+                        aligned_data, aligned_wcs = align_res[0], align_res[1]
+                    else:
+                        aligned_data, aligned_wcs = None, None
+                    if aligned_wcs is None or not aligned_wcs.is_celestial:
+                        alignment_ok = False
+                    else:
+                        if aligned_data is not None:
+                            data_to_use_for_assembly = aligned_data
+                        wcs_to_use_for_assembly = aligned_wcs
+                        try:
+                            wcs_to_use_for_assembly.pixel_shape = (
+                                data_to_use_for_assembly.shape[1],
+                                data_to_use_for_assembly.shape[0],
+                            )
+                        except Exception:
+                            pass
+                        _pcb(
+                            f"      Alignement r\u00e9ussi pour {os.path.basename(mt_path)}",
+                            lvl="DEBUG_DETAIL",
+                        )
+                except Exception as e_align:
+                    alignment_ok = False
+                    _pcb(
+                        f"ASM_REPROJ_COADD: Erreur alignement {os.path.basename(mt_path)}: {e_align}",
+                        lvl="WARN",
+                    )
+            if not alignment_ok:
+                _pcb(
+                    f"ASM_REPROJ_COADD: Tuile non align\u00e9e ignor\u00e9e {os.path.basename(mt_path)}",
+                    lvl="WARN",
+                )
+                continue
+
             input_data_all_tiles_HWC_processed.append((data_to_use_for_assembly, wcs_to_use_for_assembly))
 
         except MemoryError as e_mem_read: # ... (gestion MemoryError comme avant) ...
@@ -1535,7 +1579,8 @@ def run_hierarchical_mosaic(
     apply_master_tile_crop_config: bool,
     master_tile_crop_percent_config: float,
     save_final_as_uint16_config: bool,
-    re_solve_cropped_tiles_config: bool = False
+    re_solve_cropped_tiles_config: bool = False,
+    alignment_solver_choice: str | None = None
 
 ):
     """
@@ -1568,6 +1613,8 @@ def run_hierarchical_mosaic(
     api_key_param = solver_settings.get('api_key')
     local_ansvr_path_param = solver_settings.get('local_ansvr_path')
     astrometry_method_param = solver_settings.get('astrometry_method')
+    if alignment_solver_choice is None:
+        alignment_solver_choice = solver_settings.get('alignment_solver')
 
     if astrometry_method_param:
         method_norm = str(astrometry_method_param).strip().lower()
@@ -1606,6 +1653,8 @@ def run_hierarchical_mosaic(
         prog=None,
         lvl="DEBUG_DETAIL",
     )
+    if alignment_solver_choice:
+        pcb(f"  Alignment Solver: {alignment_solver_choice}", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Config Workers (GUI): Base demandé='{num_base_workers_config}' (0=auto)", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Options Stacking (Master Tuiles): Norm='{stack_norm_method}', Weight='{stack_weight_method}', Reject='{stack_reject_algo}', Combine='{stack_final_combine}', RadialWeight={apply_radial_weight_config} (Feather={radial_feather_fraction_config if apply_radial_weight_config else 'N/A'}, Power={radial_shape_power_config if apply_radial_weight_config else 'N/A'}, Floor={min_radial_weight_floor_config if apply_radial_weight_config else 'N/A'})", prog=None, lvl="DEBUG_DETAIL")
     pcb(f"  Options Assemblage Final: Méthode='{final_assembly_method_config}'", prog=None, lvl="DEBUG_DETAIL")
@@ -2013,7 +2062,8 @@ def run_hierarchical_mosaic(
             crop_percent=master_tile_crop_percent_config,
             re_solve_cropped_tiles=re_solve_cropped_tiles_config,
             solver_settings=solver_settings,
-            solver_instance=astrometry_solver
+            solver_instance=astrometry_solver,
+            alignment_solver_choice=alignment_solver_choice
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
