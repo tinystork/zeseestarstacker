@@ -83,6 +83,7 @@ zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 AstrometrySolver, ASTROMETRY_SOLVER_AVAILABLE = None, False
 calculate_final_mosaic_grid_dynamic_wcs, CALC_FINAL_GRID_DYNAMIC_AVAILABLE = None, False
+_calculate_final_mosaic_grid_optimized, CALC_GRID_OPTIMIZED_AVAILABLE = None, False
 
 try:
     from . import zemosaic_utils as zemosaic_utils
@@ -126,6 +127,15 @@ except Exception as e:
     calculate_final_mosaic_grid_dynamic_wcs = None
     CALC_FINAL_GRID_DYNAMIC_AVAILABLE = False
     logger.error(f"Import 'calculate_final_mosaic_grid_dynamic_wcs' échoué: {e}.")
+
+try:
+    from seestar.enhancement.mosaic_processor import _calculate_final_mosaic_grid_optimized
+    CALC_GRID_OPTIMIZED_AVAILABLE = True
+    logger.info("Fonction '_calculate_final_mosaic_grid_optimized' importée.")
+except Exception as e:
+    _calculate_final_mosaic_grid_optimized = None
+    CALC_GRID_OPTIMIZED_AVAILABLE = False
+    logger.error(f"Import '_calculate_final_mosaic_grid_optimized' échoué: {e}.")
 
 
 
@@ -240,15 +250,20 @@ def _log_memory_usage(progress_callback: callable, context_message: str = ""): #
 def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: list,
                                  drizzle_scale_factor: float = 1.0, progress_callback: callable = None):
     num_initial_inputs = len(panel_wcs_list)
-    # Utilisation de clés pour les messages utilisateur
-    _log_and_callback("calcgrid_info_start_calc", num_wcs_shapes=num_initial_inputs, scale_factor=drizzle_scale_factor, level="DEBUG_DETAIL", callback=progress_callback)
-    
-    if not (REPROJECT_AVAILABLE and find_optimal_celestial_wcs):
-        _log_and_callback("calcgrid_error_reproject_unavailable", level="ERROR", callback=progress_callback); return None, None
+    _log_and_callback(
+        "calcgrid_info_start_calc",
+        num_wcs_shapes=num_initial_inputs,
+        scale_factor=drizzle_scale_factor,
+        level="DEBUG_DETAIL",
+        callback=progress_callback,
+    )
+
     if not (ASTROPY_AVAILABLE and u and Angle):
-        _log_and_callback("calcgrid_error_astropy_unavailable", level="ERROR", callback=progress_callback); return None, None
+        _log_and_callback("calcgrid_error_astropy_unavailable", level="ERROR", callback=progress_callback)
+        return None, None
     if num_initial_inputs == 0:
-        _log_and_callback("calcgrid_error_no_wcs_shape", level="ERROR", callback=progress_callback); return None, None
+        _log_and_callback("calcgrid_error_no_wcs_shape", level="ERROR", callback=progress_callback)
+        return None, None
 
     valid_wcs_inputs = []; valid_shapes_inputs_hw = []
     for idx_filt, wcs_filt in enumerate(panel_wcs_list):
@@ -292,52 +307,130 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
         _log_and_callback("calcgrid_error_no_wcs_for_optimal_calc", level="ERROR", callback=progress_callback); return None, None
         
     try:
-        sum_of_pixel_scales_deg = 0.0; count_of_valid_scales = 0
-        # For calculating average input pixel scale, we use panel_wcs_list_to_use (which are just WCS objects)
-        for wcs_obj_scale in panel_wcs_list_to_use: 
-            if not (wcs_obj_scale and wcs_obj_scale.is_celestial): continue
+        sum_of_pixel_scales_deg = 0.0
+        count_of_valid_scales = 0
+        for wcs_obj_scale in panel_wcs_list_to_use:
+            if not (wcs_obj_scale and wcs_obj_scale.is_celestial):
+                continue
             try:
                 current_pixel_scale_deg = 0.0
                 if hasattr(wcs_obj_scale, 'proj_plane_pixel_scales') and callable(wcs_obj_scale.proj_plane_pixel_scales):
-                    pixel_scales_angle_tuple = wcs_obj_scale.proj_plane_pixel_scales(); current_pixel_scale_deg = np.mean(np.abs([s.to_value(u.deg) for s in pixel_scales_angle_tuple]))
-                elif hasattr(wcs_obj_scale, 'pixel_scale_matrix'): current_pixel_scale_deg = np.sqrt(np.abs(np.linalg.det(wcs_obj_scale.pixel_scale_matrix)))
-                else: continue
-                if np.isfinite(current_pixel_scale_deg) and current_pixel_scale_deg > 1e-10: sum_of_pixel_scales_deg += current_pixel_scale_deg; count_of_valid_scales += 1
-            except Exception: pass # Ignore errors in calculating scale for one WCS
-        
-        avg_input_pixel_scale_deg = (2.0 / 3600.0) # Fallback 2 arcsec/pix
-        if count_of_valid_scales > 0: avg_input_pixel_scale_deg = sum_of_pixel_scales_deg / count_of_valid_scales
-        elif num_valid_inputs > 0 : _log_and_callback("calcgrid_warn_scale_fallback", level="WARN", callback=progress_callback)
-        
+                    pixel_scales_angle_tuple = wcs_obj_scale.proj_plane_pixel_scales()
+                    current_pixel_scale_deg = np.mean(np.abs([s.to_value(u.deg) for s in pixel_scales_angle_tuple]))
+                elif hasattr(wcs_obj_scale, 'pixel_scale_matrix'):
+                    current_pixel_scale_deg = np.sqrt(np.abs(np.linalg.det(wcs_obj_scale.pixel_scale_matrix)))
+                else:
+                    continue
+                if np.isfinite(current_pixel_scale_deg) and current_pixel_scale_deg > 1e-10:
+                    sum_of_pixel_scales_deg += current_pixel_scale_deg
+                    count_of_valid_scales += 1
+            except Exception:
+                pass
+
+        avg_input_pixel_scale_deg = (2.0 / 3600.0)
+        if count_of_valid_scales > 0:
+            avg_input_pixel_scale_deg = sum_of_pixel_scales_deg / count_of_valid_scales
+        elif num_valid_inputs > 0:
+            _log_and_callback("calcgrid_warn_scale_fallback", level="WARN", callback=progress_callback)
+
         target_resolution_deg_per_pixel = avg_input_pixel_scale_deg / drizzle_scale_factor
         target_resolution_angle = Angle(target_resolution_deg_per_pixel, unit=u.deg)
-        _log_and_callback("calcgrid_info_scales", avg_input_scale_arcsec=avg_input_pixel_scale_deg*3600, target_scale_arcsec=target_resolution_angle.arcsec, level="INFO", callback=progress_callback)
-        
-        # Now call with inputs_for_optimal_wcs_calc which is a list of (shape_hw, wcs) tuples
-        optimal_wcs_out, optimal_shape_hw_out = find_optimal_celestial_wcs(
-            inputs_for_optimal_wcs_calc, # This is now a list of (shape_hw, WCS) tuples
-            resolution=target_resolution_angle, 
-            auto_rotate=True, 
-            projection='TAN', 
-            reference=None, 
-            frame='icrs'
+        _log_and_callback(
+            "calcgrid_info_scales",
+            avg_input_scale_arcsec=avg_input_pixel_scale_deg * 3600,
+            target_scale_arcsec=target_resolution_angle.arcsec,
+            level="INFO",
+            callback=progress_callback,
         )
-        
+
+        optimal_wcs_out = None
+        optimal_shape_hw_out = None
+
+        if REPROJECT_AVAILABLE and find_optimal_celestial_wcs:
+            try:
+                optimal_wcs_out, optimal_shape_hw_out = find_optimal_celestial_wcs(
+                    inputs_for_optimal_wcs_calc,
+                    resolution=target_resolution_angle,
+                    auto_rotate=True,
+                    projection='TAN',
+                    reference=None,
+                    frame='icrs',
+                )
+            except Exception as e_call:
+                _log_and_callback(
+                    "calcgrid_error_find_optimal_wcs_call",
+                    error=str(e_call),
+                    level="ERROR",
+                    callback=progress_callback,
+                )
+                logger.error("Traceback find_optimal_celestial_wcs:", exc_info=True)
+                optimal_wcs_out, optimal_shape_hw_out = None, None
+
+        if (optimal_wcs_out is None or optimal_shape_hw_out is None) and CALC_GRID_OPTIMIZED_AVAILABLE and _calculate_final_mosaic_grid_optimized:
+            _log_and_callback(
+                "CalcGrid: find_optimal_celestial_wcs unavailable, using optimized fallback.",
+                level="DEBUG",
+                callback=progress_callback,
+            )
+            optimal_wcs_out, optimal_shape_hw_out = _calculate_final_mosaic_grid_optimized(
+                panel_wcs_list_to_use,
+                panel_shapes_hw_list_to_use,
+                drizzle_scale_factor,
+            )
+        elif optimal_wcs_out is None or optimal_shape_hw_out is None:
+            _log_and_callback("calcgrid_error_find_optimal_wcs_unavailable", level="ERROR", callback=progress_callback)
+            return None, None
+
         if optimal_wcs_out and optimal_shape_hw_out:
             expected_pixel_shape_wh_for_wcs_out = (optimal_shape_hw_out[1], optimal_shape_hw_out[0])
             if optimal_wcs_out.pixel_shape is None or optimal_wcs_out.pixel_shape != expected_pixel_shape_wh_for_wcs_out:
-                try: optimal_wcs_out.pixel_shape = expected_pixel_shape_wh_for_wcs_out
-                except Exception: pass
-            if not (hasattr(optimal_wcs_out.wcs, 'naxis1') and hasattr(optimal_wcs_out.wcs, 'naxis2')) or not (optimal_wcs_out.wcs.naxis1 > 0 and optimal_wcs_out.wcs.naxis2 > 0) :
-                try: optimal_wcs_out.wcs.naxis1 = expected_pixel_shape_wh_for_wcs_out[0]; optimal_wcs_out.wcs.naxis2 = expected_pixel_shape_wh_for_wcs_out[1]
-                except Exception: pass
-        
-        _log_and_callback("calcgrid_info_optimal_grid_calculated", shape=optimal_shape_hw_out, crval=optimal_wcs_out.wcs.crval if optimal_wcs_out and optimal_wcs_out.wcs else 'N/A', level="INFO", callback=progress_callback)
+                try:
+                    optimal_wcs_out.pixel_shape = expected_pixel_shape_wh_for_wcs_out
+                except Exception:
+                    pass
+            if not (
+                hasattr(optimal_wcs_out.wcs, 'naxis1') and hasattr(optimal_wcs_out.wcs, 'naxis2')
+            ) or not (optimal_wcs_out.wcs.naxis1 > 0 and optimal_wcs_out.wcs.naxis2 > 0):
+                try:
+                    optimal_wcs_out.wcs.naxis1 = expected_pixel_shape_wh_for_wcs_out[0]
+                    optimal_wcs_out.wcs.naxis2 = expected_pixel_shape_wh_for_wcs_out[1]
+                except Exception:
+                    pass
+
+        _log_and_callback(
+            "calcgrid_info_optimal_grid_calculated",
+            shape=optimal_shape_hw_out,
+            crval=optimal_wcs_out.wcs.crval if optimal_wcs_out and optimal_wcs_out.wcs else 'N/A',
+            level="INFO",
+            callback=progress_callback,
+        )
+
+        if optimal_wcs_out is not None:
+            try:
+                if hasattr(optimal_wcs_out.wcs, 'cd') and optimal_wcs_out.wcs.cd is not None:
+                    pix_scale_deg = np.mean(np.abs(np.diag(optimal_wcs_out.wcs.cd)))
+                elif hasattr(optimal_wcs_out.wcs, 'cdelt') and optimal_wcs_out.wcs.cdelt is not None:
+                    pix_scale_deg = np.mean(np.abs(optimal_wcs_out.wcs.cdelt))
+                else:
+                    pix_scale_deg = np.nan
+                pix_arcsec = pix_scale_deg * 3600.0 if np.isfinite(pix_scale_deg) else 'N/A'
+                _log_and_callback(
+                    f"CalcGrid final WCS: CRPIX={getattr(optimal_wcs_out.wcs, 'crpix', 'N/A')} PIX_SCALE={pix_arcsec} arcsec/pix Shape={optimal_shape_hw_out}",
+                    level="DEBUG",
+                    callback=progress_callback,
+                )
+            except Exception:
+                pass
+
         return optimal_wcs_out, optimal_shape_hw_out
-    except ImportError: _log_and_callback("calcgrid_error_find_optimal_wcs_unavailable", level="ERROR", callback=progress_callback); return None, None
-    except Exception as e_optimal_wcs_call: 
-        _log_and_callback("calcgrid_error_find_optimal_wcs_call", error=str(e_optimal_wcs_call), level="ERROR", callback=progress_callback)
-        logger.error("Traceback find_optimal_celestial_wcs:", exc_info=True)
+    except Exception as e_optimal_wcs_call:
+        _log_and_callback(
+            "calcgrid_error_find_optimal_wcs_call",
+            error=str(e_optimal_wcs_call),
+            level="ERROR",
+            callback=progress_callback,
+        )
+        logger.error("Traceback grid calculation:", exc_info=True)
         return None, None
 
 
