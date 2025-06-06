@@ -2111,11 +2111,10 @@ def run_hierarchical_mosaic(
 
                 m_stretched = zemosaic_utils.stretch_auto_asifits_like(
                     final_mosaic_data_HWC,
-                    p_low=preview_p_low, 
+                    p_low=preview_p_low,
                     p_high=preview_p_high,
-                    asinh_a_factor=preview_asinh_a, # Renommé pour correspondre à une signature possible
-                    # ou simplement asinh_a=preview_asinh_a si la fonction s'appelle ainsi
-                    apply_wb=True # Supposons que tu veuilles la balance des blancs auto
+                    asinh_a=preview_asinh_a,  # correspond à la signature de la fonction
+                    apply_wb=True  # Supposons que tu veuilles la balance des blancs auto
                 )
 
                 if m_stretched is not None:
