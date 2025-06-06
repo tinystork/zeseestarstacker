@@ -1004,20 +1004,48 @@ def assemble_final_mosaic_incremental(
             data_to_use_for_reproject = current_tile_data_hwc
             wcs_to_use_for_reproject = mt_wcs_obj_original
 
-            if apply_crop and crop_percent > 1e-3: # Appliquer si crop_percent significatif
-                if ZEMOSAIC_UTILS_AVAILABLE and hasattr(zemosaic_utils, 'crop_image_and_wcs'):
+            if apply_crop and crop_percent > 1e-3:
+                if ZEMOSAIC_UTILS_AVAILABLE and hasattr(zemosaic_utils, 'crop_image_and_wcs') and \
+                   REPROJECT_AVAILABLE and reproject_interp:
                     pcb_asm(f"  ASM_INC: Rognage {crop_percent:.1f}% pour tuile {os.path.basename(tile_path)}", lvl="DEBUG_DETAIL")
                     cropped_data, cropped_wcs = zemosaic_utils.crop_image_and_wcs(
-                        current_tile_data_hwc, mt_wcs_obj_original, crop_percent / 100.0, progress_callback
+                        current_tile_data_hwc,
+                        mt_wcs_obj_original,
+                        crop_percent / 100.0,
+                        progress_callback,
                     )
                     if cropped_data is not None and cropped_wcs is not None:
-                        data_to_use_for_reproject = cropped_data
-                        wcs_to_use_for_reproject = cropped_wcs
-                        pcb_asm(f"    Nouvelle shape après rognage: {data_to_use_for_reproject.shape[:2]}", lvl="DEBUG_VERY_DETAIL")
+                        try:
+                            realigned, _ = reproject_interp(
+                                (cropped_data, cropped_wcs),
+                                mt_wcs_obj_original,
+                                shape_out=current_tile_data_hwc.shape[:2],
+                                order='bilinear',
+                                parallel=False,
+                            )
+                            data_to_use_for_reproject = realigned
+                            wcs_to_use_for_reproject = mt_wcs_obj_original
+                            pcb_asm(
+                                f"    Nouvelle shape après rognage: {data_to_use_for_reproject.shape[:2]}",
+                                lvl="DEBUG_VERY_DETAIL",
+                            )
+                        except Exception as e_realign:
+                            pcb_asm(
+                                f"  ASM_INC: AVERT - Reprojection après rognage échouée: {e_realign}. Utilisation des données rognées sans réalignement.",
+                                lvl="WARN",
+                            )
+                            data_to_use_for_reproject = cropped_data
+                            wcs_to_use_for_reproject = cropped_wcs
                     else:
-                        pcb_asm(f"  ASM_INC: AVERT - Rognage a échoué pour tuile {os.path.basename(tile_path)}. Utilisation tuile non rognée.", lvl="WARN")
+                        pcb_asm(
+                            f"  ASM_INC: AVERT - Rognage a échoué pour tuile {os.path.basename(tile_path)}. Utilisation tuile non rognée.",
+                            lvl="WARN",
+                        )
                 else:
-                    pcb_asm(f"  ASM_INC: AVERT - Option rognage activée mais zemosaic_utils.crop_image_and_wcs non dispo.", lvl="WARN")
+                    pcb_asm(
+                        "  ASM_INC: AVERT - Option rognage activée mais zemosaic_utils.crop_image_and_wcs non dispo ou reproject non dispo.",
+                        lvl="WARN",
+                    )
             
             if data_to_use_for_reproject is None or wcs_to_use_for_reproject is None: 
                 pcb_asm(f"  ASM_INC: Données ou WCS pour reprojection sont None pour tuile {os.path.basename(tile_path)}, ignorée.", lvl="WARN")
@@ -1158,23 +1186,51 @@ def assemble_final_mosaic_with_reproject_coadd(
             data_to_use_for_assembly = current_tile_data_hwc
             wcs_to_use_for_assembly = mt_wcs_obj_original
 
-            if apply_crop and crop_percent > 1e-3: # Appliquer si crop_percent > 0 (avec une petite tolérance)
-                if ZEMOSAIC_UTILS_AVAILABLE and hasattr(zemosaic_utils, 'crop_image_and_wcs'):
-                    _pcb(f"    ASM_REPROJ_COADD: Rognage {crop_percent:.1f}% pour tuile {os.path.basename(mt_path)}", lvl="DEBUG_DETAIL")
+            if apply_crop and crop_percent > 1e-3:
+                if ZEMOSAIC_UTILS_AVAILABLE and hasattr(zemosaic_utils, 'crop_image_and_wcs') and \
+                   REPROJECT_AVAILABLE and reproject_interp:
+                    _pcb(
+                        f"    ASM_REPROJ_COADD: Rognage {crop_percent:.1f}% pour tuile {os.path.basename(mt_path)}",
+                        lvl="DEBUG_DETAIL",
+                    )
                     cropped_data, cropped_wcs = zemosaic_utils.crop_image_and_wcs(
-                        current_tile_data_hwc, 
-                        mt_wcs_obj_original, 
-                        crop_percent / 100.0, # La fonction attend une fraction (0.0 à 1.0)
-                        progress_callback=progress_callback
+                        current_tile_data_hwc,
+                        mt_wcs_obj_original,
+                        crop_percent / 100.0,
+                        progress_callback=progress_callback,
                     )
                     if cropped_data is not None and cropped_wcs is not None:
-                        data_to_use_for_assembly = cropped_data
-                        wcs_to_use_for_assembly = cropped_wcs
-                        _pcb(f"      Nouvelle shape après rognage: {data_to_use_for_assembly.shape[:2]}", lvl="DEBUG_VERY_DETAIL")
+                        try:
+                            realigned, _ = reproject_interp(
+                                (cropped_data, cropped_wcs),
+                                mt_wcs_obj_original,
+                                shape_out=current_tile_data_hwc.shape[:2],
+                                order='bilinear',
+                                parallel=False,
+                            )
+                            data_to_use_for_assembly = realigned
+                            wcs_to_use_for_assembly = mt_wcs_obj_original
+                            _pcb(
+                                f"      Nouvelle shape après rognage: {data_to_use_for_assembly.shape[:2]}",
+                                lvl="DEBUG_VERY_DETAIL",
+                            )
+                        except Exception as e_realign:
+                            _pcb(
+                                f"    ASM_REPROJ_COADD: AVERT - Reprojection après rognage échouée: {e_realign}. Utilisation des données rognées sans réalignement.",
+                                lvl="WARN",
+                            )
+                            data_to_use_for_assembly = cropped_data
+                            wcs_to_use_for_assembly = cropped_wcs
                     else:
-                        _pcb(f"    ASM_REPROJ_COADD: AVERT - Rognage a échoué pour tuile {os.path.basename(mt_path)}. Utilisation de la tuile non rognée.", lvl="WARN")
+                        _pcb(
+                            f"    ASM_REPROJ_COADD: AVERT - Rognage a échoué pour tuile {os.path.basename(mt_path)}. Utilisation de la tuile non rognée.",
+                            lvl="WARN",
+                        )
                 else:
-                    _pcb(f"    ASM_REPROJ_COADD: AVERT - Option de rognage activée mais zemosaic_utils.crop_image_and_wcs non disponible.", lvl="WARN")
+                    _pcb(
+                        "    ASM_REPROJ_COADD: AVERT - Option de rognage activée mais zemosaic_utils.crop_image_and_wcs non disponible ou reproject non dispo.",
+                        lvl="WARN",
+                    )
             # --- FIN APPLICATION DU ROGNAGE ---
 
             input_data_all_tiles_HWC_processed.append((data_to_use_for_assembly, wcs_to_use_for_assembly))
