@@ -380,23 +380,30 @@ class AstrometrySolver:
                     local_solver_attempted_and_failed = True 
                     self._log("ASTAP a échoué ou n'a pas trouvé de solution.", "WARN")
             else:
-                self._log(f"ASTAP sélectionné mais chemin exécutable '{astap_exe}' invalide ou non fourni. ASTAP ignoré.", "WARN")
-                local_solver_attempted_and_failed = True 
+                msg = (
+                    "ASTAP sélectionné mais chemin exécutable "
+                    f"'{astap_exe}' invalide ou non fourni. ASTAP ignoré."
+                )
+                self._log(msg, "WARN")
+                local_solver_attempted_and_failed = True
 
         elif solver_preference == "ansvr":
             if ansvr_config_path: 
                 self._log("Priorité au solveur local: Astrometry.net Local (solve-field).", "INFO")
-                self._log(
-                    f"Preparing _try_solve_local_ansvr for {os.path.basename(image_path)}",
-                    "DEBUG",
+                prep_msg = (
+                    "!!!!!! DEBUG AstrometrySolver.solve: PRÉPARATION APPEL _try_solve_local_ansvr pour "
+                    f"{os.path.basename(image_path)}"
                 )
+                self._log(prep_msg, "DEBUG")
                 wcs_solution = self._try_solve_local_ansvr(image_path, fits_header, ansvr_config_path,
                                                            scale_est, scale_tol, ansvr_timeout,
                                                            update_header_with_solution)
-                self._log(
-                    f'Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}',
-                    'DEBUG',
+                sol_status = "Oui" if wcs_solution else "Non"
+                return_msg = (
+                    "!!!!!! DEBUG AstrometrySolver.solve: RETOUR DE _try_solve_local_ansvr pour "
+                    f"{os.path.basename(image_path)}. Solution: {sol_status}"
                 )
+                self._log(return_msg, "DEBUG")
                 if wcs_solution:
                     self._log("Solution trouvée avec Astrometry.net Local (solve-field).", "INFO")
                     return wcs_solution
