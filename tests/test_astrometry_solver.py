@@ -4,6 +4,7 @@ import sys
 import importlib.util
 import numpy as np
 from astropy.io import fits
+from astropy.wcs import WCS
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -50,3 +51,26 @@ def test_astap_command_uses_gui_parameters(tmp_path, monkeypatch):
     cmd = captured["cmd"]
     assert "-z" in cmd and cmd[cmd.index("-z") + 1] == "4"
     assert "-sens" in cmd and cmd[cmd.index("-sens") + 1] == "55"
+
+
+def test_parse_wcs_with_nonstandard_keywords(tmp_path):
+    solver = AstrometrySolver()
+
+    w = WCS(naxis=2)
+    w.wcs.crpix = [5, 5]
+    w.wcs.cdelt = [-0.0001, 0.0001]
+    w.wcs.crval = [10.0, 20.0]
+    w.wcs.ctype = ["RA---TPV", "DEC--TPV"]
+
+    hdr = w.to_header(relax=True)
+    hdr["FOO"] = "BAR"  # mot-clé non standard
+
+    wcs_path = tmp_path / "test.wcs"
+    with open(wcs_path, "w") as f:
+        f.write(hdr.tostring(sep="\n"))
+
+    parsed = solver._parse_wcs_file_content(str(wcs_path), (10, 10))
+
+    assert parsed is not None
+    assert parsed.is_celestial
+    assert parsed.pixel_shape == (10, 10)
