@@ -122,7 +122,12 @@ ZEMOSAIC_LOCAL_ANSVR_PATH=/path/to/ansvr.cfg
 ZEMOSAIC_ASTROMETRY_API_KEY=your_key
 ZEMOSAIC_ASTAP_SEARCH_RADIUS=3.0
 ZEMOSAIC_LOCAL_SOLVER_PREFERENCE=astap
+ZEMOSAIC_ASTROMETRY_METHOD=astap
 ```
+
+`ZEMOSAIC_ASTROMETRY_METHOD` accepts `astap`, `astrometry`, or `astrometry.net`.
+`astrometry` and `astrometry.net` will use ansvr when a local path is provided,
+otherwise they fall back to the online solver.
 
 Set `SEESTAR_VERBOSE=1` or use the `-v` flag when launching `run_zemosaic.py` to
 see detailed debug logs.
