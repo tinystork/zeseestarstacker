@@ -180,3 +180,83 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
     assert dummy_solver.ra is not None
     assert dummy_solver.dec is not None
     assert captured.get("pixel_shapes") == [(80, 80)]
+
+def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(
+        worker,
+        "reproject_interp",
+        lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
+    )
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+
+    class DummyZU:
+        @staticmethod
+        def crop_image_and_wcs(image_data, wcs_obj, crop_fraction, progress_callback=None):
+            h, w = image_data.shape[:2]
+            dh = int(h * crop_fraction)
+            dw = int(w * crop_fraction)
+            cropped = image_data[dh:h-dh, dw:w-dw, :]
+            new_wcs = wcs_obj.copy()
+            new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            return cropped, new_wcs
+
+    monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
+
+    data = np.ones((1, 100, 100), dtype=np.float32)
+    fits_path = tmp_path / "tile_no_wcs.fits"
+    from astropy.io import fits
+    header = fits.Header()
+    header["RA"] = 11.1
+    header["DEC"] = -22.2
+    fits.writeto(fits_path, data, header, overwrite=True)
+
+    wcs_in = make_wcs(0, 0, shape=(100, 100))
+
+    class DummySolver:
+        def __init__(self):
+            self.called = False
+            self.ra = None
+            self.dec = None
+
+        def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
+            self.called = True
+            self.ra = fits_header.get("RA")
+            self.dec = fits_header.get("DEC")
+            return make_wcs(1, 1, shape=(80, 80))
+
+    solver = DummySolver()
+
+    captured = {}
+
+    def dummy_reproject_and_coadd(input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs):
+        captured["pixel_shapes"] = [w.pixel_shape for _, w in input_data]
+        return np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(worker, "reproject_and_coadd", dummy_reproject_and_coadd)
+
+    final_wcs = make_wcs(0, 0, shape=(80, 80))
+    final_shape = (80, 80)
+
+    worker.assemble_final_mosaic_with_reproject_coadd(
+        [(str(fits_path), wcs_in)],
+        final_wcs,
+        final_shape,
+        progress_callback=None,
+        n_channels=1,
+        match_bg=False,
+        apply_crop=True,
+        crop_percent=10.0,
+        re_solve_cropped_tiles=True,
+        solver_settings={},
+        solver_instance=solver,
+    )
+
+    assert solver.called
+    assert solver.ra == 11.1
+    assert solver.dec == -22.2
+    assert captured.get("pixel_shapes") == [(80, 80)]
+
