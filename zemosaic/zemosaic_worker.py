@@ -53,6 +53,7 @@ except Exception as e_astro_other_imp: logger.critical(f"Erreur import Astropy: 
 
 # --- Reproject (critique pour la mosaïque) ---
 REPROJECT_AVAILABLE = False
+SHAPELY_AVAILABLE = True
 find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = None, None, None
 try:
     from reproject.mosaicking import find_optimal_celestial_wcs as actual_find_optimal_wcs
@@ -72,6 +73,17 @@ except Exception as e_reproject_other_final:
     logger.critical(
         f"Erreur import 'reproject': {e_reproject_other_final}", exc_info=True
     )
+
+if REPROJECT_AVAILABLE:
+    try:
+        from shapely.geometry import Point  # noqa: F401 - simple availability check
+        logger.info("Bibliothèque 'shapely' détectée.")
+    except Exception as e_shapely:
+        SHAPELY_AVAILABLE = False
+        find_optimal_celestial_wcs = None
+        logger.warning(
+            "Module 'shapely' manquant: find_optimal_celestial_wcs sera ignoré."
+        )
 
 if not REPROJECT_AVAILABLE:
     logger.error(
