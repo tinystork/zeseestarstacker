@@ -314,7 +314,8 @@ class AstrometrySolver:
                                            'scale_est_arcsec_per_pix' (float, optional),
                                            'scale_tolerance_percent' (float, optional),
                                            'ansvr_timeout_sec' (int), 'astap_timeout_sec' (int),
-                                           'astrometry_net_timeout_sec' (int).
+                                           'astrometry_net_timeout_sec' (int),
+                                           'use_radec_hints' (bool).
             update_header_with_solution (bool): Si True, met à jour `fits_header` avec la solution.
 
         Returns:
@@ -340,6 +341,7 @@ class AstrometrySolver:
         astap_downsample_val = settings.get('astap_downsample', 2)
         astap_sensitivity_val = settings.get('astap_sensitivity', 100)
         astap_timeout = settings.get('astap_timeout_sec', 120)
+        use_radec_hints = settings.get('use_radec_hints', True)
 
         ansvr_config_path = settings.get('local_ansvr_path', "")
         ansvr_timeout = settings.get('ansvr_timeout_sec', 120)
@@ -359,6 +361,10 @@ class AstrometrySolver:
         self._log(f"Solver preference: '{solver_preference}'", "DEBUG")
         self._log(
             f"ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
+            "DEBUG",
+        )
+        self._log(
+            f"Use RA/DEC hints: {use_radec_hints}",
             "DEBUG",
         )
         self._log(
@@ -391,6 +397,7 @@ class AstrometrySolver:
                     update_header_with_solution,
                     astap_downsample_val,
                     astap_sensitivity_val,
+                    use_radec_hints,
                 )
                 if wcs_solution:
                     self._log("Solution trouvée avec ASTAP.", "INFO")
@@ -647,6 +654,7 @@ class AstrometrySolver:
         update_header_with_solution,
         astap_downsample=2,
         astap_sensitivity=100,
+        use_radec_hints=True,
     ):
         self._log(f"Entering _try_solve_astap for {os.path.basename(image_path)}", "DEBUG")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
@@ -701,13 +709,13 @@ class AstrometrySolver:
             cmd.extend(["-fov", "0"])
             self._log(f"ASTAP: Utilisation -fov 0 (recherche automatique du champ).", "DEBUG")
 
-        # Provide RA/DEC hints if present in the FITS header
+        # Provide RA/DEC hints if enabled and present in the FITS header
         ra_hint = None
         dec_hint = None
-        if fits_header:
+        if use_radec_hints and fits_header:
             ra_hint = fits_header.get('RA', fits_header.get('CRVAL1'))
             dec_hint = fits_header.get('DEC', fits_header.get('CRVAL2'))
-        if isinstance(ra_hint, (int, float)) and isinstance(dec_hint, (int, float)):
+        if use_radec_hints and isinstance(ra_hint, (int, float)) and isinstance(dec_hint, (int, float)):
             cmd.extend(["-ra", str(ra_hint), "-dec", str(dec_hint)])
             self._log(
                 f"ASTAP: Hints RA={ra_hint} DEC={dec_hint} ajoutés à la commande.",

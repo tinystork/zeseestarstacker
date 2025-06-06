@@ -387,6 +387,8 @@ FR_TRANSLATIONS = {
     'tooltip_astap_search_radius': "Rayon de recherche ASTAP autour des coordonnées RA/DEC du header FITS. Une petite valeur est plus rapide si les coordonnées sont bonnes. Recommandé : 0.5 à 10 degrés. (0.1-90.0 permis).",
     'invalid_astap_radius_range': "Le Rayon de Recherche ASTAP doit être entre 0.1 et 90.0 degrés.",
     'invalid_astap_radius_value': "Valeur invalide pour le Rayon de Recherche ASTAP. Veuillez entrer un nombre.",
+    'use_radec_hints_label': "Utiliser les RA/DEC du FITS",
+    'tooltip_use_radec_hints': "Ajoute -ra/-dec à partir du header FITS lors de l'appel à ASTAP.",
     'settings_save_failed_on_ok': "Paramètres mis à jour en mémoire, mais échec de la sauvegarde vers le fichier depuis cette fenêtre. Ils seront sauvegardés à la fermeture de l'application principale s'ils ne sont pas écrasés.",
     #--- Tooltips pour Feathering ---
     'tooltip_apply_feathering': "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
