@@ -3,6 +3,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 import numpy as np
 from astropy.wcs import WCS
 
@@ -138,9 +140,13 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
     class DummySolver:
         def __init__(self):
             self.called = False
+            self.ra = None
+            self.dec = None
 
         def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
             self.called = True
+            self.ra = fits_header.get("RA")
+            self.dec = fits_header.get("DEC")
             return make_wcs(1, 1, shape=(80, 80))
 
     dummy_solver = DummySolver()
@@ -171,4 +177,6 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
     )
 
     assert dummy_solver.called
+    assert dummy_solver.ra is not None
+    assert dummy_solver.dec is not None
     assert captured.get("pixel_shapes") == [(80, 80)]
