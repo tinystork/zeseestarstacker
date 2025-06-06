@@ -347,7 +347,8 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
 
 def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
 
-                                  progress_callback: callable):
+                                  progress_callback: callable,
+                                  solver_instance=None):
     filename = os.path.basename(file_path)
     # Utiliser une fonction helper pour les logs internes à cette fonction si _log_and_callback
     # est trop lié à la structure de run_hierarchical_mosaic
@@ -436,9 +437,23 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
-    if wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
-        _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
-        # Action de déplacement sera gérée par le check suivant
+    if wcs_brute is None:
+        if solver_instance:
+            logger.info(f"Trying WCS resolution for {file_path} via solve()...")
+            try:
+                wcs_brute = solver_instance.solve(
+                    file_path,
+                    header_orig,
+                    solver_settings,
+                    update_header_with_solution=True,
+                )
+            except Exception as e_solver:
+                logger.error(f"Astrometric solver failed for {file_path}: {e_solver}")
+                wcs_brute = None
+        else:
+            logger.info("No astrometric solver available — image will be moved to unaligned.")
+        if wcs_brute is None:
+            _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
 
     # --- Vérification finale du WCS et action de déplacement si échec ---
     if wcs_brute and wcs_brute.is_celestial:
@@ -1286,12 +1301,13 @@ def run_hierarchical_mosaic(
     files_processed_count_ph1 = 0      # Compteur pour les fichiers soumis au ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=actual_num_workers_ph1, thread_name_prefix="ZeMosaic_Ph1_") as executor_ph1:
-        future_to_filepath_ph1 = { 
+        future_to_filepath_ph1 = {
             executor_ph1.submit(
                 get_wcs_and_pretreat_raw_file,
                 f_path,
                 solver_settings,
-                progress_callback
+                progress_callback,
+                astrometry_solver,
             ): f_path for f_path in fits_file_paths
         }
         

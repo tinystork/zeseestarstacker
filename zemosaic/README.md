@@ -8,7 +8,7 @@ It was born out of a need from an astrophotography Discord community called the 
 
 ## 🚀 Key Features
 
-- Astrometric alignment using **ASTAP**
+- Astrometric alignment via **AstrometrySolver** (ASTAP, local ansvr or web service) from **SeestarStacker**
 - Smart tile grouping and automatic clustering
 - Configurable stacking with:
   - **Noise-based weighting** (1/σ²)
@@ -101,6 +101,8 @@ Configure ASTAP paths and options
 Adjust stacking & mosaic settings
 
 Click "Start Hierarchical Mosaic"
+
+ZeMosaic now relies on the `AstrometrySolver` component from **SeestarStacker** for plate solving.
 
 When ZeMosaic is launched from **Seestar Stacker**, solver settings are
 automatically forwarded via environment variables. You can also set them
