@@ -44,3 +44,58 @@ def test_fallback_warning(caplog):
         "find_optimal_celestial_wcs" in rec.getMessage() and rec.levelno >= logging.WARNING
         for rec in caplog.records
     )
+
+
+def test_crop_pixel_shape_passed(monkeypatch, tmp_path):
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(worker, "reproject_interp", lambda input_data, output_projection, shape_out=None, order='bilinear', parallel=False: (input_data[0], np.ones(shape_out)))
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+
+    class DummyZU:
+        @staticmethod
+        def crop_image_and_wcs(image_data, wcs_obj, crop_fraction, progress_callback=None):
+            h, w = image_data.shape[:2]
+            dh = int(h * crop_fraction)
+            dw = int(w * crop_fraction)
+            if image_data.ndim == 3:
+                cropped = image_data[dh:h-dh, dw:w-dw, :]
+            else:
+                cropped = image_data[dh:h-dh, dw:w-dw]
+            new_wcs = wcs_obj.copy()
+            new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            return cropped, new_wcs
+
+    monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
+
+    data = np.ones((1, 100, 100), dtype=np.float32)
+    fits_path = tmp_path / "tile.fits"
+    from astropy.io import fits
+    fits.writeto(fits_path, data, overwrite=True)
+
+    wcs_in = make_wcs(0, 0, shape=(100, 100))
+
+    captured = {}
+
+    def dummy_reproject_and_coadd(input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs):
+        captured["pixel_shapes"] = [w.pixel_shape for _, w in input_data]
+        return np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(worker, "reproject_and_coadd", dummy_reproject_and_coadd)
+
+    final_wcs = make_wcs(0, 0, shape=(80, 80))
+    final_shape = (80, 80)
+
+    worker.assemble_final_mosaic_with_reproject_coadd(
+        [(str(fits_path), wcs_in)],
+        final_wcs,
+        final_shape,
+        progress_callback=None,
+        n_channels=1,
+        match_bg=False,
+        apply_crop=True,
+        crop_percent=10.0,
+    )
+
+    assert captured.get("pixel_shapes") == [(80, 80)]

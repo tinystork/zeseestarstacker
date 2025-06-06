@@ -1071,10 +1071,10 @@ def assemble_final_mosaic_incremental(
 
         try:
             with fits.open(tile_path, memmap=False, do_not_scale_image_data=True) as hdul: # memmap=False est plus sûr pour éviter problèmes de fichiers ouverts
-                if not hdul or not hasattr(hdul[0], 'data') or hdul[0].data is None: 
+                if not hdul or not hasattr(hdul[0], 'data') or hdul[0].data is None:
                     pcb_asm("assemble_warn_tile_empty_or_no_data_inc", prog=None, lvl="WARN", filename=os.path.basename(tile_path))
-                    continue 
-                
+                    continue
+
                 data_tile_cxhxw = hdul[0].data.astype(np.float32)
                 if data_tile_cxhxw.ndim == 3 and data_tile_cxhxw.shape[0] == n_channels:
                     current_tile_data_hwc = np.moveaxis(data_tile_cxhxw, 0, -1)
@@ -1083,6 +1083,17 @@ def assemble_final_mosaic_incremental(
                 else:
                     pcb_asm("assemble_warn_tile_shape_mismatch_inc", prog=None, lvl="WARN", filename=os.path.basename(tile_path), shape=str(data_tile_cxhxw.shape), expected_channels=n_channels)
                     del data_tile_cxhxw; gc.collect(); continue
+
+                try:
+                    mt_wcs_obj_original.pixel_shape = (
+                        current_tile_data_hwc.shape[1],
+                        current_tile_data_hwc.shape[0],
+                    )
+                except Exception as e_set_ps:
+                    pcb_asm(
+                        f"ASM_INC: AVERT - Échec set pixel_shape pour {os.path.basename(tile_path)}: {e_set_ps}",
+                        lvl="WARN",
+                    )
             del data_tile_cxhxw; gc.collect()
 
             data_to_use_for_reproject = current_tile_data_hwc
@@ -1103,6 +1114,16 @@ def assemble_final_mosaic_incremental(
                     if cropped_data is not None and cropped_wcs is not None:
                         data_to_use_for_reproject = cropped_data
                         wcs_to_use_for_reproject = cropped_wcs
+                        try:
+                            wcs_to_use_for_reproject.pixel_shape = (
+                                data_to_use_for_reproject.shape[1],
+                                data_to_use_for_reproject.shape[0],
+                            )
+                        except Exception as e_ps_crop:
+                            pcb_asm(
+                                f"ASM_INC: AVERT - Échec pixel_shape après rognage {os.path.basename(tile_path)}: {e_ps_crop}",
+                                lvl="WARN",
+                            )
                         pcb_asm(
                             f"    Nouvelle shape après rognage: {data_to_use_for_reproject.shape[:2]}",
                             lvl="DEBUG_VERY_DETAIL",
@@ -1273,7 +1294,7 @@ def assemble_final_mosaic_with_reproject_coadd(
                 
                 # Charger les données brutes de la master tuile
                 mt_data_cxhxw_adu = hdul[0].data.astype(np.float32)
-                
+
                 current_tile_data_hwc = None
                 if mt_data_cxhxw_adu.ndim == 3 and mt_data_cxhxw_adu.shape[0] == n_channels:
                     current_tile_data_hwc = np.moveaxis(mt_data_cxhxw_adu, 0, -1)
@@ -1282,6 +1303,17 @@ def assemble_final_mosaic_with_reproject_coadd(
                 else:
                     _pcb("assemble_warn_tile_shape_mismatch_reproject_coadd", prog=None, lvl="WARN", filename=os.path.basename(mt_path), shape=str(mt_data_cxhxw_adu.shape), expected_channels=n_channels)
                     continue
+
+            try:
+                mt_wcs_obj_original.pixel_shape = (
+                    current_tile_data_hwc.shape[1],
+                    current_tile_data_hwc.shape[0],
+                )
+            except Exception as e_set_ps:
+                _pcb(
+                    f"ASM_REPROJ_COADD: AVERT - Échec set pixel_shape pour {os.path.basename(mt_path)}: {e_set_ps}",
+                    lvl="WARN",
+                )
             
             # --- APPLICATION DU ROGNAGE SI ACTIVÉ ---
             data_to_use_for_assembly = current_tile_data_hwc
@@ -1302,6 +1334,16 @@ def assemble_final_mosaic_with_reproject_coadd(
                     if cropped_data is not None and cropped_wcs is not None:
                         data_to_use_for_assembly = cropped_data
                         wcs_to_use_for_assembly = cropped_wcs
+                        try:
+                            wcs_to_use_for_assembly.pixel_shape = (
+                                data_to_use_for_assembly.shape[1],
+                                data_to_use_for_assembly.shape[0],
+                            )
+                        except Exception as e_ps_crop:
+                            _pcb(
+                                f"ASM_REPROJ_COADD: AVERT - Échec pixel_shape après rognage {os.path.basename(mt_path)}: {e_ps_crop}",
+                                lvl="WARN",
+                            )
                         _pcb(
                             f"      Nouvelle shape après rognage: {data_to_use_for_assembly.shape[:2]}",
                             lvl="DEBUG_VERY_DETAIL",
