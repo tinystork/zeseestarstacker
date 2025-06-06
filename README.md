@@ -126,47 +126,29 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Placez votre icône de fenêtre personnalisée (`.png`, ex: 256x256) et mettez à jour `icon_path` dans `seestar/gui/main_window.py`.
     *   Placez votre image de fond personnalisée (`.png` ou `.jpg`) et mettez à jour `bg_image_path` dans `seestar/gui/preview.py`.
 
-## Development Setup / Environnement de Développement
 
-**(English)**
+## Development Setup
 
-Install the main requirements and the packages used by the tests:
+**Install dependencies**
 
 ```bash
+# main runtime packages
 pip install -r requirements.txt
+
+# packages needed for the unit tests
 pip install pytest numpy astropy reproject
-# if a dedicated file exists:
+# or, if provided, use the dedicated file
 pip install -r tests/requirements.txt
 ```
 
-Run the tests from the project root:
+**Run the tests**
 
 ```bash
-pytest
+SEESTAR_VERBOSE=1 pytest -q
 ```
 
-No environment variables are required, but you can set `SEESTAR_VERBOSE=1` to
-enable verbose logging.
+The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
 
-**(Français)**
-
-Installez les dépendances principales ainsi que les paquets nécessaires aux tests :
-
-```bash
-pip install -r requirements.txt
-pip install pytest numpy astropy reproject
-# si un fichier spécifique est présent :
-pip install -r tests/requirements.txt
-```
-
-Exécutez ensuite `pytest` depuis la racine du projet :
-
-```bash
-pytest
-```
-
-Aucune variable d'environnement n'est nécessaire, mais `SEESTAR_VERBOSE=1`
-permet d'avoir des logs détaillés.
 
 ---
 ## Optional GPU Acceleration (CUDA)
