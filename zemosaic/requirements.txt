@@ -1,6 +1,7 @@
 numpy
 astropy
 reproject
+shapely
 astroalign
 opencv-python-headless
 tk
