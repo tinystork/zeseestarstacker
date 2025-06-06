@@ -317,18 +317,6 @@ class AstrometrySolver:
         self._log(f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')", "INFO")
         wcs_solution = None
 
-        # !!!!! TEST DE DÉBOGAGE IMMÉDIAT !!!!!
-        if hasattr(self, 'default_pixel_size_um_for_cfg'):
-            self._log(
-                f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg EXISTS, valeur = {self.default_pixel_size_um_for_cfg}",
-                "DEBUG")
-        else:
-            self._log(
-                f"DEBUG ATTR (AstrometrySolver.solve ENTERING): self.default_pixel_size_um_for_cfg N'EXISTE PAS !!! dir(self) = {dir(self)}",
-                "DEBUG")
-            # Optionnel : lever une exception ici pour arrêter net si c'est le cas
-            # raise AttributeError("FORCED STOP: default_pixel_size_um_for_cfg manquant au début de solve()")
-        # !!!!! FIN TEST DE DÉBOGAGE !!!!!
         
         self._settings_dict_from_solve = settings.copy() # triche :-) Stocker une copie pour accès interne 
         # --- Récupération des paramètres depuis le dictionnaire settings ---
@@ -348,33 +336,31 @@ class AstrometrySolver:
         
         anet_web_timeout = settings.get('astrometry_net_timeout_sec', 300)
 
-        # <<< AJOUT DES LOGS DE DEBUG SPÉCIFIQUES >>>
         self._log(
-            f"!!!! DEBUG AstrometrySolver.solve: VALEUR LUE POUR astap_search_radius DEPUIS settings DICT = {astap_search_radius_from_settings} (type: {type(astap_search_radius_from_settings)})",
+            f"ASTAP search radius from settings: {astap_search_radius_from_settings} (type: {type(astap_search_radius_from_settings)})",
             "DEBUG",
         )
         self._log(
-            f"!!!! DEBUG AstrometrySolver.solve: Dictionnaire 'settings' reçu COMPLET par solve(): {settings}",
+            f"Settings received by solve(): {settings}",
             "DEBUG",
         )
-        # <<< FIN AJOUT DES LOGS DE DEBUG >>>
 
         # Logs existants pour confirmer les valeurs utilisées
-        self._log(f"DEBUG (AstrometrySolver.solve): Préférence solveur: '{solver_preference}'", "DEBUG")
+        self._log(f"Solver preference: '{solver_preference}'", "DEBUG")
         self._log(
-            f"DEBUG (AstrometrySolver.solve): ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
+            f"ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
             "DEBUG",
         )
         self._log(
-            f"DEBUG (AstrometrySolver.solve): Ansvr Path/Config: '{ansvr_config_path}', Timeout: {ansvr_timeout}",
+            f"Ansvr Path/Config: '{ansvr_config_path}', Timeout: {ansvr_timeout}",
             "DEBUG",
         )
         self._log(
-            f"DEBUG (AstrometrySolver.solve): API Key Web: {'Présente' if api_key else 'Absente'}, Timeout Web: {anet_web_timeout}",
+            f"API Key Web: {'Présente' if api_key else 'Absente'}, Timeout Web: {anet_web_timeout}",
             "DEBUG",
         )
         self._log(
-            f"DEBUG (AstrometrySolver.solve): Scale Est (pour Web/Ansvr): {scale_est}, Scale Tol: {scale_tol}",
+            f"Scale Est (pour Web/Ansvr): {scale_est}, Scale Tol: {scale_tol}",
             "DEBUG",
         )
 
@@ -401,15 +387,15 @@ class AstrometrySolver:
             if ansvr_config_path: 
                 self._log("Priorité au solveur local: Astrometry.net Local (solve-field).", "INFO")
                 self._log(
-                    f"!!!!!! DEBUG AstrometrySolver.solve: PRÉPARATION APPEL _try_solve_local_ansvr pour {os.path.basename(image_path)}",
+                    f"Preparing _try_solve_local_ansvr for {os.path.basename(image_path)}",
                     "DEBUG",
                 )
                 wcs_solution = self._try_solve_local_ansvr(image_path, fits_header, ansvr_config_path,
                                                            scale_est, scale_tol, ansvr_timeout,
                                                            update_header_with_solution)
                 self._log(
-                    f"!!!!!! DEBUG AstrometrySolver.solve: RETOUR DE _try_solve_local_ansvr pour {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}",
-                    "DEBUG",
+                    f'Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}',
+                    'DEBUG',
                 )
                 if wcs_solution:
                     self._log("Solution trouvée avec Astrometry.net Local (solve-field).", "INFO")
@@ -470,12 +456,9 @@ class AstrometrySolver:
 
         # --- Section 0: Log d'entrée et validation initiale de image_path ---
         base_img_name_for_log = os.path.basename(image_path) if image_path and isinstance(image_path, str) else "INVALID_IMAGE_PATH"
-        entry_msg = (
-            f"!!!!!! _try_solve_local_ansvr: ENTRÉE (Test SANS COPIE FITS V2) POUR {base_img_name_for_log} !!!!!!"
-        )
-        self._log(entry_msg, "ERROR")
-
-        self._log(f"LocalAnsvr (Test SANS COPIE FITS V2): Tentative résolution pour '{base_img_name_for_log}'.", "INFO")
+        entry_msg = f"Entering _try_solve_local_ansvr for {base_img_name_for_log}"
+        self._log(entry_msg, "DEBUG")
+        self._log(f"LocalAnsvr: Tentative résolution pour '{base_img_name_for_log}'.", "INFO")
         self._log(f"  LocalAnsvr: image_path brut reçu: '{image_path}' (type: {type(image_path)})", "DEBUG")
         self._log(f"  LocalAnsvr: ansvr_user_provided_path: '{ansvr_user_provided_path}'", "DEBUG")
 
@@ -638,7 +621,7 @@ class AstrometrySolver:
                          scale_tolerance_percent_UNUSED,
                          timeout_sec,
                          update_header_with_solution):
-        self._log(f"!!!!!! ENTRÉE DANS _try_solve_astap (Nettoyage Fichiers V1) POUR {os.path.basename(image_path)} !!!!!!", "ERROR")
+        self._log(f"Entering _try_solve_astap for {os.path.basename(image_path)}", "DEBUG")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
 
         image_dir = os.path.dirname(image_path)
@@ -793,7 +776,7 @@ class AstrometrySolver:
         Basée sur la fonction globale solve_image_wcs précédente.
         Prend un CHEMIN de fichier FITS, le charge, le prépare et le soumet.
         """
-        self._log(f"!!!!!! ENTRÉE DANS _solve_astrometry_net_web POUR {os.path.basename(image_path_for_solver)} !!!!!!", "ERROR") # Log très visible
+        self._log(f"Entering _solve_astrometry_net_web for {os.path.basename(image_path_for_solver)}", "DEBUG")
         self._log(f"WebANET: Début tentative solving pour {os.path.basename(image_path_for_solver)}", "DEBUG")
 
         if not _ASTROQUERY_AVAILABLE or not _ASTROPY_AVAILABLE:

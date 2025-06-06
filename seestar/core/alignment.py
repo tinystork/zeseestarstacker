@@ -8,7 +8,6 @@ import numpy as np
 from astropy.io import fits
 import cv2
 import astroalign as aa
-from tqdm import tqdm
 import warnings
 import gc
 import time
@@ -16,7 +15,6 @@ import shutil
 import concurrent.futures
 from functools import partial
 import traceback # Added for traceback printing
-from astropy.io import fits # Si pas déjà là
 try: from tqdm import tqdm # Optionnel, pour la barre de progression console
 except ImportError: tqdm = lambda x, **kwargs: x
 
@@ -300,8 +298,6 @@ class SeestarAligner:
                  if hasattr(self, 'update_progress'): self.update_progress(f"❌ [GET_REF/Auto] Aucun candidat valide après filtrage des noms (sur {num_to_analyze_initial_subset} scannés).")
                  return None, None
             if hasattr(self, 'update_progress'): self.update_progress(f"🔍 [GET_REF/Auto] Analyse de {num_to_analyze_auto} images candidates pour référence...")
-            try: from tqdm import tqdm
-            except ImportError: tqdm = lambda x, **kwargs: x 
             disable_tqdm_auto = (hasattr(self, 'progress_callback') and self.progress_callback is not None) or (hasattr(self, 'update_progress') and self.update_progress is not None and self.update_progress != print)
 
             for i_cand, f_name_cand in enumerate(tqdm(iterable_candidates, desc="Analyse Réf. Auto", disable=disable_tqdm_auto, leave=False)):

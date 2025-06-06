@@ -181,7 +181,9 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
     assert dummy_solver.dec is not None
     assert captured.get("pixel_shapes") == [(80, 80)]
 
+
 def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
+
     importlib.reload(worker)
 
     monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
@@ -242,6 +244,7 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
     final_shape = (80, 80)
 
     worker.assemble_final_mosaic_with_reproject_coadd(
+
         [(str(fits_path), wcs_in)],
         final_wcs,
         final_shape,
@@ -259,4 +262,5 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
     assert solver.ra == 11.1
     assert solver.dec == -22.2
     assert captured.get("pixel_shapes") == [(80, 80)]
+
 
