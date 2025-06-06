@@ -329,6 +329,8 @@ class AstrometrySolver:
         astap_data = settings.get('astap_data_dir', None)
         # Lire la valeur du rayon pour ASTAP depuis le dictionnaire settings
         astap_search_radius_from_settings = settings.get('astap_search_radius', 30.0) # Valeur par défaut si non trouvée
+        astap_downsample_val = settings.get('astap_downsample', 2)
+        astap_sensitivity_val = settings.get('astap_sensitivity', 100)
         astap_timeout = settings.get('astap_timeout_sec', 120)
 
         ansvr_config_path = settings.get('local_ansvr_path', "")
@@ -369,10 +371,19 @@ class AstrometrySolver:
         if solver_preference == "astap":
             if astap_exe and os.path.isfile(astap_exe):
                 self._log("Priorité au solveur local: ASTAP.", "INFO")
-                wcs_solution = self._try_solve_astap(image_path, fits_header, astap_exe, astap_data,
-                                                     astap_search_radius_from_settings, # Utiliser la valeur lue
-                                                     scale_est, scale_tol, astap_timeout,
-                                                     update_header_with_solution)
+                wcs_solution = self._try_solve_astap(
+                    image_path,
+                    fits_header,
+                    astap_exe,
+                    astap_data,
+                    astap_search_radius_from_settings,  # Utiliser la valeur lue
+                    scale_est,
+                    scale_tol,
+                    astap_timeout,
+                    update_header_with_solution,
+                    astap_downsample_val,
+                    astap_sensitivity_val,
+                )
                 if wcs_solution:
                     self._log("Solution trouvée avec ASTAP.", "INFO")
                     return wcs_solution
@@ -615,12 +626,20 @@ class AstrometrySolver:
 
 # --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
 
-    def _try_solve_astap(self, image_path, fits_header, astap_exe_path, astap_data_dir,
-                         astap_search_radius_deg,
-                         scale_est_arcsec_per_pix_from_solver_UNUSED,
-                         scale_tolerance_percent_UNUSED,
-                         timeout_sec,
-                         update_header_with_solution):
+    def _try_solve_astap(
+        self,
+        image_path,
+        fits_header,
+        astap_exe_path,
+        astap_data_dir,
+        astap_search_radius_deg,
+        scale_est_arcsec_per_pix_from_solver_UNUSED,
+        scale_tolerance_percent_UNUSED,
+        timeout_sec,
+        update_header_with_solution,
+        astap_downsample=2,
+        astap_sensitivity=100,
+    ):
         self._log(f"Entering _try_solve_astap for {os.path.basename(image_path)}", "DEBUG")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
 
@@ -651,8 +670,8 @@ class AstrometrySolver:
             cmd.extend(["-d", astap_data_dir])
 
         # Options de résolution (z, sens)
-        cmd.extend(["-z", "2"]) # Downsample pour accélérer (0=aucun, 1=x2, 2=x4)
-        cmd.extend(["-sens", "100"]) # Seuil de détection (plus bas = plus sensible)
+        cmd.extend(["-z", str(astap_downsample)])  # Downsample configurable
+        cmd.extend(["-sens", str(astap_sensitivity)])  # Détection configurable
 
         # Gestion du rayon de recherche
         # astap_search_radius_deg est la valeur float reçue de settings
