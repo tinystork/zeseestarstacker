@@ -689,7 +689,20 @@ class AstrometrySolver:
             # ce qui est généralement recommandé pour une recherche "aveugle".
             cmd.extend(["-fov", "0"])
             self._log(f"ASTAP: Utilisation -fov 0 (recherche automatique du champ).", "DEBUG")
-        
+
+        # Provide RA/DEC hints if present in the FITS header
+        ra_hint = None
+        dec_hint = None
+        if fits_header:
+            ra_hint = fits_header.get('RA', fits_header.get('CRVAL1'))
+            dec_hint = fits_header.get('DEC', fits_header.get('CRVAL2'))
+        if isinstance(ra_hint, (int, float)) and isinstance(dec_hint, (int, float)):
+            cmd.extend(["-ra", str(ra_hint), "-dec", str(dec_hint)])
+            self._log(
+                f"ASTAP: Hints RA={ra_hint} DEC={dec_hint} ajoutés à la commande.",
+                "DEBUG",
+            )
+
         self._log(f"ASTAP: Commande finale: {' '.join(cmd)}", "DEBUG")
         wcs_object = None
 
