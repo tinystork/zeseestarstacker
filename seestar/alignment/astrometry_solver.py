@@ -14,10 +14,16 @@ import shutil  # Pour trouver les exécutables
 import gc
 import glob  # <<< AJOUTER CET IMPORT EN HAUT DU FICHIER
 import logging
+from zemosaic import zemosaic_config
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logger.addHandler(logging.NullHandler())
+
+# Default search radius in degrees used by ASTAP when no value is provided
+# through solver settings. Loaded from ``zemosaic_config`` so tests and
+# documentation stay in sync with application defaults.
+ASTAP_DEFAULT_SEARCH_RADIUS = zemosaic_config.get_astap_default_search_radius()
 # --- Dépendances Astropy/Astroquery (comme avant) ---
 _ASTROQUERY_AVAILABLE = False
 _ASTROPY_AVAILABLE = False
@@ -328,7 +334,9 @@ class AstrometrySolver:
         astap_exe = settings.get('astap_path', "")
         astap_data = settings.get('astap_data_dir', None)
         # Lire la valeur du rayon pour ASTAP depuis le dictionnaire settings
-        astap_search_radius_from_settings = settings.get('astap_search_radius', 30.0) # Valeur par défaut si non trouvée
+        astap_search_radius_from_settings = settings.get(
+            'astap_search_radius', ASTAP_DEFAULT_SEARCH_RADIUS
+        )  # Valeur par défaut si non trouvée
         astap_downsample_val = settings.get('astap_downsample', 2)
         astap_sensitivity_val = settings.get('astap_sensitivity', 100)
         astap_timeout = settings.get('astap_timeout_sec', 120)

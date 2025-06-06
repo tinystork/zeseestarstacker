@@ -7,6 +7,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 spec = importlib.util.spec_from_file_location(
     "astrometry_solver",
     ROOT / "seestar" / "alignment" / "astrometry_solver.py",
@@ -75,3 +76,34 @@ def test_parse_wcs_with_nonstandard_keywords(tmp_path):
     assert parsed is not None
     assert parsed.is_celestial
     assert parsed.pixel_shape == (10, 10)
+
+
+def test_default_radius_used_when_missing(tmp_path, monkeypatch):
+    """solve() should fall back to ASTAP_DEFAULT_SEARCH_RADIUS."""
+    img = np.ones((10, 10), dtype=np.float32)
+    fits_path = tmp_path / "img.fits"
+    fits.writeto(fits_path, img, overwrite=True)
+
+    solver = AstrometrySolver()
+
+    captured = {}
+
+    def fake_try_solve_astap(image, header, exe, data, radius, *args, **kw):
+        captured["radius"] = radius
+        return None
+
+    monkeypatch.setattr(solver, "_try_solve_astap", fake_try_solve_astap)
+
+    dummy_exe = tmp_path / "astap.exe"
+    dummy_exe.write_text("")
+
+    settings = {
+        "local_solver_preference": "astap",
+        "astap_path": str(dummy_exe),
+    }
+
+    header = fits.getheader(fits_path)
+    solver.solve(str(fits_path), header, settings)
+
+    assert "radius" in captured
+    assert captured["radius"] == astrometry_solver.ASTAP_DEFAULT_SEARCH_RADIUS

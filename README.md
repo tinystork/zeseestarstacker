@@ -292,7 +292,8 @@ zemosaic_worker.run_hierarchical_mosaic(
 
 - `astap_path`: path to the ASTAP executable
 - `astap_data_dir`: directory containing ASTAP star catalogs
-- `astap_search_radius`: search radius in degrees passed to ASTAP
+- `astap_search_radius`: search radius in degrees passed to ASTAP. When
+  omitted the solver uses `ASTAP_DEFAULT_SEARCH_RADIUS` (3.0 degrees)
 - `astap_downsample`: downsample factor used by ASTAP
 - `astap_sensitivity`: detection sensitivity percentage for ASTAP
 - `local_ansvr_path`: path to a local `ansvr.cfg`
