@@ -61,8 +61,22 @@ try:
     find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = actual_find_optimal_wcs, actual_reproject_coadd, actual_reproject_interp
     REPROJECT_AVAILABLE = True
     logger.info("Bibliothèque 'reproject' importée.")
-except ImportError as e_reproject_final: logger.critical(f"Échec import reproject: {e_reproject_final}.")
-except Exception as e_reproject_other_final: logger.critical(f"Erreur import 'reproject': {e_reproject_other_final}", exc_info=True)
+except ImportError as e_reproject_final:
+    logger.critical(
+        f"Échec import reproject: {e_reproject_final}."
+    )
+    logger.critical(
+        "Veuillez installer le paquet 'reproject' (pip install reproject)."
+    )
+except Exception as e_reproject_other_final:
+    logger.critical(
+        f"Erreur import 'reproject': {e_reproject_other_final}", exc_info=True
+    )
+
+if not REPROJECT_AVAILABLE:
+    logger.error(
+        "Le module 'reproject' est requis. Installez-le via 'pip install reproject'."
+    )
 
 # --- Local Project Module Imports ---
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False

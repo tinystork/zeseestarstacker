@@ -85,6 +85,13 @@ If you prefer to install manually:
 
 pip install numpy astropy reproject opencv-python photutils scipy psutil
 
+The mosaic assembly routines require the **reproject** package. If you encounter
+errors about missing `reproject`, install it with:
+
+```bash
+pip install reproject
+```
+
 2. 🚀 Launch ZeMosaic
 Once the dependencies are installed:
 python -m zemosaic.run_zemosaic
