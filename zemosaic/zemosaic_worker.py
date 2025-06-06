@@ -1529,42 +1529,67 @@ def run_hierarchical_mosaic(
     base_progress_phase4 = current_global_progress
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
-    stacked_panel_paths = []
+    wcs_list_for_grid = []
+    shape_list_for_grid = []
     for idx_mt, (mt_path_iter, mt_wcs_iter) in enumerate(master_tiles_results_list, 1):
         if not (mt_path_iter and os.path.exists(mt_path_iter)):
             pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path"))
             continue
-        stacked_panel_paths.append(mt_path_iter)
-        solver_used = "header"
+
+        shape_hw = None
         try:
             hdr_tmp = fits.getheader(mt_path_iter)
-            hdr_keys = {k.upper() for k in hdr_tmp.keys()}
-            if 'ASTAP_SOLVED' in hdr_keys:
-                solver_used = 'ASTAP'
-            elif any(k.startswith('LOCALANSVR') and k.endswith('_SOLVED') for k in hdr_keys):
-                solver_used = 'ansvr'
-            elif 'ASTROMETRY.NET_SOLVED' in hdr_keys or 'ASTROMETRY_NET_SOLVED' in hdr_keys:
-                solver_used = 'API'
+            if hdr_tmp and 'NAXIS1' in hdr_tmp and 'NAXIS2' in hdr_tmp:
+                shape_hw = (int(hdr_tmp['NAXIS2']), int(hdr_tmp['NAXIS1']))
         except Exception as e_read_hdr:
             pcb("Phase4: lecture header échouée", prog=None, lvl="DEBUG", path=os.path.basename(mt_path_iter), error=str(e_read_hdr))
-        pcb(f"Phase4: panneau {idx_mt} résolu via {solver_used}", prog=None, lvl="INFO_DETAIL")
 
-    if not stacked_panel_paths:
+        if shape_hw is None:
+            if mt_wcs_iter.pixel_shape:
+                shape_hw = (int(mt_wcs_iter.pixel_shape[1]), int(mt_wcs_iter.pixel_shape[0]))
+        if shape_hw is None:
+            pcb("run_warn_phase4_no_shape_for_tile", prog=None, lvl="WARN", filename=os.path.basename(mt_path_iter))
+            continue
+
+        wcs_to_use = mt_wcs_iter.copy()
+        if apply_master_tile_crop_config and master_tile_crop_percent_config > 1e-3:
+            crop_fraction = master_tile_crop_percent_config / 100.0
+            dh = int(shape_hw[0] * crop_fraction)
+            dw = int(shape_hw[1] * crop_fraction)
+            new_h = max(1, shape_hw[0] - 2 * dh)
+            new_w = max(1, shape_hw[1] - 2 * dw)
+            shape_hw = (new_h, new_w)
+            try:
+                if hasattr(wcs_to_use.wcs, 'crpix'):
+                    wcs_to_use.wcs.crpix = [wcs_to_use.wcs.crpix[0] - dw, wcs_to_use.wcs.crpix[1] - dh]
+            except Exception:
+                pass
+        try:
+            wcs_to_use.pixel_shape = (shape_hw[1], shape_hw[0])
+        except Exception:
+            pass
+
+        wcs_list_for_grid.append(wcs_to_use)
+        shape_list_for_grid.append(shape_hw)
+        pcb(f"Phase4: panneau {idx_mt} shape={shape_hw}", prog=None, lvl="DEBUG_DETAIL")
+
+    if not wcs_list_for_grid:
         pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
         return
 
-    if not (CALC_FINAL_GRID_DYNAMIC_AVAILABLE and calculate_final_mosaic_grid_dynamic_wcs):
-        pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
-        return
-
     final_mosaic_drizzle_scale = 1.0
-    final_output_wcs, final_output_shape_hw = calculate_final_mosaic_grid_dynamic_wcs(
-        stacked_panel_paths,
-        final_mosaic_drizzle_scale,
-        solver_settings.get('local_solver_preference', 'astap'),
-        solver_settings.get('local_ansvr_path'),
-        solver_settings.get('api_key'),
+    final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(
+        wcs_list_for_grid,
+        shape_list_for_grid,
+        drizzle_scale_factor=final_mosaic_drizzle_scale,
+        progress_callback=progress_callback,
     )
+    if final_output_wcs and final_output_shape_hw:
+        pcb(
+            f"Phase4: grille calc {len(wcs_list_for_grid)} tuiles -> shape {final_output_shape_hw} CRPIX {final_output_wcs.wcs.crpix if final_output_wcs.wcs else 'N/A'} CRVAL {final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A'}",
+            prog=None,
+            lvl="DEBUG",
+        )
 
     if not final_output_wcs or not final_output_shape_hw:
         pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
