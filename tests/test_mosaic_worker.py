@@ -264,3 +264,63 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
     assert captured.get("pixel_shapes") == [(80, 80)]
 
 
+def test_use_sidecar_wcs(monkeypatch, tmp_path):
+    import importlib
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(
+        worker,
+        "reproject_interp",
+        lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
+    )
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+
+    class DummyZU:
+        @staticmethod
+        def load_and_validate_fits(filepath, normalize_to_float32=False, attempt_fix_nonfinite=True, progress_callback=None):
+            from astropy.io import fits
+            data = np.ones((2, 2), dtype=np.float32)
+            hdr = fits.Header()
+            hdr["BITPIX"] = 16
+            return data, hdr
+
+        @staticmethod
+        def debayer_image(img, pattern, progress_callback=None):
+            return np.stack([img] * 3, axis=-1)
+
+        @staticmethod
+        def detect_and_correct_hot_pixels(img, thr, size, progress_callback=None):
+            return img
+
+    monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
+
+    from astropy.io import fits
+    fits_path = tmp_path / "tile.fits"
+    fits.writeto(fits_path, np.ones((2, 2), dtype=np.uint16))
+
+    wcs_obj = make_wcs(10, 20, shape=(2, 2))
+    sidecar_path = fits_path.with_suffix(".wcs")
+    with open(sidecar_path, "w") as f:
+        f.write(wcs_obj.to_header(relax=True).tostring(sep="\n"))
+
+    class DummySolver:
+        def __init__(self):
+            self.called = False
+
+        def solve(self, *args, **kwargs):
+            self.called = True
+            return make_wcs(0, 0, shape=(2, 2))
+
+    solver = DummySolver()
+
+    img, wcs_out, hdr = worker.get_wcs_and_pretreat_raw_file(
+        str(fits_path), {}, lambda *a, **k: None, solver
+    )
+
+    assert wcs_out is not None
+    assert not solver.called
+    assert np.allclose(wcs_out.wcs.crval, [10, 20])
+
+
