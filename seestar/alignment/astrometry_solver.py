@@ -241,13 +241,16 @@ class AstrometrySolver:
     """
     Classe pour orchestrer la résolution astrométrique en utilisant différents solveurs.
     """
-    def __init__(self, progress_callback=None, verbose=False):
+    def __init__(self, progress_callback=None, verbose=None):
         """
         Initialise le solveur.
         Args:
             progress_callback (callable, optional): Callback pour les messages de progression.
         """
         self.progress_callback = progress_callback
+        if verbose is None:
+            _v_env = os.getenv("SEESTAR_VERBOSE", "")
+            verbose = str(_v_env).lower() in ("1", "true", "yes")
         self.verbose = verbose
         self.logger = logger
         if not _ASTROPY_AVAILABLE:

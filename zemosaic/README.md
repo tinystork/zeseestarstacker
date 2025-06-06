@@ -124,6 +124,9 @@ ZEMOSAIC_ASTAP_SEARCH_RADIUS=3.0
 ZEMOSAIC_LOCAL_SOLVER_PREFERENCE=astap
 ```
 
+Set `SEESTAR_VERBOSE=1` or use the `-v` flag when launching `run_zemosaic.py` to
+see detailed debug logs.
+
 These values prefill the solver configuration when the GUI starts.
 
 📁 Requirements Summary

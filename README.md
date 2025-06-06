@@ -209,6 +209,8 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
 **(English)**
 
 1.  **Run the Application:** Navigate to the project's root directory and run `python seestar/main.py`.
+    Set the environment variable `SEESTAR_VERBOSE=1` (or pass `-v` when running
+    `run_zemosaic.py`) to enable verbose debug output.
 2.  **Select Folders:** Choose Input, Output, and optional Reference folders/files.
 3.  **Adjust Stacking Settings:** Select Method, Kappa, Batch Size, Hot Pixel options, Quality Weighting parameters, and Cleanup preference.
 4.  **Adjust Preview (Optional):** Modify preview display settings (WB, Stretch, Gamma, etc.) using the Preview tab and Histogram. *This does not affect the final FITS stack.*
@@ -220,6 +222,8 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
 **(Français)**
 
 1.  **Lancer l'Application :** Naviguez vers le répertoire racine du projet et exécutez `python seestar/main.py`.
+    Définissez la variable d'environnement `SEESTAR_VERBOSE=1` (ou utilisez
+    l'option `-v` avec `run_zemosaic.py`) pour activer les messages de débogage détaillés.
 2.  **Sélectionner les Dossiers :** Choisissez les dossiers d'Entrée, de Sortie et optionnellement le fichier de Référence.
 3.  **Ajuster les Paramètres d'Empilement :** Sélectionnez la Méthode, Kappa, Taille de Lot, options de Pixels Chauds, paramètres de Pondération par Qualité et préférence de Nettoyage.
 4.  **Ajuster l'Aperçu (Optionnel) :** Modifiez les paramètres d'affichage de l'aperçu (BdB, Étirement, Gamma, etc.) via l'onglet Aperçu et l'Histogramme. *Ceci n'affecte pas le stack FITS final sauvegardé.*
