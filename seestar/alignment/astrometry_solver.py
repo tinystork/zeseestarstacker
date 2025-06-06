@@ -961,7 +961,9 @@ class AstrometrySolver:
             return None
         try:
             # Lire le contenu du fichier .wcs
-            with open(wcs_file_path, 'r') as f:
+            # Utiliser errors='replace' pour éviter les erreurs d'encodage qui
+            # pourraient être présentes dans certains fichiers ASTAP
+            with open(wcs_file_path, 'r', errors='replace') as f:
                 wcs_text_content = f.read()
             
             # Créer un header FITS à partir de ce texte
@@ -971,7 +973,7 @@ class AstrometrySolver:
             # Créer l'objet WCS
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", FITSFixedWarning)
-                wcs_obj = WCS(wcs_header_from_text, naxis=2) # naxis=2 car c'est un WCS 2D
+                wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)  # relax=True pour accepter les mots-clés non standards
             
             if wcs_obj and wcs_obj.is_celestial:
                 # Important: définir la taille de l'image à laquelle ce WCS s'applique
