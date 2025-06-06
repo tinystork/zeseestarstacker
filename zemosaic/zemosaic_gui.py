@@ -206,6 +206,9 @@ class ZeMosaicGUI:
         self.master_tile_crop_percent_var = tk.DoubleVar(
             value=self.config.get("master_tile_crop_percent", 18.0) # 18% par côté par défaut si activé
         )
+        self.re_solve_cropped_tiles_var = tk.BooleanVar(
+            value=self.config.get("re_solve_cropped_tiles", False)
+        )
         # ---  ---
 
         self.translatable_widgets = {}
@@ -550,6 +553,18 @@ class ZeMosaicGUI:
         crop_percent_note.grid(row=crop_opt_row, column=2, padx=(10,5), pady=3, sticky="ew")
         self.translatable_widgets["master_tile_crop_percent_note"] = crop_percent_note
         crop_opt_row += 1
+
+        self.re_solve_crop_label = ttk.Label(crop_options_frame, text="")
+        self.re_solve_crop_label.grid(row=crop_opt_row, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["re_solve_cropped_tiles_label"] = self.re_solve_crop_label
+
+        self.re_solve_crop_check = ttk.Checkbutton(
+            crop_options_frame,
+            variable=self.re_solve_cropped_tiles_var
+        )
+        self.re_solve_crop_check.grid(row=crop_opt_row, column=1, padx=5, pady=3, sticky="w")
+        crop_opt_row += 1
+        self._update_crop_options_state()
         # --- FIN  CADRE DE ROGNAGE ---
 
         # --- Options d'Assemblage Final ---
@@ -707,16 +722,19 @@ class ZeMosaicGUI:
     def _update_crop_options_state(self, *args):
         """Active ou désactive le spinbox de pourcentage de rognage."""
         if not all(hasattr(self, attr) for attr in [
-            'apply_master_tile_crop_var', 
-            'crop_percent_spinbox'
+            'apply_master_tile_crop_var',
+            'crop_percent_spinbox',
+            're_solve_crop_check'
         ]):
             return # Widgets pas encore prêts
 
         try:
             if self.apply_master_tile_crop_var.get():
                 self.crop_percent_spinbox.config(state=tk.NORMAL)
+                self.re_solve_crop_check.config(state=tk.NORMAL)
             else:
                 self.crop_percent_spinbox.config(state=tk.DISABLED)
+                self.re_solve_crop_check.config(state=tk.DISABLED)
         except tk.TclError:
             pass # Widget peut avoir été détruit
 
@@ -1112,7 +1130,8 @@ class ZeMosaicGUI:
             # --- NOUVEAUX ARGUMENTS POUR LE ROGNAGE ---
             apply_master_tile_crop_val,
             master_tile_crop_percent_val,
-            self.save_final_uint16_var.get()
+            self.save_final_uint16_var.get(),
+            self.re_solve_cropped_tiles_var.get()
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
         

@@ -22,6 +22,7 @@
     "apply_master_tile_crop_label": "Crop Master Tile Edges:",
     "master_tile_crop_percent_label": "Crop Percentage per Side (0-25%):",
     "master_tile_crop_percent_note": "(0.0 = no crop)",
+    "re_solve_cropped_tiles_label": "Re-solve Cropped Tiles:",
 
 
     "config_warning_title": "Config Warning",
