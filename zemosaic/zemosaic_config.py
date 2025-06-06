@@ -6,7 +6,9 @@ import tkinter.messagebox as mb
 
 CONFIG_FILE_NAME = "zemosaic_config.json"
 DEFAULT_CONFIG = {
-    "astap_default_search_radius": 3.0, 
+    "astap_path": "",
+    "astap_data_dir": "",
+    "astap_default_search_radius": 3.0,
     "astap_default_downsample": 2, 
     "astap_default_sensitivity": 100,
     "language": "en",
@@ -130,3 +132,11 @@ def get_astap_default_downsample():
 def get_astap_default_sensitivity():
     config = load_config()
     return config.get("astap_default_sensitivity", DEFAULT_CONFIG["astap_default_sensitivity"])
+
+def get_astap_path():
+    config = load_config()
+    return config.get("astap_path", DEFAULT_CONFIG["astap_path"])
+
+def get_astap_data_dir():
+    config = load_config()
+    return config.get("astap_data_dir", DEFAULT_CONFIG["astap_data_dir"])
