@@ -232,6 +232,18 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
 7.  **Ajouter des Dossiers (Optionnel) :** Cliquez sur "Ajouter Dossier" pendant le traitement pour mettre en file d'attente des jeux d'images additionnels.
 8.  **Fin :** Consultez le dialogue de résumé. Trouvez l'image finale `stack_final_....fit` et l'aperçu PNG dans le dossier de sortie. Utilisez les boutons "Copier Log" / "Ouvrir Sortie" si besoin.
 
+### Command-Line Mosaic
+
+You can also run the hierarchical mosaic workflow directly from a terminal:
+
+```bash
+python -m seestar.scripts.run_mosaic INPUT_DIR OUTPUT_DIR \
+    --astap-path /path/to/astap \
+    --astap-data-dir /path/to/catalogs
+```
+
+Solver options correspond to the `ZEMOSAIC_*` environment variables used by the GUI.
+
 ---
 
 ## Configuration (`seestar_settings.json`)
