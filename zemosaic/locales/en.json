@@ -114,6 +114,7 @@
     "calcgrid_info_optimal_grid_calculated": "CalcGrid: Optimal grid: Shape(H,W)={shape}, CRVAL={crval}",
     "calcgrid_error_find_optimal_wcs_unavailable": "CalcGrid ERROR: find_optimal_celestial_wcs function is not available.",
     "calcgrid_error_find_optimal_wcs_call": "CalcGrid ERROR calling find_optimal_celestial_wcs: {error}",
+    "calcgrid_warn_output_scale_mismatch": "CalcGrid WARN: Output pixel scale {actual_arcsec:.6f} arcsec/pix differs from target {target_arcsec:.6f} arcsec/pix. Forcing target scale.",
 
     "clusterstacks_error_astropy_unavailable": "ClusterStacks ERROR: Astropy (SkyCoord/units) not available.",
     "clusterstacks_warn_no_raw_info": "ClusterStacks: No raw file information provided.",

@@ -139,6 +139,7 @@
     "calcgrid_info_optimal_grid_calculated": "CalcGrid : Grille optimale : Shape(H,W)={shape}, CRVAL={crval}",
     "calcgrid_error_find_optimal_wcs_unavailable": "CalcGrid ERREUR : Fonction find_optimal_celestial_wcs non disponible.",
     "calcgrid_error_find_optimal_wcs_call": "CalcGrid ERREUR lors de l'appel à find_optimal_celestial_wcs : {error}",
+    "calcgrid_warn_output_scale_mismatch": "CalcGrid AVERT : L'échelle pixel de sortie {actual_arcsec:.6f} arcsec/pix diffère de la cible {target_arcsec:.6f} arcsec/pix. Forçage de l'échelle cible.",
 
     "clusterstacks_error_astropy_unavailable": "ClusterStacks ERREUR : Astropy (SkyCoord/units) non disponible.",
     "clusterstacks_warn_no_raw_info": "ClusterStacks : Aucune information de fichier brut fournie.",

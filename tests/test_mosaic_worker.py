@@ -324,3 +324,34 @@ def test_use_sidecar_wcs(monkeypatch, tmp_path):
     assert np.allclose(wcs_out.wcs.crval, [10, 20])
 
 
+def test_output_scale_warning_and_adjust(monkeypatch, caplog):
+    import importlib
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "CALC_GRID_OPTIMIZED_AVAILABLE", False)
+
+    def dummy_focw(inputs, resolution, auto_rotate=True, projection='TAN', reference=None, frame='icrs'):
+        w = make_wcs(0, 0)
+        w.wcs.cdelt = np.array([-0.002, 0.002])
+        w.pixel_shape = (100, 100)
+        return w, (100, 100)
+
+    monkeypatch.setattr(worker, "find_optimal_celestial_wcs", dummy_focw)
+
+    w1 = make_wcs(0, 0)
+    w2 = make_wcs(1, 0)
+
+    caplog.set_level(logging.WARNING, logger="ZeMosaicWorker")
+    out_wcs, out_shape = worker._calculate_final_mosaic_grid(
+        [w1, w2], [(100, 100), (100, 100)], drizzle_scale_factor=1.0, progress_callback=None
+    )
+
+    assert out_wcs is not None
+    pix_scale = np.mean(np.abs(out_wcs.wcs.cdelt))
+    assert np.isclose(pix_scale, 0.001)
+    assert any(
+        "calcgrid_warn_output_scale_mismatch" in rec.getMessage() and rec.levelno >= logging.WARNING
+        for rec in caplog.records
+    )
+
+

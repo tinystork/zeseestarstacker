@@ -500,6 +500,29 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
                     pix_scale_deg = np.mean(np.abs(optimal_wcs_out.wcs.cdelt))
                 else:
                     pix_scale_deg = np.nan
+
+                if np.isfinite(pix_scale_deg):
+                    diff_deg = float(abs(pix_scale_deg - target_resolution_deg_per_pixel))
+                    if diff_deg > 1e-6:
+                        _log_and_callback(
+                            "calcgrid_warn_output_scale_mismatch",
+                            actual_arcsec=pix_scale_deg * 3600.0,
+                            target_arcsec=target_resolution_deg_per_pixel * 3600.0,
+                            level="WARN",
+                            callback=progress_callback,
+                        )
+                        if hasattr(optimal_wcs_out.wcs, 'cdelt') and optimal_wcs_out.wcs.cdelt is not None:
+                            signs = np.sign(optimal_wcs_out.wcs.cdelt)
+                            optimal_wcs_out.wcs.cdelt = signs * target_resolution_deg_per_pixel
+                            pix_scale_deg = target_resolution_deg_per_pixel
+                        elif hasattr(optimal_wcs_out.wcs, 'cd') and optimal_wcs_out.wcs.cd is not None:
+                            signs = np.sign(np.diag(optimal_wcs_out.wcs.cd))
+                            new_cd = optimal_wcs_out.wcs.cd.copy()
+                            new_cd[0, 0] = signs[0] * target_resolution_deg_per_pixel
+                            new_cd[1, 1] = signs[1] * target_resolution_deg_per_pixel
+                            optimal_wcs_out.wcs.cd = new_cd
+                            pix_scale_deg = target_resolution_deg_per_pixel
+
                 pix_arcsec = pix_scale_deg * 3600.0 if np.isfinite(pix_scale_deg) else 'N/A'
                 _log_and_callback(
                     f"CalcGrid final WCS: CRPIX={getattr(optimal_wcs_out.wcs, 'crpix', 'N/A')} PIX_SCALE={pix_arcsec} arcsec/pix Shape={optimal_shape_hw_out}",
