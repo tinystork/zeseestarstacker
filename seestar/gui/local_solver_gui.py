@@ -202,7 +202,15 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         ttk.Entry(astap_data_subframe, textvariable=self.astap_data_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
         astap_radius_subframe = ttk.Frame(self.astap_frame); astap_radius_subframe.pack(fill=tk.X, pady=(2,5))
         ttk.Label(astap_radius_subframe, text=self.parent_gui.tr("local_solver_astap_radius_label", default="ASTAP Search Radius (degrees, 0 for auto):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Spinbox(astap_radius_subframe, from_=0.0, to=180.0, increment=0.5, textvariable=self.astap_search_radius_var, width=6, format="%.1f").pack(side=tk.LEFT)
+        ttk.Spinbox(
+            astap_radius_subframe,
+            from_=0.0,
+            to=180.0,
+            increment=0.5,
+            textvariable=self.astap_search_radius_var,
+            width=6,
+            format="%.2f",
+        ).pack(side=tk.LEFT)
 
 
         # --- MODIFICATION : Configuration Astrometry.net Local (ansvr) avec deux boutons ---

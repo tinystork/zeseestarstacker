@@ -328,6 +328,15 @@ def test_output_scale_warning_and_adjust(monkeypatch, caplog):
     import importlib
     importlib.reload(worker)
 
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(
+        worker,
+        "reproject_interp",
+        lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
+    )
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+
     monkeypatch.setattr(worker, "CALC_GRID_OPTIMIZED_AVAILABLE", False)
 
     def dummy_focw(inputs, resolution, auto_rotate=True, projection='TAN', reference=None, frame='icrs'):

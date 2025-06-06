@@ -684,8 +684,9 @@ class AstrometrySolver:
             # Pour l'instant, on passe -r si fourni, sinon on laisse ASTAP gérer.
             # Le comportement exact de -r sans -ra -dec est à confirmer via les logs ASTAP.
             # Le log d'ASTAP devrait indiquer "Search an area of X degrees around image center"
-            cmd.extend(["-r", str(astap_search_radius_deg)])
-            self._log(f"ASTAP: Utilisation rayon de recherche: {astap_search_radius_deg}°", "DEBUG")
+            radius_str = f"{float(astap_search_radius_deg):.2f}"
+            cmd.extend(["-r", radius_str])
+            self._log(f"ASTAP: Utilisation rayon de recherche: {radius_str}°", "DEBUG")
         else:
             # Si astap_search_radius_deg est 0 ou non fourni, ASTAP utilisera -fov 0
             # ce qui est généralement recommandé pour une recherche "aveugle".

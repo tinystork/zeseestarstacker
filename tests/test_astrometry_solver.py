@@ -51,6 +51,7 @@ def test_astap_command_uses_gui_parameters(tmp_path, monkeypatch):
     cmd = captured["cmd"]
     assert "-z" in cmd and cmd[cmd.index("-z") + 1] == "4"
     assert "-sens" in cmd and cmd[cmd.index("-sens") + 1] == "55"
+    assert "-r" in cmd and cmd[cmd.index("-r") + 1] == "3.00"
 
 
 def test_parse_wcs_with_nonstandard_keywords(tmp_path):
