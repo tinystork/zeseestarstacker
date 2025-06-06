@@ -2160,64 +2160,65 @@ def run_hierarchical_mosaic(
 
     # --- MODIFIÉ : Génération de la Preview PNG avec stretch_auto_asifits_like ---
     if final_mosaic_data_HWC is not None and ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils:
-        pcb("run_info_preview_stretch_started_auto_asifits", prog=None, lvl="INFO_DETAIL") # Log mis à jour
+        pcb("run_info_preview_stretch_started_auto_asifits", prog=None, lvl="INFO_DETAIL")
         try:
-            # Vérifier si la fonction stretch_auto_asifits_like existe dans zemosaic_utils
+            preview_p_low = 2.5
+            preview_p_high = 99.8
+            preview_asinh_a = 1.0
+
+            m_stretched = None
+            use_fallback = False
+
             if hasattr(zemosaic_utils, 'stretch_auto_asifits_like') and callable(zemosaic_utils.stretch_auto_asifits_like):
-                
-                # Paramètres pour stretch_auto_asifits_like (à ajuster si besoin)
-                # Ces valeurs sont des exemples, tu devras peut-être les affiner
-                # ou les rendre configurables plus tard.
-                preview_p_low = 2.5  # Percentile pour le point noir (plus élevé que pour asinh seul)
-                preview_p_high = 99.8 # Percentile pour le point blanc initial
-                preview_asinh_a = 0.1 # Facteur 'a' pour le stretch asinh après la normalisation initiale
-                                      # Pour un stretch plus "doux" similaire à ASIFitsView, 'a' peut être plus grand.
-                                      # ASIFitsView utilise souvent un 'midtones balance' (gamma-like) aussi.
-                                      # Un 'a' de 10 comme dans ton code de test est très doux. Essayons 0.5 ou 1.0.
-                preview_asinh_a = 1.0 # Test avec une valeur plus douce pour le 'a' de asinh
-
-                m_stretched = zemosaic_utils.stretch_auto_asifits_like(
-                    final_mosaic_data_HWC,
-                    p_low=preview_p_low,
-                    p_high=preview_p_high,
-                    asinh_a=preview_asinh_a,  # correspond à la signature de la fonction
-                    apply_wb=True  # Supposons que tu veuilles la balance des blancs auto
-                )
-
-                if m_stretched is not None:
-                    img_u8 = (np.clip(m_stretched.astype(np.float32), 0, 1) * 255).astype(np.uint8)
-                    png_path = os.path.join(output_folder, f"{output_base_name}_preview.png")
-                    try: 
-                        import cv2 # Importer cv2 seulement si nécessaire
-                        img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
-                        if cv2.imwrite(png_path, img_bgr): 
-                            pcb("run_success_preview_saved_auto_asifits", prog=None, lvl="SUCCESS", filename=os.path.basename(png_path))
-                        else: 
-                            pcb("run_warn_preview_imwrite_failed_auto_asifits", prog=None, lvl="WARN", filename=os.path.basename(png_path))
-                    except ImportError: 
-                        pcb("run_warn_preview_opencv_missing_for_auto_asifits", prog=None, lvl="WARN")
-                    except Exception as e_cv2_prev: 
-                        pcb("run_error_preview_opencv_failed_auto_asifits", prog=None, lvl="ERROR", error=str(e_cv2_prev))
-                else:
-                    pcb("run_error_preview_stretch_auto_asifits_returned_none", prog=None, lvl="ERROR")
+                try:
+                    m_stretched = zemosaic_utils.stretch_auto_asifits_like(
+                        final_mosaic_data_HWC,
+                        p_low=preview_p_low,
+                        p_high=preview_p_high,
+                        asinh_a=preview_asinh_a,
+                        apply_wb=True,
+                    )
+                    if m_stretched is None:
+                        pcb("run_error_preview_stretch_auto_asifits_returned_none", prog=None, lvl="ERROR")
+                        use_fallback = True
+                except Exception as e_call:
+                    pcb("run_error_preview_stretch_auto_asifits_exception", prog=None, lvl="ERROR", error=str(e_call))
+                    logger.error("stretch_auto_asifits_like failed:", exc_info=True)
+                    use_fallback = True
             else:
                 pcb("run_warn_preview_stretch_auto_asifits_func_missing", prog=None, lvl="WARN")
-                # Fallback sur l'ancienne méthode si stretch_auto_asifits_like n'est pas trouvée
-                # (Tu peux supprimer ce fallback si tu es sûr que la fonction existe)
+                use_fallback = True
+
+            if use_fallback:
                 pcb("run_info_preview_fallback_to_simple_asinh", prog=None, lvl="DEBUG_DETAIL")
                 if hasattr(zemosaic_utils, 'stretch_percentile_rgb') and zemosaic_utils.ASTROPY_VISUALIZATION_AVAILABLE:
-                     m_stretched_fallback = zemosaic_utils.stretch_percentile_rgb(final_mosaic_data_HWC, p_low=0.5, p_high=99.9, independent_channels=False, asinh_a=0.01 )
-                     if m_stretched_fallback is not None:
-                        img_u8_fb = (np.clip(m_stretched_fallback.astype(np.float32), 0, 1) * 255).astype(np.uint8)
-                        png_path_fb = os.path.join(output_folder, f"{output_base_name}_preview_fallback.png")
-                        try:
-                            import cv2
-                            img_bgr_fb = cv2.cvtColor(img_u8_fb, cv2.COLOR_RGB2BGR)
-                            cv2.imwrite(png_path_fb, img_bgr_fb)
-                            pcb("run_success_preview_saved_fallback", prog=None, lvl="INFO_DETAIL", filename=os.path.basename(png_path_fb))
-                        except: pass # Ignorer erreur fallback
+                    m_stretched = zemosaic_utils.stretch_percentile_rgb(
+                        final_mosaic_data_HWC,
+                        p_low=0.5,
+                        p_high=99.9,
+                        independent_channels=False,
+                        asinh_a=0.01,
+                    )
 
-        except Exception as e_stretch_main: 
+            if m_stretched is not None:
+                img_u8 = (np.clip(m_stretched.astype(np.float32), 0, 1) * 255).astype(np.uint8)
+                png_name = f"{output_base_name}_preview.png" if not use_fallback else f"{output_base_name}_preview_fallback.png"
+                png_path = os.path.join(output_folder, png_name)
+                try:
+                    import cv2
+                    img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
+                    if cv2.imwrite(png_path, img_bgr):
+                        if use_fallback:
+                            pcb("run_success_preview_saved_fallback", prog=None, lvl="INFO_DETAIL", filename=os.path.basename(png_path))
+                        else:
+                            pcb("run_success_preview_saved_auto_asifits", prog=None, lvl="SUCCESS", filename=os.path.basename(png_path))
+                    else:
+                        pcb("run_warn_preview_imwrite_failed_auto_asifits", prog=None, lvl="WARN", filename=os.path.basename(png_path))
+                except ImportError:
+                    pcb("run_warn_preview_opencv_missing_for_auto_asifits", prog=None, lvl="WARN")
+                except Exception as e_cv2_prev:
+                    pcb("run_error_preview_opencv_failed_auto_asifits", prog=None, lvl="ERROR", error=str(e_cv2_prev))
+        except Exception as e_stretch_main:
             pcb("run_error_preview_stretch_unexpected_main", prog=None, lvl="ERROR", error=str(e_stretch_main))
             logger.error("Erreur imprévue lors de la génération de la preview:", exc_info=True)
             

@@ -180,3 +180,48 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
     assert dummy_solver.ra is not None
     assert dummy_solver.dec is not None
     assert captured.get("pixel_shapes") == [(80, 80)]
+
+
+def test_assemble_reproject_no_exception(monkeypatch, tmp_path):
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(
+        worker,
+        "reproject_interp",
+        lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
+    )
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+
+    class DummyZU:
+        pass
+
+    monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
+
+    data = np.ones((1, 40, 40), dtype=np.float32)
+    fits_path = tmp_path / "tile.fits"
+    from astropy.io import fits
+    fits.writeto(fits_path, data, overwrite=True)
+
+    wcs_in = make_wcs(0, 0, shape=(40, 40))
+
+    def dummy_reproject_and_coadd(input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs):
+        return np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(worker, "reproject_and_coadd", dummy_reproject_and_coadd)
+
+    final_wcs = make_wcs(0, 0, shape=(40, 40))
+    final_shape = (40, 40)
+
+    result = worker.assemble_final_mosaic_with_reproject_coadd(
+        [(str(fits_path), wcs_in)],
+        final_wcs,
+        final_shape,
+        progress_callback=None,
+        n_channels=1,
+        match_bg=False,
+        apply_crop=False,
+    )
+
+    assert result[0] is not None
+    assert result[1] is not None
