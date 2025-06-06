@@ -90,7 +90,11 @@ logger.debug("-" * 50)
 
 def _parse_cli_args():
     parser = argparse.ArgumentParser(
-        description="Run ZeMosaic either via the GUI (default) or headless CLI",
+        description=(
+            "Run ZeMosaic either via the GUI (default) or headless CLI. "
+            "Solver parameters are collected into a solver_settings dictionary "
+            "and forwarded to run_hierarchical_mosaic."
+        ),
         add_help=True,
     )
     parser.add_argument("input_folder", nargs="?", help="Folder with FITS images")

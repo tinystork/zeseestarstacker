@@ -15,7 +15,11 @@ from zemosaic import zemosaic_config, zemosaic_worker
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the hierarchical mosaic process on a folder of FITS files",
+        description=(
+            "Run the hierarchical mosaic process on a folder of FITS files. "
+            "Solver options are gathered into a solver_settings dict and passed "
+            "to run_hierarchical_mosaic."
+        ),
     )
     parser.add_argument("input_folder", help="Directory containing FITS tiles")
     parser.add_argument("output_folder", help="Directory where results are written")

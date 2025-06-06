@@ -134,6 +134,32 @@ see detailed debug logs.
 
 These values prefill the solver configuration when the GUI starts.
 
+If you invoke the worker manually, supply the same options via a
+`solver_settings` dictionary:
+
+```python
+solver_settings = {
+    "astap_path": "/path/to/astap",
+    "astap_data_dir": "/path/to/catalogs",
+    "astap_search_radius": 3.0,
+    "astap_downsample": 2,
+    "astap_sensitivity": 100,
+    "local_ansvr_path": "/path/to/ansvr.cfg",
+    "api_key": "your_key",
+    "local_solver_preference": "astap",
+}
+```
+
+Keys are the same used by the GUI:
+- `astap_path` – ASTAP executable
+- `astap_data_dir` – folder with ASTAP star catalogs
+- `astap_search_radius` – search radius in degrees
+- `astap_downsample` – ASTAP downsample factor
+- `astap_sensitivity` – ASTAP detection sensitivity
+- `local_ansvr_path` – path to `ansvr.cfg`
+- `api_key` – astrometry.net API key
+- `local_solver_preference` – preferred local solver
+
 📁 Requirements Summary
 ✅ Python 3.9 or newer
 
