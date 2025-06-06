@@ -82,6 +82,7 @@ if not REPROJECT_AVAILABLE:
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 AstrometrySolver, ASTROMETRY_SOLVER_AVAILABLE = None, False
+calculate_final_mosaic_grid_dynamic_wcs, CALC_FINAL_GRID_DYNAMIC_AVAILABLE = None, False
 
 try:
     from . import zemosaic_utils as zemosaic_utils
@@ -116,6 +117,15 @@ except Exception as e:
     ASTROMETRY_SOLVER_AVAILABLE = False
     AstrometrySolver = None
     logger.error(f"Import 'AstrometrySolver' échoué: {e}.")
+
+try:
+    from seestar.enhancement.mosaic_processor import calculate_final_mosaic_grid_dynamic_wcs
+    CALC_FINAL_GRID_DYNAMIC_AVAILABLE = True
+    logger.info("Fonction 'calculate_final_mosaic_grid_dynamic_wcs' importée.")
+except Exception as e:
+    calculate_final_mosaic_grid_dynamic_wcs = None
+    CALC_FINAL_GRID_DYNAMIC_AVAILABLE = False
+    logger.error(f"Import 'calculate_final_mosaic_grid_dynamic_wcs' échoué: {e}.")
 
 
 
@@ -1217,7 +1227,8 @@ def run_hierarchical_mosaic(
     
     error_messages_deps = []
     if not (ASTROPY_AVAILABLE and WCS and SkyCoord and Angle and fits and u): error_messages_deps.append("Astropy")
-    if not (REPROJECT_AVAILABLE and find_optimal_celestial_wcs and reproject_and_coadd and reproject_interp): error_messages_deps.append("Reproject")
+    if not (REPROJECT_AVAILABLE and reproject_and_coadd and reproject_interp):
+        error_messages_deps.append("Reproject")
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils): error_messages_deps.append("zemosaic_utils")
     if not (ZEMOSAIC_ALIGN_STACK_AVAILABLE and zemosaic_align_stack): error_messages_deps.append("zemosaic_align_stack")
     if not PSUTIL_AVAILABLE:
@@ -1518,30 +1529,46 @@ def run_hierarchical_mosaic(
     base_progress_phase4 = current_global_progress
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
-    wcs_list_for_final_grid = []; shapes_list_for_final_grid_hw = []
-    for mt_path_iter,mt_wcs_iter in master_tiles_results_list:
-        # ... (logique de récupération shape, inchangée) ...
-        if not (mt_path_iter and os.path.exists(mt_path_iter) and mt_wcs_iter and mt_wcs_iter.is_celestial): pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path")); continue
+    stacked_panel_paths = []
+    for idx_mt, (mt_path_iter, mt_wcs_iter) in enumerate(master_tiles_results_list, 1):
+        if not (mt_path_iter and os.path.exists(mt_path_iter)):
+            pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path"))
+            continue
+        stacked_panel_paths.append(mt_path_iter)
+        solver_used = "header"
         try:
-            h_mt_loc,w_mt_loc=0,0
-            if mt_wcs_iter.pixel_shape and mt_wcs_iter.pixel_shape[0] > 0 and mt_wcs_iter.pixel_shape[1] > 0 : h_mt_loc,w_mt_loc=mt_wcs_iter.pixel_shape[1],mt_wcs_iter.pixel_shape[0] 
-            else: 
-                with fits.open(mt_path_iter,memmap=True, do_not_scale_image_data=True) as hdul_mt_s:
-                    if hdul_mt_s[0].data is None: pcb("run_warn_phase4_no_data_in_tile_fits", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter)); continue
-                    data_shape = hdul_mt_s[0].shape 
-                    if len(data_shape) == 3: h_mt_loc,w_mt_loc = data_shape[1],data_shape[2]
-                    elif len(data_shape) == 2: h_mt_loc,w_mt_loc = data_shape[0],data_shape[1]
-                    else: pcb("run_warn_phase4_unhandled_tile_shape", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter), shape=data_shape); continue 
-                    if mt_wcs_iter and mt_wcs_iter.is_celestial and mt_wcs_iter.pixel_shape is None:
-                        try: mt_wcs_iter.pixel_shape=(w_mt_loc,h_mt_loc)
-                        except Exception as e_set_ps: pcb("run_warn_phase4_failed_set_pixel_shape", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter), error=str(e_set_ps))
-            if h_mt_loc > 0 and w_mt_loc > 0: shapes_list_for_final_grid_hw.append((int(h_mt_loc),int(w_mt_loc))); wcs_list_for_final_grid.append(mt_wcs_iter)
-            else: pcb("run_warn_phase4_zero_dimensions_tile", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter))
-        except Exception as e_read_tile_shape: pcb("run_error_phase4_reading_tile_shape", prog=None, lvl="ERROR", path=os.path.basename(mt_path_iter), error=str(e_read_tile_shape)); logger.error(f"Erreur lecture shape tuile {os.path.basename(mt_path_iter)}:", exc_info=True); continue
-    if not wcs_list_for_final_grid or not shapes_list_for_final_grid_hw or len(wcs_list_for_final_grid) != len(shapes_list_for_final_grid_hw): pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
-    final_mosaic_drizzle_scale = 1.0 
-    final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(wcs_list_for_final_grid, shapes_list_for_final_grid_hw, final_mosaic_drizzle_scale, progress_callback)
-    if not final_output_wcs or not final_output_shape_hw: pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
+            hdr_tmp = fits.getheader(mt_path_iter)
+            hdr_keys = {k.upper() for k in hdr_tmp.keys()}
+            if 'ASTAP_SOLVED' in hdr_keys:
+                solver_used = 'ASTAP'
+            elif any(k.startswith('LOCALANSVR') and k.endswith('_SOLVED') for k in hdr_keys):
+                solver_used = 'ansvr'
+            elif 'ASTROMETRY.NET_SOLVED' in hdr_keys or 'ASTROMETRY_NET_SOLVED' in hdr_keys:
+                solver_used = 'API'
+        except Exception as e_read_hdr:
+            pcb("Phase4: lecture header échouée", prog=None, lvl="DEBUG", path=os.path.basename(mt_path_iter), error=str(e_read_hdr))
+        pcb(f"Phase4: panneau {idx_mt} résolu via {solver_used}", prog=None, lvl="INFO_DETAIL")
+
+    if not stacked_panel_paths:
+        pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
+        return
+
+    if not (CALC_FINAL_GRID_DYNAMIC_AVAILABLE and calculate_final_mosaic_grid_dynamic_wcs):
+        pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
+        return
+
+    final_mosaic_drizzle_scale = 1.0
+    final_output_wcs, final_output_shape_hw = calculate_final_mosaic_grid_dynamic_wcs(
+        stacked_panel_paths,
+        final_mosaic_drizzle_scale,
+        solver_settings.get('local_solver_preference', 'astap'),
+        solver_settings.get('local_ansvr_path'),
+        solver_settings.get('api_key'),
+    )
+
+    if not final_output_wcs or not final_output_shape_hw:
+        pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
+        return
     current_global_progress = base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC
     _log_memory_usage(progress_callback, "Fin Phase 4"); pcb("run_info_phase4_finished", prog=current_global_progress, lvl="INFO", shape=final_output_shape_hw, crval=final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A')
 
