@@ -22,7 +22,8 @@
     "crop_options_frame_title": "Options de Rognage des Tuiles Maîtresses",
     "apply_master_tile_crop_label": "Rogner les Bords des Tuiles Maîtresses :",
     "master_tile_crop_percent_label": "Pourcentage de Rognage par Côté (0-25%) :",
-    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",    
+    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",
+    "re_solve_cropped_tiles_label": "Re-résoudre les Tuiles Rognées :",
 
 
     "config_warning_title": "Avertissement Configuration",
