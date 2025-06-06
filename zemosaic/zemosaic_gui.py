@@ -601,6 +601,23 @@ class ZeMosaicGUI:
         log_scrollbar_y_text.pack(side=tk.RIGHT, fill=tk.Y); log_scrollbar_x_text.pack(side=tk.BOTTOM, fill=tk.X)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # Initialiser les textes visibles des comboboxes selon la langue courante
+        self._refresh_combobox(self.norm_method_combo,
+                               self.stacking_normalize_method_var,
+                               self.norm_method_keys, "norm_method")
+        self._refresh_combobox(self.weight_method_combo,
+                               self.stacking_weighting_method_var,
+                               self.weight_method_keys, "weight_method")
+        self._refresh_combobox(self.reject_algo_combo,
+                               self.stacking_rejection_algorithm_var,
+                               self.reject_algo_keys, "reject_algo")
+        self._refresh_combobox(self.final_combine_combo,
+                               self.stacking_final_combine_method_var,
+                               self.combine_method_keys, "combine_method")
+        self._refresh_combobox(self.final_assembly_method_combo,
+                               self.final_assembly_method_var,
+                               self.assembly_method_keys, "assembly_method")
+
 
         self.scrollable_content_frame.update_idletasks()
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
