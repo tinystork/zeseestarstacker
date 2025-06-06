@@ -1017,8 +1017,34 @@ def assemble_final_mosaic_incremental(
         if not ASTROPY_AVAILABLE or not fits : missing_deps.append("Astropy (fits)")
         pcb_asm("assemble_error_core_deps_unavailable_incremental", prog=None, lvl="ERROR", missing=", ".join(missing_deps)); return None, None
 
+    # --- Deduplicate master tiles by path (optionally CRVAL) before processing ---
+    deduped_master_tiles = []
+    seen_paths = set()
+    for mt_path, mt_wcs in master_tile_fits_with_wcs_list:
+        norm_path = os.path.abspath(mt_path)
+        if norm_path in seen_paths:
+            pcb_asm(
+                f"ASM_INC: Duplicate tile skipped {os.path.basename(mt_path)}",
+                lvl="DEBUG_DETAIL",
+            )
+            continue
+        seen_paths.add(norm_path)
+        crval = getattr(getattr(mt_wcs, "wcs", mt_wcs), "crval", None)
+        pcb_asm(
+            f"ASM_INC: Add tile {os.path.basename(mt_path)} CRVAL={crval}",
+            lvl="DEBUG_DETAIL",
+        )
+        deduped_master_tiles.append((mt_path, mt_wcs))
+
+    master_tile_fits_with_wcs_list = deduped_master_tiles
+
     num_master_tiles = len(master_tile_fits_with_wcs_list)
-    pcb_asm("assemble_info_start_incremental", prog=None, lvl="INFO", num_tiles=num_master_tiles)
+    pcb_asm(
+        "assemble_info_start_incremental",
+        prog=None,
+        lvl="INFO",
+        num_tiles=num_master_tiles,
+    )
     if not master_tile_fits_with_wcs_list:
         pcb_asm("assemble_error_no_tiles_provided_incremental", prog=None, lvl="ERROR"); return None, None
 
@@ -1198,8 +1224,35 @@ def assemble_final_mosaic_with_reproject_coadd(
         if not ASTROPY_AVAILABLE or not fits : missing_deps.append("Astropy (fits)")
         _pcb("assemble_error_core_deps_unavailable_reproject_coadd", prog=None, lvl="ERROR", missing=", ".join(missing_deps)); return None, None
 
+    # --- Deduplicate master tiles by path (optionally CRVAL) ---
+    deduped_master_tiles = []
+    seen_paths = set()
+    for mt_path, mt_wcs in master_tile_fits_with_wcs_list:
+        norm_path = os.path.abspath(mt_path)
+        if norm_path in seen_paths:
+            _pcb(
+                f"ASM_REPROJ_COADD: Duplicate tile skipped {os.path.basename(mt_path)}",
+                lvl="DEBUG_DETAIL",
+            )
+            continue
+        seen_paths.add(norm_path)
+        crval = getattr(getattr(mt_wcs, "wcs", mt_wcs), "crval", None)
+        _pcb(
+            f"ASM_REPROJ_COADD: Add tile {os.path.basename(mt_path)} CRVAL={crval}",
+            lvl="DEBUG_DETAIL",
+        )
+        deduped_master_tiles.append((mt_path, mt_wcs))
+
+    master_tile_fits_with_wcs_list = deduped_master_tiles
+
     num_master_tiles = len(master_tile_fits_with_wcs_list)
-    _pcb("assemble_info_start_reproject_coadd", prog=None, lvl="INFO", num_tiles=num_master_tiles, match_bg=match_bg)
+    _pcb(
+        "assemble_info_start_reproject_coadd",
+        prog=None,
+        lvl="INFO",
+        num_tiles=num_master_tiles,
+        match_bg=match_bg,
+    )
     if not master_tile_fits_with_wcs_list:
         _pcb("assemble_error_no_tiles_provided_reproject_coadd", prog=None, lvl="ERROR"); return None, None
 
