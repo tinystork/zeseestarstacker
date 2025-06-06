@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/ui_utils.py ---
 import tkinter as tk
 
 class ToolTip:

@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/localization/fr.py ---
 """
 Fichier de traductions françaises pour Seestar Stacker.
 """

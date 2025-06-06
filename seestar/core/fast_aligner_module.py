@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/fast_aligner_module.py (Corrected for DAOStarFinder) ---
 """
 Module pour l'alignement rapide d'images.
 Utilise DAOStarFinder pour la détection d'étoiles et ORB pour les descripteurs.

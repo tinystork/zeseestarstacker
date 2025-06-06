@@ -1,14 +1,10 @@
-# --- START OF FILE seestar/enhancement/drizzle_integration.py ---
 import numpy as np
 import os
 import traceback
 import warnings
-import time
 import gc
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
-from astropy.coordinates import SkyCoord 
-from astropy import units as u
 import cv2
 from scipy.ndimage import gaussian_filter
 # ConvexHull n'est pas utilisé dans ce fichier
@@ -246,8 +242,6 @@ class DrizzleProcessor:
                     out_wht=out_weights_by_channel[i],
                     kernel=self.kernel,   # kernel est pour __init__
                     fillval=self.fillval,  # fillval est pour __init__
-                    max_ctx_id=0,         # <<< LAISSER CETTE LIGNE (forcée)
-                    disable_ctx=True      # <<< LAISSER CETTE LIGNE (forcée)
                     # pixfrac N'EST PAS pour __init__
                 )
                 drizzlers_by_channel.append(driz_ch)

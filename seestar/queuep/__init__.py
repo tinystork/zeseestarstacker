@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/queuep/__init__.py ---
 """
 Package queuep pour Seestar - fournit les fonctionnalités de gestion
 de file d'attente pour le traitement des images astronomiques.

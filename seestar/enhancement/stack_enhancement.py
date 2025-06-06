@@ -1,8 +1,6 @@
-# --- START OF FILE seestar/enhancement/stack_enhancement.py (MODIFIED) ---
 import cv2
 import numpy as np
 from skimage import exposure
-import time
 import traceback # Garder pour les logs d'erreur
 
 

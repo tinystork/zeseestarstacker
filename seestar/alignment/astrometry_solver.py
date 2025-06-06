@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/alignment/astrometry_solver.py ---
 """
 Module pour gérer l'interaction avec les solveurs astrométriques,
 y compris Astrometry.net (web service), ASTAP (local), et ansvr (Astrometry.net local).
@@ -12,7 +11,6 @@ import traceback
 import subprocess  # Pour appeler les solveurs locaux
 import shutil  # Pour trouver les exécutables
 import gc
-import glob  # <<< AJOUTER CET IMPORT EN HAUT DU FICHIER
 import logging
 from zemosaic import zemosaic_config
 

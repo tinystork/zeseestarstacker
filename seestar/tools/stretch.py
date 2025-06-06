@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/tools/stretch.py ---
 """
 Module contenant les algorithmes d'étirement d'histogramme et de correction couleur
 inspirés de visu.py et adaptés pour Seestar Stacker.
@@ -6,7 +5,7 @@ inspirés de visu.py et adaptés pour Seestar Stacker.
 
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps # Added ImageOps
+from PIL import Image, ImageEnhance, ImageFilter
 import os # For save_fits_as_png
 import traceback # For error reporting
 from ..core.utils import check_cuda

@@ -1,10 +1,8 @@
-# --- START OF FILE seestar/gui/file_handling.py ---
 """
 Module pour la gestion des fichiers et dossiers dans l'interface GSeestar.
 (Version Révisée: Simplification add_folder - délégation au GUI)
 """
 import os
-import tkinter as tk
 from tkinter import filedialog, messagebox
 
 class FileHandlingManager:

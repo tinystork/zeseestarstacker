@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/main_window.py (Part 1/3) ---
 """
 Module principal pour l'interface graphique de GSeestar.
 Intègre la prévisualisation avancée et le traitement en file d'attente via QueueManager.
@@ -44,16 +43,13 @@ except Exception as gen_err:
     print(f"ERREUR MW: Erreur INATTENDUE pendant l'import de SeestarQueuedStacker: {gen_err}")
     traceback.print_exc()
     sys.exit("Échec de l'importation critique.")
+# Print separator to clearly show the start of queued stacker import logs
 print("-" * 20)
-# --- FIN DU BLOC DE DEBUG ---
 # Seestar imports
 from ..core.image_processing import load_and_validate_fits, debayer_image
 from ..localization import Localization
-from .local_solver_gui import LocalSolverSettingsWindow # 
-from ..core.utils import estimate_batch_size
-from ..enhancement.color_correction import ChromaticBalancer 
-# (Ajouter ceci avec les autres imports de gui)
-from .mosaic_gui import MosaicSettingsWindow # Importer la future classe
+from .local_solver_gui import LocalSolverSettingsWindow
+from .mosaic_gui import MosaicSettingsWindow
 try:
     # Import tools for preview adjustments and auto calculations
     from ..tools.stretch import StretchPresets, ColorCorrection
@@ -2484,7 +2480,6 @@ class SeestarStackerGUI:
             messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"); 
             traceback.print_exc(limit=2)
         # --- FIN DE VOTRE CODE ORIGINAL ---
-        self.logger.debug("<<<< Fin SeestarStackerGUI.apply_auto_stretch")
 
 
 
@@ -2762,7 +2757,6 @@ class SeestarStackerGUI:
             messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}")
             traceback.print_exc(limit=2)
         # --- FIN DE VOTRE CODE ORIGINAL ---
-        self.logger.debug("<<<< Fin SeestarStackerGUI.apply_auto_white_balance")
 
 
 
@@ -2962,8 +2956,8 @@ class SeestarStackerGUI:
             if self.processing and self.queued_stacker.is_running(): # Ajout check is_running pour sécurité
                 try:
                     # L'accès problématique
-                    with self.queued_stacker.folders_lock: # <<< C'est ici que ça plante
-                         count = len(self.queued_stacker.additional_folders)
+                    with self.queued_stacker.folders_lock:
+                        count = len(self.queued_stacker.additional_folders)
                     print(f"  -> Lecture backend (processing): count={count}") # Si ça passe le 'with'
                 except AttributeError as ae:
                      print(f"  -> ERREUR ATTRIBUT DANS LE 'WITH': {ae}") # Log spécifique si ça plante DANS le with
@@ -3492,7 +3486,6 @@ class SeestarStackerGUI:
             # ou simplement le forcer à True. Forcer à True est plus simple.
             self._final_stretch_set_by_processing_finished = True
             self.logger.info(f"     _execute_final_auto_stretch: Verrou final rétabli à {self._final_stretch_set_by_processing_finished} après apply_auto_stretch.")
-        self.logger.info("<<<< Sortie de _execute_final_auto_stretch")
 
 
 
@@ -3795,7 +3788,6 @@ class SeestarStackerGUI:
             self._temp_data_for_final_histo = None
 
         if 'gc' in globals() or 'gc' in locals(): gc.collect()
-        self.logger.info("<<<< Sortie de SeestarStackerGUI._processing_finished (V_FinalAutoStretchLogic_2_DirectCall)")
         # --- FIN DU CODE MODIFIÉ ---
 
 
@@ -3815,7 +3807,6 @@ class SeestarStackerGUI:
             self.logger.warning("     _refresh_final_preview_and_histo_direct: Aucune donnée disponible pour l'histogramme final. Tentative d'effacement de l'aperçu.")
             if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview("No final data for preview.")
             if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
-            self.logger.info("<<<< Sortie de SeestarStackerGUI._refresh_final_preview_and_histo_direct (données histo manquantes)")
             return
 
         try:
@@ -3855,7 +3846,6 @@ class SeestarStackerGUI:
             self.logger.info("     _refresh_final_preview_and_histo_direct: Nettoyage de _temp_data_for_final_histo.")
             self._temp_data_for_final_histo = None 
         
-        self.logger.info("<<<< Sortie de SeestarStackerGUI._refresh_final_preview_and_histo_direct (V_DirectFinalRefresh_2_OrderCheck_LogComplet)")
         # --- FIN DU CODE MODIFIÉ ---
 
 ################################################################################################################################################

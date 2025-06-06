@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/main.py ---
 #!/usr/bin/env python3
 """
 Script principal pour lancer l'application Seestar Stacker GUI.

@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/utils.py ---
 """
 Fonctions utilitaires pour le traitement d'images astronomiques.
 """

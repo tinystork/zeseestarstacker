@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/alignment.py ---
 """
 Module pour l'alignement des images astronomiques.
 Utilise astroalign pour l'enregistrement des images.
@@ -10,10 +9,8 @@ import cv2
 import astroalign as aa
 import warnings
 import gc
-import time
 import shutil
 import concurrent.futures
-from functools import partial
 import traceback # Added for traceback printing
 try: from tqdm import tqdm # Optionnel, pour la barre de progression console
 except ImportError: tqdm = lambda x, **kwargs: x
@@ -25,7 +22,6 @@ from .image_processing import (
     save_preview_image      # For saving reference preview
 )
 from .hot_pixels import detect_and_correct_hot_pixels
-from .utils import estimate_batch_size
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 

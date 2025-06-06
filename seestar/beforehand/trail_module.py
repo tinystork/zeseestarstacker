@@ -1,7 +1,5 @@
-# --- START OF FILE trail_module.py ---
 
 import os
-import numpy as np
 import warnings
 import inspect
 import traceback
@@ -34,12 +32,18 @@ except Exception as e:
     print(f"ERREUR (trail_module): Erreur lors de l'import/inspection de acstools.satdet: {e}"); traceback.print_exc()
 
 # --- Dépendances Optionnelles ---
-SCIPY_AVAILABLE = False; SKIMAGE_AVAILABLE = False
+SCIPY_AVAILABLE = False
+SKIMAGE_AVAILABLE = False
 if SATDET_AVAILABLE:
-    try: import scipy; SCIPY_AVAILABLE = True
-    except ImportError: print("AVERTISSEMENT (trail_module): scipy non trouvé.")
-    try: import skimage; SKIMAGE_AVAILABLE = True
-    except ImportError: print("AVERTISSEMENT (trail_module): scikit-image non trouvé.")
+    import importlib.util
+    if importlib.util.find_spec("scipy") is not None:
+        SCIPY_AVAILABLE = True
+    else:
+        print("AVERTISSEMENT (trail_module): scipy non trouvé.")
+    if importlib.util.find_spec("skimage") is not None:
+        SKIMAGE_AVAILABLE = True
+    else:
+        print("AVERTISSEMENT (trail_module): scikit-image non trouvé.")
 
 # --- REVERTED FUNCTION ---
 def run_trail_detection(search_pattern, sat_params_input, status_callback=None, log_callback=None):

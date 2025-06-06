@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/local_solver_gui.py ---
 """
 Module pour la fenêtre de configuration des solveurs astrométriques locaux.
 """
@@ -29,7 +28,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         # --- Variables Tkinter pour les chemins et options ---
         
-        # <<< NOUVEAU : Variable pour le choix du solveur local >>>
         # La valeur par défaut sera "none". Plus tard, on lira depuis self.parent_gui.settings.local_solver_preference
         # Pour l'instant, on anticipe que local_solver_preference existera.
         default_solver_choice = "none"
@@ -50,7 +48,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.astap_data_dir_var = tk.StringVar(
             value=getattr(self.parent_gui.settings, 'astap_data_dir', "")
         )
-        # <<< NOUVEAU : Variable pour le rayon de recherche ASTAP >>>
         self.astap_search_radius_var = tk.DoubleVar( # Utiliser DoubleVar pour le Spinbox
             value=getattr(self.parent_gui.settings, 'astap_search_radius', 30.0) # Défaut 30 deg
         )
@@ -91,11 +88,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.focus_force()  
         self.grab_set()     
 
-        # <<< NOUVEAU : Appel initial pour mettre à jour l'état des cadres de configuration >>>
         self._on_solver_choice_change()
         print("DEBUG (LocalSolverSettingsWindow __init__): Fenêtre initialisée et _on_solver_choice_change() appelé.")
 
-    # <<< NOUVELLE MÉTHODE >>>
     def _on_solver_choice_change(self, *args):
         """
         Appelée lorsque le choix du solveur local (Radiobutton) change.
@@ -126,7 +121,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         
         print(f"DEBUG (LocalSolverSettingsWindow _on_solver_choice_change): États des cadres mis à jour - ASTAP: {astap_state}, Ansvr: {ansvr_state}") # DEBUG
 
-    # <<< NOUVELLE MÉTHODE UTILITAIRE >>>
     def _set_widget_state_recursive(self, widget, state):
         """
         Change récursivement l'état d'un widget et de ses enfants (si applicable).

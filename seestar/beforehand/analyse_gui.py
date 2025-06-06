@@ -1,4 +1,3 @@
-# --- START OF FILE beforehand/analyse_gui.py (COMPLETE & COMMENTED) ---
 
 # === Imports Standard ===
 import os
@@ -22,6 +21,7 @@ import argparse # Pour gérer les arguments de ligne de commande
 from PIL import Image, ImageTk
 # L'import de ToolTip est déplacé APRES l'ajustement de sys.path
 import json
+import importlib.util
 
 # --- AJUSTEMENT DE SYS.PATH POUR PERMETTRE LES IMPORTS DEPUIS LA RACINE DU PROJET ---
 # Ceci est crucial lorsque ce script (analyse_gui.py) est exécuté directement
@@ -2358,28 +2358,18 @@ def check_dependencies():
     missing = [] # <--- Utilisation de 'missing'
 
     # Vérifier chaque dépendance essentielle
-    try:
-        import astropy
-    except ImportError:
-        missing.append("astropy") # <--- Utilisation de 'missing'
-    try:
-        import numpy
-    except ImportError:
-        missing.append("numpy") # <--- Utilisation de 'missing'
-    try:
-        import matplotlib
-    except ImportError:
-        missing.append("matplotlib") # <--- CORRECTION: Utilisation de 'missing'
+    if importlib.util.find_spec("astropy") is None:
+        missing.append("astropy")
+    if importlib.util.find_spec("numpy") is None:
+        missing.append("numpy")
+    if importlib.util.find_spec("matplotlib") is None:
+        missing.append("matplotlib")
     # acstools lui-même est vérifié via SATDET_AVAILABLE, mais ses propres dépendances sont vérifiées ici
     # Vérifier skimage et scipy qui sont nécessaires pour satdet version Hough
-    try:
-        import skimage
-    except ImportError:
-        missing.append("scikit-image") # Nom pip <--- CORRECTION: Utilisation de 'missing'
-    try:
-        import scipy
-    except ImportError:
-        missing.append("scipy") # <--- CORRECTION: Utilisation de 'missing'
+    if importlib.util.find_spec("skimage") is None:
+        missing.append("scikit-image")
+    if importlib.util.find_spec("scipy") is None:
+        missing.append("scipy")
 
     # Si des dépendances manquent
     if missing:

@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/tools/__init__.py ---
 """
 Package tools pour Seestar - fournit des outils supplémentaires
 pour le traitement et la visualisation des images astronomiques.
