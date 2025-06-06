@@ -126,6 +126,28 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Placez votre icône de fenêtre personnalisée (`.png`, ex: 256x256) et mettez à jour `icon_path` dans `seestar/gui/main_window.py`.
     *   Placez votre image de fond personnalisée (`.png` ou `.jpg`) et mettez à jour `bg_image_path` dans `seestar/gui/preview.py`.
 
+## Development Setup
+
+**Install dependencies**
+
+```bash
+# main runtime packages
+pip install -r requirements.txt
+
+# packages needed for the unit tests
+pip install pytest numpy astropy reproject
+# or, if provided, use the dedicated file
+pip install -r tests/requirements.txt
+```
+
+**Run the tests**
+
+```bash
+SEESTAR_VERBOSE=1 pytest -q
+```
+
+The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
+
 ---
 ## Optional GPU Acceleration (CUDA)
 
