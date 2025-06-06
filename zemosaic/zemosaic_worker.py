@@ -696,7 +696,14 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
     try:
         original_file_dir = os.path.dirname(file_path)
         unaligned_dir_name = "unaligned_by_zemosaic"
-        unaligned_path = os.path.join(original_file_dir, unaligned_dir_name)
+        if unaligned_dir_name in os.path.normpath(file_path).split(os.sep):
+            unaligned_path = original_file_dir
+            _pcb_local(
+                "  Fichier déjà dans dossier unaligned, pas de nouveau déplacement",
+                lvl="INFO_DETAIL",
+            )
+        else:
+            unaligned_path = os.path.join(original_file_dir, unaligned_dir_name)
         
         if not os.path.exists(unaligned_path):
             os.makedirs(unaligned_path)
