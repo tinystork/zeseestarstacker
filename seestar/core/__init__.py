@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/__init__.py ---
 """
 Package core pour Seestar - fournit les fonctionnalités de base pour le traitement des images astronomiques.
 (stacking.py a été retiré car remplacé par queue_manager.py)
@@ -37,7 +36,7 @@ __all__ = [
 
 # Tentative d'importation du nouvel aligneur local
 try:
-    from .fast_aligner_module import FastSeestarAligner as SeestarLocalAligner # Alias pour clarté
+    from .fast_aligner_module import FastSeestarAligner as SeestarLocalAligner  # noqa: F401
     print("DEBUG [core/__init__.py]: SeestarLocalAligner (FastSeestarAligner) importé avec succès.")
     __all__.append('SeestarLocalAligner') # Ajouter à __all__ SI l'import réussit
 except ImportError as e_fla:

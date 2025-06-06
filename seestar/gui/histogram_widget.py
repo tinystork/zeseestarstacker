@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/histogram_widget.py ---
 """
 Widget Tkinter intégrant Matplotlib pour afficher un histogramme interactif
 des données d'image astronomique.

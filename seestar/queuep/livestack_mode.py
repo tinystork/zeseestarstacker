@@ -24,9 +24,7 @@ from a dedicated "LiveStack" tab.
 """
 from __future__ import annotations
 
-import os
 import sys
-import gc
 import traceback
 import threading
 from pathlib import Path

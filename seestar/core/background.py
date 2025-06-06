@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/background.py ---
 """
 Module pour la soustraction de fond 2D des images astronomiques
 en utilisant photutils.

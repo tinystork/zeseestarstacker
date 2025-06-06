@@ -1,12 +1,10 @@
-# --- START OF FILE main_stacking_script.py ---
 
 import tkinter as tk
 from tkinter import ttk # Assurer que ttk est importé
 from tkinter import filedialog, messagebox
 import os
 import sys
-import subprocess # Pour lancer le stacking (exemple)
-import time # Pour une pause éventuelle
+
 import traceback # Pour afficher les erreurs détaillées
 
 # --- Importer l'interface de l'analyseur ---

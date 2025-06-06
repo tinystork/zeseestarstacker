@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/__init__.py ---
 """
 Package gui pour Seestar - fournit l'interface graphique
 pour le traitement des images astronomiques.

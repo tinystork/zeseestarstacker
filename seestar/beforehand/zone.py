@@ -1,4 +1,3 @@
-# --- START OF FILE zone.py ---
 
 # Fichier pour l'internationalisation (i18n) et les infobulles
 

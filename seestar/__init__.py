@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/__init__.py ---
 """
 Seestar: Un outil d'empilement et de traitement d'images astronomiques.
 

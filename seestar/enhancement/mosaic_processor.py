@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/enhancement/mosaic_processor.py ---
 """
 Module pour orchestrer le traitement spécifique des mosaïques,
 incluant le groupement par panneau, le stacking/solving par panneau,
@@ -6,7 +5,6 @@ et la combinaison finale Drizzle.
 """
 import os
 import numpy as np
-import time
 import traceback
 import gc
 import warnings # Ajouté pour warnings
@@ -18,7 +16,6 @@ from astropy.wcs import WCS, FITSFixedWarning
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from astropy.io import fits
-from astropy.stats import sigma_clipped_stats
 
 # --- Imports Internes Seestar ---
 # Depuis le solver
@@ -51,7 +48,7 @@ except ImportError:
 # Depuis le gestionnaire de queue (pour type hinting)
 # Utiliser TYPE_CHECKING pour éviter tout import circulaire au runtime
 if TYPE_CHECKING:
-    from ..queuep.queue_manager import SeestarQueuedStacker
+    from ..queuep.queue_manager import SeestarQueuedStacker  # noqa: F401
 
 # --- Constantes ---
 PANEL_GROUPING_THRESHOLD_DEG = 0.3 # Seuil pour regrouper les panneaux

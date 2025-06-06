@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/mosaic_gui.py (Avec options alignement et FastAligner) ---
 import tkinter as tk
 from tkinter import ttk, messagebox
 # import traceback # Décommentez si besoin pour le debug
@@ -36,7 +35,6 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.local_mosaic_align_mode_var = tk.StringVar(value=self.settings.get('alignment_mode', 'local_fast_fallback'))
 
         # Ces variables pour les options Drizzle Mosaïque doivent être définies ici
-        self.local_mosaic_scale_var = tk.StringVar(value=str(self.settings.get('mosaic_scale_factor', 2))) # <<< CELLE-CI ÉTAIT LE PROBLÈME
         self.local_drizzle_kernel_var = tk.StringVar(value=self.settings.get('kernel', 'square'))
         self.local_drizzle_pixfrac_var = tk.DoubleVar(value=float(self.settings.get('pixfrac', 0.8)))
         self.local_drizzle_fillval_var = tk.StringVar(value=str(self.settings.get('fillval', '0.0')))

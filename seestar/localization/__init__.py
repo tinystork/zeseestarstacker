@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/localization/__init__.py ---
 """
 Package localization pour Seestar - fournit les fonctionnalités de localisation
 pour l'interface utilisateur.

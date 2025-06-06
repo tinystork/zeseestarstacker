@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/preview.py ---
 """
 Module pour la gestion de la prévisualisation des images astronomiques (Canvas + Panning).
 Le traitement de l'image pour l'affichage (WB, Stretch, Gamma, B/C/S) est effectué ici.
@@ -6,7 +5,7 @@ Le traitement de l'image pour l'affichage (WB, Stretch, Gamma, B/C/S) est effect
 """
 import tkinter as tk
 import numpy as np
-from PIL import Image, ImageTk, ImageEnhance, ImageFont # Added ImageFont
+from PIL import Image, ImageTk, ImageEnhance
 import traceback
 import platform # For finding fonts
 import os 

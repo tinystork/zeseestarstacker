@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/localization/en.py ---
 """
 English translation file for Seestar Stacker.
 """

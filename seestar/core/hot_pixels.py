@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/hot_pixels.py ---
 """
 Module pour la détection et la correction des pixels chauds dans les images astronomiques.
 """

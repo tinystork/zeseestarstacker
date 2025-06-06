@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/localization/localization.py ---
 """
 Module de localisation pour l'interface utilisateur de Seestar.
 """

@@ -1011,19 +1011,20 @@ class AstroImageAnalyzerGUI:
 def check_dependencies():
     """Vérifie les dépendances requises et propose l'installation"""
     missing_deps = []
-    try: import astropy
-    except ImportError: missing_deps.append("astropy")
-    try: import numpy
-    except ImportError: missing_deps.append("numpy")
-    try: import matplotlib
-    except ImportError: missing_deps.append("matplotlib")
+    import importlib.util
+    if importlib.util.find_spec("astropy") is None:
+        missing_deps.append("astropy")
+    if importlib.util.find_spec("numpy") is None:
+        missing_deps.append("numpy")
+    if importlib.util.find_spec("matplotlib") is None:
+        missing_deps.append("matplotlib")
     # acstools est optionnel et géré différemment
 
     # Vérifier skimage et scipy qui sont nécessaires pour satdet version Hough
-    try: import skimage
-    except ImportError: missing_deps.append("scikit-image") # Nom pip
-    try: import scipy
-    except ImportError: missing_deps.append("scipy")
+    if importlib.util.find_spec("skimage") is None:
+        missing_deps.append("scikit-image")
+    if importlib.util.find_spec("scipy") is None:
+        missing_deps.append("scipy")
 
 
     if missing_deps:

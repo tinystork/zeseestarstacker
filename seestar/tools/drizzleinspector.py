@@ -5,8 +5,7 @@ particularly for the Drizzle class and how to properly set up input/output WCS.
 
 import inspect
 import sys
-import warnings
-from pprint import pprint
+
 
 # Try importing drizzle
 print("Attempting to import drizzle components...")

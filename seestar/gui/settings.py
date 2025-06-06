@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/settings.py ---
 """
 Module pour la gestion des paramètres de traitement, de prévisualisation,
 de pondération qualité et Drizzle.
@@ -9,7 +8,6 @@ import os
 import tkinter as tk
 import numpy as np
 import traceback
-from .mosaic_gui import VALID_DRIZZLE_KERNELS 
 
 class SettingsManager:
     """

@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/core/image_processing.py ---
 """
 Fonctions de base pour le traitement d'images astronomiques.
 """
@@ -8,12 +7,9 @@ from astropy.io import fits
 import cv2
 import warnings
 from astropy.io.fits.verify import VerifyWarning
-from astropy.utils.exceptions import AstropyWarning 
-from PIL import Image, ImageEnhance, ImageFilter # Added PIL imports for enhanced stretch
-from astropy.stats import sigma_clipped_stats
+from PIL import Image
 import traceback # Pour un meilleur débogage des erreurs de lecture FITS
 from astropy.io import fits
-import sys
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 

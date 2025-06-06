@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/gui/progress.py ---
 """
 Module pour la gestion de la progression du traitement des images astronomiques.
 MODIFIED: Ajout de la gestion des niveaux de log pour colorer les messages.

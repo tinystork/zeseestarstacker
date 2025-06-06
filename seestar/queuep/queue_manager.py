@@ -1,4 +1,3 @@
-# --- START OF FILE seestar/queuep/queue_manager.py ---
 """
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
@@ -28,26 +27,15 @@ import numpy as np
 from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate
 from astropy import units as u
 from astropy.io import fits
-from astropy.stats import sigma_clipped_stats
 from astropy.wcs import WCS, FITSFixedWarning
-from ccdproc import CCDData, combine as ccdproc_combine
+from ccdproc import combine as ccdproc_combine
 from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
-from reproject.mosaicking import reproject_and_coadd
-from reproject import reproject_interp
 from seestar.gui.settings import SettingsManager
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
-try:
-    import cupy
-    _cupy_installed = True
-    print("DEBUG QM: Import CuPy OK.")
-except ImportError:
-    _cupy_installed = False
-    print("DEBUG QM: Import CuPy échoué (normal si non installé).")
-
 try:
     # On importe juste Drizzle ici, car la CLASSE est utilisée dans les méthodes
     from drizzle.resample import Drizzle
@@ -118,7 +106,7 @@ except ImportError:
 
 # Core Utils (Utilisé PARTOUT)
 try:
-    from ..core.utils import check_cupy_cuda, estimate_batch_size
+    from ..core.utils import estimate_batch_size
     print("DEBUG QM: Imports utils OK.")
 except ImportError as e: print(f"ERREUR QM: Échec import utils: {e}"); raise
 # Enhancement Color Correction (Instancié dans __init__)
@@ -192,10 +180,8 @@ except ImportError as e:
 # Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
 # pour éviter les dépendances circulaires au chargement initial.
 
-from ..enhancement.drizzle_integration import _load_drizzle_temp_file, DrizzleProcessor, _create_wcs_from_header # Déplacé vers _worker, etc.
+
 from ..alignment.astrometry_solver import AstrometrySolver # Déplacé vers _worker/_process_file
-from ..enhancement.mosaic_processor import process_mosaic_from_aligned_files # Déplacé vers _worker
-from ..enhancement.stack_enhancement import StackEnhancer # Importé tardivement si nécessaire dans _save_final_stack ou ailleurs
 
 
 # --- Configuration des Avertissements ---
@@ -1564,13 +1550,11 @@ class SeestarQueuedStacker:
             self.reference_wcs_object = None 
             temp_wcs_ancre = None # Spécifique pour la logique mosaïque locale
 
-            # <<< DEBUG PRINT AVANT CRÉATION DICT POUR SOLVEUR ANCRE >>>
             print(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
             print(f"    self.is_mosaic_run = {self.is_mosaic_run}")
             print(f"    self.local_solver_preference = '{getattr(self, 'local_solver_preference', 'NON_DÉFINI')}'")
             print(f"    self.astap_search_radius = {getattr(self, 'astap_search_radius', 'NON_DÉFINI')}")
             print(f"    self.reference_pixel_scale_arcsec = {self.reference_pixel_scale_arcsec}")
-            # <<< FIN DEBUG PRINT >>>
 
             solver_settings_for_ref_anchor = {
                 'local_solver_preference': self.local_solver_preference,
@@ -1591,7 +1575,6 @@ class SeestarQueuedStacker:
                 if key_s == 'api_key': print(f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'")
                 else: print(f"    '{key_s}': '{val_s}'")
 
-            # <<< DEBUG PRINT AVANT BLOC IF/ELIF POUR SOLVING ANCRE >>>
             print(f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- CAS 1: Mosaïque Locale (FastAligner avec ou sans fallback WCS) ---
@@ -1678,7 +1661,6 @@ class SeestarQueuedStacker:
 
                 print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
             
-            # <<< DEBUG PRINT APRÈS BLOC IF/ELIF POUR SOLVING ANCRE >>>
             print(f"!!!! DEBUG _worker APRÈS BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- Initialisation grille Drizzle Standard (si applicable pour un run NON-mosaïque) ---
@@ -1703,7 +1685,6 @@ class SeestarQueuedStacker:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
                     self.update_progress(error_msg_ref_driz, "ERROR"); raise RuntimeError(error_msg_ref_driz)
             
-            # <<< DEBUG PRINT POST SECTION 1 (après init grille Drizzle si applicable) >>>
             print(f"!!!! DEBUG _worker POST SECTION 1 (après init grille Drizzle si applicable) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
             
             self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
@@ -1722,7 +1703,6 @@ class SeestarQueuedStacker:
             while not self.stop_processing:
                 iteration_count += 1
                 
-                # <<< LOG PRINCIPAL AU DÉBUT DE CHAQUE ITÉRATION DE LA BOUCLE >>>
                 print(f"!!!! DEBUG _worker LOOP START iter {iteration_count}: self.is_mosaic_run = {self.is_mosaic_run}, "
                       f"self.mosaic_alignment_mode = '{self.mosaic_alignment_mode}', "
                       f"self.drizzle_active_session = {self.drizzle_active_session}, "
@@ -1750,12 +1730,10 @@ class SeestarQueuedStacker:
 
                     item_result_tuple = None 
 
-                    # <<< DEBUG AVANT LE BLOC IF/ELIF/ELSE D'APPEL À _process_file >>>
                     print(f"  DEBUG _worker (iter {iteration_count}): PRE-CALL _process_file pour '{file_name_for_log}'")
                     print(f"    - use_local_aligner_for_this_mosaic_run: {use_local_aligner_for_this_mosaic_run}")
                     print(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
                     print(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
-                    # <<< FIN DEBUG >>>
 
                     if use_local_aligner_for_this_mosaic_run: 
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
@@ -4606,7 +4584,6 @@ class SeestarQueuedStacker:
             print(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
             try:
                 save_preview_image(data_after_postproc, preview_path, 
-                                   apply_stretch=True, # <<< MODIFIÉ ICI
                                    enhanced_stretch=False) # ou True si vous préférez le stretch "enhanced" pour le PNG
                 self.update_progress("     ✅ Sauvegarde Preview PNG terminee.") 
             except Exception as prev_err: self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.") 

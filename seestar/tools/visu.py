@@ -5,9 +5,9 @@ from PIL import Image
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QPushButton, QLabel, QFileDialog,
                             QSlider, QComboBox, QGraphicsView, QGraphicsScene,
-                            QGroupBox, QRadioButton, QToolBar, QAction, QSpinBox,
+                            QGroupBox, QToolBar, QAction,
                             QDoubleSpinBox, QTabWidget, QSizePolicy, QMessageBox)
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QPalette
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPalette
 from PyQt5.QtCore import Qt, QRectF, QSettings, pyqtSignal, QTimer, pyqtSlot, QFileInfo, QDir
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -137,7 +137,6 @@ class HistogramWidget(QWidget):
 
                 min_y = max(1, p995_max * 0.001) # Basé sur le percentile max
                 # Appliquer nouvelles limites Y avec moins de marge
-                self.ax.set_ylim(min_y, p995_max * 1.1) # <<<--- Limites Y améliorées
                 # --- Fin calcul limites Y ---
 
                 self.ax.set_yscale('log') # Appliquer l'échelle log
@@ -378,7 +377,6 @@ class TelescopeImageViewer(QMainWindow):
             else: self.raw_data = np.zeros_like(self.raw_data)
             print(f"Data chargé et normalisé: {self.raw_data.shape}, {self.raw_data.dtype}, range=[{np.min(self.raw_data):.3f}, {np.max(self.raw_data):.3f}]")
             self.invalidate_caches(debayer=True, wb=True, stretch=True)
-            self.histogram.reset_zoom() # <<<--- Reset zoom
             self.request_update()
             QTimer.singleShot(100, self.view.fit_view); end=time.time()
             self.statusBar().showMessage(f"Chargé en {end-start:.2f}s. Traitement...", 5000)
@@ -460,7 +458,6 @@ class TelescopeImageViewer(QMainWindow):
     def reset_stretch(self):
         self.bps['spinbox'].setValue(0.0); self.wps['spinbox'].setValue(1.0); self.gamma_ctrls['spinbox'].setValue(1.0)
         self.histogram.set_range(0.0, 1.0)
-        self.histogram.reset_zoom() # <<<--- Reset zoom
 
     # --- apply_auto_stretch : N'active PLUS le zoom (géré par l'interaction user) ---
     def apply_auto_stretch(self):

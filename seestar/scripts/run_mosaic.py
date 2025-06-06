@@ -8,7 +8,6 @@ via command-line arguments.
 """
 import argparse
 import logging
-import os
 
 from zemosaic import zemosaic_config, zemosaic_worker
 
