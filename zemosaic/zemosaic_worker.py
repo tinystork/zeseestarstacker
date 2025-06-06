@@ -1362,6 +1362,21 @@ def run_hierarchical_mosaic(
     astap_search_radius_config = solver_settings.get('astap_search_radius', 3.0)
     api_key_param = solver_settings.get('api_key')
     local_ansvr_path_param = solver_settings.get('local_ansvr_path')
+    astrometry_method_param = solver_settings.get('astrometry_method')
+
+    if astrometry_method_param:
+        method_norm = str(astrometry_method_param).strip().lower()
+        if method_norm == 'astap':
+            solver_settings['local_solver_preference'] = 'astap'
+        elif method_norm in ('astrometry', 'astrometry.net'):
+            solver_settings['local_solver_preference'] = (
+                'ansvr' if local_ansvr_path_param else 'none'
+            )
+        pcb(
+            f"  Config Solver Method: '{method_norm}' -> '{solver_settings['local_solver_preference']}'",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+        )
     
     error_messages_deps = []
     if not (ASTROPY_AVAILABLE and WCS and SkyCoord and Angle and fits and u): error_messages_deps.append("Astropy")
