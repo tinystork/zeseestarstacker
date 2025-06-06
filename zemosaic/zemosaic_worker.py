@@ -6,7 +6,8 @@ import time
 import traceback
 import gc
 import logging
-import inspect # Pas utilisé directement ici, mais peut être utile pour des introspections futures
+import inspect  # Pas utilisé directement ici, mais peut être utile pour des introspections futures
+import tempfile
 # psutil is used purely for optional memory logging
 try:
     import psutil
@@ -1222,7 +1223,11 @@ def assemble_final_mosaic_with_reproject_coadd(
     match_bg: bool = True,
     # --- NOUVEAUX PARAMÈTRES POUR LE ROGNAGE ---
     apply_crop: bool = False,
-    crop_percent: float = 0.0 # Pourcentage par côté, 0.0 = pas de rognage par défaut
+    crop_percent: float = 0.0,  # Pourcentage par côté, 0.0 = pas de rognage par défaut
+    # -- Nouveaux paramètres pour re-solve WCS après rognage --
+    re_solve_cropped_tiles: bool = False,
+    solver_settings: dict | None = None,
+    solver_instance=None,
     # --- FIN NOUVEAUX PARAMÈTRES ---
 ):
     """
@@ -1231,12 +1236,18 @@ def assemble_final_mosaic_with_reproject_coadd(
     Peut optionnellement rogner les master tuiles avant assemblage.
     Le rognage s'effectue par simple découpage et mise à jour du WCS. Les
     tuiles rognées seront reprojetées lors de l'empilement final.
+    Si ``re_solve_cropped_tiles`` est activé et qu'un ``solver_instance`` est
+    fourni, chaque tuile rognée est soumise à une nouvelle résolution
+    astrométrique avant d'être reprojetée.
     """
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: \
         _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
 
     _log_memory_usage(progress_callback, "Début assemble_final_mosaic_with_reproject_coadd")
-    _pcb(f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}", lvl="DEBUG_DETAIL") # Log des options de rognage
+    _pcb(
+        f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
+        lvl="DEBUG_DETAIL",
+    )  # Log des options de rognage
 
     # ... (Vérification des dépendances REPROJECT_AVAILABLE, ASTROPY_AVAILABLE - inchangée) ...
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and reproject_interp and ASTROPY_AVAILABLE and fits):
@@ -1344,6 +1355,42 @@ def assemble_final_mosaic_with_reproject_coadd(
                                 f"ASM_REPROJ_COADD: AVERT - Échec pixel_shape après rognage {os.path.basename(mt_path)}: {e_ps_crop}",
                                 lvl="WARN",
                             )
+                        # Optionnel : re-solve du WCS sur la tuile rognée
+                        if re_solve_cropped_tiles and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
+                            try:
+                                header_for_solver = hdul[0].header.copy()
+                                header_for_solver['NAXIS1'] = data_to_use_for_assembly.shape[1]
+                                header_for_solver['NAXIS2'] = data_to_use_for_assembly.shape[0]
+                                for key in ['CRPIX1','CRPIX2','CRVAL1','CRVAL2','CD1_1','CD1_2','CD2_1','CD2_2','CTYPE1','CTYPE2','CDELT1','CDELT2','CROTA2','PC1_1','PC1_2','PC2_1','PC2_2']:
+                                    if key in header_for_solver:
+                                        del header_for_solver[key]
+                                with tempfile.NamedTemporaryFile(suffix='.fits', delete=False) as tmp_f:
+                                    fits.writeto(tmp_f.name, data_to_use_for_assembly, header_for_solver, overwrite=True)
+                                    solved_wcs = solver_instance.solve(
+                                        tmp_f.name,
+                                        header_for_solver,
+                                        solver_settings or {},
+                                        update_header_with_solution=False,
+                                    )
+                                os.remove(tmp_f.name)
+                                if solved_wcs and solved_wcs.is_celestial:
+                                    wcs_to_use_for_assembly = solved_wcs
+                                    try:
+                                        wcs_to_use_for_assembly.pixel_shape = (
+                                            data_to_use_for_assembly.shape[1],
+                                            data_to_use_for_assembly.shape[0],
+                                        )
+                                    except Exception:
+                                        pass
+                                    _pcb(
+                                        f"      WCS re-solved après rognage pour {os.path.basename(mt_path)}",
+                                        lvl="DEBUG_DETAIL",
+                                    )
+                            except Exception as e_resolve:
+                                _pcb(
+                                    f"ASM_REPROJ_COADD: AVERT - Re-solve échoué pour {os.path.basename(mt_path)}: {e_resolve}",
+                                    lvl="WARN",
+                                )
                         _pcb(
                             f"      Nouvelle shape après rognage: {data_to_use_for_assembly.shape[:2]}",
                             lvl="DEBUG_VERY_DETAIL",
@@ -1470,11 +1517,14 @@ def run_hierarchical_mosaic(
         # --- ARGUMENTS POUR LE ROGNAGE ---
     apply_master_tile_crop_config: bool,
     master_tile_crop_percent_config: float,
-    save_final_as_uint16_config: bool
+    save_final_as_uint16_config: bool,
+    re_solve_cropped_tiles_config: bool = False
 
 ):
     """
     Orchestre le traitement de la mosaïque hiérarchique.
+    Si ``re_solve_cropped_tiles_config`` est ``True``, les tuiles rognées sont
+    re-soumis à une résolution astrométrique avant l'assemblage final.
     """
     pcb = lambda msg_key, prog=None, lvl="INFO", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
     
@@ -1943,7 +1993,10 @@ def run_hierarchical_mosaic(
             match_bg=True,
             # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
             apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config
+            crop_percent=master_tile_crop_percent_config,
+            re_solve_cropped_tiles=re_solve_cropped_tiles_config,
+            solver_settings=solver_settings,
+            solver_instance=astrometry_solver
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
