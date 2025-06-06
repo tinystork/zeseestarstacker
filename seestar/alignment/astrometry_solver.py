@@ -394,7 +394,7 @@ class AstrometrySolver:
                                                            scale_est, scale_tol, ansvr_timeout,
                                                            update_header_with_solution)
                 self._log(
-                    f'Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}',
+                    f"Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}",
                     'DEBUG',
                 )
                 if wcs_solution:
