@@ -1435,25 +1435,30 @@ def assemble_final_mosaic_with_reproject_coadd(
                                 header_for_solver['NAXIS1'] = data_to_use_for_assembly.shape[1]
                                 header_for_solver['NAXIS2'] = data_to_use_for_assembly.shape[0]
 
-                                ra_hint = header_for_solver.get('RA', header_for_solver.get('CRVAL1'))
-                                dec_hint = header_for_solver.get('DEC', header_for_solver.get('CRVAL2'))
-
-                                for key in ['CRPIX1', 'CRPIX2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2', 'CTYPE1', 'CTYPE2', 'CDELT1', 'CDELT2', 'CROTA2', 'PC1_1', 'PC1_2', 'PC2_1', 'PC2_2', 'CRVAL1', 'CRVAL2']:
+                                for key in ['CRPIX1', 'CRPIX2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2', 'CTYPE1', 'CTYPE2', 'CDELT1', 'CDELT2', 'CROTA2', 'PC1_1', 'PC1_2', 'PC2_1', 'PC2_2', 'CRVAL1', 'CRVAL2', 'RA', 'DEC']:
                                     if key in header_for_solver:
                                         del header_for_solver[key]
 
-                                if ra_hint is None or dec_hint is None:
-                                    try:
-                                        center = (data_to_use_for_assembly.shape[1] / 2, data_to_use_for_assembly.shape[0] / 2)
-                                        ra_hint, dec_hint = wcs_to_use_for_assembly.wcs_pix2world([[center[0], center[1]]], 0)[0]
-                                    except Exception:
-                                        pass
+                                try:
+                                    center = (
+                                        data_to_use_for_assembly.shape[1] / 2,
+                                        data_to_use_for_assembly.shape[0] / 2,
+                                    )
+                                    ra_hint, dec_hint = wcs_to_use_for_assembly.wcs_pix2world(
+                                        [[center[0], center[1]]], 0
+                                    )[0]
+                                except Exception:
+                                    ra_hint, dec_hint = None, None
 
                                 if ra_hint is not None and dec_hint is not None:
                                     header_for_solver['CRVAL1'] = ra_hint
                                     header_for_solver['CRVAL2'] = dec_hint
                                     header_for_solver['RA'] = ra_hint
                                     header_for_solver['DEC'] = dec_hint
+                                    _pcb(
+                                        f"      Solver hints RA={ra_hint:.6f}, DEC={dec_hint:.6f}",
+                                        lvl="DEBUG_DETAIL",
+                                    )
                                 with tempfile.NamedTemporaryFile(suffix='.fits', delete=False) as tmp_f:
                                     fits.writeto(tmp_f.name, data_to_use_for_assembly, header_for_solver, overwrite=True)
                                     solved_wcs = solver_instance.solve(

@@ -176,9 +176,10 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
         solver_instance=dummy_solver,
     )
 
+    expected_ra, expected_dec = wcs_in.wcs_pix2world([[40, 40]], 0)[0]
     assert dummy_solver.called
-    assert dummy_solver.ra is not None
-    assert dummy_solver.dec is not None
+    assert pytest.approx(dummy_solver.ra, abs=1e-6) == expected_ra
+    assert pytest.approx(dummy_solver.dec, abs=1e-6) == expected_dec
     assert captured.get("pixel_shapes") == [(80, 80)]
 
 
@@ -258,9 +259,10 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
         solver_instance=solver,
     )
 
+    expected_ra, expected_dec = wcs_in.wcs_pix2world([[40, 40]], 0)[0]
     assert solver.called
-    assert solver.ra == 11.1
-    assert solver.dec == -22.2
+    assert pytest.approx(solver.ra, abs=1e-6) == expected_ra
+    assert pytest.approx(solver.dec, abs=1e-6) == expected_dec
     assert captured.get("pixel_shapes") == [(80, 80)]
 
 
