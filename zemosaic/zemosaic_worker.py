@@ -1439,6 +1439,21 @@ def assemble_final_mosaic_with_reproject_coadd(
                                     if key in header_for_solver:
                                         del header_for_solver[key]
 
+                                # Assurer un en-tête propre pour le fichier temporaire
+                                for key in ('BSCALE', 'BZERO'):
+                                    if key in header_for_solver:
+                                        del header_for_solver[key]
+                                header_for_solver['BITPIX'] = -32
+                                _pcb(
+                                    "ASM_REPROJ_COADD: Temporary header BITPIX=%s BSCALE=%s BZERO=%s"
+                                    % (
+                                        header_for_solver.get('BITPIX'),
+                                        header_for_solver.get('BSCALE'),
+                                        header_for_solver.get('BZERO'),
+                                    ),
+                                    lvl="DEBUG_DETAIL",
+                                )
+
                                 try:
                                     center = (
                                         data_to_use_for_assembly.shape[1] / 2,

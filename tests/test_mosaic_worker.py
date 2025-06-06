@@ -114,6 +114,11 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
         "reproject_interp",
         lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
     )
+    monkeypatch.setattr(
+        worker,
+        "reproject_and_coadd",
+        lambda input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs: (np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)),
+    )
     monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
     monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
 
@@ -193,6 +198,11 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
         "reproject_interp",
         lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
     )
+    monkeypatch.setattr(
+        worker,
+        "reproject_and_coadd",
+        lambda input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs: (np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)),
+    )
     monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
     monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
 
@@ -264,6 +274,94 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
     assert pytest.approx(solver.ra, abs=1e-6) == expected_ra
     assert pytest.approx(solver.dec, abs=1e-6) == expected_dec
     assert captured.get("pixel_shapes") == [(80, 80)]
+
+
+def test_temp_header_clean(monkeypatch, tmp_path):
+    import importlib
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "REPROJECT_AVAILABLE", True)
+    monkeypatch.setattr(
+        worker,
+        "reproject_interp",
+        lambda input_data, output_projection, shape_out=None, order="bilinear", parallel=False: (input_data[0], np.ones(shape_out)),
+    )
+    monkeypatch.setattr(
+        worker,
+        "reproject_and_coadd",
+        lambda input_data, output_projection, shape_out, reproject_function=None, combine_function="mean", match_background=True, **kwargs: (np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)),
+    )
+    monkeypatch.setattr(worker, "ZEMOSAIC_UTILS_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+
+    class DummyZU:
+        @staticmethod
+        def crop_image_and_wcs(image_data, wcs_obj, crop_fraction, progress_callback=None):
+            h, w = image_data.shape[:2]
+            dh = int(h * crop_fraction)
+            dw = int(w * crop_fraction)
+            cropped = image_data[dh:h-dh, dw:w-dw, :]
+            new_wcs = wcs_obj.copy()
+            new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            return cropped, new_wcs
+
+    monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
+
+    from astropy.io import fits
+    data = np.ones((1, 100, 100), dtype=np.float32)
+    header = fits.Header()
+    header["BSCALE"] = 2.0
+    header["BZERO"] = 1000.0
+    header["BITPIX"] = 16
+    fits_path = tmp_path / "tile.fits"
+    fits.writeto(fits_path, data, header, overwrite=True)
+
+    wcs_in = make_wcs(0, 0, shape=(100, 100))
+
+    class DummySolver:
+        def __init__(self):
+            self.header = None
+
+        def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
+            self.header = fits_header.copy()
+            return make_wcs(1, 1, shape=(80, 80))
+
+    solver = DummySolver()
+
+    captured = {}
+    original_writeto = fits.writeto
+
+    def fake_writeto(path, data, header=None, overwrite=True, **kw):
+        captured["header"] = header.copy()
+        original_writeto(path, data, header=header, overwrite=overwrite, **kw)
+
+    monkeypatch.setattr(worker.fits, "writeto", fake_writeto)
+
+    final_wcs = make_wcs(0, 0, shape=(80, 80))
+    final_shape = (80, 80)
+
+    worker.assemble_final_mosaic_with_reproject_coadd(
+        [(str(fits_path), wcs_in)],
+        final_wcs,
+        final_shape,
+        progress_callback=None,
+        n_channels=1,
+        match_bg=False,
+        apply_crop=True,
+        crop_percent=10.0,
+        re_solve_cropped_tiles=True,
+        solver_settings={},
+        solver_instance=solver,
+    )
+
+    assert solver.header is not None
+    assert "BSCALE" not in solver.header
+    assert "BZERO" not in solver.header
+    assert solver.header.get("BITPIX") == -32
+    assert captured.get("header") is not None
+    assert "BSCALE" not in captured["header"]
+    assert "BZERO" not in captured["header"]
+    assert captured["header"].get("BITPIX") == -32
 
 
 def test_use_sidecar_wcs(monkeypatch, tmp_path):
