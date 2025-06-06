@@ -267,6 +267,37 @@ python -m seestar.scripts.run_mosaic INPUT_DIR OUTPUT_DIR \
 ```
 
 Solver options correspond to the `ZEMOSAIC_*` environment variables used by the GUI.
+When calling the worker from Python, gather them into a `solver_settings` dictionary:
+
+```python
+from zemosaic import zemosaic_worker
+
+solver_settings = {
+    "astap_path": "/path/to/astap",
+    "astap_data_dir": "/path/to/catalogs",
+    "astap_search_radius": 3.0,
+    "astap_downsample": 2,
+    "astap_sensitivity": 100,
+    "local_ansvr_path": "/path/to/ansvr.cfg",
+    "api_key": "your_key",
+    "local_solver_preference": "astap",
+}
+
+zemosaic_worker.run_hierarchical_mosaic(
+    "INPUT_DIR", "OUTPUT_DIR", solver_settings, cluster_threshold=0.5, ...
+)
+```
+
+**`solver_settings` keys**
+
+- `astap_path`: path to the ASTAP executable
+- `astap_data_dir`: directory containing ASTAP star catalogs
+- `astap_search_radius`: search radius in degrees passed to ASTAP
+- `astap_downsample`: downsample factor used by ASTAP
+- `astap_sensitivity`: detection sensitivity percentage for ASTAP
+- `local_ansvr_path`: path to a local `ansvr.cfg`
+- `api_key`: astrometry.net API key
+- `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
 
 ---
 
