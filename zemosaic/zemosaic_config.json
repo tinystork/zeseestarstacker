@@ -1,4 +1,6 @@
 {
+    "astap_path": "",
+    "astap_data_dir": "",
     "astap_default_search_radius": 3.0,
     "astap_default_downsample": 2,
     "astap_default_sensitivity": 100,

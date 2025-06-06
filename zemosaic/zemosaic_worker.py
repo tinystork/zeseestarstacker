@@ -556,8 +556,9 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
     filename = os.path.basename(file_path)
     # Utiliser une fonction helper pour les logs internes à cette fonction si _log_and_callback
     # est trop lié à la structure de run_hierarchical_mosaic
-    _pcb_local = lambda msg_key, lvl="DEBUG", **kwargs: \
-        progress_callback(msg_key, None, lvl, **kwargs) if progress_callback else print(f"GETWCS_LOG {lvl}: {msg_key} {kwargs}")
+    _pcb_local = lambda msg_key, lvl="DEBUG", **kwargs: _log_and_callback(
+        msg_key, None, lvl, callback=progress_callback, **kwargs
+    )
 
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 

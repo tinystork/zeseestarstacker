@@ -1,6 +1,7 @@
 # zemosaic/run_zemosaic.py
 import sys  # Ajout pour sys.path et sys.modules
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
+import argparse
 import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
 import os
@@ -87,9 +88,91 @@ logger.debug(
 logger.debug("-" * 50)
 
 
+def _parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Run ZeMosaic either via the GUI (default) or headless CLI",
+        add_help=True,
+    )
+    parser.add_argument("input_folder", nargs="?", help="Folder with FITS images")
+    parser.add_argument("output_folder", nargs="?", help="Destination folder")
+    parser.add_argument("--cli", action="store_true", help="Run headless without GUI")
+    parser.add_argument("--astap-path", dest="astap_path", help="Path to ASTAP executable")
+    parser.add_argument(
+        "--astap-data-dir", dest="astap_data_dir", help="Directory with ASTAP catalogs"
+    )
+    parser.add_argument(
+        "--astrometry-method",
+        dest="astrometry_method",
+        choices=["astap", "astrometry", "astrometry.net"],
+        help="Solver method",
+    )
+    return parser.parse_args()
+
+
+def _cli_progress(msg: str, progress: float | None = None) -> None:
+    if progress is not None:
+        print(f"[{progress:.1f}%] {msg}")
+    else:
+        print(msg)
+
+
+def _run_cli(args: argparse.Namespace) -> None:
+    from . import zemosaic_config, zemosaic_worker
+
+    config = zemosaic_config.load_config()
+
+    solver_settings = {
+        "astap_path": args.astap_path or config.get("astap_path"),
+        "astap_data_dir": args.astap_data_dir or config.get("astap_data_dir"),
+        "astap_search_radius": config.get("astap_default_search_radius", 3.0),
+        "astap_downsample": config.get("astap_default_downsample", 2),
+        "astap_sensitivity": config.get("astap_default_sensitivity", 100),
+        "astrometry_method": args.astrometry_method or config.get("astrometry_method"),
+    }
+
+    winsor_str = config.get("stacking_winsor_limits", "0.05,0.05")
+    try:
+        winsor_limits = tuple(float(x) for x in winsor_str.split(","))
+    except Exception:
+        winsor_limits = (0.05, 0.05)
+
+    zemosaic_worker.run_hierarchical_mosaic(
+        args.input_folder,
+        args.output_folder,
+        solver_settings,
+        config.get("cluster_panel_threshold", 0.5),
+        _cli_progress,
+        config.get("stacking_normalize_method", "none"),
+        config.get("stacking_weighting_method", "none"),
+        config.get("stacking_rejection_algorithm", "kappa_sigma"),
+        config.get("stacking_kappa_low", 3.0),
+        config.get("stacking_kappa_high", 3.0),
+        winsor_limits,
+        config.get("stacking_final_combine_method", "mean"),
+        config.get("apply_radial_weight", False),
+        config.get("radial_feather_fraction", 0.8),
+        config.get("radial_shape_power", 2.0),
+        config.get("min_radial_weight_floor", 0.0),
+        config.get("final_assembly_method", "reproject_coadd"),
+        config.get("num_processing_workers", 0),
+        config.get("apply_master_tile_crop", False),
+        config.get("master_tile_crop_percent", 10.0),
+        config.get("save_final_as_uint16", False),
+        config.get("re_solve_cropped_tiles", False),
+    )
+
+
 def main():
     """Fonction principale pour lancer l'application ZeMosaic."""
     logger.debug("--- run_zemosaic.py: Entrée dans main() ---")
+    args = _parse_cli_args()
+
+    if args.cli:
+        if not (args.input_folder and args.output_folder):
+            print("Input and output folders are required in CLI mode")
+            return
+        _run_cli(args)
+        return
 
     # Vérification de sys.modules au début de main
     if 'zemosaic_worker' in sys.modules:
