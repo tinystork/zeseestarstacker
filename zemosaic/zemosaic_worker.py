@@ -122,6 +122,7 @@ if not REPROJECT_AVAILABLE:
 
 # --- Local Project Module Imports ---
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
+zemosaic_astrometry, ZEMOSAIC_ASTROMETRY_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 AstrometrySolver, ASTROMETRY_SOLVER_AVAILABLE = None, False
 calculate_final_mosaic_grid_dynamic_wcs, CALC_FINAL_GRID_DYNAMIC_AVAILABLE = None, False
@@ -138,6 +139,19 @@ except Exception:
         logger.info("Module 'zemosaic_utils' importé (absolu).")
     except ImportError as e:
         logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
+
+
+try:
+    from . import zemosaic_astrometry as zemosaic_astrometry
+    ZEMOSAIC_ASTROMETRY_AVAILABLE = True
+    logger.info("Module 'zemosaic_astrometry' importé (relatif).")
+except Exception:
+    try:
+        import zemosaic_astrometry as zemosaic_astrometry
+        ZEMOSAIC_ASTROMETRY_AVAILABLE = True
+        logger.info("Module 'zemosaic_astrometry' importé (absolu).")
+    except ImportError as e:
+        logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
 
 
 try:
@@ -687,6 +701,25 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
                 )
             except Exception as e_solver:
                 logger.error(f"Astrometric solver failed for {file_path}: {e_solver}")
+                wcs_brute = None
+        elif ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
+            logger.info(f"Trying WCS resolution for {file_path} via solve_with_astap()...")
+            try:
+                wcs_brute = zemosaic_astrometry.solve_with_astap(
+                    image_fits_path=file_path,
+                    original_fits_header=header_orig,
+                    astap_exe_path=solver_settings.get('astap_path'),
+                    astap_data_dir=solver_settings.get('astap_data_dir'),
+                    search_radius_deg=solver_settings.get('astap_search_radius'),
+                    downsample_factor=solver_settings.get('astap_downsample'),
+                    sensitivity=solver_settings.get('astap_sensitivity'),
+                    timeout_sec=solver_settings.get('astap_timeout_sec', 180),
+                    update_original_header_in_place=True,
+                    progress_callback=progress_callback,
+                    solver_instance=None,
+                )
+            except Exception as e_solver:
+                logger.error(f"solve_with_astap failed for {file_path}: {e_solver}")
                 wcs_brute = None
         else:
             logger.info("No astrometric solver available — image will be moved to unaligned.")
