@@ -29,6 +29,7 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
+from astropy.nddata import CCDData
 from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
@@ -4033,14 +4034,21 @@ class SeestarQueuedStacker:
                     if is_color_batch:
                         channels = []
                         for c in range(3):
-                            imgs = [img[..., c] for img in valid_images_for_ccdproc]
-                            combined = ccdproc_combine(imgs, method=method_arr, sigma_clip=False,
-                                                       weights=weights_for_stack)
+                            imgs = [CCDData(img[..., c], unit=u.dimensionless_unscaled)
+                                    for img in valid_images_for_ccdproc]
+                            combined = ccdproc_combine(
+                                imgs, method=method_arr, sigma_clip=False,
+                                weights=weights_for_stack
+                            )
                             channels.append(np.array(combined, dtype=np.float32))
                         stacked_batch_data_np = np.stack(channels, axis=-1)
                     else:
-                        combined = ccdproc_combine(valid_images_for_ccdproc, method=method_arr, sigma_clip=False,
-                                                   weights=weights_for_stack)
+                        imgs_ccd = [CCDData(img, unit=u.dimensionless_unscaled)
+                                    for img in valid_images_for_ccdproc]
+                        combined = ccdproc_combine(
+                            imgs_ccd, method=method_arr, sigma_clip=False,
+                            weights=weights_for_stack
+                        )
                         stacked_batch_data_np = np.array(combined, dtype=np.float32)
                 stack_info_header = fits.Header()
             except Exception:
