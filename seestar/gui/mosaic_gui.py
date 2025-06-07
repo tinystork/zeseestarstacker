@@ -212,7 +212,8 @@ class MosaicSettingsWindow(tk.Toplevel):
         api_key_inner = ttk.Frame(api_key_frame)
         api_key_inner.pack(fill=tk.X, padx=5, pady=(5, 0))
         ttk.Label(api_key_inner, text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"), width=10).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Entry(api_key_inner, textvariable=self.parent_gui.astrometry_api_key_var, show="*", width=40).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.api_key_entry = ttk.Entry(api_key_inner, textvariable=self.parent_gui.astrometry_api_key_var, show="*", width=40)
+        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ttk.Label(
             api_key_frame,
@@ -290,8 +291,8 @@ class MosaicSettingsWindow(tk.Toplevel):
             anchor="w",
         )
         ansvr_path_label.pack(side=tk.LEFT, padx=(0, 5))
-        ansvr_path_entry = ttk.Entry(ansvr_path_entry_frame, textvariable=self.local_ansvr_path_var)
-        ansvr_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.ansvr_path_entry = ttk.Entry(ansvr_path_entry_frame, textvariable=self.local_ansvr_path_var)
+        self.ansvr_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ansvr_buttons_frame = ttk.Frame(self.ansvr_frame)
         ansvr_buttons_frame.pack(fill=tk.X, pady=(0, 5))
@@ -759,6 +760,16 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.destroy()
         if hasattr(self.parent_gui, 'update_mosaic_button_appearance'):
             self.parent_gui.update_mosaic_button_appearance() # Mettre à jour l'apparence même en cas d'annulation
+
+    # Getter methods to expose selected astrometry settings
+    def get_astrometry_solver_choice(self):
+        return self.local_solver_choice_var.get()
+
+    def get_astrometry_api_key(self):
+        return self.api_key_entry.get()
+
+    def get_astrometry_ansvr_path(self):
+        return self.ansvr_path_entry.get()
 
 
 
