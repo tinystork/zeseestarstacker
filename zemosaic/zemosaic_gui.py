@@ -131,6 +131,10 @@ class ZeMosaicGUI:
         }
         logger.info("Effective solver settings: %s", effective_solver_config)
 
+        env_lang = os.environ.get("ZEMOSAIC_LANGUAGE")
+        if env_lang:
+            self.config["language"] = env_lang
+
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
             self.localizer = ZeMosaicLocalization(language_code=default_lang_from_config)

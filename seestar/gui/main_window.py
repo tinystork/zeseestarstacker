@@ -3201,6 +3201,11 @@ class SeestarStackerGUI:
                 env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)
             except Exception:
                 pass
+            # Propagate current UI language to ZeMosaic
+            try:
+                env["ZEMOSAIC_LANGUAGE"] = self.language_var.get()
+            except Exception:
+                env["ZEMOSAIC_LANGUAGE"] = self.settings.language
 
             # Directly execute the run_zemosaic.py script located in the
             # ``zemosaic`` directory of the project. Using the explicit file
