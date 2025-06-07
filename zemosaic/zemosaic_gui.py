@@ -380,17 +380,6 @@ class ZeMosaicGUI:
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
 
-        # --- ASTAP Configuration Frame ---
-        self.astap_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        # ... (contenu de astap_frame) ...
-        self.astap_frame.pack(fill=tk.X, pady=(0,10)); self.astap_frame.columnconfigure(1, weight=1)
-        self.translatable_widgets["astap_config_frame_title"] = self.astap_frame
-        ttk.Label(self.astap_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = self.astap_frame.grid_slaves(row=0,column=0)[0]
-        ttk.Entry(self.astap_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(self.astap_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = self.astap_frame.grid_slaves(row=0,column=2)[0]
-        ttk.Label(self.astap_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = self.astap_frame.grid_slaves(row=1,column=0)[0]
-        ttk.Entry(self.astap_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(self.astap_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = self.astap_frame.grid_slaves(row=1,column=2)[0]
 
         # --- Solver Settings Frame ---
         solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -409,6 +398,17 @@ class ZeMosaicGUI:
                    keys=["astap", "astrometry"], p="solver":
                 (self._combo_to_key(e, c, v, keys, p), self._on_solver_choice_change())
         )
+
+        # --- Sous-cadre ASTAP (déplacé) -----------------------------------------
+        self.astap_subframe = ttk.Frame(solver_frame)
+        self.astap_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
+
+        ttk.Label(self.astap_subframe, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = self.astap_subframe.grid_slaves(row=0,column=0)[0]
+        ttk.Entry(self.astap_subframe, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.astap_subframe, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = self.astap_subframe.grid_slaves(row=0,column=2)[0]
+        ttk.Label(self.astap_subframe, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = self.astap_subframe.grid_slaves(row=1,column=0)[0]
+        ttk.Entry(self.astap_subframe, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.astap_subframe, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = self.astap_subframe.grid_slaves(row=1,column=2)[0]
 
         self.astrometry_subframe = ttk.Frame(solver_frame)
         self.astrometry_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
@@ -738,19 +738,15 @@ class ZeMosaicGUI:
     def _on_solver_choice_change(self, *args):
         try:
             if self.solver_choice_var.get() == "astrometry":
-                if hasattr(self, "astap_frame"):
-                    self.astap_frame.pack_forget()
-                if hasattr(self, "astap_params_frame"):
-                    self.astap_params_frame.pack_forget()
                 if hasattr(self, "astrometry_subframe"):
                     self.astrometry_subframe.grid()
-            else:
+                if hasattr(self, "astap_subframe"):
+                    self.astap_subframe.grid_remove()
+            else:  # "astap"
+                if hasattr(self, "astap_subframe"):
+                    self.astap_subframe.grid()
                 if hasattr(self, "astrometry_subframe"):
                     self.astrometry_subframe.grid_remove()
-                if hasattr(self, "astap_frame"):
-                    self.astap_frame.pack(fill=tk.X, pady=(0,10))
-                if hasattr(self, "astap_params_frame"):
-                    self.astap_params_frame.pack(fill=tk.X, pady=(0,10))
         except tk.TclError:
             pass
 
