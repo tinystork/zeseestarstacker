@@ -278,6 +278,7 @@ solver_settings = {
     "astap_search_radius": 3.0,
     "astap_downsample": 2,
     "astap_sensitivity": 100,
+    "use_radec_hints": False,
     "local_ansvr_path": "/path/to/ansvr.cfg",
     "api_key": "your_key",
     "local_solver_preference": "astap",
