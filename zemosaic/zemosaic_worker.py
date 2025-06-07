@@ -352,6 +352,15 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 
     solver_settings = GLOBAL_SOLVER_SETTINGS
+    solver_preference = solver_settings.get(
+        "solver_method",
+        zemosaic_config.get_solver_method()
+    ).lower()
+    use_astap = (solver_preference == "astap")
+    if use_astap:
+        if not (astap_exe_path and os.path.isfile(astap_exe_path)):
+            use_astap = False
+            _pcb_local("getwcs_warn_astap_path_invalid_fallback", lvl="WARN", filename=filename)
 
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils):
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
@@ -433,7 +442,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
-    if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
+    if wcs_brute is None and use_astap and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
         _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
         wcs_brute = zemosaic_astrometry.solve_with_astap(
             image_fits_path=file_path, original_fits_header=header_orig,
@@ -448,37 +457,38 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
         else:
             _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
 
-        # --- Fallback Astrometry local puis web -----------------------------
-        if wcs_brute is None:
-            _pcb_local("getwcs_info_try_local_astrometry", lvl="INFO_DETAIL", filename=filename)
-            astrometry_local_path = solver_settings.get(
-                "astrometry_local_path", zemosaic_config.get_astrometry_local_path()
+    # --- Fallback Astrometry local puis web -----------------------------
+    if wcs_brute is None:
+        _pcb_local("getwcs_info_try_local_astrometry", lvl="INFO_DETAIL", filename=filename)
+        astrometry_local_path = solver_settings.get(
+            "astrometry_local_path", zemosaic_config.get_astrometry_local_path()
+        )
+        if astrometry_local_path:
+            wcs_brute = zemosaic_astrometry.solve_with_astrometry_local(
+                file_path, header_orig,
+                local_ansvr_path=astrometry_local_path,
+                timeout_sec=180,
+                progress_callback=progress_callback
             )
-            if astrometry_local_path:
-                wcs_brute = zemosaic_astrometry.solve_with_astrometry_local(
-                    file_path, header_orig,
-                    local_ansvr_path=astrometry_local_path,
-                    timeout_sec=180,
-                    progress_callback=progress_callback
-                )
-                if wcs_brute:
-                    _pcb_local("getwcs_info_astrometry_local_ok", lvl="INFO_DETAIL", filename=filename)
+            if wcs_brute:
+                _pcb_local("getwcs_info_astrometry_local_ok", lvl="INFO_DETAIL", filename=filename)
 
-        if wcs_brute is None:
-            _pcb_local("getwcs_info_try_web_astrometry", lvl="INFO_DETAIL", filename=filename)
-            astrometry_api_key = solver_settings.get(
-                "astrometry_api_key", zemosaic_config.get_astrometry_api_key()
+    if wcs_brute is None:
+        _pcb_local("getwcs_info_try_web_astrometry", lvl="INFO_DETAIL", filename=filename)
+        astrometry_api_key = solver_settings.get(
+            "astrometry_api_key", zemosaic_config.get_astrometry_api_key()
+        )
+        if astrometry_api_key:
+            wcs_brute = zemosaic_astrometry.solve_with_astrometry_net(
+                file_path, header_orig,
+                api_key=astrometry_api_key,
+                timeout_sec=300,
+                progress_callback=progress_callback
             )
-            if astrometry_api_key:
-                wcs_brute = zemosaic_astrometry.solve_with_astrometry_net(
-                    file_path, header_orig,
-                    api_key=astrometry_api_key,
-                    timeout_sec=300,
-                    progress_callback=progress_callback
-                )
-                if wcs_brute:
-                    _pcb_local("getwcs_info_astrometry_web_ok", lvl="INFO_DETAIL", filename=filename)
-    elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
+            if wcs_brute:
+                _pcb_local("getwcs_info_astrometry_web_ok", lvl="INFO_DETAIL", filename=filename)
+
+    if wcs_brute is None:
         _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
         # Action de déplacement sera gérée par le check suivant
 
