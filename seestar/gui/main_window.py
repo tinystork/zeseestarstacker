@@ -3202,8 +3202,13 @@ class SeestarStackerGUI:
             except Exception:
                 pass
 
+            # Directly execute the run_zemosaic.py script located in the
+            # ``zemosaic`` directory of the project. Using the explicit file
+            # path avoids issues with module lookups when the application is
+            # bundled or executed from a different working directory.
+            run_zemosaic_path = project_root / "zemosaic" / "run_zemosaic.py"
             subprocess.Popen(
-                [sys.executable, "-m", "zemosaic.run_zemosaic"],
+                [sys.executable, str(run_zemosaic_path)],
                 cwd=str(project_root),
                 env=env,
             )
