@@ -8,9 +8,6 @@ import traceback
 import time
 import subprocess
 import sys
-import logging
-
-logger = logging.getLogger("ZeMosaicGUI")
 
 try:
     from PIL import Image, ImageTk # Importe depuis Pillow
@@ -20,7 +17,7 @@ except ImportError:
     print("AVERT GUI: Pillow (PIL) non installé. L'icône PNG ne peut pas être chargée.")
 # --- Import du module de localisation ---
 try:
-    from .locales.zemosaic_localization import ZeMosaicLocalization
+    from locales.zemosaic_localization import ZeMosaicLocalization
     ZEMOSAIC_LOCALIZATION_AVAILABLE = True
 except ImportError as e_loc:
     ZEMOSAIC_LOCALIZATION_AVAILABLE = False
@@ -29,29 +26,21 @@ except ImportError as e_loc:
 
 # --- Configuration Import ---
 try:
-    from . import zemosaic_config
+    import zemosaic_config 
     ZEMOSAIC_CONFIG_AVAILABLE = True
-except Exception:
-    try:
-        import zemosaic_config
-        ZEMOSAIC_CONFIG_AVAILABLE = True
-    except ImportError as e_config:
-        ZEMOSAIC_CONFIG_AVAILABLE = False
-        zemosaic_config = None
-        print(f"AVERTISSEMENT (zemosaic_gui): 'zemosaic_config.py' non trouvé: {e_config}")
+except ImportError as e_config:
+    ZEMOSAIC_CONFIG_AVAILABLE = False
+    zemosaic_config = None
+    print(f"AVERTISSEMENT (zemosaic_gui): 'zemosaic_config.py' non trouvé: {e_config}")
 
 # --- Worker Import ---
 try:
-    from .zemosaic_worker import run_hierarchical_mosaic
+    from zemosaic_worker import run_hierarchical_mosaic
     ZEMOSAIC_WORKER_AVAILABLE = True
-except Exception:
-    try:
-        from zemosaic_worker import run_hierarchical_mosaic
-        ZEMOSAIC_WORKER_AVAILABLE = True
-    except ImportError as e_worker:
-        ZEMOSAIC_WORKER_AVAILABLE = False
-        run_hierarchical_mosaic = None
-        print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
+except ImportError as e_worker:
+    ZEMOSAIC_WORKER_AVAILABLE = False
+    run_hierarchical_mosaic = None
+    print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
 
 
 
@@ -87,7 +76,8 @@ class ZeMosaicGUI:
         else:
             # Dictionnaire de configuration de secours si zemosaic_config.py n'est pas trouvé
             # ou si le chargement échoue.
-            self.config = {
+            self.config = { 
+                "astap_executable_path": "", "astap_data_directory_path": "",
                 "astap_default_search_radius": 3.0, "astap_default_downsample": 2,
                 "astap_default_sensitivity": 100, "language": "en",
                 "stacking_normalize_method": "none",
@@ -104,32 +94,6 @@ class ZeMosaicGUI:
                 "final_assembly_method": "reproject_coadd",
                 "num_processing_workers": 0 # 0 pour auto, anciennement -1
             }
-
-        self.env_solver_settings = {
-            'astap_path': os.environ.get('ZEMOSAIC_ASTAP_PATH'),
-            'astap_data_dir': os.environ.get('ZEMOSAIC_ASTAP_DATA_DIR'),
-            'local_ansvr_path': os.environ.get('ZEMOSAIC_LOCAL_ANSVR_PATH'),
-            'api_key': os.environ.get('ZEMOSAIC_ASTROMETRY_API_KEY'),
-            'local_solver_preference': os.environ.get('ZEMOSAIC_LOCAL_SOLVER_PREFERENCE'),
-            'astap_search_radius': None,
-        }
-        if os.environ.get('ZEMOSAIC_ASTAP_SEARCH_RADIUS'):
-            try:
-                self.env_solver_settings['astap_search_radius'] = float(os.environ['ZEMOSAIC_ASTAP_SEARCH_RADIUS'])
-            except ValueError:
-                self.env_solver_settings['astap_search_radius'] = None
-
-        effective_solver_config = {
-            'astap_path': self.env_solver_settings.get('astap_path') or '',
-            'astap_data_dir': self.env_solver_settings.get('astap_data_dir') or '',
-            'local_ansvr_path': self.env_solver_settings.get('local_ansvr_path') or '',
-            'api_key': self.env_solver_settings.get('api_key') or '',
-            'local_solver_preference': self.env_solver_settings.get('local_solver_preference') or 'none',
-            'astap_search_radius': self.env_solver_settings['astap_search_radius']
-                if self.env_solver_settings.get('astap_search_radius') is not None
-                else self.config.get('astap_default_search_radius', 3.0)
-        }
-        logger.info("Effective solver settings: %s", effective_solver_config)
 
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
@@ -156,6 +120,11 @@ class ZeMosaicGUI:
         # --- Tkinter Variables ---
         self.input_dir_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
+        self.astap_exe_path_var = tk.StringVar(value=self.config.get("astap_executable_path", ""))
+        self.astap_data_dir_var = tk.StringVar(value=self.config.get("astap_data_directory_path", ""))
+        self.astap_search_radius_var = tk.DoubleVar(value=self.config.get("astap_default_search_radius", 3.0))
+        self.astap_downsample_var = tk.IntVar(value=self.config.get("astap_default_downsample", 2))
+        self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
         self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
         
@@ -205,9 +174,6 @@ class ZeMosaicGUI:
         )
         self.master_tile_crop_percent_var = tk.DoubleVar(
             value=self.config.get("master_tile_crop_percent", 18.0) # 18% par côté par défaut si activé
-        )
-        self.re_solve_cropped_tiles_var = tk.BooleanVar(
-            value=self.config.get("re_solve_cropped_tiles", False)
         )
         # ---  ---
 
@@ -410,13 +376,34 @@ class ZeMosaicGUI:
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
 
+        # --- ASTAP Configuration Frame ---
+        astap_cfg_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        # ... (contenu de astap_cfg_frame) ...
+        astap_cfg_frame.pack(fill=tk.X, pady=(0,10)); astap_cfg_frame.columnconfigure(1, weight=1)
+        self.translatable_widgets["astap_config_frame_title"] = astap_cfg_frame
+        ttk.Label(astap_cfg_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = astap_cfg_frame.grid_slaves(row=0,column=0)[0]
+        ttk.Entry(astap_cfg_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = astap_cfg_frame.grid_slaves(row=0,column=2)[0]
+        ttk.Label(astap_cfg_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = astap_cfg_frame.grid_slaves(row=1,column=0)[0]
+        ttk.Entry(astap_cfg_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = astap_cfg_frame.grid_slaves(row=1,column=2)[0]
+
         # --- Parameters Frame ---
         params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
         # ... (contenu de params_frame) ...
         params_frame.pack(fill=tk.X, pady=(0,10))
-        self.translatable_widgets["mosaic_params_frame_title"] = params_frame
-        param_row_idx = 0
-
+        self.translatable_widgets["mosaic_astap_params_frame_title"] = params_frame
+        param_row_idx = 0 
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
         
         # --- Stacking Options Frame ---
         stacking_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10") 
@@ -552,18 +539,6 @@ class ZeMosaicGUI:
         crop_percent_note.grid(row=crop_opt_row, column=2, padx=(10,5), pady=3, sticky="ew")
         self.translatable_widgets["master_tile_crop_percent_note"] = crop_percent_note
         crop_opt_row += 1
-
-        self.re_solve_crop_label = ttk.Label(crop_options_frame, text="")
-        self.re_solve_crop_label.grid(row=crop_opt_row, column=0, padx=5, pady=3, sticky="w")
-        self.translatable_widgets["re_solve_cropped_tiles_label"] = self.re_solve_crop_label
-
-        self.re_solve_crop_check = ttk.Checkbutton(
-            crop_options_frame,
-            variable=self.re_solve_cropped_tiles_var
-        )
-        self.re_solve_crop_check.grid(row=crop_opt_row, column=1, padx=5, pady=3, sticky="w")
-        crop_opt_row += 1
-        self._update_crop_options_state()
         # --- FIN  CADRE DE ROGNAGE ---
 
         # --- Options d'Assemblage Final ---
@@ -614,23 +589,6 @@ class ZeMosaicGUI:
         self.log_text.config(yscrollcommand=log_scrollbar_y_text.set, xscrollcommand=log_scrollbar_x_text.set)
         log_scrollbar_y_text.pack(side=tk.RIGHT, fill=tk.Y); log_scrollbar_x_text.pack(side=tk.BOTTOM, fill=tk.X)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Initialiser les textes visibles des comboboxes selon la langue courante
-        self._refresh_combobox(self.norm_method_combo,
-                               self.stacking_normalize_method_var,
-                               self.norm_method_keys, "norm_method")
-        self._refresh_combobox(self.weight_method_combo,
-                               self.stacking_weighting_method_var,
-                               self.weight_method_keys, "weight_method")
-        self._refresh_combobox(self.reject_algo_combo,
-                               self.stacking_rejection_algorithm_var,
-                               self.reject_algo_keys, "reject_algo")
-        self._refresh_combobox(self.final_combine_combo,
-                               self.stacking_final_combine_method_var,
-                               self.combine_method_keys, "combine_method")
-        self._refresh_combobox(self.final_assembly_method_combo,
-                               self.final_assembly_method_var,
-                               self.assembly_method_keys, "assembly_method")
 
 
         self.scrollable_content_frame.update_idletasks()
@@ -721,19 +679,16 @@ class ZeMosaicGUI:
     def _update_crop_options_state(self, *args):
         """Active ou désactive le spinbox de pourcentage de rognage."""
         if not all(hasattr(self, attr) for attr in [
-            'apply_master_tile_crop_var',
-            'crop_percent_spinbox',
-            're_solve_crop_check'
+            'apply_master_tile_crop_var', 
+            'crop_percent_spinbox'
         ]):
             return # Widgets pas encore prêts
 
         try:
             if self.apply_master_tile_crop_var.get():
                 self.crop_percent_spinbox.config(state=tk.NORMAL)
-                self.re_solve_crop_check.config(state=tk.NORMAL)
             else:
                 self.crop_percent_spinbox.config(state=tk.DISABLED)
-                self.re_solve_crop_check.config(state=tk.DISABLED)
         except tk.TclError:
             pass # Widget peut avoir été détruit
 
@@ -821,6 +776,36 @@ class ZeMosaicGUI:
         dir_path = filedialog.askdirectory(title=self._tr("browse_output_title", "Select Output Folder"))
         if dir_path: self.output_dir_var.set(dir_path)
 
+    def _browse_and_save_astap_exe(self):
+        title = self._tr("select_astap_exe_title", "Select ASTAP Executable")
+        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+            new_path = zemosaic_config.ask_and_set_astap_path(self.config)
+            if new_path: self.astap_exe_path_var.set(new_path)
+            elif not self.config.get("astap_executable_path"):
+                messagebox.showwarning(self._tr("astap_path_title", "ASTAP Path"),
+                                       self._tr("astap_exe_not_set_warning", "ASTAP executable path is not set."),
+                                       parent=self.root)
+        else:
+            filetypes_loc = [(self._tr("executable_files", "Executable Files"), "*.exe"), (self._tr("all_files", "All Files"), "*.*")] if os.name == 'nt' else [(self._tr("all_files", "All Files"), "*")]
+            exe_path = filedialog.askopenfilename(title=self._tr("select_astap_exe_no_save_title", "Select ASTAP Executable (Not Saved)"), filetypes=filetypes_loc)
+            if exe_path: self.astap_exe_path_var.set(exe_path)
+
+    def _browse_and_save_astap_data_dir(self):
+        title = self._tr("select_astap_data_dir_title", "Select ASTAP Data Directory")
+        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+            new_data_dir = zemosaic_config.ask_and_set_astap_data_dir_path(self.config)
+            if new_data_dir: self.astap_data_dir_var.set(new_data_dir)
+            elif not self.config.get("astap_data_directory_path"):
+                messagebox.showwarning(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
+                                       self._tr("astap_data_dir_not_set_warning", "ASTAP data directory path is not set."),
+                                       parent=self.root)
+        else:
+            dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_no_save_title", "Select ASTAP Data Directory (Not Saved)"))
+            if dir_path: self.astap_data_dir_var.set(dir_path)
+            
+    def _browse_astap_data_dir(self): # Fallback non-saving browse
+        dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_title_simple", "Select ASTAP Data Directory"))
+        if dir_path: self.astap_data_dir_var.set(dir_path)
 
 
 
@@ -841,17 +826,8 @@ class ZeMosaicGUI:
                     def update_eta_label():
                         if hasattr(self.eta_var,'set') and callable(self.eta_var.set):
                             try: self.eta_var.set(eta_string_from_worker)
-                            except tk.TclError: pass
+                            except tk.TclError: pass 
                     if self.root.winfo_exists(): self.root.after_idle(update_eta_label)
-                if hasattr(self, 'progress_manager') and self.progress_manager:
-                    pm = self.progress_manager
-                    if hasattr(pm, 'set_remaining') and callable(pm.set_remaining):
-                        pm.set_remaining(eta_string_from_worker)
-                    elif hasattr(pm, 'remaining_time_var'):
-                        try:
-                            pm.remaining_time_var.set(eta_string_from_worker)
-                        except Exception:
-                            pass
                 is_control_message = True
             elif message_key_or_raw == "CHRONO_START_REQUEST":
                 if self.root.winfo_exists(): self.root.after_idle(self._start_gui_chrono)
@@ -1022,16 +998,13 @@ class ZeMosaicGUI:
         # 1. RÉCUPÉRER TOUTES les valeurs des variables Tkinter
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
-        astap_exe = self.env_solver_settings.get('astap_path') or ""
-        astap_data = self.env_solver_settings.get('astap_data_dir') or ""
+        astap_exe = self.astap_exe_path_var.get() 
+        astap_data = self.astap_data_dir_var.get()
         
         try:
-            if self.env_solver_settings.get('astap_search_radius') is not None:
-                astap_radius_val = self.env_solver_settings['astap_search_radius']
-            else:
-                astap_radius_val = self.config.get("astap_default_search_radius", 3.0)
-            astap_downsample_val = self.config.get("astap_default_downsample", 2)
-            astap_sensitivity_val = self.config.get("astap_default_sensitivity", 100)
+            astap_radius_val = self.astap_search_radius_var.get()
+            astap_downsample_val = self.astap_downsample_var.get()
+            astap_sensitivity_val = self.astap_sensitivity_var.get()
             cluster_thresh_val = self.cluster_threshold_var.get()
             
             stack_norm_method = self.stacking_normalize_method_var.get()
@@ -1071,6 +1044,15 @@ class ZeMosaicGUI:
             os.makedirs(output_dir, exist_ok=True)
         except OSError as e: 
             messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
+        if not (astap_exe and os.path.isfile(astap_exe)): 
+            messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
+        if not (astap_data and os.path.isdir(astap_data)): 
+            if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
+                                          self._tr("astap_data_dir_missing_or_invalid_continue_q", 
+                                                   path=astap_data,
+                                                   default_path=self.config.get("astap_data_directory_path","")),
+                                          icon='warning', parent=self.root):
+                return
 
 
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
@@ -1096,23 +1078,11 @@ class ZeMosaicGUI:
         self._log_message("log_key_processing_started", level="INFO")
         # ... (autres logs d'info) ...
 
-        solver_settings = {
-            'local_solver_preference': self.env_solver_settings.get('local_solver_preference', 'none'),
-            'astap_path': astap_exe,
-            'astap_data_dir': astap_data,
-            'astap_search_radius': astap_radius_val,
-            'astap_downsample': astap_downsample_val,
-            'astap_sensitivity': astap_sensitivity_val,
-            'api_key': self.env_solver_settings.get('api_key'),
-            'local_ansvr_path': self.env_solver_settings.get('local_ansvr_path'),
-        }
-
         worker_args = (
-            input_dir,
-            output_dir,
-            solver_settings,
-            cluster_thresh_val,
-            self._log_message,
+            input_dir, output_dir, astap_exe, astap_data, 
+            astap_radius_val, astap_downsample_val, astap_sensitivity_val, 
+            cluster_thresh_val, 
+            self._log_message, 
             stack_norm_method,
             stack_weight_method,
             stack_reject_algo,
@@ -1129,8 +1099,7 @@ class ZeMosaicGUI:
             # --- NOUVEAUX ARGUMENTS POUR LE ROGNAGE ---
             apply_master_tile_crop_val,
             master_tile_crop_percent_val,
-            self.save_final_uint16_var.get(),
-            self.re_solve_cropped_tiles_var.get()
+            self.save_final_uint16_var.get()
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
         

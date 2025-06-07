@@ -1,10 +1,9 @@
 {
-    "astap_path": "",
-    "astap_data_dir": "",
+    "astap_executable_path": "C:/Program Files/astap/astap.exe",
+    "astap_data_directory_path": "C:/Program Files/astap",
     "astap_default_search_radius": 3.0,
-  "astap_default_downsample": 2,
-  "astap_default_sensitivity": 100,
-  "cluster_panel_threshold": 0.5,
+    "astap_default_downsample": 2,
+    "astap_default_sensitivity": 100,
     "language": "en",
     "num_processing_workers": -1,
     "stacking_normalize_method": "linear_fit",
@@ -18,5 +17,7 @@
     "radial_feather_fraction": 0.8,
     "radial_shape_power": 2.0,
     "final_assembly_method": "reproject_coadd",
-    "save_final_as_uint16": false
+    "save_final_as_uint16": false,
+    "apply_master_tile_crop": true,
+    "master_tile_crop_percent": 18.0
 }

@@ -63,15 +63,10 @@ except ImportError:
 ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = False
 make_radial_weight_map_func = None
 try:
-    from .zemosaic_utils import make_radial_weight_map
+    from zemosaic_utils import make_radial_weight_map
     make_radial_weight_map_func = make_radial_weight_map
     ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
-except Exception:
-    try:
-        from zemosaic_utils import make_radial_weight_map
-        make_radial_weight_map_func = make_radial_weight_map
-        ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
-    except ImportError as e_util_rad:
+except ImportError as e_util_rad:
         print(f"AVERT (zemosaic_align_stack): Radial weighting: Erreur import make_radial_weight_map: {e_util_rad}")
 
 
@@ -546,21 +541,15 @@ def _calculate_image_weights_noise_variance(image_list: list[np.ndarray | None],
                 weights_for_this_img_array[..., c_idx] = calculated_weight
                 # _pcb(f"WeightNoiseVar: Img {original_image_idx}, Ch {c_idx}, Var={variance_ch:.2e}, PoidsRel={calculated_weight:.3f}", lvl="DEBUG_VERY_DETAIL")
         
-
         elif original_img_data_shape_ref.ndim == 2 and len(variances_for_current_img) == 1: # Monochrome
             variance_mono = variances_for_current_img[0]
             if np.isfinite(variance_mono) and variance_mono > 1e-18:
                 calculated_weight = min_overall_variance / variance_mono
             else:
                 calculated_weight = 1e-6
-            weights_for_this_img_array[:] = calculated_weight  # Appliquer à tous les pixels de l'image HW
+            weights_for_this_img_array[:] = calculated_weight # Appliquer à tous les pixels de l'image HW
             # _pcb(f"WeightNoiseVar: Img {original_image_idx} (Mono), Var={variance_mono:.2e}, PoidsRel={calculated_weight:.3f}", lvl="DEBUG_VERY_DETAIL")
-
-        # Normalisation pour que le poids maximal vaille 1.0
-        w_max = np.nanmax(weights_for_this_img_array)
-        if np.isfinite(w_max) and w_max > 0:
-            weights_for_this_img_array = weights_for_this_img_array / w_max
-
+        
         output_weights_list[original_image_idx] = weights_for_this_img_array
 
     # Pour les images qui n'ont pas pu être traitées (initialement None, ou erreur en cours de route)
@@ -863,15 +852,8 @@ def _calculate_image_weights_noise_fwhm(image_list: list[np.ndarray | None],
             output_weights_list_fwhm[i] = None
         elif i in final_calculated_weights_scalar_fwhm:
             scalar_w_fwhm = final_calculated_weights_scalar_fwhm[i]
-            w = np.full_like(original_image_data, scalar_w_fwhm, dtype=np.float32)
-
-            # Normalisation pour que le poids maximal vaille 1.0
-            w_max = np.nanmax(w)
-            if np.isfinite(w_max) and w_max > 0:
-                w = w / w_max
-
-            output_weights_list_fwhm[i] = w
-        else:
+            output_weights_list_fwhm[i] = np.full_like(original_image_data, scalar_w_fwhm, dtype=np.float32)
+        else: 
             _pcb("weight_fwhm_fallback_weight_one", lvl="DEBUG_DETAIL", img_idx=i)
             output_weights_list_fwhm[i] = np.ones_like(original_image_data, dtype=np.float32)
             

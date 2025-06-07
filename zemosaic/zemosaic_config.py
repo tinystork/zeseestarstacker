@@ -6,12 +6,11 @@ import tkinter.messagebox as mb
 
 CONFIG_FILE_NAME = "zemosaic_config.json"
 DEFAULT_CONFIG = {
-    "astap_path": "",
-    "astap_data_dir": "",
-    "astap_default_search_radius": 3.0,
+    "astap_executable_path": "",
+    "astap_data_directory_path": "", 
+    "astap_default_search_radius": 3.0, 
     "astap_default_downsample": 2, 
     "astap_default_sensitivity": 100,
-    "cluster_panel_threshold": 0.5,
     "language": "en",
     "num_processing_workers": -1, # -1 pour auto
     "stacking_normalize_method": "linear_fit",
@@ -28,9 +27,8 @@ DEFAULT_CONFIG = {
     "save_final_as_uint16": False,
     # --- CLES POUR LE ROGNAGE DES MASTER TUILES ---
     "apply_master_tile_crop": True,       # Désactivé par défaut
-    "master_tile_crop_percent": 18.0,     # Pourcentage par côté si activé (ex: 10%)
-    "re_solve_cropped_tiles": False,
-    # --- FIN CLES POUR LE ROGNAGE ---
+    "master_tile_crop_percent": 18.0      # Pourcentage par côté si activé (ex: 10%)
+    # --- FIN CLES POUR LE ROGNAGE --- 
 }
 
 def get_config_path():
@@ -121,6 +119,42 @@ def save_config(config_data):
 # Assurez-vous que tkinter.filedialog (fd) est importé si vous l'utilisez dans ces fonctions.
 # Par exemple :
 # import tkinter.filedialog as fd # Au début du fichier si ce n'est pas déjà fait globalement
+# ... (vos fonctions ask_and_set_astap_path, etc.)
+
+def ask_and_set_astap_path(current_config):
+    """Demande à l'utilisateur le chemin de l'exécutable ASTAP et met à jour la config."""
+    astap_path = fd.askopenfilename(
+        title="Sélectionner l'exécutable ASTAP",
+        filetypes=(("Fichiers exécutables", "*.exe"), ("Tous les fichiers", "*.*"))
+    )
+    if astap_path:
+        current_config["astap_executable_path"] = astap_path
+        if save_config(current_config):
+            mb.showinfo("Chemin ASTAP Défini", f"Chemin ASTAP défini à : {astap_path}", parent=None) # Spécifier parent si possible
+        return astap_path
+    return current_config.get("astap_executable_path", "")
+
+
+def ask_and_set_astap_data_dir_path(current_config):
+    """Demande à l'utilisateur le chemin du dossier de données ASTAP et met à jour la config."""
+    astap_data_dir = fd.askdirectory(
+        title="Sélectionner le dossier de données ASTAP (contenant G17, H17, etc.)"
+    )
+    if astap_data_dir:
+        current_config["astap_data_directory_path"] = astap_data_dir
+        if save_config(current_config):
+            mb.showinfo("Dossier Données ASTAP Défini", f"Dossier de données ASTAP défini à : {astap_data_dir}", parent=None)
+        return astap_data_dir
+    return current_config.get("astap_data_directory_path", "")
+
+
+def get_astap_executable_path():
+    config = load_config()
+    return config.get("astap_executable_path", "")
+
+def get_astap_data_directory_path():
+    config = load_config()
+    return config.get("astap_data_directory_path", "") # Retourne une chaîne vide si non défini
 
 def get_astap_default_search_radius():
     config = load_config()
@@ -133,11 +167,3 @@ def get_astap_default_downsample():
 def get_astap_default_sensitivity():
     config = load_config()
     return config.get("astap_default_sensitivity", DEFAULT_CONFIG["astap_default_sensitivity"])
-
-def get_astap_path():
-    config = load_config()
-    return config.get("astap_path", DEFAULT_CONFIG["astap_path"])
-
-def get_astap_data_dir():
-    config = load_config()
-    return config.get("astap_data_dir", DEFAULT_CONFIG["astap_data_dir"])
