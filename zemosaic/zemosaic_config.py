@@ -27,8 +27,11 @@ DEFAULT_CONFIG = {
     "save_final_as_uint16": False,
     # --- CLES POUR LE ROGNAGE DES MASTER TUILES ---
     "apply_master_tile_crop": True,       # Désactivé par défaut
-    "master_tile_crop_percent": 18.0      # Pourcentage par côté si activé (ex: 10%)
-    # --- FIN CLES POUR LE ROGNAGE --- 
+    "master_tile_crop_percent": 18.0,      # Pourcentage par côté si activé (ex: 10%)
+    # --- FIN CLES POUR LE ROGNAGE ---
+    "solver_method": "astap",
+    "astrometry_local_path": "",
+    "astrometry_api_key": ""
 }
 
 def get_config_path():
