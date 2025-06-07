@@ -169,163 +169,13 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(expand=True, fill=tk.BOTH)
 
-        # --- Section Choix Solveur (inchangée par rapport à ta version précédente) ---
-        solver_choice_frame = ttk.LabelFrame(main_frame,
-                                             text=self.parent_gui.tr("local_solver_choice_frame_title", default="Local Solver Preference"),
-                                             padding="10")
-        solver_choice_frame.pack(fill=tk.X, padx=5, pady=(0, 10))
-        ttk.Radiobutton(solver_choice_frame, text=self.parent_gui.tr("local_solver_choice_none", default="Do not use local solvers (use Astrometry.net web service if API key provided)"), variable=self.local_solver_choice_var, value="none", command=self._on_solver_choice_change).pack(anchor=tk.W, pady=2)
-        ttk.Radiobutton(solver_choice_frame, text=self.parent_gui.tr("local_solver_choice_astap", default="Use ASTAP (local)"), variable=self.local_solver_choice_var, value="astap", command=self._on_solver_choice_change).pack(anchor=tk.W, pady=2)
-        ttk.Radiobutton(solver_choice_frame, text=self.parent_gui.tr("local_solver_choice_ansvr", default="Use Astrometry.net Local (solve-field)"), variable=self.local_solver_choice_var, value="ansvr", command=self._on_solver_choice_change).pack(anchor=tk.W, pady=2)
-
-        # --- Cadre Clé API (utilise la variable du GUI parent) ---
-        api_key_frame = ttk.LabelFrame(main_frame,
-                                       text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"),
-                                       padding="5")
-        api_key_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        api_key_inner = ttk.Frame(api_key_frame)
-        api_key_inner.pack(fill=tk.X, padx=5, pady=(5, 0))
-        ttk.Label(api_key_inner,
-                  text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"),
-                  width=10).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Entry(api_key_inner, textvariable=self.parent_gui.astrometry_api_key_var, show="*", width=40).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        ttk.Label(api_key_frame,
-                  text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"),
-                  foreground="gray", font=("Arial", 8)).pack(anchor=tk.W, padx=10, pady=(2,5))
-
-        api_key_help_text_static = self.parent_gui.tr(
-            "msw_api_key_help_static",
-            default="Used for Astrometry.net web service:\n"
-                    "- If 'Astrometry.net per Panel' is chosen and no local solver is active.\n"
-                    "- As a final fallback if chosen local solvers fail (for anchor or panels)."
+        info_label = ttk.Label(
+            main_frame,
+            text=self.parent_gui.tr("solver_settings_moved", default="Astrometry solver settings are now available in Mosaic Options."),
+            justify=tk.LEFT,
+            wraplength=400,
         )
-        ttk.Label(api_key_frame, text=api_key_help_text_static, font=("Arial", 8, "italic"), justify=tk.LEFT, wraplength=380).pack(anchor=tk.W, padx=10, pady=(0,5))
-
-        # --- Configuration ASTAP (inchangée par rapport à ta version précédente) ---
-        self.astap_frame = ttk.LabelFrame(main_frame, text=self.parent_gui.tr("local_solver_astap_frame_title", default="ASTAP Configuration"), padding="10")
-        self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
-        # ... (contenu du cadre ASTAP - lignes pour path, data dir, search radius - comme avant)
-        astap_path_subframe = ttk.Frame(self.astap_frame); astap_path_subframe.pack(fill=tk.X, pady=(5, 2))
-        ttk.Label(astap_path_subframe, text=self.parent_gui.tr("local_solver_astap_path_label", default="ASTAP Executable Path:"), width=25, anchor="w").pack(side=tk.LEFT)
-        ttk.Button(astap_path_subframe, text=self.parent_gui.tr("browse", default="Browse..."), command=self._browse_astap_path, width=10).pack(side=tk.RIGHT, padx=(5,0))
-        ttk.Entry(astap_path_subframe, textvariable=self.astap_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
-        astap_data_subframe = ttk.Frame(self.astap_frame); astap_data_subframe.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(astap_data_subframe, text=self.parent_gui.tr("local_solver_astap_data_label", default="ASTAP Star Index Data Directory:"), width=25, anchor="w").pack(side=tk.LEFT)
-        ttk.Button(astap_data_subframe, text=self.parent_gui.tr("browse", default="Browse..."), command=self._browse_astap_data_dir, width=10).pack(side=tk.RIGHT, padx=(5,0))
-        ttk.Entry(astap_data_subframe, textvariable=self.astap_data_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
-        astap_radius_subframe = ttk.Frame(self.astap_frame); astap_radius_subframe.pack(fill=tk.X, pady=(2,5))
-        ttk.Label(astap_radius_subframe, text=self.parent_gui.tr("local_solver_astap_radius_label", default="ASTAP Search Radius (degrees, 0 for auto):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Spinbox(
-            astap_radius_subframe,
-            from_=0.0,
-            to=180.0,
-            increment=0.5,
-            textvariable=self.astap_search_radius_var,
-            width=6,
-            format="%.2f",
-        ).pack(side=tk.LEFT)
-
-        astap_down_subframe = ttk.Frame(self.astap_frame)
-        astap_down_subframe.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(
-            astap_down_subframe,
-            text=self.parent_gui.tr("local_solver_astap_downsample_label", default="ASTAP Downsample (-z):"),
-            width=35,
-            anchor="w",
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Spinbox(
-            astap_down_subframe,
-            from_=1,
-            to=8,
-            increment=1,
-            textvariable=self.astap_downsample_var,
-            width=6,
-        ).pack(side=tk.LEFT)
-
-        astap_sens_subframe = ttk.Frame(self.astap_frame)
-        astap_sens_subframe.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(
-            astap_sens_subframe,
-            text=self.parent_gui.tr("local_solver_astap_sens_label", default="ASTAP Sensitivity (-sens):"),
-            width=35,
-            anchor="w",
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Spinbox(
-            astap_sens_subframe,
-            from_=10,
-            to=1000,
-            increment=5,
-            textvariable=self.astap_sensitivity_var,
-            width=6,
-        ).pack(side=tk.LEFT)
-
-        cluster_thresh_subframe = ttk.Frame(self.astap_frame)
-        cluster_thresh_subframe.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(
-            cluster_thresh_subframe,
-            text=self.parent_gui.tr("panel_clustering_threshold_label", default="Panel Clustering Threshold (deg):"),
-            width=35,
-            anchor="w",
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Spinbox(
-            cluster_thresh_subframe,
-            from_=0.01,
-            to=5.0,
-            increment=0.01,
-            textvariable=self.cluster_threshold_var,
-            width=6,
-            format="%.2f",
-        ).pack(side=tk.LEFT)
-
-
-        # --- MODIFICATION : Configuration Astrometry.net Local (ansvr) avec deux boutons ---
-        self.ansvr_frame = ttk.LabelFrame(main_frame,
-                                     text=self.parent_gui.tr("local_solver_ansvr_frame_title", default="Local Astrometry.net (solve-field) Configuration"),
-                                     padding="10")
-        self.ansvr_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        # Cadre pour le label et le champ de saisie du chemin principal
-        ansvr_path_entry_frame = ttk.Frame(self.ansvr_frame)
-        ansvr_path_entry_frame.pack(fill=tk.X, pady=(5,2)) # Un peu de padding en bas pour espacer des boutons
-
-        ansvr_path_label = ttk.Label(ansvr_path_entry_frame,
-                                     text=self.parent_gui.tr("local_solver_ansvr_main_path_label", default="Path (Exe, .cfg, or Index Dir):"), # Label plus générique
-                                     width=25, anchor="w") # Augmenter légèrement la largeur si besoin
-        ansvr_path_label.pack(side=tk.LEFT, padx=(0,5)) # Un peu de padding à droite du label
-
-        ansvr_path_entry = ttk.Entry(ansvr_path_entry_frame, textvariable=self.local_ansvr_path_var)
-        ansvr_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        # Cadre pour les deux boutons "Browse", alignés à droite
-        ansvr_buttons_frame = ttk.Frame(self.ansvr_frame)
-        ansvr_buttons_frame.pack(fill=tk.X, pady=(0,5)) # Padding en bas pour espacer de la section suivante
-
-        # Sous-cadre pour aligner les boutons à droite de ansvr_buttons_frame
-        ansvr_buttons_sub_right_frame = ttk.Frame(ansvr_buttons_frame)
-        ansvr_buttons_sub_right_frame.pack(side=tk.RIGHT) # Aligner ce sous-cadre à droite
-
-        self.ansvr_browse_file_button = ttk.Button(ansvr_buttons_sub_right_frame, # Parent est le sous-cadre
-                                                   text=self.parent_gui.tr("browse_ansvr_file_button", default="Browse File... (.cfg/Exe)"),
-                                                   command=self._browse_ansvr_file, # Nouvelle méthode callback
-                                                   width=20) # Ajuster largeur si besoin
-        self.ansvr_browse_file_button.pack(side=tk.LEFT, padx=(0,5)) # Espacement entre les boutons
-
-        self.ansvr_browse_dir_button = ttk.Button(ansvr_buttons_sub_right_frame, # Parent est le sous-cadre
-                                                  text=self.parent_gui.tr("browse_ansvr_dir_button", default="Browse Index Dir..."),
-                                                  command=self._browse_ansvr_index_dir, # Nouvelle méthode callback
-                                                  width=20) # Ajuster largeur si besoin
-        self.ansvr_browse_dir_button.pack(side=tk.LEFT)
-        # --- FIN MODIFICATION SECTION ANSVR ---
-
-        # --- Info/Aide (Modifier la clé de traduction pour le nouveau texte) ---
-        info_label = ttk.Label(main_frame,
-                               text=self.parent_gui.tr("local_solver_info_text_v3", # Nouvelle clé pour le texte
-                                                       default="Select a local solver preference above. Paths are only needed for the selected solver.\n"
-                                                               "For Ansvr, you can point to `solve-field` exe, an `astrometry.cfg` file, or an Index Directory (a .cfg will be auto-generated)."),
-                               justify=tk.LEFT, wraplength=480) # Augmenter wraplength si le texte est plus long
-        info_label.pack(pady=(10,5), padx=5, fill=tk.X)
+        info_label.pack(pady=10, padx=5)
 
         # --- Boutons OK / Annuler (inchangés) ---
         button_frame = ttk.Frame(main_frame, padding="5")
@@ -340,7 +190,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                                     command=self._on_ok)
         ok_button.pack(side=tk.RIGHT)
 
-        print("DEBUG (LocalSolverSettingsWindow _build_ui): UI construite avec 2 boutons Browse pour Ansvr (V2).")
 
 
 
