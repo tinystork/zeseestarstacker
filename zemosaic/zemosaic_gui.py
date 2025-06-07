@@ -403,7 +403,12 @@ class ZeMosaicGUI:
 
         self.solver_combo = ttk.Combobox(solver_frame, state="readonly", width=20, textvariable=self.solver_choice_var)
         self.solver_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.solver_combo.bind("<<ComboboxSelected>>", lambda e: self._on_solver_choice_change())
+        self.solver_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e, c=self.solver_combo, v=self.solver_choice_var,
+                   keys=["astap", "astrometry"], p="solver":
+                (self._combo_to_key(e, c, v, keys, p), self._on_solver_choice_change())
+        )
 
         self.astrometry_subframe = ttk.Frame(solver_frame)
         self.astrometry_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
@@ -692,6 +697,7 @@ class ZeMosaicGUI:
         if hasattr(self, 'solver_combo'):
             solver_keys = ["astap", "astrometry"]
             self._refresh_combobox(self.solver_combo, self.solver_choice_var, solver_keys, "solver")
+            self._on_solver_choice_change()
         # ---  ---
         # Mise à jour des textes ETA et Temps Écoulé (déjà correct)
         if not self.is_processing:
