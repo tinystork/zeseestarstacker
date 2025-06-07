@@ -68,6 +68,17 @@ except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 
+# Flags used by the test suite to toggle optional features
+ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
+CALC_GRID_OPTIMIZED_AVAILABLE = False
+
+def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
+                                           drizzle_scale_factor: float = 1.0,
+                                           progress_callback: callable = None):
+    """Fallback optimized grid routine used in tests."""
+    return _calculate_final_mosaic_grid(panel_wcs_list, panel_shapes_hw_list,
+                                         drizzle_scale_factor, progress_callback)
+
 
 
 
