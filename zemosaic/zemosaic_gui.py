@@ -1121,6 +1121,17 @@ class ZeMosaicGUI:
         os.environ["ZEMOSAIC_LOCAL_ANSVR_PATH"] = astrometry_local_path_val
         os.environ["ZEMOSAIC_ASTROMETRY_API_KEY"] = astrometry_api_key_val
 
+        solver_settings = {
+            "local_solver_preference": solver_choice_val,
+            "local_ansvr_path": astrometry_local_path_val,
+            "api_key": astrometry_api_key_val,
+            "astap_path": astap_exe,
+            "astap_data_dir": astap_data,
+            "astap_search_radius": astap_radius_val,
+            "astap_downsample": astap_downsample_val,
+            "astap_sensitivity": astap_sensitivity_val,
+        }
+
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
         parsed_winsor_limits = (0.05, 0.05) 
         if stack_reject_algo == "winsorized_sigma_clip":
@@ -1145,10 +1156,11 @@ class ZeMosaicGUI:
         # ... (autres logs d'info) ...
 
         worker_args = (
-            input_dir, output_dir, astap_exe, astap_data, 
-            astap_radius_val, astap_downsample_val, astap_sensitivity_val, 
-            cluster_thresh_val, 
-            self._log_message, 
+            input_dir,
+            output_dir,
+            solver_settings,
+            cluster_thresh_val,
+            self._log_message,
             stack_norm_method,
             stack_weight_method,
             stack_reject_algo,

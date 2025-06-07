@@ -1100,11 +1100,7 @@ def assemble_final_mosaic_with_reproject_coadd(
 def run_hierarchical_mosaic(
     input_folder: str,
     output_folder: str,
-    astap_exe_path: str,
-    astap_data_dir_param: str,
-    astap_search_radius_config: float,
-    astap_downsample_config: int,
-    astap_sensitivity_config: int,
+    solver_settings: dict | None,
     cluster_threshold_config: float,
     progress_callback: callable,
     stack_norm_method: str,
@@ -1131,6 +1127,12 @@ def run_hierarchical_mosaic(
     """
     pcb = lambda msg_key, prog=None, lvl="INFO", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
     
+    solver_settings = solver_settings or {}
+    astap_exe_path = solver_settings.get("astap_path", zemosaic_config.get_astap_executable_path())
+    astap_data_dir_param = solver_settings.get("astap_data_dir", zemosaic_config.get_astap_data_directory_path())
+    astap_search_radius_config = solver_settings.get("astap_search_radius", zemosaic_config.get_astap_default_search_radius())
+    astap_downsample_config = solver_settings.get("astap_downsample", zemosaic_config.get_astap_default_downsample())
+    astap_sensitivity_config = solver_settings.get("astap_sensitivity", zemosaic_config.get_astap_default_sensitivity())
     def update_gui_eta(eta_seconds_total):
         if progress_callback and callable(progress_callback):
             eta_str = "--:--:--"

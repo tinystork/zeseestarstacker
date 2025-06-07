@@ -277,7 +277,7 @@ python -m seestar.scripts.run_mosaic INPUT_DIR OUTPUT_DIR \
     --astap-data-dir /path/to/catalogs
 ```
 
-Solver options correspond to the `ZEMOSAIC_*` environment variables used by the GUI.
+Solver options correspond to the `ZEMOSAIC_*` environment variables used by the GUI. These values can be configured from the **Mosaic Options** window.
 When calling the worker from Python, gather them into a `solver_settings` dictionary:
 
 ```python
