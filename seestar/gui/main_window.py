@@ -3243,7 +3243,7 @@ class SeestarStackerGUI:
             print("DEBUG (GUI): Création de l'instance MosaicSettingsWindow...")
             # Passer 'self' (l'instance SeestarStackerGUI) à la fenêtre enfant
             # pour qu'elle puisse mettre à jour le flag mosaic_mode_active etc.
-            mosaic_window = MosaicSettingsWindow(parent_gui=self)
+            mosaic_window = MosaicSettingsWindow(parent_gui=self, translate_func=self.tr)
             self._mosaic_settings_window_instance = mosaic_window # Stocker référence (optionnel)
             print("DEBUG (GUI): Instance MosaicSettingsWindow créée.")
             # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.

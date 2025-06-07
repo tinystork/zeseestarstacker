@@ -9,13 +9,21 @@ VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'gaussian', 'lanczos2', 'la
 
 
 class MosaicSettingsWindow(tk.Toplevel):
-    def __init__(self, parent_gui):
+    def __init__(self, parent_gui, translate_func=None):
         print("DEBUG (MosaicSettingsWindow __init__ V4 - Trad): Initialisation...")
         if not hasattr(parent_gui, 'root') or not parent_gui.root.winfo_exists():
              raise ValueError("Parent GUI invalide pour MosaicSettingsWindow")
 
         super().__init__(parent_gui.root)
-        self.parent_gui = parent_gui # Stocker la référence au GUI parent pour accéder à .tr()
+        self.parent_gui = parent_gui
+        # Fonction de traduction à utiliser pour tous les textes de l'UI.
+        if translate_func is None and hasattr(parent_gui, "tr"):
+            self.tr = parent_gui.tr
+        elif callable(translate_func):
+            self.tr = translate_func
+        else:
+            # Fallback : renvoie la clé ou le texte par défaut si fourni
+            self.tr = lambda key, default=None: default if default is not None else key
         self.withdraw() 
 
         # --- 1. Récupération des settings existants et des valeurs par défaut ---
@@ -65,7 +73,7 @@ class MosaicSettingsWindow(tk.Toplevel):
         # --- FIN INITIALISATION VARIABLES TKINTER LOCALES (DÉPLACÉES) ---
 
         # --- 3. Configuration de la fenêtre Toplevel ---
-        self.title(self.parent_gui.tr("mosaic_settings_title", default="Mosaic Options"))
+        self.title(self.tr("mosaic_settings_title", default="Mosaic Options"))
         self.transient(parent_gui.root) 
         
         # --- 4. Construction de l'Interface Utilisateur (Widgets) ---
@@ -111,45 +119,45 @@ class MosaicSettingsWindow(tk.Toplevel):
         main_frame.pack(expand=True, fill=tk.BOTH)
 
         # --- 1. Section Activation ---
-        activation_frame = ttk.LabelFrame(main_frame, 
-                                          text=self.parent_gui.tr("mosaic_activation_frame_title", default="Activation"), 
+        activation_frame = ttk.LabelFrame(main_frame,
+                                          text=self.tr("mosaic_activation_frame_title", default="Activation"),
                                           padding="5")
         activation_frame.pack(fill=tk.X, pady=(0, 10), padx=5)
-        self.activate_check = ttk.Checkbutton(activation_frame, 
-                                            text=self.parent_gui.tr("mosaic_activate_label", default="Enable Mosaic Processing Mode"), # Réutilisation de la clé existante
+        self.activate_check = ttk.Checkbutton(activation_frame,
+                                            text=self.tr("mosaic_activate_label", default="Enable Mosaic Processing Mode"), # Réutilisation de la clé existante
                                             variable=self.local_mosaic_active_var, command=self._update_options_state)
         self.activate_check.pack(anchor=tk.W, padx=5, pady=5)
 
         # --- 2. Cadre Mode d'Alignement ---
-        self.alignment_mode_frame = ttk.LabelFrame(main_frame, 
-                                                 text=self.parent_gui.tr("mosaic_alignment_method_frame_title", default="Mosaic Alignment Method"), 
+        self.alignment_mode_frame = ttk.LabelFrame(main_frame,
+                                                 text=self.tr("mosaic_alignment_method_frame_title", default="Mosaic Alignment Method"),
                                                  padding="5")
         self.alignment_mode_frame.pack(fill=tk.X, pady=5, padx=5) 
-        ttk.Radiobutton(self.alignment_mode_frame, 
-                        text=self.parent_gui.tr("mosaic_align_local_fast_fallback_label", default="Fast Local + WCS Fallback (Recommended)"),
+        ttk.Radiobutton(self.alignment_mode_frame,
+                        text=self.tr("mosaic_align_local_fast_fallback_label", default="Fast Local + WCS Fallback (Recommended)"),
                         variable=self.local_mosaic_align_mode_var, value="local_fast_fallback", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
-        ttk.Radiobutton(self.alignment_mode_frame, 
-                        text=self.parent_gui.tr("mosaic_align_local_fast_only_label", default="Fast Local Only (Strict)"),
+        ttk.Radiobutton(self.alignment_mode_frame,
+                        text=self.tr("mosaic_align_local_fast_only_label", default="Fast Local Only (Strict)"),
                         variable=self.local_mosaic_align_mode_var, value="local_fast_only", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
-        ttk.Radiobutton(self.alignment_mode_frame, 
-                        text=self.parent_gui.tr("mosaic_align_astrometry_per_panel_label", default="Astrometry.net per Panel (Slower)"),
+        ttk.Radiobutton(self.alignment_mode_frame,
+                        text=self.tr("mosaic_align_astrometry_per_panel_label", default="Astrometry.net per Panel (Slower)"),
                         variable=self.local_mosaic_align_mode_var, value="astrometry_per_panel", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
 
         # --- 3. Cadre Options FastAligner ---
-        self.fastaligner_options_frame = ttk.LabelFrame(main_frame, 
-                                                      text=self.parent_gui.tr("fastaligner_tuning_frame_title", default="FastAligner Tuning (for Local Alignment)"), 
+        self.fastaligner_options_frame = ttk.LabelFrame(main_frame,
+                                                      text=self.tr("fastaligner_tuning_frame_title", default="FastAligner Tuning (for Local Alignment)"),
                                                       padding="5")
         # Ce cadre est packé conditionnellement par _update_options_state
 
         fa_params_config = [
-            (self.parent_gui.tr("fa_orb_features_label", default="ORB Features:"), 
-             self.local_fastalign_orb_features_var, 1000.0, 8000.0, 100.0, "%.0f"), 
-            (self.parent_gui.tr("fa_min_abs_matches_label", default="Min Abs. Matches:"), 
+            (self.tr("fa_orb_features_label", default="ORB Features:"),
+             self.local_fastalign_orb_features_var, 1000.0, 8000.0, 100.0, "%.0f"),
+            (self.tr("fa_min_abs_matches_label", default="Min Abs. Matches:"),
              self.local_fastalign_min_abs_matches_var, 1.0, 50.0, 1.0, "%.0f"),
-            (self.parent_gui.tr("fa_min_ransac_inliers_label", default="Min RANSAC Inliers:"), 
+            (self.tr("fa_min_ransac_inliers_label", default="Min RANSAC Inliers:"),
              self.local_fastalign_min_ransac_var, 1.0, 20.0, 1.0, "%.0f"),
-            (self.parent_gui.tr("fa_ransac_thresh_label", default="RANSAC Thresh (px):"), 
-             self.local_fastalign_ransac_thresh_var, 1.0, 15.0, 0.1, "%.1f") 
+            (self.tr("fa_ransac_thresh_label", default="RANSAC Thresh (px):"),
+             self.local_fastalign_ransac_thresh_var, 1.0, 15.0, 0.1, "%.1f")
         ]
 
         for label_text_key, tk_var_instance, from_val, to_val, incr_val, fmt_value in fa_params_config:
@@ -167,39 +175,39 @@ class MosaicSettingsWindow(tk.Toplevel):
 
 
         # --- 4. Cadre Options Drizzle Mosaïque ---
-        self.drizzle_options_frame = ttk.LabelFrame(main_frame, 
-                                                  text=self.parent_gui.tr("mosaic_drizzle_options_frame", default="Mosaic Drizzle Options"), # Clé existante
+        self.drizzle_options_frame = ttk.LabelFrame(main_frame,
+                                                  text=self.tr("mosaic_drizzle_options_frame", default="Mosaic Drizzle Options"), # Clé existante
                                                   padding="5")
         self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
         
         kernel_frame = ttk.Frame(self.drizzle_options_frame, padding=5); kernel_frame.pack(fill=tk.X)
-        ttk.Label(kernel_frame, 
-                  text=self.parent_gui.tr("mosaic_drizzle_kernel_label", default="Kernel:"), # Clé existante
+        ttk.Label(kernel_frame,
+                  text=self.tr("mosaic_drizzle_kernel_label", default="Kernel:"), # Clé existante
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.local_drizzle_kernel_var, values=VALID_DRIZZLE_KERNELS, state="readonly", width=12); self.kernel_combo.pack(side=tk.LEFT, padx=5)
         
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame, padding=5); pixfrac_frame.pack(fill=tk.X)
-        ttk.Label(pixfrac_frame, 
-                  text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), # Clé existante
+        ttk.Label(pixfrac_frame,
+                  text=self.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), # Clé existante
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=2.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         
         fillval_frame = ttk.Frame(self.drizzle_options_frame, padding=5); fillval_frame.pack(fill=tk.X)
-        ttk.Label(fillval_frame, 
-                  text=self.parent_gui.tr("mosaic_drizzle_fillval_label", default="Fill Value:"), # Nouvelle clé
+        ttk.Label(fillval_frame,
+                  text=self.tr("mosaic_drizzle_fillval_label", default="Fill Value:"), # Nouvelle clé
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.fillval_entry = ttk.Entry(fillval_frame, textvariable=self.local_drizzle_fillval_var, width=7, justify=tk.RIGHT); self.fillval_entry.pack(side=tk.LEFT, padx=5)
         
         wht_frame = ttk.Frame(self.drizzle_options_frame, padding=5); wht_frame.pack(fill=tk.X)
-        ttk.Label(wht_frame, 
-                  text=self.parent_gui.tr("mosaic_drizzle_wht_thresh_label", default="Low WHT Mask (%):"), # Nouvelle clé
+        ttk.Label(wht_frame,
+                  text=self.tr("mosaic_drizzle_wht_thresh_label", default="Low WHT Mask (%):"), # Nouvelle clé
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.wht_spinbox = ttk.Spinbox(wht_frame, from_=0, to=100, increment=1, textvariable=self.local_drizzle_wht_thresh_display_var, width=7, justify=tk.RIGHT, format="%.0f"); self.wht_spinbox.pack(side=tk.LEFT, padx=5)
         # NOUVEAU BLOC : Facteur d'échelle Mosaïque
         mosaic_scale_frame = ttk.Frame(self.drizzle_options_frame, padding=5)
         mosaic_scale_frame.pack(fill=tk.X)
         ttk.Label(mosaic_scale_frame,
-                text=self.parent_gui.tr("mosaic_scale_label", default="Scale Factor:"), # Nouvelle clé
+                text=self.tr("mosaic_scale_label", default="Scale Factor:"), # Nouvelle clé
                 width=15).pack(side=tk.LEFT, padx=(0,5))
         
         # Boutons radio x1, x2, x3, x4
@@ -212,12 +220,12 @@ class MosaicSettingsWindow(tk.Toplevel):
         button_frame = ttk.Frame(main_frame, padding="5")
         button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0)) 
         
-        self.cancel_button = ttk.Button(button_frame, 
-                                       text=self.parent_gui.tr("cancel", default="Cancel"), # Clé globale 'cancel'
+        self.cancel_button = ttk.Button(button_frame,
+                                       text=self.tr("cancel", default="Cancel"), # Clé globale 'cancel'
                                        command=self._on_cancel)
         self.cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
-        self.ok_button = ttk.Button(button_frame, 
-                                    text=self.parent_gui.tr("ok", default="OK"), # Clé globale 'ok'
+        self.ok_button = ttk.Button(button_frame,
+                                    text=self.tr("ok", default="OK"), # Clé globale 'ok'
                                     command=self._on_ok)
         self.ok_button.pack(side=tk.RIGHT)
 
@@ -348,8 +356,8 @@ class MosaicSettingsWindow(tk.Toplevel):
                 api_key_potentially_needed = True
 
         if is_mosaic_enabled_ui and api_key_potentially_needed and not api_key_value:
-            warn_title = self.parent_gui.tr("warning", default="Warning")
-            warn_msg = self.parent_gui.tr(
+            warn_title = self.tr("warning", default="Warning")
+            warn_msg = self.tr(
                 "msw_api_key_missing_warning",
                 default="Astrometry.net API Key is missing. Plate solving for mosaic (anchor or panels) "
                         "might fail if local solvers are not configured or also fail. Continue anyway?"
