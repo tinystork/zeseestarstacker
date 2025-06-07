@@ -1454,18 +1454,21 @@ def assemble_final_mosaic_with_reproject_coadd(
                                     lvl="DEBUG_DETAIL",
                                 )
 
-                                try:
-                                    center = (
-                                        data_to_use_for_assembly.shape[1] / 2,
-                                        data_to_use_for_assembly.shape[0] / 2,
-                                    )
-                                    ra_hint, dec_hint = wcs_to_use_for_assembly.wcs_pix2world(
-                                        [[center[0], center[1]]], 0
-                                    )[0]
-                                except Exception:
-                                    ra_hint, dec_hint = None, None
+                                use_radec_hints = bool((solver_settings or {}).get("use_radec_hints", False))
+                                ra_hint, dec_hint = None, None
+                                if use_radec_hints:
+                                    try:
+                                        center = (
+                                            data_to_use_for_assembly.shape[1] / 2,
+                                            data_to_use_for_assembly.shape[0] / 2,
+                                        )
+                                        ra_hint, dec_hint = wcs_to_use_for_assembly.wcs_pix2world(
+                                            [[center[0], center[1]]], 0
+                                        )[0]
+                                    except Exception:
+                                        ra_hint, dec_hint = None, None
 
-                                if ra_hint is not None and dec_hint is not None:
+                                if use_radec_hints and ra_hint is not None and dec_hint is not None:
                                     header_for_solver['CRVAL1'] = ra_hint
                                     header_for_solver['CRVAL2'] = dec_hint
                                     header_for_solver['RA'] = ra_hint
