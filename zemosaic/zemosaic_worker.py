@@ -79,6 +79,9 @@ except ImportError as e:
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
 CALC_GRID_OPTIMIZED_AVAILABLE = False
 
+# Global storage for solver settings so helper functions can access
+GLOBAL_SOLVER_SETTINGS = {}
+
 def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
                                            drizzle_scale_factor: float = 1.0,
                                            progress_callback: callable = None):
@@ -200,8 +203,18 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
     # Utilisation de clés pour les messages utilisateur
     _log_and_callback("calcgrid_info_start_calc", num_wcs_shapes=num_initial_inputs, scale_factor=drizzle_scale_factor, level="DEBUG_DETAIL", callback=progress_callback)
     
-    if not (REPROJECT_AVAILABLE and find_optimal_celestial_wcs):
-        _log_and_callback("calcgrid_error_reproject_unavailable", level="ERROR", callback=progress_callback); return None, None
+    if not REPROJECT_AVAILABLE:
+        _log_and_callback("calcgrid_error_reproject_unavailable", level="ERROR", callback=progress_callback)
+        return None, None
+
+    if not find_optimal_celestial_wcs:
+        logger.warning("find_optimal_celestial_wcs unavailable, using fallback if possible")
+        if CALC_GRID_OPTIMIZED_AVAILABLE and callable(_calculate_final_mosaic_grid_optimized):
+            return _calculate_final_mosaic_grid_optimized(
+                panel_wcs_list, panel_shapes_hw_list, drizzle_scale_factor
+            )
+        _log_and_callback("calcgrid_error_reproject_unavailable", level="ERROR", callback=progress_callback)
+        return None, None
     if not (ASTROPY_AVAILABLE and u and Angle):
         _log_and_callback("calcgrid_error_astropy_unavailable", level="ERROR", callback=progress_callback); return None, None
     if num_initial_inputs == 0:
@@ -338,6 +351,8 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
 
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 
+    solver_settings = GLOBAL_SOLVER_SETTINGS
+
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils):
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
         return None, None, None
@@ -421,15 +436,48 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
     if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
         _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
         wcs_brute = zemosaic_astrometry.solve_with_astap(
-            image_fits_path=file_path, original_fits_header=header_orig, 
-            astap_exe_path=astap_exe_path, astap_data_dir=astap_data_dir, 
-            search_radius_deg=astap_search_radius, downsample_factor=astap_downsample, 
-            sensitivity=astap_sensitivity, timeout_sec=astap_timeout_seconds, 
+            image_fits_path=file_path, original_fits_header=header_orig,
+            astap_exe_path=astap_exe_path, astap_data_dir=astap_data_dir,
+            search_radius_deg=astap_search_radius, downsample_factor=astap_downsample,
+            sensitivity=astap_sensitivity, timeout_sec=astap_timeout_seconds,
             update_original_header_in_place=True, # Important que le header soit mis à jour
             progress_callback=progress_callback
         )
-        if wcs_brute: _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
-        else: _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
+        if wcs_brute:
+            _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
+        else:
+            _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
+
+        # --- Fallback Astrometry local puis web -----------------------------
+        if wcs_brute is None:
+            _pcb_local("getwcs_info_try_local_astrometry", lvl="INFO_DETAIL", filename=filename)
+            astrometry_local_path = solver_settings.get(
+                "astrometry_local_path", zemosaic_config.get_astrometry_local_path()
+            )
+            if astrometry_local_path:
+                wcs_brute = zemosaic_astrometry.solve_with_astrometry_local(
+                    file_path, header_orig,
+                    local_ansvr_path=astrometry_local_path,
+                    timeout_sec=180,
+                    progress_callback=progress_callback
+                )
+                if wcs_brute:
+                    _pcb_local("getwcs_info_astrometry_local_ok", lvl="INFO_DETAIL", filename=filename)
+
+        if wcs_brute is None:
+            _pcb_local("getwcs_info_try_web_astrometry", lvl="INFO_DETAIL", filename=filename)
+            astrometry_api_key = solver_settings.get(
+                "astrometry_api_key", zemosaic_config.get_astrometry_api_key()
+            )
+            if astrometry_api_key:
+                wcs_brute = zemosaic_astrometry.solve_with_astrometry_net(
+                    file_path, header_orig,
+                    api_key=astrometry_api_key,
+                    timeout_sec=300,
+                    progress_callback=progress_callback
+                )
+                if wcs_brute:
+                    _pcb_local("getwcs_info_astrometry_web_ok", lvl="INFO_DETAIL", filename=filename)
     elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
         _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
         # Action de déplacement sera gérée par le check suivant
@@ -1133,8 +1181,10 @@ def run_hierarchical_mosaic(
     Orchestre le traitement de la mosaïque hiérarchique.
     """
     pcb = lambda msg_key, prog=None, lvl="INFO", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
-    
+
+    global GLOBAL_SOLVER_SETTINGS
     solver_settings = solver_settings or {}
+    GLOBAL_SOLVER_SETTINGS = solver_settings
     astap_exe_path = solver_settings.get("astap_path", zemosaic_config.get_astap_executable_path())
     astap_data_dir_param = solver_settings.get("astap_data_dir", zemosaic_config.get_astap_data_directory_path())
     astap_search_radius_config = solver_settings.get("astap_search_radius", zemosaic_config.get_astap_default_search_radius())

@@ -10,6 +10,7 @@ import subprocess
 # import shutil # Plus utilisé directement si on nettoie manuellement
 import gc
 import logging
+from seestar.alignment.astrometry_solver import AstrometrySolver
 
 logger = logging.getLogger("ZeMosaicAstrometry")
 # ... (pas besoin de reconfigurer le logger ici s'il hérite du worker)
@@ -25,9 +26,52 @@ try:
 except ImportError:
     logger.error("Astropy non installée. Certaines fonctionnalités de zemosaic_astrometry seront limitées.")
     ASTROPY_AVAILABLE_ASTROMETRY = False
-    class AstropyWCS: pass 
+    class AstropyWCS: pass
     class FITSFixedWarning(Warning): pass
     u = None
+
+
+def solve_with_astrometry_local(image_fits_path: str,
+                                original_fits_header,
+                                local_ansvr_path: str,
+                                timeout_sec: int = 180,
+                                progress_callback=None):
+    """Essaye ansvr (Astrometry local). Retourne WCS ou None."""
+    solver = AstrometrySolver(progress_callback=progress_callback)
+    settings = {
+        "local_solver_preference": "ansvr",
+        "local_ansvr_path": local_ansvr_path,
+        "ansvr_timeout_sec": timeout_sec,
+        "api_key": "",
+        "use_radec_hints": False,
+    }
+    return solver.solve(
+        image_fits_path,
+        original_fits_header,
+        settings,
+        update_header_with_solution=True,
+    )
+
+
+def solve_with_astrometry_net(image_fits_path: str,
+                              original_fits_header,
+                              api_key: str,
+                              timeout_sec: int = 300,
+                              progress_callback=None):
+    """Essaye Astrometry.net Web. Retourne WCS ou None."""
+    solver = AstrometrySolver(progress_callback=progress_callback)
+    settings = {
+        "local_solver_preference": "none",
+        "api_key": api_key,
+        "astrometry_net_timeout_sec": timeout_sec,
+        "use_radec_hints": False,
+    }
+    return solver.solve(
+        image_fits_path,
+        original_fits_header,
+        settings,
+        update_header_with_solution=True,
+    )
 
 
 def _calculate_pixel_scale_from_header(header: fits.Header, progress_callback: callable = None) -> float | None:
