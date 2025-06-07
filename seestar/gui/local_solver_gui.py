@@ -20,7 +20,16 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         """
         super().__init__(parent_gui.root)
         self.parent_gui = parent_gui
-        self.withdraw() # Cacher pendant la configuration
+        self.withdraw()  # Cacher pendant la configuration
+
+        # Assurer la présence d'un dictionnaire de configuration utilisable
+        try:
+            self.config = getattr(self.parent_gui, "config")
+        except AttributeError:
+            try:
+                self.config = zemosaic_config.load_config()
+            except Exception:
+                self.config = zemosaic_config.DEFAULT_CONFIG.copy()
 
         self.title(self.parent_gui.tr("local_solver_window_title", default="Local Astrometry Solvers Configuration"))
         self.transient(parent_gui.root)
@@ -57,15 +66,16 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         )
 
         self.astap_downsample_var = tk.IntVar(
-            value=self.parent_gui.config.get('astap_default_downsample', 2)
+            value=self.config.get("astap_default_downsample", 2)
         )
 
         self.astap_sensitivity_var = tk.IntVar(
-            value=self.parent_gui.config.get('astap_default_sensitivity', 100)
+            value=self.config.get("astap_default_sensitivity", 100)
         )
 
         self.cluster_threshold_var = tk.DoubleVar(
-            value=self.parent_gui.config.get('cluster_panel_threshold', 0.5)
+            value=self.config.get("cluster_panel_threshold", 0.5)
+
         )
 
 
@@ -592,14 +602,23 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         except Exception:
             self.parent_gui.settings.astrometry_api_key = ''
 
-        self.parent_gui.config['astap_default_downsample'] = int(astap_downsample)
-        self.parent_gui.config['astap_default_sensitivity'] = int(astap_sensitivity)
-        self.parent_gui.config['cluster_panel_threshold'] = float(cluster_threshold)
+        self.config['astap_default_downsample'] = int(astap_downsample)
+        self.config['astap_default_sensitivity'] = int(astap_sensitivity)
+        self.config['cluster_panel_threshold'] = float(cluster_threshold)
+        if hasattr(self.parent_gui, 'config'):
+            self.parent_gui.config.update({
+                'astap_default_downsample': int(astap_downsample),
+                'astap_default_sensitivity': int(astap_sensitivity),
+                'cluster_panel_threshold': float(cluster_threshold),
+            })
+
         if hasattr(self.parent_gui, 'cluster_threshold_var'):
             self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
         try:
             from zemosaic import zemosaic_config
-            zemosaic_config.save_config(self.parent_gui.config)
+
+            zemosaic_config.save_config(self.config)
+
         except Exception:
             pass
         
