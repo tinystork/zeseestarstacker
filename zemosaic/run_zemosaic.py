@@ -6,6 +6,19 @@ import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
 import os
 import logging
+from pathlib import Path
+
+# When run directly ("python zemosaic/run_zemosaic.py"), Python does not
+# treat this file as part of the ``zemosaic`` package, which causes the
+# relative imports below to fail.  If ``__package__`` is empty, we add the
+# project root to ``sys.path`` and set ``__package__`` manually so the
+# subsequent relative imports work as expected.
+if not __package__:
+    current_dir = Path(__file__).resolve().parent
+    project_root = current_dir.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    __package__ = "zemosaic"
 
 # Determine verbosity from environment variable or command-line flag
 _verbose_env = os.getenv("SEESTAR_VERBOSE", "")
