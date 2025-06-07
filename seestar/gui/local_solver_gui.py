@@ -4,6 +4,7 @@ Module pour la fenêtre de configuration des solveurs astrométriques locaux.
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os # Pour les opérations sur les chemins
+from zemosaic import zemosaic_config
 
 class LocalSolverSettingsWindow(tk.Toplevel):
     """
@@ -48,13 +49,23 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.astap_data_dir_var = tk.StringVar(
             value=getattr(self.parent_gui.settings, 'astap_data_dir', "")
         )
-        self.astap_search_radius_var = tk.DoubleVar( # Utiliser DoubleVar pour le Spinbox
-            value=getattr(self.parent_gui.settings, 'astap_search_radius', 30.0) # Défaut 30 deg
+        self.astap_search_radius_var = tk.DoubleVar(
+            value=getattr(self.parent_gui.settings, 'astap_search_radius', 30.0)
         )
-        print(f"DEBUG (LocalSolverSettingsWindow __init__): astap_search_radius_var initialisée à {self.astap_search_radius_var.get()}.") # DEBUG
+        print(
+            f"DEBUG (LocalSolverSettingsWindow __init__): astap_search_radius_var initialisée à {self.astap_search_radius_var.get()}."
+        )
 
-        self.use_radec_hints_var = tk.BooleanVar(
-            value=getattr(self.parent_gui.settings, 'use_radec_hints', False)
+        self.astap_downsample_var = tk.IntVar(
+            value=self.parent_gui.config.get('astap_default_downsample', 2)
+        )
+
+        self.astap_sensitivity_var = tk.IntVar(
+            value=self.parent_gui.config.get('astap_default_sensitivity', 100)
+        )
+
+        self.cluster_threshold_var = tk.DoubleVar(
+            value=self.parent_gui.config.get('cluster_panel_threshold', 0.5)
         )
 
 
@@ -210,11 +221,57 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             format="%.2f",
         ).pack(side=tk.LEFT)
 
-        ttk.Checkbutton(
-            self.astap_frame,
-            text=self.parent_gui.tr("use_radec_hints_label", default="Use FITS RA/DEC hints"),
-            variable=self.use_radec_hints_var,
-        ).pack(anchor=tk.W)
+        astap_down_subframe = ttk.Frame(self.astap_frame)
+        astap_down_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            astap_down_subframe,
+            text=self.parent_gui.tr("local_solver_astap_downsample_label", default="ASTAP Downsample (-z):"),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            astap_down_subframe,
+            from_=1,
+            to=8,
+            increment=1,
+            textvariable=self.astap_downsample_var,
+            width=6,
+        ).pack(side=tk.LEFT)
+
+        astap_sens_subframe = ttk.Frame(self.astap_frame)
+        astap_sens_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            astap_sens_subframe,
+            text=self.parent_gui.tr("local_solver_astap_sens_label", default="ASTAP Sensitivity (-sens):"),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            astap_sens_subframe,
+            from_=10,
+            to=1000,
+            increment=5,
+            textvariable=self.astap_sensitivity_var,
+            width=6,
+        ).pack(side=tk.LEFT)
+
+        cluster_thresh_subframe = ttk.Frame(self.astap_frame)
+        cluster_thresh_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            cluster_thresh_subframe,
+            text=self.parent_gui.tr("panel_clustering_threshold_label", default="Panel Clustering Threshold (deg):"),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            cluster_thresh_subframe,
+            from_=0.01,
+            to=5.0,
+            increment=0.01,
+            textvariable=self.cluster_threshold_var,
+            width=6,
+            format="%.2f",
+        ).pack(side=tk.LEFT)
 
 
         # --- MODIFICATION : Configuration Astrometry.net Local (ansvr) avec deux boutons ---
@@ -495,8 +552,10 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         solver_choice = self.local_solver_choice_var.get()
         astap_path = self.astap_path_var.get().strip()
         astap_data_dir = self.astap_data_dir_var.get().strip()
-        astap_radius = self.astap_search_radius_var.get() # Lire la valeur du DoubleVar
-        use_radec_hints = self.use_radec_hints_var.get()
+        astap_radius = self.astap_search_radius_var.get()
+        astap_downsample = self.astap_downsample_var.get()
+        astap_sensitivity = self.astap_sensitivity_var.get()
+        cluster_threshold = self.cluster_threshold_var.get()
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
 
         # Valider que si un solveur est choisi, son chemin principal est rempli
@@ -526,15 +585,27 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         
         self.parent_gui.settings.astap_path = astap_path
         self.parent_gui.settings.astap_data_dir = astap_data_dir
-        setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius) # Sauvegarder le rayon
-        self.parent_gui.settings.use_radec_hints = use_radec_hints
+        setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius)
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         try:
             self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()
         except Exception:
             self.parent_gui.settings.astrometry_api_key = ''
+
+        self.parent_gui.config['astap_default_downsample'] = int(astap_downsample)
+        self.parent_gui.config['astap_default_sensitivity'] = int(astap_sensitivity)
+        self.parent_gui.config['cluster_panel_threshold'] = float(cluster_threshold)
+        if hasattr(self.parent_gui, 'cluster_threshold_var'):
+            self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
+        try:
+            from zemosaic import zemosaic_config
+            zemosaic_config.save_config(self.parent_gui.config)
+        except Exception:
+            pass
         
-        print(f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Ansvr Local='{local_ansvr_path}'") # DEBUG
+        print(
+            f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Down={astap_downsample}, Sens={astap_sensitivity}, Cluster={cluster_threshold}, Ansvr Local='{local_ansvr_path}'"
+        )  # DEBUG
         print("  LocalSolverSettingsWindow: Paramètres mis à jour dans parent_gui.settings.")
         print(f"DEBUG (LocalSolverSettingsWindow _on_ok): Validation OK. Sauvegarde des settings. Préparation fermeture fenêtre.")
         print(f"  -> local_solver_preference: {solver_choice}")
