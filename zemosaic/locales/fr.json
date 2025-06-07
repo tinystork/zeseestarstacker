@@ -40,6 +40,9 @@
     "astrometry_local_path_label": "Chemin Astrometry Local :",
     "browse_astrometry_local_path_button": "Parcourir...",
     "select_astrometry_local_title": "Sélectionner le Chemin Astrometry Local",
+    "select_astrometry_exe_or_cfg_title": "Sélectionner solve-field ou fichier .cfg (Annuler pour le Dossier d'Index)",
+    "select_astrometry_index_dir_title": "Sélectionner le Dossier d'Index Astrometry.net",
+    "configuration_files": "Fichiers de Configuration",
 
 
     "config_warning_title": "Avertissement Configuration",
