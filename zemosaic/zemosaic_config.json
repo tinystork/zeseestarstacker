@@ -19,5 +19,8 @@
     "final_assembly_method": "reproject_coadd",
     "save_final_as_uint16": false,
     "apply_master_tile_crop": true,
-    "master_tile_crop_percent": 18.0
+    "master_tile_crop_percent": 18.0,
+    "solver_method": "astap",
+    "astrometry_local_path": "",
+    "astrometry_api_key": ""
 }

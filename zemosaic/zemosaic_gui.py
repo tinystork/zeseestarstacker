@@ -127,6 +127,10 @@ class ZeMosaicGUI:
         self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
         self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
+
+        self.solver_choice_var = tk.StringVar(value=self.config.get("solver_method", "astap"))
+        self.astrometry_local_path_var = tk.StringVar(value=self.config.get("astrometry_local_path", ""))
+        self.astrometry_api_key_var = tk.StringVar(value=self.config.get("astrometry_api_key", ""))
         
         self.is_processing = False
         self.processing_thread = None
@@ -387,6 +391,36 @@ class ZeMosaicGUI:
         ttk.Label(astap_cfg_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = astap_cfg_frame.grid_slaves(row=1,column=0)[0]
         ttk.Entry(astap_cfg_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
         ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = astap_cfg_frame.grid_slaves(row=1,column=2)[0]
+
+        # --- Solver Settings Frame ---
+        solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        solver_frame.pack(fill=tk.X, pady=(0,10))
+        self.translatable_widgets["solver_settings_frame_title"] = solver_frame
+
+        solver_label = ttk.Label(solver_frame, text="")
+        solver_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.translatable_widgets["solver_choice_label"] = solver_label
+
+        self.solver_combo = ttk.Combobox(solver_frame, state="readonly", width=20, textvariable=self.solver_choice_var)
+        self.solver_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.solver_combo.bind("<<ComboboxSelected>>", lambda e: self._on_solver_choice_change())
+
+        self.astrometry_subframe = ttk.Frame(solver_frame)
+        self.astrometry_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
+
+        api_label = ttk.Label(self.astrometry_subframe, text="")
+        api_label.grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["astrometry_api_key_label"] = api_label
+        ttk.Entry(self.astrometry_subframe, textvariable=self.astrometry_api_key_var, width=40).grid(row=0, column=1, padx=5, pady=3, sticky="ew")
+
+        path_label = ttk.Label(self.astrometry_subframe, text="")
+        path_label.grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["astrometry_local_path_label"] = path_label
+        ttk.Entry(self.astrometry_subframe, textvariable=self.astrometry_local_path_var, width=40).grid(row=1, column=1, padx=5, pady=3, sticky="ew")
+        ttk.Button(self.astrometry_subframe, text="", command=self._browse_astrometry_local_path).grid(row=1, column=2, padx=5, pady=3); self.translatable_widgets["browse_astrometry_local_path_button"] = self.astrometry_subframe.grid_slaves(row=1,column=2)[0]
+
+        self.solver_combo['values'] = []  # will be populated in _update_ui_language
+        self._on_solver_choice_change()
 
         # --- Parameters Frame ---
         params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -655,6 +689,9 @@ class ZeMosaicGUI:
         # --- RAFRAICHISSEMENT DU NOUVEAU COMBOBOX D'ASSEMBLAGE ---
         if hasattr(self, 'final_assembly_method_combo'):
             self._refresh_combobox(self.final_assembly_method_combo, self.final_assembly_method_var, self.assembly_method_keys, "assembly_method")
+        if hasattr(self, 'solver_combo'):
+            solver_keys = ["astap", "astrometry"]
+            self._refresh_combobox(self.solver_combo, self.solver_choice_var, solver_keys, "solver")
         # ---  ---
         # Mise à jour des textes ETA et Temps Écoulé (déjà correct)
         if not self.is_processing:
@@ -691,6 +728,16 @@ class ZeMosaicGUI:
                 self.crop_percent_spinbox.config(state=tk.DISABLED)
         except tk.TclError:
             pass # Widget peut avoir été détruit
+
+    def _on_solver_choice_change(self, *args):
+        if hasattr(self, 'astrometry_subframe'):
+            try:
+                if self.solver_choice_var.get() == 'astrometry':
+                    self.astrometry_subframe.grid()
+                else:
+                    self.astrometry_subframe.grid_remove()
+            except tk.TclError:
+                pass
 
     def _update_rejection_params_state(self, event=None):
         """
@@ -806,6 +853,11 @@ class ZeMosaicGUI:
     def _browse_astap_data_dir(self): # Fallback non-saving browse
         dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_title_simple", "Select ASTAP Data Directory"))
         if dir_path: self.astap_data_dir_var.set(dir_path)
+
+    def _browse_astrometry_local_path(self):
+        dir_path = filedialog.askdirectory(title=self._tr("select_astrometry_local_title", "Select Local Astrometry Path"))
+        if dir_path:
+            self.astrometry_local_path_var.set(dir_path)
 
 
 
@@ -1044,9 +1096,9 @@ class ZeMosaicGUI:
             os.makedirs(output_dir, exist_ok=True)
         except OSError as e: 
             messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
-        if not (astap_exe and os.path.isfile(astap_exe)): 
+        if not (astap_exe and os.path.isfile(astap_exe)):
             messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
-        if not (astap_data and os.path.isdir(astap_data)): 
+        if not (astap_data and os.path.isdir(astap_data)):
             if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
                                           self._tr("astap_data_dir_missing_or_invalid_continue_q", 
                                                    path=astap_data,
@@ -1054,6 +1106,20 @@ class ZeMosaicGUI:
                                           icon='warning', parent=self.root):
                 return
 
+
+        solver_choice_val = self.solver_choice_var.get()
+        astrometry_local_path_val = self.astrometry_local_path_var.get()
+        astrometry_api_key_val = self.astrometry_api_key_var.get()
+
+        self.config["solver_method"] = solver_choice_val
+        self.config["astrometry_local_path"] = astrometry_local_path_val
+        self.config["astrometry_api_key"] = astrometry_api_key_val
+        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+            zemosaic_config.save_config(self.config)
+
+        os.environ["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = solver_choice_val
+        os.environ["ZEMOSAIC_LOCAL_ANSVR_PATH"] = astrometry_local_path_val
+        os.environ["ZEMOSAIC_ASTROMETRY_API_KEY"] = astrometry_api_key_val
 
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
         parsed_winsor_limits = (0.05, 0.05) 

@@ -31,6 +31,15 @@
     "master_tile_crop_percent_label": "Crop Percentage per Side (0-25%):",
     "master_tile_crop_percent_note": "(0.0 = no crop)",
 
+    "solver_settings_frame_title": "Solver Settings",
+    "solver_choice_label": "Solver:",
+    "solver_astap": "ASTAP",
+    "solver_astrometry": "Astrometry",
+    "astrometry_api_key_label": "Astrometry API Key:",
+    "astrometry_local_path_label": "Local Astrometry Path:",
+    "browse_astrometry_local_path_button": "Browse...",
+    "select_astrometry_local_title": "Select Local Astrometry Path",
+
 
     "config_warning_title": "Config Warning",
     "config_module_not_found_warning": "Configuration module (zemosaic_config.py) not found.\nASTAP paths will not be saved between sessions.",

@@ -30,7 +30,16 @@
     "crop_options_frame_title": "Options de Rognage des Tuiles Maîtresses",
     "apply_master_tile_crop_label": "Rogner les Bords des Tuiles Maîtresses :",
     "master_tile_crop_percent_label": "Pourcentage de Rognage par Côté (0-25%) :",
-    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",    
+    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",
+
+    "solver_settings_frame_title": "Paramètres du Solveur",
+    "solver_choice_label": "Solveur :",
+    "solver_astap": "ASTAP",
+    "solver_astrometry": "Astrometry",
+    "astrometry_api_key_label": "Clé API Astrometry :",
+    "astrometry_local_path_label": "Chemin Astrometry Local :",
+    "browse_astrometry_local_path_button": "Parcourir...",
+    "select_astrometry_local_title": "Sélectionner le Chemin Astrometry Local",
 
 
     "config_warning_title": "Avertissement Configuration",
