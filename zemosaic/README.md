@@ -123,7 +123,14 @@ ZEMOSAIC_ASTROMETRY_API_KEY=your_key
 ZEMOSAIC_ASTAP_SEARCH_RADIUS=3.0
 ZEMOSAIC_LOCAL_SOLVER_PREFERENCE=astap
 ZEMOSAIC_ASTROMETRY_METHOD=astap
+ZEMOSAIC_USE_RADEC_HINTS=1
+ZEMOSAIC_SCALE_EST_ARCSEC_PER_PIX=1.9
+ZEMOSAIC_SCALE_TOLERANCE_PERCENT=20
 ```
+
+Setting `ZEMOSAIC_USE_RADEC_HINTS=1` passes the RA/DEC values from your FITS
+headers to ASTAP. The scale variables let you provide a pixel scale hint in
+arcseconds per pixel and a tolerance percentage.
 
 `ZEMOSAIC_ASTROMETRY_METHOD` accepts `astap`, `astrometry`, or `astrometry.net`.
 `astrometry` and `astrometry.net` will use ansvr when a local path is provided,
@@ -147,6 +154,9 @@ solver_settings = {
     "local_ansvr_path": "/path/to/ansvr.cfg",
     "api_key": "your_key",
     "local_solver_preference": "astap",
+    "use_radec_hints": True,
+    "scale_est_arcsec_per_pix": 1.9,
+    "scale_tolerance_percent": 20,
 }
 ```
 
@@ -157,6 +167,8 @@ Keys are the same used by the GUI:
 - `astap_downsample` – ASTAP downsample factor
 - `astap_sensitivity` – ASTAP detection sensitivity
 - `use_radec_hints` (disabled by default) – include RA/DEC hints when solving with ASTAP
+- `scale_est_arcsec_per_pix` – estimated pixel scale in arcsec/pixel to pass to the solver
+- `scale_tolerance_percent` – tolerance around the pixel scale estimate (default 20)
 - `local_ansvr_path` – path to `ansvr.cfg`
 - `api_key` – astrometry.net API key
 - `local_solver_preference` – preferred local solver
@@ -165,6 +177,11 @@ Keys are the same used by the GUI:
 It is disabled by default and should only be enabled when your FITS headers
 contain reliable coordinates. Disabling it forces a blind search around the
 configured radius.
+
+`scale_est_arcsec_per_pix` lets you provide an approximate pixel scale in
+arcseconds per pixel. When given, the solver restricts its search around this
+value using `scale_tolerance_percent` as the allowed deviation. This can speed
+up solves and improve reliability if your camera's scale is known.
 
 📁 Requirements Summary
 ✅ Python 3.9 or newer
