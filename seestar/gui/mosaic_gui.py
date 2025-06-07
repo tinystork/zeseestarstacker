@@ -62,6 +62,36 @@ class MosaicSettingsWindow(tk.Toplevel):
         self.local_fastalign_ransac_thresh_var = tk.DoubleVar(
             value=float(self.settings.get('fastalign_ransac_thresh', 2.5))
         )
+
+        # --- Variables pour la configuration des solveurs astrométriques ---
+        default_solver_choice = "none"
+        if hasattr(self.parent_gui.settings, 'local_solver_preference'):
+            default_solver_choice = getattr(
+                self.parent_gui.settings, 'local_solver_preference', 'none'
+            )
+        self.local_solver_choice_var = tk.StringVar(value=default_solver_choice)
+
+        self.astap_path_var = tk.StringVar(
+            value=getattr(self.parent_gui.settings, 'astap_path', '')
+        )
+        self.astap_data_dir_var = tk.StringVar(
+            value=getattr(self.parent_gui.settings, 'astap_data_dir', '')
+        )
+        self.astap_search_radius_var = tk.DoubleVar(
+            value=getattr(self.parent_gui.settings, 'astap_search_radius', 30.0)
+        )
+        self.astap_downsample_var = tk.IntVar(
+            value=self.parent_gui.config.get('astap_default_downsample', 2)
+        )
+        self.astap_sensitivity_var = tk.IntVar(
+            value=self.parent_gui.config.get('astap_default_sensitivity', 100)
+        )
+        self.cluster_threshold_var = tk.DoubleVar(
+            value=self.parent_gui.config.get('cluster_panel_threshold', 0.5)
+        )
+        self.local_ansvr_path_var = tk.StringVar(
+            value=getattr(self.parent_gui.settings, 'local_ansvr_path', '')
+        )
         # --- FIN INITIALISATION VARIABLES TKINTER LOCALES (DÉPLACÉES) ---
 
         # --- 3. Configuration de la fenêtre Toplevel ---
@@ -70,7 +100,8 @@ class MosaicSettingsWindow(tk.Toplevel):
         
         # --- 4. Construction de l'Interface Utilisateur (Widgets) ---
         # CET APPEL EST MAINTENANT SÛR, CAR TOUTES LES VARIABLES SONT DÉFINIES
-        self._build_ui() 
+        self._build_ui()
+        self._on_solver_choice_change()
         
         # --- 5. Mise à jour initiale de l'état des options ---
         self._update_options_state() 
@@ -131,9 +162,166 @@ class MosaicSettingsWindow(tk.Toplevel):
         ttk.Radiobutton(self.alignment_mode_frame, 
                         text=self.parent_gui.tr("mosaic_align_local_fast_only_label", default="Fast Local Only (Strict)"),
                         variable=self.local_mosaic_align_mode_var, value="local_fast_only", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
-        ttk.Radiobutton(self.alignment_mode_frame, 
+        ttk.Radiobutton(self.alignment_mode_frame,
                         text=self.parent_gui.tr("mosaic_align_astrometry_per_panel_label", default="Astrometry.net per Panel (Slower)"),
                         variable=self.local_mosaic_align_mode_var, value="astrometry_per_panel", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
+
+        # --- Bloc Configuration Astrometry ---
+        self.astrometry_config_frame = ttk.LabelFrame(
+            main_frame,
+            text=self.parent_gui.tr("local_solver_astap_frame_title", default="Astrometry Configuration"),
+            padding="10"
+        )
+        self.astrometry_config_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        solver_choice_frame = ttk.LabelFrame(
+            self.astrometry_config_frame,
+            text=self.parent_gui.tr("local_solver_choice_frame_title", default="Local Solver Preference"),
+            padding="10"
+        )
+        solver_choice_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text=self.parent_gui.tr("local_solver_choice_none", default="Do not use local solvers (use Astrometry.net web service if API key provided)"),
+            variable=self.local_solver_choice_var,
+            value="none",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text=self.parent_gui.tr("local_solver_choice_astap", default="Use ASTAP (local)"),
+            variable=self.local_solver_choice_var,
+            value="astap",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text=self.parent_gui.tr("local_solver_choice_ansvr", default="Use Astrometry.net Local (solve-field)"),
+            variable=self.local_solver_choice_var,
+            value="ansvr",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+
+        api_key_frame = ttk.LabelFrame(
+            self.astrometry_config_frame,
+            text=self.parent_gui.tr("mosaic_api_key_frame", default="Astrometry.net API Key (Required for Mosaic)"),
+            padding="5"
+        )
+        api_key_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        api_key_inner = ttk.Frame(api_key_frame)
+        api_key_inner.pack(fill=tk.X, padx=5, pady=(5, 0))
+        ttk.Label(api_key_inner, text=self.parent_gui.tr("mosaic_api_key_label", default="API Key:"), width=10).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(api_key_inner, textvariable=self.parent_gui.astrometry_api_key_var, show="*", width=40).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(
+            api_key_frame,
+            text=self.parent_gui.tr("mosaic_api_key_help", default="Get your key from nova.astrometry.net (free account)"),
+            foreground="gray",
+            font=("Arial", 8),
+        ).pack(anchor=tk.W, padx=10, pady=(2, 5))
+
+        api_key_help_text_static = self.parent_gui.tr(
+            "msw_api_key_help_static",
+            default="Used for Astrometry.net web service:\n" "- If 'Astrometry.net per Panel' is chosen and no local solver is active.\n" "- As a final fallback if chosen local solvers fail (for anchor or panels).",
+        )
+        ttk.Label(api_key_frame, text=api_key_help_text_static, font=("Arial", 8, "italic"), justify=tk.LEFT, wraplength=380).pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+        self.astap_frame = ttk.LabelFrame(
+            self.astrometry_config_frame,
+            text=self.parent_gui.tr("local_solver_astap_frame_title", default="ASTAP Configuration"),
+            padding="10",
+        )
+        self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        astap_path_subframe = ttk.Frame(self.astap_frame)
+        astap_path_subframe.pack(fill=tk.X, pady=(5, 2))
+        ttk.Label(astap_path_subframe, text=self.parent_gui.tr("local_solver_astap_path_label", default="ASTAP Executable Path:"), width=25, anchor="w").pack(side=tk.LEFT)
+        ttk.Button(astap_path_subframe, text=self.parent_gui.tr("browse", default="Browse..."), command=self._browse_astap_path, width=10).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Entry(astap_path_subframe, textvariable=self.astap_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+        astap_data_subframe = ttk.Frame(self.astap_frame)
+        astap_data_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(astap_data_subframe, text=self.parent_gui.tr("local_solver_astap_data_label", default="ASTAP Star Index Data Directory:"), width=25, anchor="w").pack(side=tk.LEFT)
+        ttk.Button(astap_data_subframe, text=self.parent_gui.tr("browse", default="Browse..."), command=self._browse_astap_data_dir, width=10).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Entry(astap_data_subframe, textvariable=self.astap_data_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+        astap_radius_subframe = ttk.Frame(self.astap_frame)
+        astap_radius_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(astap_radius_subframe, text=self.parent_gui.tr("local_solver_astap_radius_label", default="ASTAP Search Radius (degrees, 0 for auto):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            astap_radius_subframe,
+            from_=0.0,
+            to=180.0,
+            increment=0.5,
+            textvariable=self.astap_search_radius_var,
+            width=6,
+            format="%.2f",
+        ).pack(side=tk.LEFT)
+
+        astap_down_subframe = ttk.Frame(self.astap_frame)
+        astap_down_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(astap_down_subframe, text=self.parent_gui.tr("local_solver_astap_downsample_label", default="ASTAP Downsample (-z):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(astap_down_subframe, from_=1, to=8, increment=1, textvariable=self.astap_downsample_var, width=6).pack(side=tk.LEFT)
+
+        astap_sens_subframe = ttk.Frame(self.astap_frame)
+        astap_sens_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(astap_sens_subframe, text=self.parent_gui.tr("local_solver_astap_sens_label", default="ASTAP Sensitivity (-sens):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(astap_sens_subframe, from_=10, to=1000, increment=5, textvariable=self.astap_sensitivity_var, width=6).pack(side=tk.LEFT)
+
+        cluster_thresh_subframe = ttk.Frame(self.astap_frame)
+        cluster_thresh_subframe.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(cluster_thresh_subframe, text=self.parent_gui.tr("panel_clustering_threshold_label", default="Panel Clustering Threshold (deg):"), width=35, anchor="w").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(cluster_thresh_subframe, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=6, format="%.2f").pack(side=tk.LEFT)
+
+        self.ansvr_frame = ttk.LabelFrame(
+            self.astrometry_config_frame,
+            text=self.parent_gui.tr("local_solver_ansvr_frame_title", default="Local Astrometry.net (solve-field) Configuration"),
+            padding="10",
+        )
+        self.ansvr_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ansvr_path_entry_frame = ttk.Frame(self.ansvr_frame)
+        ansvr_path_entry_frame.pack(fill=tk.X, pady=(5, 2))
+        ansvr_path_label = ttk.Label(
+            ansvr_path_entry_frame,
+            text=self.parent_gui.tr("local_solver_ansvr_main_path_label", default="Path (Exe, .cfg, or Index Dir):"),
+            width=25,
+            anchor="w",
+        )
+        ansvr_path_label.pack(side=tk.LEFT, padx=(0, 5))
+        ansvr_path_entry = ttk.Entry(ansvr_path_entry_frame, textvariable=self.local_ansvr_path_var)
+        ansvr_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ansvr_buttons_frame = ttk.Frame(self.ansvr_frame)
+        ansvr_buttons_frame.pack(fill=tk.X, pady=(0, 5))
+        ansvr_buttons_sub_right_frame = ttk.Frame(ansvr_buttons_frame)
+        ansvr_buttons_sub_right_frame.pack(side=tk.RIGHT)
+        self.ansvr_browse_file_button = ttk.Button(
+            ansvr_buttons_sub_right_frame,
+            text=self.parent_gui.tr("browse_ansvr_file_button", default="Browse File... (.cfg/Exe)"),
+            command=self._browse_ansvr_file,
+            width=20,
+        )
+        self.ansvr_browse_file_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.ansvr_browse_dir_button = ttk.Button(
+            ansvr_buttons_sub_right_frame,
+            text=self.parent_gui.tr("browse_ansvr_dir_button", default="Browse Index Dir..."),
+            command=self._browse_ansvr_index_dir,
+            width=20,
+        )
+        self.ansvr_browse_dir_button.pack(side=tk.LEFT)
+
+        info_label = ttk.Label(
+            self.astrometry_config_frame,
+            text=self.parent_gui.tr(
+                "local_solver_info_text_v3",
+                default="Select a local solver preference above. Paths are only needed for the selected solver.\n" "For Ansvr, you can point to `solve-field` exe, an `astrometry.cfg` file, or an Index Directory (a .cfg will be auto-generated).",
+            ),
+            justify=tk.LEFT,
+            wraplength=480,
+        )
+        info_label.pack(pady=(10, 5), padx=5, fill=tk.X)
 
         # --- 3. Cadre Options FastAligner ---
         self.fastaligner_options_frame = ttk.LabelFrame(main_frame, 
@@ -281,6 +469,7 @@ class MosaicSettingsWindow(tk.Toplevel):
         print(f"  _update_options_state: is_mosaic_enabled={is_mosaic_enabled} -> main_frames_state set to: '{main_frames_state}'")
         
         toggle_frame_children_state(self.alignment_mode_frame, main_frames_state)
+        toggle_frame_children_state(self.astrometry_config_frame, main_frames_state)
         toggle_frame_children_state(self.drizzle_options_frame, main_frames_state) # Contient pixfrac_spinbox et wht_spinbox
         
         # Visibilité et état du cadre FastAligner
@@ -313,9 +502,122 @@ class MosaicSettingsWindow(tk.Toplevel):
             display_val_str = self.local_drizzle_wht_thresh_display_var.get()
             if not display_val_str: self.local_drizzle_wht_thresh_storage_var.set(0.01); return
             percent_val = float(display_val_str)
-            float_val = np.clip(percent_val / 100.0, 0.0, 1.0) 
+            float_val = np.clip(percent_val / 100.0, 0.0, 1.0)
             self.local_drizzle_wht_thresh_storage_var.set(round(float_val, 3))
         except (ValueError, tk.TclError): self.local_drizzle_wht_thresh_storage_var.set(0.01)
+
+    def _on_solver_choice_change(self, *args):
+        """Met à jour l'état des cadres de configuration selon le solveur choisi."""
+        choice = self.local_solver_choice_var.get()
+        astap_state = tk.DISABLED
+        ansvr_state = tk.DISABLED
+        if choice == "astap":
+            astap_state = tk.NORMAL
+        elif choice == "ansvr":
+            ansvr_state = tk.NORMAL
+        if hasattr(self, 'astap_frame') and self.astap_frame.winfo_exists():
+            for widget in self.astap_frame.winfo_children():
+                self._set_widget_state_recursive(widget, astap_state)
+        if hasattr(self, 'ansvr_frame') and self.ansvr_frame.winfo_exists():
+            for widget in self.ansvr_frame.winfo_children():
+                self._set_widget_state_recursive(widget, ansvr_state)
+
+    def _set_widget_state_recursive(self, widget, state):
+        try:
+            if 'state' in widget.configure():
+                widget.configure(state=state)
+        except tk.TclError:
+            pass
+        if hasattr(widget, 'winfo_children'):
+            for child in widget.winfo_children():
+                self._set_widget_state_recursive(child, state)
+
+    def _browse_astap_path(self):
+        initial_dir = ""
+        current_path = self.astap_path_var.get()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            initial_dir = os.path.dirname(current_path)
+        elif os.path.exists(current_path):
+            initial_dir = os.path.dirname(current_path)
+
+        file_types = [(self.parent_gui.tr("executable_files", default="Executable Files"), "*.*")]
+        if os.name == 'nt':
+            file_types = [
+                (self.parent_gui.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"),
+                (self.parent_gui.tr("all_files", default="All Files"), "*.*"),
+            ]
+
+        filepath = filedialog.askopenfilename(
+            title=self.parent_gui.tr("select_astap_executable_title", default="Select ASTAP Executable"),
+            initialdir=initial_dir if initial_dir else os.path.expanduser("~"),
+            filetypes=file_types,
+            parent=self,
+        )
+        if filepath:
+            self.astap_path_var.set(filepath)
+
+    def _browse_astap_data_dir(self):
+        initial_dir = self.astap_data_dir_var.get()
+        if not initial_dir or not os.path.isdir(initial_dir):
+            initial_dir = os.path.expanduser("~")
+
+        dirpath = filedialog.askdirectory(
+            title=self.parent_gui.tr("select_astap_data_dir_title", default="Select ASTAP Star Index Data Directory"),
+            initialdir=initial_dir,
+            parent=self,
+        )
+        if dirpath:
+            self.astap_data_dir_var.set(dirpath)
+
+    def _browse_ansvr_file(self):
+        initial_dir_ansvr = os.path.expanduser("~")
+        current_path = self.local_ansvr_path_var.get()
+        if current_path and os.path.exists(current_path):
+            if os.path.isfile(current_path):
+                initial_dir_ansvr = os.path.dirname(current_path)
+        elif current_path and os.path.exists(os.path.dirname(current_path)):
+            initial_dir_ansvr = os.path.dirname(current_path)
+
+        if os.name == 'nt':
+            file_types_list = [
+                (self.parent_gui.tr("configuration_files", default="Config Files"), "*.cfg"),
+                (self.parent_gui.tr("executable_files", default="Executable Files (.exe)"), "*.exe"),
+                (self.parent_gui.tr("all_files", default="All Files"), "*.*"),
+            ]
+        else:
+            file_types_list = [
+                (self.parent_gui.tr("executable_files", default="Executable Files (any)"), "*"),
+                (self.parent_gui.tr("configuration_files", default="Config Files (.cfg)"), "*.cfg"),
+                (self.parent_gui.tr("all_files", default="All Files"), "*.*"),
+            ]
+
+        filepath = filedialog.askopenfilename(
+            title=self.parent_gui.tr("select_ansvr_exe_or_cfg_title_v2", default="Select solve-field Executable or .cfg File"),
+            initialdir=initial_dir_ansvr,
+            filetypes=file_types_list,
+            parent=self,
+        )
+        if filepath:
+            self.local_ansvr_path_var.set(filepath)
+
+    def _browse_ansvr_index_dir(self):
+        initial_dir_ansvr = os.path.expanduser("~")
+        current_path = self.local_ansvr_path_var.get()
+        if current_path and os.path.exists(current_path):
+            if os.path.isdir(current_path):
+                initial_dir_ansvr = current_path
+            elif os.path.isfile(current_path):
+                initial_dir_ansvr = os.path.dirname(current_path)
+        elif current_path and os.path.exists(os.path.dirname(current_path)):
+            initial_dir_ansvr = os.path.dirname(current_path)
+
+        dirpath = filedialog.askdirectory(
+            title=self.parent_gui.tr("select_ansvr_index_dir_title_v2", default="Select Astrometry.net Index Directory"),
+            initialdir=initial_dir_ansvr,
+            parent=self,
+        )
+        if dirpath:
+            self.local_ansvr_path_var.set(dirpath)
 
 
 #######################################################################################################################################
@@ -355,7 +657,56 @@ class MosaicSettingsWindow(tk.Toplevel):
                         "might fail if local solvers are not configured or also fail. Continue anyway?"
             )
             if not messagebox.askyesno(warn_title, warn_msg, parent=self):
-                return 
+                return
+
+        solver_choice = self.local_solver_choice_var.get()
+        astap_path = self.astap_path_var.get().strip()
+        astap_data_dir = self.astap_data_dir_var.get().strip()
+        astap_radius = self.astap_search_radius_var.get()
+        astap_downsample = self.astap_downsample_var.get()
+        astap_sensitivity = self.astap_sensitivity_var.get()
+        cluster_threshold = self.cluster_threshold_var.get()
+        local_ansvr_path = self.local_ansvr_path_var.get().strip()
+
+        validation_ok = True
+        if solver_choice == "astap" and not astap_path:
+            messagebox.showerror(
+                self.parent_gui.tr("error"),
+                self.parent_gui.tr("astap_path_required_error", default="ASTAP is selected, but the executable path is missing."),
+                parent=self,
+            )
+            validation_ok = False
+        elif solver_choice == "ansvr" and not local_ansvr_path:
+            messagebox.showerror(
+                self.parent_gui.tr("error"),
+                self.parent_gui.tr("ansvr_path_required_error", default="Astrometry.net Local is selected, but the path/config is missing."),
+                parent=self,
+            )
+            validation_ok = False
+        if not validation_ok:
+            return
+
+        setattr(self.parent_gui.settings, 'local_solver_preference', solver_choice)
+        if hasattr(self.parent_gui.settings, 'use_local_solver_priority'):
+            delattr(self.parent_gui.settings, 'use_local_solver_priority')
+        self.parent_gui.settings.astap_path = astap_path
+        self.parent_gui.settings.astap_data_dir = astap_data_dir
+        setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius)
+        self.parent_gui.settings.local_ansvr_path = local_ansvr_path
+        try:
+            self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()
+        except Exception:
+            self.parent_gui.settings.astrometry_api_key = ''
+        self.parent_gui.config['astap_default_downsample'] = int(astap_downsample)
+        self.parent_gui.config['astap_default_sensitivity'] = int(astap_sensitivity)
+        self.parent_gui.config['cluster_panel_threshold'] = float(cluster_threshold)
+        if hasattr(self.parent_gui, 'cluster_threshold_var'):
+            self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
+        try:
+            from zemosaic import zemosaic_config
+            zemosaic_config.save_config(self.parent_gui.config)
+        except Exception:
+            pass
         
         self.parent_gui.settings.mosaic_mode_active = is_mosaic_enabled_ui
         self.parent_gui.mosaic_mode_active = is_mosaic_enabled_ui 
