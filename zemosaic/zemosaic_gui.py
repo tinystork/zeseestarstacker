@@ -1144,25 +1144,43 @@ class ZeMosaicGUI:
             return
 
         # 2. VALIDATIONS (chemins, etc.)
-        # ... (section de validation inchangée pour l'instant)
-        if not (input_dir and os.path.isdir(input_dir)): 
-            messagebox.showerror(self._tr("error_title"), self._tr("invalid_input_folder_error"), parent=self.root); return
-        if not output_dir: 
-            messagebox.showerror(self._tr("error_title"), self._tr("missing_output_folder_error"), parent=self.root); return
-        try: 
-            os.makedirs(output_dir, exist_ok=True)
-        except OSError as e: 
-            messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
-        if not (astap_exe and os.path.isfile(astap_exe)):
-            messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
-        if not (astap_data and os.path.isdir(astap_data)):
-            if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
-                                          self._tr("astap_data_dir_missing_or_invalid_continue_q", 
-                                                   path=astap_data,
-                                                   default_path=self.config.get("astap_data_directory_path","")),
-                                          icon='warning', parent=self.root):
-                return
+        if not (input_dir and os.path.isdir(input_dir)):
+            messagebox.showerror(self._tr("error_title"),
+                                 self._tr("invalid_input_folder_error"),
+                                 parent=self.root)
+            return
 
+        if not output_dir:
+            messagebox.showerror(self._tr("error_title"),
+                                 self._tr("missing_output_folder_error"),
+                                 parent=self.root)
+            return
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror(self._tr("error_title"),
+                                 self._tr("output_folder_creation_error", error=e),
+                                 parent=self.root)
+            return
+
+        # ───── Validation ASTAP uniquement si le solveur choisi est ASTAP ─────
+        if self.solver_choice_var.get() == "astap":
+            if not (astap_exe and os.path.isfile(astap_exe)):
+                messagebox.showerror(self._tr("error_title"),
+                                     self._tr("invalid_astap_exe_error"),
+                                     parent=self.root)
+                return
+            if not (astap_data and os.path.isdir(astap_data)):
+                if not messagebox.askokcancel(
+                        self._tr("astap_data_dir_title", "ASTAP Data Directory"),
+                        self._tr("astap_data_dir_missing_or_invalid_continue_q",
+                                 path=astap_data,
+                                 default_path=self.config.get("astap_data_directory_path", "")),
+                        icon='warning',
+                        parent=self.root):
+                    return
+        # ───────────────────────────────────────────────────────────────────────
 
         solver_choice_val = self.solver_choice_var.get()
         astrometry_local_path_val = self.astrometry_local_path_var.get()

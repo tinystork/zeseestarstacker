@@ -1,86 +1,118 @@
-# zemosaic_worker.py
-
-import os
-import shutil
-import time
-import traceback
-import gc
-import logging
-import inspect # Pas utilisé directement ici, mais peut être utile pour des introspections futures
+# ----------------------------------------------------------------------
+# zemosaic_worker.py  – imports et configuration
+# ----------------------------------------------------------------------
+import os, sys, logging, importlib.util, shutil, time, traceback, gc, inspect
 import psutil
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np   # tierce partie
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-# --- Configuration du Logging ---
+# ──────────────────────────── LOGGING ────────────────────────────────
 logger = logging.getLogger("ZeMosaicWorker")
 if not logger.handlers:
     logger.setLevel(logging.DEBUG)
     try:
-        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zemosaic_worker.log")
-    except NameError: 
+        log_file_path = os.path.join(os.path.dirname(__file__), "zemosaic_worker.log")
+    except NameError:
         log_file_path = "zemosaic_worker.log"
-    fh = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
+    fh = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s"))
     fh.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
-    fh.setFormatter(formatter)
     logger.addHandler(fh)
-logger.info("Logging pour ZeMosaicWorker initialisé. Logs écrits dans: %s", log_file_path)
+logger.info("Logging initialisé dans %s", log_file_path)
 
-# --- Third-Party Library Imports ---
-import numpy as np
-
-# --- Astropy (critique) ---
+# ──────────────────────────── ASTROPY ────────────────────────────────
 ASTROPY_AVAILABLE = False
-WCS, SkyCoord, Angle, fits, u = None, None, None, None, None
+WCS = SkyCoord = Angle = fits = u = None
 try:
-    from astropy.io import fits as actual_fits
-    from astropy.wcs import WCS as actual_WCS
-    from astropy.coordinates import SkyCoord as actual_SkyCoord, Angle as actual_Angle
-    from astropy import units as actual_u
-    fits, WCS, SkyCoord, Angle, u = actual_fits, actual_WCS, actual_SkyCoord, actual_Angle, actual_u
+    from astropy.io import fits as fits
+    from astropy.wcs import WCS as WCS
+    from astropy.coordinates import SkyCoord as SkyCoord, Angle as Angle
+    from astropy import units as u
     ASTROPY_AVAILABLE = True
-    logger.info("Bibliothèque Astropy importée.")
-except ImportError as e_astro_imp: logger.critical(f"Astropy non trouvée: {e_astro_imp}.")
-except Exception as e_astro_other_imp: logger.critical(f"Erreur import Astropy: {e_astro_other_imp}", exc_info=True)
+    logger.info("Astropy importée.")
+except ImportError as e:
+    logger.critical("Astropy non trouvée : %s", e)
 
-# --- Reproject (critique pour la mosaïque) ---
+# ─────────────────────────── REPROJECT ───────────────────────────────
 REPROJECT_AVAILABLE = False
-find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = None, None, None
+find_optimal_celestial_wcs = reproject_and_coadd = reproject_interp = None
 try:
-    from reproject.mosaicking import find_optimal_celestial_wcs as actual_find_optimal_wcs
-    from reproject.mosaicking import reproject_and_coadd as actual_reproject_coadd
-    from reproject import reproject_interp as actual_reproject_interp
-    find_optimal_celestial_wcs, reproject_and_coadd, reproject_interp = actual_find_optimal_wcs, actual_reproject_coadd, actual_reproject_interp
+    from reproject.mosaicking import find_optimal_celestial_wcs
+    from reproject.mosaicking import reproject_and_coadd
+    from reproject import reproject_interp
     REPROJECT_AVAILABLE = True
-    logger.info("Bibliothèque 'reproject' importée.")
-except ImportError as e_reproject_final: logger.critical(f"Échec import reproject: {e_reproject_final}.")
-except Exception as e_reproject_other_final: logger.critical(f"Erreur import 'reproject': {e_reproject_other_final}", exc_info=True)
+    logger.info("Reproject importé.")
+except ImportError as e:
+    logger.critical("Reproject non trouvé : %s", e)
 
-# --- Local Project Module Imports ---
+# ───────────────────── IMPORTS PROJET LOCAUX ─────────────────────────
 zemosaic_utils, ZEMOSAIC_UTILS_AVAILABLE = None, False
 zemosaic_astrometry, ZEMOSAIC_ASTROMETRY_AVAILABLE = None, False
 zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 zemosaic_config = None
 
-try: import zemosaic_utils; ZEMOSAIC_UTILS_AVAILABLE = True; logger.info("Module 'zemosaic_utils' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
-try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.info("Module 'zemosaic_astrometry' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
-try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
-except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
-try:
-    import zemosaic_config
+def _safe_import(name, alias=None):
+    """Importe *name* et retourne le module ou None."""
+    try:
+        module = __import__(name, fromlist=["*"])
+        logger.info("Module '%s' importé.", name)
+        return module
+    except ImportError as e:
+        logger.error("Import '%s' échoué : %s", name, e)
+        return None
 
-    logger.info("Module 'zemosaic_config' importé.")
-except ImportError as e:
-    logger.error(f"Import 'zemosaic_config.py' échoué: {e}.")
+# zemosaic_utils
+zemosaic_utils = _safe_import("zemosaic_utils")
+ZEMOSAIC_UTILS_AVAILABLE = zemosaic_utils is not None
 
-# Flags used by the test suite to toggle optional features
+# zemosaic_astrometry : 3 méthodes
+def _import_zemosaic_astrometry():
+    # 1) from zemosaic import zemosaic_astrometry
+    try:
+        from zemosaic import zemosaic_astrometry as za
+        return za, "package import"
+    except ImportError:
+        pass
+    # 2) import zemosaic_astrometry (même dossier)
+    try:
+        import zemosaic_astrometry as za
+        return za, "direct import"
+    except ImportError:
+        pass
+    # 3) import direct par chemin
+    module_path = os.path.join(os.path.dirname(__file__), "zemosaic_astrometry.py")
+    if os.path.isfile(module_path):
+        spec = importlib.util.spec_from_file_location("zemosaic_astrometry", module_path)
+        za = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(za)
+        sys.modules["zemosaic_astrometry"] = za
+        return za, "importlib path"
+    return None, None
+
+zemosaic_astrometry, _how = _import_zemosaic_astrometry()
+if zemosaic_astrometry:
+    ZEMOSAIC_ASTROMETRY_AVAILABLE = True
+    logger.info("zemosaic_astrometry importé via %s.", _how)
+else:
+    logger.critical("Impossible d'importer zemosaic_astrometry.")
+
+# zemosaic_align_stack
+zemosaic_align_stack = _safe_import("zemosaic_align_stack")
+ZEMOSAIC_ALIGN_STACK_AVAILABLE = zemosaic_align_stack is not None
+
+# zemosaic_config
+zemosaic_config = _safe_import("zemosaic_config")
+
+# ───────────────────────── FLAGS GLOBAUX ─────────────────────────────
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
 CALC_GRID_OPTIMIZED_AVAILABLE = False
+GLOBAL_SOLVER_SETTINGS: dict = {}
+# ----------------------------------------------------------------------
 
-# Global storage for solver settings so helper functions can access
-GLOBAL_SOLVER_SETTINGS = {}
 
 def _calculate_final_mosaic_grid_optimized(panel_wcs_list, panel_shapes_hw_list,
                                            drizzle_scale_factor: float = 1.0,
@@ -468,14 +500,15 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
     # ---------- Étape 1 : ASTAP (si autorisé) ----------
     if use_astap and ASTROPY_AVAILABLE and zemosaic_astrometry:
         _pcb_local("getwcs_info_try_astap", lvl="INFO_DETAIL", filename=filename)
+
         wcs_brute = zemosaic_astrometry.solve_with_astap(
             image_fits_path=file_path,
             original_fits_header=header_orig,
             astap_exe_path=astap_exe_path,
             astap_data_dir=astap_data_dir,
-            search_radius_deg=astap_search_radius,
-            downsample_factor=astap_downsample,
-            sensitivity=astap_sensitivity,
+            search_radius_deg=astap_search_radius,   # ← déjà défini
+            downsample_factor=astap_downsample,      # ← déjà défini
+            sensitivity=astap_sensitivity,           # ← déjà défini
             timeout_sec=astap_timeout_seconds,
             update_original_header_in_place=True,
             progress_callback=progress_callback
@@ -1274,20 +1307,26 @@ def run_hierarchical_mosaic(
     base_progress_phase1 = current_global_progress
     _log_memory_usage(progress_callback, "Début Phase 1 (Prétraitement)")
     pcb("run_info_phase1_started_cache", prog=base_progress_phase1, lvl="INFO")
-    
+        
     fits_file_paths = []
     # Scan des fichiers FITS dans le dossier d'entrée et ses sous-dossiers
-    for root_dir_iter, _, files_in_dir_iter in os.walk(input_folder):
+    for root_dir_iter, dirs, files_in_dir_iter in os.walk(input_folder):
+        # 1) Ignorer complètement tout arbre déjà dans un dossier unaligned
+        if "unaligned_by_zemosaic" in root_dir_iter.split(os.sep):
+            continue
+
+        # 2) Empêcher os.walk de descendre plus loin dans ces dossiers
+        dirs[:] = [d for d in dirs if d != "unaligned_by_zemosaic"]
+
         for file_name_iter in files_in_dir_iter:
-            if file_name_iter.lower().endswith((".fit", ".fits")): 
+            if file_name_iter.lower().endswith((".fit", ".fits")):
                 fits_file_paths.append(os.path.join(root_dir_iter, file_name_iter))
     
-    if not fits_file_paths: 
-        pcb("run_error_no_fits_found_input", prog=current_global_progress, lvl="ERROR")
-        return # Sortie anticipée si aucun fichier FITS n'est trouvé
-
     num_total_raw_files = len(fits_file_paths)
-    pcb("run_info_found_potential_fits", prog=base_progress_phase1, lvl="INFO_DETAIL", num_files=num_total_raw_files)
+    
+    if not fits_file_paths:
+        pcb("run_error_no_fits_found_input", prog=current_global_progress, lvl="ERROR")
+        return  # Sortie anticipée si aucun fichier FITS n'est trouvé
     
     # --- Détermination du nombre de workers de BASE ---
     effective_base_workers = 0
