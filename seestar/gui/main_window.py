@@ -24,6 +24,7 @@ import sys # Pour sys.executable
 # ----------------------------------------------------
 import tempfile # <-- AJOUTÉ
 import logging
+from zemosaic import zemosaic_config
 print("-" * 20)
 print("DEBUG MW: Tentative d'importation de SeestarQueuedStacker...")
 try:
@@ -170,8 +171,16 @@ class SeestarStackerGUI:
         self.preview_auto_refresh_batch_interval = 10 
         self.mosaic_mode_active = False
         self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
-        self.mosaic_settings = {}    
+        self.mosaic_settings = {}
         self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés.")
+
+        # Load shared configuration used by mosaic and solver settings dialogs
+        try:
+            self.config = zemosaic_config.load_config()
+            self.logger.info("DEBUG (GUI __init__): Configuration chargée depuis zemosaic_config.")
+        except Exception as e:
+            self.logger.error(f"Error loading configuration: {e}")
+            self.config = {}
 
         self._trigger_immediate_stack = False 
         self._folder_for_immediate_stack = None 
