@@ -751,12 +751,17 @@ class AstrometrySolver:
         if use_radec_hints and fits_header:
             ra_hint = fits_header.get('RA', fits_header.get('CRVAL1'))
             dec_hint = fits_header.get('DEC', fits_header.get('CRVAL2'))
+        hints_status_msg = "désactivés"
         if use_radec_hints and isinstance(ra_hint, (int, float)) and isinstance(dec_hint, (int, float)):
             cmd.extend(["-ra", str(ra_hint), "-dec", str(dec_hint)])
             self._log(
                 f"ASTAP: Hints RA={ra_hint} DEC={dec_hint} ajoutés à la commande.",
                 "DEBUG",
             )
+            hints_status_msg = f"utilisés -> RA={ra_hint} DEC={dec_hint}"
+        elif use_radec_hints:
+            hints_status_msg = "activés mais valeurs manquantes ou invalides"
+        self._log(f"ASTAP: RA/DEC hints avant exécution: {hints_status_msg}", "DEBUG")
 
         # Determine pixel scale from header if possible
         pxscale = self._derive_pixel_scale_from_header(fits_header)
