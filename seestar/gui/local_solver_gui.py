@@ -75,6 +75,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         self.cluster_threshold_var = tk.DoubleVar(
             value=self.config.get("cluster_panel_threshold", 0.5)
+
         )
 
 
@@ -610,11 +611,14 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                 'astap_default_sensitivity': int(astap_sensitivity),
                 'cluster_panel_threshold': float(cluster_threshold),
             })
+
         if hasattr(self.parent_gui, 'cluster_threshold_var'):
             self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
         try:
             from zemosaic import zemosaic_config
+
             zemosaic_config.save_config(self.config)
+
         except Exception:
             pass
         
