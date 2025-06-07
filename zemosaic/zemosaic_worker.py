@@ -1869,7 +1869,7 @@ def run_hierarchical_mosaic(
             solver_settings.setdefault('ansvr_timeout_sec', 120)
             solver_settings.setdefault('astap_timeout_sec', 180)
             solver_settings.setdefault('astrometry_net_timeout_sec', 300)
-            solver_settings.setdefault('use_radec_hints', False)
+            solver_settings.setdefault('use_radec_hints', True)
         except Exception as e_solver_inst:
             pcb("run_warn_solver_init_failed", prog=None, lvl="WARN", error=str(e_solver_inst))
             astrometry_solver = None
