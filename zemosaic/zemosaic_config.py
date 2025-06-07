@@ -170,3 +170,11 @@ def get_astap_default_downsample():
 def get_astap_default_sensitivity():
     config = load_config()
     return config.get("astap_default_sensitivity", DEFAULT_CONFIG["astap_default_sensitivity"])
+
+
+def get_astrometry_local_path() -> str:
+    return load_config().get("astrometry_local_path", "")
+
+
+def get_astrometry_api_key() -> str:
+    return load_config().get("astrometry_api_key", "")
