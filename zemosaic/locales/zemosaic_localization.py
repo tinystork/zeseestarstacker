@@ -16,10 +16,19 @@ class ZeMosaicLocalization:
         try:
             current_module_path = os.path.abspath(__file__)
             self.locales_dir_abs_path = os.path.dirname(current_module_path)
-            # print(f"DEBUG (Localization __init__): Dossier des locales déterminé: {self.locales_dir_abs_path}")
+            debug_file = __file__
         except NameError:
             self.locales_dir_abs_path = os.getcwd()
-            print(f"AVERT (Localization __init__): __file__ non défini. Dossier des locales basé sur CWD: {self.locales_dir_abs_path}")
+            debug_file = "<undefined __file__>"
+            print(
+                f"AVERT (Localization __init__): __file__ non défini. Dossier des locales basé sur CWD: {self.locales_dir_abs_path}"
+            )
+
+        # Debug logs to help verify the resolved paths
+        print(f"DEBUG [ZeMosaicLocalization]: __file__ = {debug_file}")
+        print(
+            f"DEBUG [ZeMosaicLocalization]: locales_dir_abs_path DÉFINI À = {self.locales_dir_abs_path}"
+        )
 
         self.language_code = None
         self.translations = {}
@@ -42,7 +51,9 @@ class ZeMosaicLocalization:
         # print(f"DEBUG (Localization _load_language_file): Début chargement pour '{lang_code_to_load}' (is_fallback={is_fallback}) -> vers self.{target_dict_name}")
         
         file_path_to_load = os.path.join(self.locales_dir_abs_path, f"{lang_code_to_load}.json")
-        # print(f"  Chemin du fichier JSON: {file_path_to_load}")
+        print(
+            f"DEBUG [ZeMosaicLocalization]: Tentative de chargement du fichier de langue : {file_path_to_load}"
+        )
         
         temp_translations_loaded = {}
         loaded_successfully = False
@@ -65,6 +76,9 @@ class ZeMosaicLocalization:
             with open(file_path_to_load, 'r', encoding='utf-8') as f:
                 temp_translations_loaded = json.load(f)
             print(f"INFO (Localization _load_language_file): Traductions pour '{lang_code_to_load}' chargées ({len(temp_translations_loaded)} clés) depuis {file_path_to_load}")
+            print(
+                f"DEBUG [ZeMosaicLocalization]: Fichier de langue '{file_path_to_load}' chargé avec succès."
+            )
             loaded_successfully = True
         except json.JSONDecodeError as e_json:
             print(f"ERREUR (Localization _load_language_file): Erreur de décodage JSON dans '{file_path_to_load}': {e_json}")
