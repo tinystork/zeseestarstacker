@@ -347,11 +347,11 @@ EN_TRANSLATIONS = {
     'select_astap_data_dir_title': "Select ASTAP Star Index Data Directory",
     'select_local_ansvr_path_title': "Select Local Astrometry.net (ansvr) Path",
     'astap_search_radius_label': "ASTAP Search Radius (deg):",
+    'local_solver_astap_downsample_label': "ASTAP Downsample (-z):",
+    'local_solver_astap_sens_label': "ASTAP Sensitivity (-sens):",
     'tooltip_astap_search_radius': "ASTAP search radius around FITS header RA/DEC. Smaller values are faster if coordinates are good. Recommended: 0.5 to 10 degrees. (0.1-90.0 allowed).",
     'invalid_astap_radius_range': "ASTAP Search Radius must be between 0.1 and 90.0 degrees.",
     'invalid_astap_radius_value': "Invalid value for ASTAP Search Radius. Please enter a number.",
-    'use_radec_hints_label': "Use FITS RA/DEC hints",
-    'tooltip_use_radec_hints': "Add -ra/-dec using RA/DEC from the FITS header when calling ASTAP.",
     'settings_save_failed_on_ok': "Settings were updated in memory, but failed to save to file from this window. They will be saved when the main application closes if not overwritten.",
     
     # final log popup 
