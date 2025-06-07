@@ -70,6 +70,7 @@ try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 try:
     import zemosaic_config
+
     logger.info("Module 'zemosaic_config' importé.")
 except ImportError as e:
     logger.error(f"Import 'zemosaic_config.py' échoué: {e}.")
