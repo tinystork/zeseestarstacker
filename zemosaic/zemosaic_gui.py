@@ -1179,7 +1179,7 @@ class ZeMosaicGUI:
         os.environ["ZEMOSAIC_ASTROMETRY_API_KEY"] = astrometry_api_key_val
 
         solver_settings = {
-            "local_solver_preference": solver_choice_val,
+            "solver_method": solver_choice_val.lower(),  # "astap" ou "astrometry"
             "local_ansvr_path": astrometry_local_path_val,
             "api_key": astrometry_api_key_val,
             "astap_path": astap_exe,
