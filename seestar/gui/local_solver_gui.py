@@ -20,7 +20,13 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         """
         super().__init__(parent_gui.root)
         self.parent_gui = parent_gui
-        self.withdraw() # Cacher pendant la configuration
+        # Load fallback config if the parent GUI lacks one
+        if not hasattr(self.parent_gui, "config"):
+            try:
+                self.parent_gui.config = zemosaic_config.load_config()
+            except Exception:
+                self.parent_gui.config = {}
+        self.withdraw()  # Cacher pendant la configuration
 
         self.title(self.parent_gui.tr("local_solver_window_title", default="Local Astrometry Solvers Configuration"))
         self.transient(parent_gui.root)
