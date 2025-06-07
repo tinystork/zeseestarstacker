@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency
         "psutil not available; memory usage logs disabled.")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
 
 # --- Configuration du Logging ---
 logger = logging.getLogger("ZeMosaicWorker")
@@ -556,6 +557,99 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
         )
         logger.error("Traceback grid calculation:", exc_info=True)
         return None, None
+
+
+def prepare_tiles_and_calc_grid(
+    master_tile_fits_with_wcs_list: list,
+    crop_percent: float,
+    re_solve_cropped_tiles: bool,
+    solver_settings: dict | None,
+    solver_instance,
+    drizzle_scale_factor: float = 1.0,
+    progress_callback: Optional[Callable] = None,
+):
+    """Prepare master tile WCS for grid calculation then call the grid helper."""
+    prepared_tiles = []
+    shapes_hw = []
+
+    for mt_path, mt_wcs in master_tile_fits_with_wcs_list:
+        if not mt_wcs or not mt_wcs.is_celestial:
+            continue
+
+        shape_hw = None
+        try:
+            if mt_wcs.pixel_shape:
+                shape_hw = (int(mt_wcs.pixel_shape[1]), int(mt_wcs.pixel_shape[0]))
+        except Exception:
+            shape_hw = None
+        if shape_hw is None and ASTROPY_AVAILABLE and fits:
+            try:
+                hdr_tmp = fits.getheader(mt_path)
+                if hdr_tmp and "NAXIS1" in hdr_tmp and "NAXIS2" in hdr_tmp:
+                    shape_hw = (int(hdr_tmp["NAXIS2"]), int(hdr_tmp["NAXIS1"]))
+            except Exception:
+                pass
+        if shape_hw is None:
+            continue
+
+        wcs_proc = mt_wcs.copy()
+
+        if crop_percent > 1e-3:
+            frac = crop_percent / 100.0
+            dh = int(shape_hw[0] * frac)
+            dw = int(shape_hw[1] * frac)
+            shape_hw = (max(1, shape_hw[0] - 2 * dh), max(1, shape_hw[1] - 2 * dw))
+            try:
+                if hasattr(wcs_proc.wcs, "crpix"):
+                    wcs_proc.wcs.crpix = [wcs_proc.wcs.crpix[0] - dw, wcs_proc.wcs.crpix[1] - dh]
+            except Exception:
+                pass
+
+        if re_solve_cropped_tiles and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
+            header_for_solver = fits.Header()
+            header_for_solver["SIMPLE"] = True
+            header_for_solver["BITPIX"] = -32
+            header_for_solver["NAXIS"] = 2
+            header_for_solver["NAXIS1"] = shape_hw[1]
+            header_for_solver["NAXIS2"] = shape_hw[0]
+            try:
+                center_px = (shape_hw[1] / 2, shape_hw[0] / 2)
+                ra_hint, dec_hint = wcs_proc.wcs_pix2world([[center_px[0], center_px[1]]], 0)[0]
+                header_for_solver["RA"] = ra_hint
+                header_for_solver["DEC"] = dec_hint
+                header_for_solver["CRVAL1"] = ra_hint
+                header_for_solver["CRVAL2"] = dec_hint
+            except Exception:
+                pass
+            solved_wcs = solver_instance.solve(
+                None,
+                header_for_solver,
+                solver_settings or {},
+                update_header_with_solution=False,
+            )
+            if solved_wcs and solved_wcs.is_celestial:
+                wcs_proc = solved_wcs
+
+        try:
+            wcs_proc.pixel_shape = (shape_hw[1], shape_hw[0])
+            if hasattr(wcs_proc.wcs, "naxis1"):
+                wcs_proc.wcs.naxis1 = shape_hw[1]
+            if hasattr(wcs_proc.wcs, "naxis2"):
+                wcs_proc.wcs.naxis2 = shape_hw[0]
+        except Exception:
+            pass
+
+        prepared_tiles.append((mt_path, wcs_proc))
+        shapes_hw.append(shape_hw)
+
+    final_wcs, final_shape = _calculate_final_mosaic_grid(
+        [w for _, w in prepared_tiles],
+        shapes_hw,
+        drizzle_scale_factor=drizzle_scale_factor,
+        progress_callback=progress_callback,
+    )
+
+    return final_wcs, final_shape, prepared_tiles
 
 
 def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: callable):
@@ -1108,6 +1202,7 @@ def assemble_final_mosaic_incremental(
     re_solve_cropped_tiles: bool = False,
     solver_settings: dict | None = None,
     solver_instance=None,
+    wcs_already_prepared: bool = False,
 ):
     """
     Assemble les master tuiles en une mosaïque finale de manière incrémentale.
@@ -1226,7 +1321,8 @@ def assemble_final_mosaic_incremental(
                     )
                     if cropped_data is not None and cropped_wcs is not None:
                         data_to_use_for_reproject = cropped_data
-                        wcs_to_use_for_reproject = cropped_wcs
+                        if not wcs_already_prepared:
+                            wcs_to_use_for_reproject = cropped_wcs
                         try:
                             wcs_to_use_for_reproject.pixel_shape = (
                                 data_to_use_for_reproject.shape[1],
@@ -1237,7 +1333,7 @@ def assemble_final_mosaic_incremental(
                                 f"ASM_INC: AVERT - Échec pixel_shape après rognage {os.path.basename(tile_path)}: {e_ps_crop}",
                                 lvl="WARN",
                             )
-                        if re_solve_cropped_tiles and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
+                        if re_solve_cropped_tiles and not wcs_already_prepared and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
                             try:
                                 header_for_solver = fits.Header()
                                 header_for_solver["SIMPLE"] = True
@@ -1400,6 +1496,7 @@ def assemble_final_mosaic_with_reproject_coadd(
     solver_settings: dict | None = None,
     solver_instance=None,
     alignment_solver_choice: str | None = None,
+    wcs_already_prepared: bool = False,
     # --- FIN NOUVEAUX PARAMÈTRES ---
 ):
     """
@@ -1516,7 +1613,8 @@ def assemble_final_mosaic_with_reproject_coadd(
                     )
                     if cropped_data is not None and cropped_wcs is not None:
                         data_to_use_for_assembly = cropped_data
-                        wcs_to_use_for_assembly = cropped_wcs
+                        if not wcs_already_prepared:
+                            wcs_to_use_for_assembly = cropped_wcs
                         try:
                             wcs_to_use_for_assembly.pixel_shape = (
                                 data_to_use_for_assembly.shape[1],
@@ -1528,7 +1626,7 @@ def assemble_final_mosaic_with_reproject_coadd(
                                 lvl="WARN",
                             )
                         # Optionnel : re-solve du WCS sur la tuile rognée
-                        if re_solve_cropped_tiles and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
+                        if re_solve_cropped_tiles and not wcs_already_prepared and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
                             try:
                                 header_for_solver = hdul[0].header.copy()
                                 header_for_solver['NAXIS1'] = data_to_use_for_assembly.shape[1]
@@ -2131,61 +2229,19 @@ def run_hierarchical_mosaic(
     base_progress_phase4 = current_global_progress
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
-    wcs_list_for_grid = []
-    shape_list_for_grid = []
-    for idx_mt, (mt_path_iter, mt_wcs_iter) in enumerate(master_tiles_results_list, 1):
-        if not (mt_path_iter and os.path.exists(mt_path_iter)):
-            pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path"))
-            continue
-
-        shape_hw = None
-        try:
-            hdr_tmp = fits.getheader(mt_path_iter)
-            if hdr_tmp and 'NAXIS1' in hdr_tmp and 'NAXIS2' in hdr_tmp:
-                shape_hw = (int(hdr_tmp['NAXIS2']), int(hdr_tmp['NAXIS1']))
-        except Exception as e_read_hdr:
-            pcb("Phase4: lecture header échouée", prog=None, lvl="DEBUG", path=os.path.basename(mt_path_iter), error=str(e_read_hdr))
-
-        if shape_hw is None:
-            if mt_wcs_iter.pixel_shape:
-                shape_hw = (int(mt_wcs_iter.pixel_shape[1]), int(mt_wcs_iter.pixel_shape[0]))
-        if shape_hw is None:
-            pcb("run_warn_phase4_no_shape_for_tile", prog=None, lvl="WARN", filename=os.path.basename(mt_path_iter))
-            continue
-
-        wcs_to_use = mt_wcs_iter.copy()
-        if apply_master_tile_crop_config and master_tile_crop_percent_config > 1e-3:
-            crop_fraction = master_tile_crop_percent_config / 100.0
-            dh = int(shape_hw[0] * crop_fraction)
-            dw = int(shape_hw[1] * crop_fraction)
-            new_h = max(1, shape_hw[0] - 2 * dh)
-            new_w = max(1, shape_hw[1] - 2 * dw)
-            shape_hw = (new_h, new_w)
-            try:
-                if hasattr(wcs_to_use.wcs, 'crpix'):
-                    wcs_to_use.wcs.crpix = [wcs_to_use.wcs.crpix[0] - dw, wcs_to_use.wcs.crpix[1] - dh]
-            except Exception:
-                pass
-        try:
-            wcs_to_use.pixel_shape = (shape_hw[1], shape_hw[0])
-        except Exception:
-            pass
-
-        wcs_list_for_grid.append(wcs_to_use)
-        shape_list_for_grid.append(shape_hw)
-        pcb(f"Phase4: panneau {idx_mt} shape={shape_hw}", prog=None, lvl="DEBUG_DETAIL")
-
-    if not wcs_list_for_grid:
-        pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
-        return
-
     final_mosaic_drizzle_scale = 1.0
-    final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(
-        wcs_list_for_grid,
-        shape_list_for_grid,
+    final_output_wcs, final_output_shape_hw, master_tiles_results_list = prepare_tiles_and_calc_grid(
+        master_tiles_results_list,
+        master_tile_crop_percent_config if apply_master_tile_crop_config else 0.0,
+        re_solve_cropped_tiles_config,
+        solver_settings,
+        astrometry_solver,
         drizzle_scale_factor=final_mosaic_drizzle_scale,
         progress_callback=progress_callback,
     )
+    if not master_tiles_results_list:
+        pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR")
+        return
     if final_output_wcs and final_output_shape_hw:
         pcb(
             f"Phase4: grille calc {len(wcs_list_for_grid)} tuiles -> shape {final_output_shape_hw} CRPIX {final_output_wcs.wcs.crpix if final_output_wcs.wcs else 'N/A'} CRVAL {final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A'}",
@@ -2237,9 +2293,10 @@ def run_hierarchical_mosaic(
             # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
             apply_crop=apply_master_tile_crop_config,
             crop_percent=master_tile_crop_percent_config,
-            re_solve_cropped_tiles=re_solve_cropped_tiles_config,
+            re_solve_cropped_tiles=False,
             solver_settings=solver_settings,
             solver_instance=astrometry_solver,
+            wcs_already_prepared=True,
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_incremental"
@@ -2258,10 +2315,11 @@ def run_hierarchical_mosaic(
             # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
             apply_crop=apply_master_tile_crop_config,
             crop_percent=master_tile_crop_percent_config,
-            re_solve_cropped_tiles=re_solve_cropped_tiles_config,
+            re_solve_cropped_tiles=False,
             solver_settings=solver_settings,
             solver_instance=astrometry_solver,
-            alignment_solver_choice=alignment_solver_choice
+            alignment_solver_choice=alignment_solver_choice,
+            wcs_already_prepared=True,
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
