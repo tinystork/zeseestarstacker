@@ -24,17 +24,20 @@ from typing import Callable, Optional
 
 # --- Configuration du Logging ---
 logger = logging.getLogger("ZeMosaicWorker")
+# Ensure log_file_path is defined even if the logger already has handlers.
+try:
+    log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zemosaic_worker.log")
+except Exception:
+    log_file_path = "zemosaic_worker.log"
+
 if not logger.handlers:
     logger.setLevel(logging.DEBUG)
-    try:
-        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zemosaic_worker.log")
-    except NameError: 
-        log_file_path = "zemosaic_worker.log"
     fh = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
     fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+
 logger.info("Logging pour ZeMosaicWorker initialisé. Logs écrits dans: %s", log_file_path)
 
 # --- Third-Party Library Imports ---
