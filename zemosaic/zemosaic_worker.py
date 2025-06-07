@@ -352,6 +352,11 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 
     solver_settings = GLOBAL_SOLVER_SETTINGS
+    if "solver_method" not in solver_settings and \
+       "local_solver_preference" in solver_settings:
+        solver_settings["solver_method"] = str(
+            solver_settings["local_solver_preference"]
+        ).lower()
     solver_method = solver_settings.get(
         "solver_method",
         zemosaic_config.get_solver_method()
