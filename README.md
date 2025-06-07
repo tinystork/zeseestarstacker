@@ -296,14 +296,15 @@ zemosaic_worker.run_hierarchical_mosaic(
   omitted the solver uses `ASTAP_DEFAULT_SEARCH_RADIUS` (3.0 degrees)
 - `astap_downsample`: downsample factor used by ASTAP
 - `astap_sensitivity`: detection sensitivity percentage for ASTAP
-- `use_radec_hints`: include FITS RA/DEC as hints when solving with ASTAP
+- `use_radec_hints`: include FITS RA/DEC as hints when solving with ASTAP *(defaults to false; enable only if your FITS headers contain reliable coordinates)*
 - `local_ansvr_path`: path to a local `ansvr.cfg`
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
-the FITS header. When disabled the solver performs a blind search centered only
-on the provided search radius.
+the FITS header. This option is **disabled by default** and should only be
+enabled when those header values are trustworthy. When disabled the solver
+performs a blind search centered only on the provided search radius.
 
 ---
 

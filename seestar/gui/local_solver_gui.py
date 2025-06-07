@@ -54,7 +54,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         print(f"DEBUG (LocalSolverSettingsWindow __init__): astap_search_radius_var initialisée à {self.astap_search_radius_var.get()}.") # DEBUG
 
         self.use_radec_hints_var = tk.BooleanVar(
-            value=getattr(self.parent_gui.settings, 'use_radec_hints', True)
+            value=getattr(self.parent_gui.settings, 'use_radec_hints', False)
         )
 
 
