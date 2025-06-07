@@ -1063,14 +1063,17 @@ def create_master_tile(
 
 def assemble_final_mosaic_incremental(
     master_tile_fits_with_wcs_list: list,
-    final_output_wcs: WCS, 
+    final_output_wcs: WCS,
     final_output_shape_hw: tuple,
     progress_callback: callable,
     n_channels: int = 3,
     dtype_accumulator: np.dtype = np.float64,
     dtype_norm: np.dtype = np.float32,
     apply_crop: bool = False,
-    crop_percent: float = 0.0
+    crop_percent: float = 0.0,
+    re_solve_cropped_tiles: bool = False,
+    solver_settings: dict | None = None,
+    solver_instance=None,
 ):
     """
     Assemble les master tuiles en une mosaïque finale de manière incrémentale.
@@ -1078,6 +1081,9 @@ def assemble_final_mosaic_incremental(
     Le rognage utilise uniquement un découpage d'image et met à jour le WCS.
     Les tuiles (rognées ou non) sont ensuite reprojetées lors de leur ajout
     à la mosaïque finale.
+    Si ``re_solve_cropped_tiles`` est activé et qu'un ``solver_instance`` est
+    fourni, chaque tuile rognée est soumise à une nouvelle résolution
+    astrométrique avant sa reprojection.
     """
     pcb_asm = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: \
         _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
@@ -1197,6 +1203,65 @@ def assemble_final_mosaic_incremental(
                                 f"ASM_INC: AVERT - Échec pixel_shape après rognage {os.path.basename(tile_path)}: {e_ps_crop}",
                                 lvl="WARN",
                             )
+                        if re_solve_cropped_tiles and solver_instance and ASTROMETRY_SOLVER_AVAILABLE:
+                            try:
+                                header_for_solver = fits.Header()
+                                header_for_solver["SIMPLE"] = True
+                                header_for_solver["BITPIX"] = -32
+                                header_for_solver["NAXIS"] = 2
+                                header_for_solver["NAXIS1"] = data_to_use_for_reproject.shape[1]
+                                header_for_solver["NAXIS2"] = data_to_use_for_reproject.shape[0]
+                                for key_copy in ("FOCALLEN", "XPIXSZ"):
+                                    if key_copy in hdul[0].header:
+                                        header_for_solver[key_copy] = hdul[0].header[key_copy]
+                                try:
+                                    center_px = (
+                                        data_to_use_for_reproject.shape[1] / 2,
+                                        data_to_use_for_reproject.shape[0] / 2,
+                                    )
+                                    ra_hint, dec_hint = wcs_to_use_for_reproject.wcs_pix2world([[center_px[0], center_px[1]]], 0)[0]
+                                    header_for_solver["CRVAL1"] = ra_hint
+                                    header_for_solver["CRVAL2"] = dec_hint
+                                    header_for_solver["RA"] = ra_hint
+                                    header_for_solver["DEC"] = dec_hint
+                                    pcb_asm(
+                                        f"      Solver hints RA={ra_hint:.6f}, DEC={dec_hint:.6f}",
+                                        lvl="DEBUG_DETAIL",
+                                    )
+                                except Exception:
+                                    pass
+                                with tempfile.NamedTemporaryFile(suffix='.fits', delete=False) as tmp_f:
+                                    fits.writeto(tmp_f.name, data_to_use_for_reproject, header_for_solver, overwrite=True)
+                                    solved_wcs = solver_instance.solve(
+                                        tmp_f.name,
+                                        header_for_solver,
+                                        solver_settings or {},
+                                        update_header_with_solution=False,
+                                    )
+                                os.remove(tmp_f.name)
+                                if solved_wcs and solved_wcs.is_celestial:
+                                    wcs_to_use_for_reproject = solved_wcs
+                                    try:
+                                        wcs_to_use_for_reproject.pixel_shape = (
+                                            data_to_use_for_reproject.shape[1],
+                                            data_to_use_for_reproject.shape[0],
+                                        )
+                                    except Exception:
+                                        pass
+                                    pcb_asm(
+                                        f"      WCS re-solved après rognage pour {os.path.basename(tile_path)}",
+                                        lvl="DEBUG_DETAIL",
+                                    )
+                                else:
+                                    pcb_asm(
+                                        f"ASM_INC: AVERT - Re-solve échoué pour {os.path.basename(tile_path)}",
+                                        lvl="WARN",
+                                    )
+                            except Exception as e_resolve_inc:
+                                pcb_asm(
+                                    f"ASM_INC: AVERT - Re-solve erreur {os.path.basename(tile_path)}: {e_resolve_inc}",
+                                    lvl="WARN",
+                                )
                         pcb_asm(
                             f"    Nouvelle shape après rognage: {data_to_use_for_reproject.shape[:2]}",
                             lvl="DEBUG_VERY_DETAIL",
@@ -2129,14 +2194,17 @@ def run_hierarchical_mosaic(
             pcb("run_error_phase5_inc_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_incremental", prog=base_progress_phase5, lvl="INFO")
         final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly, 
-            final_output_wcs=final_output_wcs, 
+            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+            final_output_wcs=final_output_wcs,
             final_output_shape_hw=final_output_shape_hw,
             progress_callback=progress_callback,
             n_channels=3,
             # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
             apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config
+            crop_percent=master_tile_crop_percent_config,
+            re_solve_cropped_tiles=re_solve_cropped_tiles_config,
+            solver_settings=solver_settings,
+            solver_instance=astrometry_solver,
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_incremental"
