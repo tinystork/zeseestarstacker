@@ -156,3 +156,73 @@ def test_use_radec_hints_toggle(tmp_path, monkeypatch):
         use_radec_hints=True,
     )
     assert "-ra" in captured["cmd"]
+
+
+def test_astap_uses_pxscale_from_header(tmp_path, monkeypatch):
+    img = np.ones((10, 10), dtype=np.float32)
+    hdr = fits.Header()
+    hdr["XPIXSZ"] = 2.4
+    hdr["FOCALLEN"] = 240.0
+    fits_path = tmp_path / "px.fits"
+    fits.writeto(fits_path, img, hdr, overwrite=True)
+
+    solver = AstrometrySolver()
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check, cwd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    header = fits.getheader(fits_path)
+
+    solver._try_solve_astap(
+        str(fits_path),
+        header,
+        "astap.exe",
+        str(tmp_path),
+        1.0,
+        None,
+        None,
+        5,
+        False,
+    )
+
+    assert "-pxscale" in captured["cmd"]
+    idx = captured["cmd"].index("-pxscale") + 1
+    val = float(captured["cmd"][idx])
+    assert abs(val - ((hdr["XPIXSZ"] / hdr["FOCALLEN"]) * 206.265)) < 0.01
+
+
+def test_astap_adds_fov_when_scale_missing(tmp_path, monkeypatch):
+    img = np.ones((10, 10), dtype=np.float32)
+    fits_path = tmp_path / "nofov.fits"
+    fits.writeto(fits_path, img, overwrite=True)
+
+    solver = AstrometrySolver()
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check, cwd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    header = fits.getheader(fits_path)
+
+    solver._try_solve_astap(
+        str(fits_path),
+        header,
+        "astap.exe",
+        str(tmp_path),
+        2.0,
+        None,
+        None,
+        5,
+        False,
+    )
+
+    assert "-fov" in captured["cmd"]
