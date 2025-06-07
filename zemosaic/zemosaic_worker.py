@@ -69,7 +69,8 @@ except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 try:
-    from zemosaic import zemosaic_config
+    import zemosaic_config
+
     logger.info("Module 'zemosaic_config' importé.")
 except ImportError as e:
     logger.error(f"Import 'zemosaic_config.py' échoué: {e}.")
