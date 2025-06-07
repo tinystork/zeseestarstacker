@@ -326,6 +326,7 @@ FR_TRANSLATIONS = {
     'Mosaic...': "Mosaïque...",
     'mosaic_settings_title': "Options Mosaïque",
     'mosaic_activation_frame': "Activation",
+    'mosaic_activation_frame_title': "Activation",
     'mosaic_activate_label': "Activer le mode de traitement Mosaïque",
     'cancel': "Annuler",
     'ok': "OK",
@@ -357,6 +358,7 @@ FR_TRANSLATIONS = {
 
     'mosaic_drizzle_fillval_label': "Val. Remplissage :", # Nouveau
     'mosaic_drizzle_wht_thresh_label': "Masque Bas WHT (%) :", # Nouveau
+    'mosaic_scale_label': "Facteur d’échelle :",
 
     'mosaic_validation_orb_range': "Points ORB doit être entre {min_orb} et {max_orb}.",
     'mosaic_validation_matches_range': "Corresp. Abs. Min doit être entre {min_matches} et {max_matches}.",
@@ -364,6 +366,7 @@ FR_TRANSLATIONS = {
     'mosaic_validation_ransac_thresh_range': "Seuil RANSAC doit être entre {min_thresh:.1f} et {max_thresh:.1f}.",
     'mosaic_error_reading_spinbox': "Erreur de lecture d'une valeur de Spinbox : {error_details}",
     'mosaic_error_converting_spinbox': "Erreur de conversion d'une valeur de Spinbox : {error_details}",
+    'msw_api_key_missing_warning': "La clé API Astrometry.net est manquante. Le plate solving pour la mosaïque (ancrage ou panneaux) pourrait échouer si les solveurs locaux ne sont pas configurés ou échouent aussi. Continuer malgré tout ?",
    
     # --- LocalSolverSettingsWindow ---   
     'local_solver_button_text': "Config Solveur",

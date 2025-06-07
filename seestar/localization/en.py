@@ -292,6 +292,7 @@ EN_TRANSLATIONS = {
     'Mosaic...': "Mosaic...",
     'mosaic_settings_title': "Mosaic Options",
     'mosaic_activation_frame': "Activation",
+    'mosaic_activation_frame_title': "Activation",
     'mosaic_activate_label': "Enable Mosaic Processing Mode",
     'cancel': "Cancel",
     'ok': "OK",
@@ -322,12 +323,14 @@ EN_TRANSLATIONS = {
 
     'mosaic_drizzle_fillval_label': "Fill Value:", # Nouveau
     'mosaic_drizzle_wht_thresh_label': "Low WHT Mask (%):", # Nouveau (différent du Drizzle global pour être sûr)
+    'mosaic_scale_label': "Scale Factor:",
     'mosaic_validation_orb_range': "ORB Features must be between {min_orb} and {max_orb}.",
     'mosaic_validation_matches_range': "Min Absolute Matches must be between {min_matches} and {max_matches}.",
     'mosaic_validation_inliers_range': "Min RANSAC Inliers must be between {min_inliers} and {max_inliers}.",
     'mosaic_validation_ransac_thresh_range': "RANSAC Threshold must be between {min_thresh:.1f} and {max_thresh:.1f}.",
     'mosaic_error_reading_spinbox': "Error reading Spinbox value: {error_details}",
     'mosaic_error_converting_spinbox': "Error converting Spinbox value: {error_details}",
+    'msw_api_key_missing_warning': "Astrometry.net API Key is missing. Plate solving for mosaic (anchor or panels) might fail if local solvers are not configured or also fail. Continue anyway?",
     
     # --- LocalSolverSettingsWindow ---   
     'local_solver_button_text': "Solver Config",
