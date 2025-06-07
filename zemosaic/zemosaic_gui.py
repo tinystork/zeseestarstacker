@@ -373,7 +373,8 @@ class ZeMosaicGUI:
         # --- Sélecteur de Langue ---
         lang_select_frame = ttk.Frame(self.scrollable_content_frame)
         lang_select_frame.pack(fill=tk.X, pady=(0,10), padx=5)
-        lang_label = ttk.Label(lang_select_frame, text="") 
+        lang_label = ttk.Label(lang_select_frame,
+                               text=self._tr("language_selector_label"))
         lang_label.pack(side=tk.LEFT, padx=(0,5))
         self.translatable_widgets["language_selector_label"] = lang_label
         
@@ -395,23 +396,50 @@ class ZeMosaicGUI:
         self.language_combo.pack(side=tk.LEFT)
 
         # --- Folder Selection Frame ---
-        folders_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        folders_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("folders_frame_title"),
+            padding="10"
+        )
         # ... (contenu de folders_frame) ...
         folders_frame.pack(fill=tk.X, pady=(0,10)); folders_frame.columnconfigure(1, weight=1)
         self.translatable_widgets["folders_frame_title"] = folders_frame
-        ttk.Label(folders_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["input_folder_label"] = folders_frame.grid_slaves(row=0,column=0)[0]
+        ttk.Label(folders_frame, text=self._tr("input_folder_label")).grid(
+            row=0, column=0, padx=5, pady=5, sticky="w"
+        );
+        self.translatable_widgets["input_folder_label"] = folders_frame.grid_slaves(row=0,column=0)[0]
         ttk.Entry(folders_frame, textvariable=self.input_dir_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(folders_frame, text="", command=self._browse_input_dir).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_button"] = folders_frame.grid_slaves(row=0,column=2)[0]
-        ttk.Label(folders_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["output_folder_label"] = folders_frame.grid_slaves(row=1,column=0)[0]
+        ttk.Button(
+            folders_frame,
+            text=self._tr("browse_button"),
+            command=self._browse_input_dir
+        ).grid(row=0, column=2, padx=5, pady=5);
+        self.translatable_widgets["browse_button"] = folders_frame.grid_slaves(row=0,column=2)[0]
+        ttk.Label(folders_frame, text=self._tr("output_folder_label")).grid(
+            row=1, column=0, padx=5, pady=5, sticky="w"
+        );
+        self.translatable_widgets["output_folder_label"] = folders_frame.grid_slaves(row=1,column=0)[0]
         ttk.Entry(folders_frame, textvariable=self.output_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(folders_frame, text="", command=self._browse_output_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_button_output"] = folders_frame.grid_slaves(row=1,column=2)[0]
+        ttk.Button(
+            folders_frame,
+            text=self._tr("browse_button_output"),
+            command=self._browse_output_dir
+        ).grid(row=1, column=2, padx=5, pady=5);
+        self.translatable_widgets["browse_button_output"] = folders_frame.grid_slaves(row=1,column=2)[0]
 
-        ttk.Label(folders_frame, text="").grid(row=2, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["save_final_16bit_label"] = folders_frame.grid_slaves(row=2,column=0)[0]
+        ttk.Label(folders_frame, text=self._tr("save_final_16bit_label")).grid(
+            row=2, column=0, padx=5, pady=5, sticky="w"
+        );
+        self.translatable_widgets["save_final_16bit_label"] = folders_frame.grid_slaves(row=2,column=0)[0]
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
 
         # --- Parameters Frame ---
-        params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        params_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("mosaic_params_frame_title"),
+            padding="10"
+        )
         # ... (contenu de params_frame) ...
         params_frame.pack(fill=tk.X, pady=(0,10))
         self.translatable_widgets["mosaic_params_frame_title"] = params_frame
@@ -419,26 +447,39 @@ class ZeMosaicGUI:
 
         
         # --- Stacking Options Frame ---
-        stacking_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10") 
+        stacking_options_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("stacking_options_frame_title"),
+            padding="10"
+        )
         # ... (contenu de stacking_options_frame avec Normalisation, Pondération, Rejet, Combinaison, Pondération Radiale, Plancher Poids Radial) ...
         stacking_options_frame.pack(fill=tk.X, pady=(0,10))
         self.translatable_widgets["stacking_options_frame_title"] = stacking_options_frame
         stacking_options_frame.columnconfigure(1, weight=1) 
         stk_opt_row = 0
         # Normalisation
-        norm_label = ttk.Label(stacking_options_frame, text="")
+        norm_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_norm_method_label")
+        )
         norm_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_norm_method_label"] = norm_label
         self.norm_method_combo = ttk.Combobox(stacking_options_frame, values=[], state="readonly", width=25)
         self.norm_method_combo.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="ew", columnspan=3)
         self.norm_method_combo.bind("<<ComboboxSelected>>", lambda e, c=self.norm_method_combo, v=self.stacking_normalize_method_var, k_list=self.norm_method_keys, p="norm_method": self._combo_to_key(e, c, v, k_list, p)); stk_opt_row += 1
         # Pondération
-        weight_label = ttk.Label(stacking_options_frame, text="")
+        weight_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_weight_method_label")
+        )
         weight_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_weight_method_label"] = weight_label
         self.weight_method_combo = ttk.Combobox(stacking_options_frame, values=[], state="readonly", width=25)
         self.weight_method_combo.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="ew", columnspan=3)
         self.weight_method_combo.bind("<<ComboboxSelected>>", lambda e, c=self.weight_method_combo, v=self.stacking_weighting_method_var, k_list=self.weight_method_keys, p="weight_method": self._combo_to_key(e, c, v, k_list, p)); stk_opt_row += 1
         # Rejet
-        reject_label = ttk.Label(stacking_options_frame, text="")
+        reject_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_reject_algo_label")
+        )
         reject_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_reject_algo_label"] = reject_label
         self.reject_algo_combo = ttk.Combobox(stacking_options_frame, values=[], state="readonly", width=25)
         self.reject_algo_combo.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="ew", columnspan=3)
@@ -446,48 +487,92 @@ class ZeMosaicGUI:
         # Kappa
         kappa_params_frame = ttk.Frame(stacking_options_frame) 
         kappa_params_frame.grid(row=stk_opt_row, column=0, columnspan=4, sticky="ew", padx=0, pady=0)
-        kappa_low_label = ttk.Label(kappa_params_frame, text=""); kappa_low_label.pack(side=tk.LEFT, padx=(5,2)); self.translatable_widgets["stacking_kappa_low_label"] = kappa_low_label
+        kappa_low_label = ttk.Label(
+            kappa_params_frame,
+            text=self._tr("stacking_kappa_low_label")
+        );
+        kappa_low_label.pack(side=tk.LEFT, padx=(5,2));
+        self.translatable_widgets["stacking_kappa_low_label"] = kappa_low_label
         self.kappa_low_spinbox = ttk.Spinbox(kappa_params_frame, from_=0.1, to=10.0, increment=0.1, textvariable=self.stacking_kappa_low_var, width=6); self.kappa_low_spinbox.pack(side=tk.LEFT, padx=(0,10))
-        kappa_high_label = ttk.Label(kappa_params_frame, text=""); kappa_high_label.pack(side=tk.LEFT, padx=(5,2)); self.translatable_widgets["stacking_kappa_high_label"] = kappa_high_label
+        kappa_high_label = ttk.Label(
+            kappa_params_frame,
+            text=self._tr("stacking_kappa_high_label")
+        );
+        kappa_high_label.pack(side=tk.LEFT, padx=(5,2));
+        self.translatable_widgets["stacking_kappa_high_label"] = kappa_high_label
         self.kappa_high_spinbox = ttk.Spinbox(kappa_params_frame, from_=0.1, to=10.0, increment=0.1, textvariable=self.stacking_kappa_high_var, width=6); self.kappa_high_spinbox.pack(side=tk.LEFT, padx=(0,5)); stk_opt_row += 1
         # Winsor
         winsor_params_frame = ttk.Frame(stacking_options_frame)
         winsor_params_frame.grid(row=stk_opt_row, column=0, columnspan=4, sticky="ew", padx=0, pady=0)
-        winsor_label = ttk.Label(winsor_params_frame, text=""); winsor_label.pack(side=tk.LEFT, padx=(5,2)); self.translatable_widgets["stacking_winsor_limits_label"] = winsor_label
+        winsor_label = ttk.Label(
+            winsor_params_frame,
+            text=self._tr("stacking_winsor_limits_label")
+        );
+        winsor_label.pack(side=tk.LEFT, padx=(5,2));
+        self.translatable_widgets["stacking_winsor_limits_label"] = winsor_label
         self.winsor_limits_entry = ttk.Entry(winsor_params_frame, textvariable=self.stacking_winsor_limits_str_var, width=10); self.winsor_limits_entry.pack(side=tk.LEFT, padx=(0,5))
-        winsor_note = ttk.Label(winsor_params_frame, text=""); winsor_note.pack(side=tk.LEFT, padx=(5,0)); self.translatable_widgets["stacking_winsor_note"] = winsor_note; stk_opt_row += 1
+        winsor_note = ttk.Label(
+            winsor_params_frame,
+            text=self._tr("stacking_winsor_note")
+        );
+        winsor_note.pack(side=tk.LEFT, padx=(5,0));
+        self.translatable_widgets["stacking_winsor_note"] = winsor_note; stk_opt_row += 1
         # Combinaison Finale MT
-        combine_label = ttk.Label(stacking_options_frame, text="")
+        combine_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_final_combine_label")
+        )
         combine_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_final_combine_label"] = combine_label
         self.final_combine_combo = ttk.Combobox(stacking_options_frame, values=[], state="readonly", width=25)
         self.final_combine_combo.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="ew", columnspan=3)
         self.final_combine_combo.bind("<<ComboboxSelected>>", lambda e, c=self.final_combine_combo, v=self.stacking_final_combine_method_var, k_list=self.combine_method_keys, p="combine_method": self._combo_to_key(e, c, v, k_list, p)); stk_opt_row += 1
         # Pondération Radiale
-        self.apply_radial_weight_label = ttk.Label(stacking_options_frame, text="")
+        self.apply_radial_weight_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_apply_radial_label")
+        )
         self.apply_radial_weight_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_apply_radial_label"] = self.apply_radial_weight_label
         self.apply_radial_weight_check = ttk.Checkbutton(stacking_options_frame, variable=self.apply_radial_weight_var); self.apply_radial_weight_check.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w"); stk_opt_row += 1
         # Feather Fraction
-        self.radial_feather_label = ttk.Label(stacking_options_frame, text="")
+        self.radial_feather_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_radial_feather_label")
+        )
         self.radial_feather_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_radial_feather_label"] = self.radial_feather_label
         self.radial_feather_spinbox = ttk.Spinbox(stacking_options_frame, from_=0.1, to=1.0, increment=0.05, textvariable=self.radial_feather_fraction_var, width=8, format="%.2f")
         self.radial_feather_spinbox.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w"); stk_opt_row += 1
         # Min Radial Weight Floor
-        self.min_radial_floor_label = ttk.Label(stacking_options_frame, text="")
+        self.min_radial_floor_label = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_min_radial_floor_label")
+        )
         self.min_radial_floor_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_min_radial_floor_label"] = self.min_radial_floor_label
         self.min_radial_floor_spinbox = ttk.Spinbox(stacking_options_frame, from_=0.0, to=0.5, increment=0.01, textvariable=self.min_radial_weight_floor_var, width=8, format="%.2f")
         self.min_radial_floor_spinbox.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w")
-        min_radial_floor_note = ttk.Label(stacking_options_frame, text=""); min_radial_floor_note.grid(row=stk_opt_row, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_min_radial_floor_note"] = min_radial_floor_note; stk_opt_row += 1
+        min_radial_floor_note = ttk.Label(
+            stacking_options_frame,
+            text=self._tr("stacking_min_radial_floor_note")
+        );
+        min_radial_floor_note.grid(row=stk_opt_row, column=2, padx=5, pady=3, sticky="w");
+        self.translatable_widgets["stacking_min_radial_floor_note"] = min_radial_floor_note; stk_opt_row += 1
 
 
         # --- AJOUT DU CADRE POUR LES OPTIONS DE PERFORMANCE (NOMBRE DE THREADS) ---
-        perf_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        perf_options_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("performance_options_frame_title"),
+            padding="10"
+        )
         perf_options_frame.pack(fill=tk.X, pady=(5, 10), padx=0) # pack avant "Options d'Assemblage Final"
         self.translatable_widgets["performance_options_frame_title"] = perf_options_frame
         perf_options_frame.columnconfigure(1, weight=0) # Les widgets ne s'étendent pas horizontalement ici
         perf_options_frame.columnconfigure(2, weight=1) # La note peut s'étendre
 
         # Label et Spinbox pour le nombre de threads
-        num_workers_label = ttk.Label(perf_options_frame, text="")
+        num_workers_label = ttk.Label(
+            perf_options_frame,
+            text=self._tr("num_workers_label")
+        )
         num_workers_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.translatable_widgets["num_workers_label"] = num_workers_label
         
@@ -509,12 +594,19 @@ class ZeMosaicGUI:
         )
         self.num_workers_spinbox.grid(row=0, column=1, padx=5, pady=5, sticky="w")
         
-        num_workers_note = ttk.Label(perf_options_frame, text="")
+        num_workers_note = ttk.Label(
+            perf_options_frame,
+            text=self._tr("num_workers_note")
+        )
         num_workers_note.grid(row=0, column=2, padx=(10,5), pady=5, sticky="ew") # Note avec un peu plus de marge
         self.translatable_widgets["num_workers_note"] = num_workers_note
         # --- FIN CADRE OPTIONS DE PERFORMANCE ---
         # --- NOUVEAU CADRE : OPTIONS DE ROGNAGE DES TUILES MAÎTRESSES ---
-        crop_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        crop_options_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("crop_options_frame_title"),
+            padding="10"
+        )
         crop_options_frame.pack(fill=tk.X, pady=(5, 10), padx=0)
         self.translatable_widgets["crop_options_frame_title"] = crop_options_frame
         crop_options_frame.columnconfigure(1, weight=0) # Labels et spinbox de largeur fixe
@@ -523,7 +615,10 @@ class ZeMosaicGUI:
         crop_opt_row = 0
 
         # Checkbutton pour activer le rognage
-        self.apply_crop_label = ttk.Label(crop_options_frame, text="")
+        self.apply_crop_label = ttk.Label(
+            crop_options_frame,
+            text=self._tr("apply_master_tile_crop_label")
+        )
         self.apply_crop_label.grid(row=crop_opt_row, column=0, padx=5, pady=3, sticky="w")
         self.translatable_widgets["apply_master_tile_crop_label"] = self.apply_crop_label
         
@@ -536,7 +631,10 @@ class ZeMosaicGUI:
         crop_opt_row += 1
 
         # Spinbox pour le pourcentage de rognage
-        self.crop_percent_label = ttk.Label(crop_options_frame, text="")
+        self.crop_percent_label = ttk.Label(
+            crop_options_frame,
+            text=self._tr("master_tile_crop_percent_label")
+        )
         self.crop_percent_label.grid(row=crop_opt_row, column=0, padx=5, pady=3, sticky="w")
         self.translatable_widgets["master_tile_crop_percent_label"] = self.crop_percent_label
 
@@ -548,12 +646,18 @@ class ZeMosaicGUI:
         )
         self.crop_percent_spinbox.grid(row=crop_opt_row, column=1, padx=5, pady=3, sticky="w")
         
-        crop_percent_note = ttk.Label(crop_options_frame, text="")
+        crop_percent_note = ttk.Label(
+            crop_options_frame,
+            text=self._tr("master_tile_crop_percent_note")
+        )
         crop_percent_note.grid(row=crop_opt_row, column=2, padx=(10,5), pady=3, sticky="ew")
         self.translatable_widgets["master_tile_crop_percent_note"] = crop_percent_note
         crop_opt_row += 1
 
-        self.re_solve_crop_label = ttk.Label(crop_options_frame, text="")
+        self.re_solve_crop_label = ttk.Label(
+            crop_options_frame,
+            text=self._tr("re_solve_cropped_tiles_label")
+        )
         self.re_solve_crop_label.grid(row=crop_opt_row, column=0, padx=5, pady=3, sticky="w")
         self.translatable_widgets["re_solve_cropped_tiles_label"] = self.re_solve_crop_label
 
@@ -567,13 +671,20 @@ class ZeMosaicGUI:
         # --- FIN  CADRE DE ROGNAGE ---
 
         # --- Options d'Assemblage Final ---
-        final_assembly_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        final_assembly_options_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("final_assembly_options_frame_title"),
+            padding="10"
+        )
         # ... (contenu de final_assembly_options_frame) ...
         final_assembly_options_frame.pack(fill=tk.X, pady=(0,10), padx=0) # Changé pady top à 0
         self.translatable_widgets["final_assembly_options_frame_title"] = final_assembly_options_frame
         final_assembly_options_frame.columnconfigure(1, weight=1)
         asm_opt_row = 0
-        self.final_assembly_method_label = ttk.Label(final_assembly_options_frame, text="")
+        self.final_assembly_method_label = ttk.Label(
+            final_assembly_options_frame,
+            text=self._tr("final_assembly_method_label")
+        )
         self.final_assembly_method_label.grid(row=asm_opt_row, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["final_assembly_method_label"] = self.final_assembly_method_label
         self.final_assembly_method_combo = ttk.Combobox(final_assembly_options_frame, values=[], state="readonly", width=40)
         self.final_assembly_method_combo.grid(row=asm_opt_row, column=1, padx=5, pady=5, sticky="ew")
@@ -581,7 +692,12 @@ class ZeMosaicGUI:
         
 
         # --- Launch Button, Progress Bar, Log Frame ---
-        self.launch_button = ttk.Button(self.scrollable_content_frame, text="", command=self._start_processing, style="Accent.TButton")
+        self.launch_button = ttk.Button(
+            self.scrollable_content_frame,
+            text=self._tr("launch_button"),
+            command=self._start_processing,
+            style="Accent.TButton"
+        )
         # ... (contenu launch_button, progress_info_frame, log_frame) ...
         self.launch_button.pack(pady=15, ipady=5); self.translatable_widgets["launch_button"] = self.launch_button
         if not ZEMOSAIC_WORKER_AVAILABLE: self.launch_button.config(state=tk.DISABLED)
@@ -594,19 +710,34 @@ class ZeMosaicGUI:
         self.progress_bar_widget.pack(fill=tk.X, expand=True, padx=5, pady=(0,3))
         time_display_subframe = ttk.Frame(progress_info_frame)
         time_display_subframe.pack(fill=tk.X, padx=5)
-        ttk.Label(time_display_subframe, text="").pack(side=tk.LEFT, padx=(0,2)); self.translatable_widgets["eta_text_label"] = time_display_subframe.pack_slaves()[0]
+        ttk.Label(
+            time_display_subframe,
+            text=self._tr("eta_text_label")
+        ).pack(side=tk.LEFT, padx=(0,2));
+        self.translatable_widgets["eta_text_label"] = time_display_subframe.pack_slaves()[0]
         self.eta_label_widget = ttk.Label(time_display_subframe, textvariable=self.eta_var, font=("Segoe UI", 9, "bold"), width=10)
         self.eta_label_widget.pack(side=tk.LEFT, padx=(0,15))
-        ttk.Label(time_display_subframe, text="").pack(side=tk.LEFT, padx=(0,2)); self.translatable_widgets["elapsed_text_label"] = time_display_subframe.pack_slaves()[2]
+        ttk.Label(
+            time_display_subframe,
+            text=self._tr("elapsed_text_label")
+        ).pack(side=tk.LEFT, padx=(0,2));
+        self.translatable_widgets["elapsed_text_label"] = time_display_subframe.pack_slaves()[2]
         self.elapsed_time_label_widget = ttk.Label(time_display_subframe, textvariable=self.elapsed_time_var, font=("Segoe UI", 9, "bold"), width=10)
         self.elapsed_time_label_widget.pack(side=tk.LEFT, padx=(0,10))
-        self.tile_count_text_label_widget = ttk.Label(time_display_subframe, text="") 
+        self.tile_count_text_label_widget = ttk.Label(
+            time_display_subframe,
+            text=self._tr("tiles_text_label")
+        )
         self.tile_count_text_label_widget.pack(side=tk.LEFT, padx=(0,2))
         self.translatable_widgets["tiles_text_label"] = self.tile_count_text_label_widget # Pour la traduction "Tuiles :"
 
         self.master_tile_count_label_widget = ttk.Label(time_display_subframe,textvariable=self.master_tile_count_var,font=("Segoe UI", 9, "bold"), width=12 )# Un peu plus large pour "XXX / XXX"    
         self.master_tile_count_label_widget.pack(side=tk.LEFT, padx=(0,5))
-        log_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        log_frame = ttk.LabelFrame(
+            self.scrollable_content_frame,
+            text=self._tr("log_frame_title"),
+            padding="10"
+        )
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5,5)); self.translatable_widgets["log_frame_title"] = log_frame
         self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=10, state=tk.DISABLED, font=("Consolas", 9))
         log_scrollbar_y_text = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
