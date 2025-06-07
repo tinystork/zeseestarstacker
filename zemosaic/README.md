@@ -156,13 +156,15 @@ Keys are the same used by the GUI:
 - `astap_search_radius` – search radius in degrees
 - `astap_downsample` – ASTAP downsample factor
 - `astap_sensitivity` – ASTAP detection sensitivity
-- `use_radec_hints` – include RA/DEC hints when solving with ASTAP
+- `use_radec_hints` (disabled by default) – include RA/DEC hints when solving with ASTAP
 - `local_ansvr_path` – path to `ansvr.cfg`
 - `api_key` – astrometry.net API key
 - `local_solver_preference` – preferred local solver
 
 `use_radec_hints` controls if RA/DEC from the FITS header are passed to ASTAP.
-Disabling it forces a blind search around the configured radius.
+It is disabled by default and should only be enabled when your FITS headers
+contain reliable coordinates. Disabling it forces a blind search around the
+configured radius.
 
 📁 Requirements Summary
 ✅ Python 3.9 or newer
