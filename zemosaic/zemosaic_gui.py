@@ -861,9 +861,55 @@ class ZeMosaicGUI:
         if dir_path: self.astap_data_dir_var.set(dir_path)
 
     def _browse_astrometry_local_path(self):
-        dir_path = filedialog.askdirectory(title=self._tr("select_astrometry_local_title", "Select Local Astrometry Path"))
-        if dir_path:
-            self.astrometry_local_path_var.set(dir_path)
+        def _log_browser(msg, level="DEBUG"):
+            print(f"DEBUG (ZeMosaicGUI _browse_astrometry_local_path) [{level}]: {msg}")
+
+        initial_dir = ""
+        current_path = self.astrometry_local_path_var.get()
+
+        if current_path:
+            if os.path.isfile(current_path):
+                initial_dir = os.path.dirname(current_path)
+            elif os.path.isdir(current_path):
+                initial_dir = current_path
+
+        if not initial_dir:
+            initial_dir = os.path.expanduser("~")
+
+        _log_browser(f"Opening file dialog (initialdir: {initial_dir})")
+        filepath_selected = filedialog.askopenfilename(
+            title=self._tr(
+                "select_astrometry_exe_or_cfg_title",
+                "Select solve-field Executable or .cfg (Cancel for Index Dir)",
+            ),
+            initialdir=initial_dir,
+            filetypes=[
+                (self._tr("configuration_files", "Configuration Files"), "*.cfg"),
+                (
+                    self._tr("executable_files", "Executable Files"),
+                    "*.*" if os.name != "nt" else "*.exe",
+                ),
+                (self._tr("all_files", "All Files"), "*.*"),
+            ],
+        )
+
+        if not filepath_selected:
+            _log_browser("No file selected. Opening directory dialog.")
+            dirpath_selected = filedialog.askdirectory(
+                title=self._tr(
+                    "select_astrometry_index_dir_title",
+                    "Select Astrometry.net Index Directory",
+                ),
+                initialdir=initial_dir,
+            )
+            if dirpath_selected:
+                _log_browser(f"Index directory selected: {dirpath_selected}")
+                self.astrometry_local_path_var.set(dirpath_selected)
+            else:
+                _log_browser("No index directory selected either.")
+        else:
+            _log_browser(f"File selected: {filepath_selected}")
+            self.astrometry_local_path_var.set(filepath_selected)
 
 
 

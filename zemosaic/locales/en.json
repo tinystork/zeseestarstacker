@@ -39,6 +39,9 @@
     "astrometry_local_path_label": "Local Astrometry Path:",
     "browse_astrometry_local_path_button": "Browse...",
     "select_astrometry_local_title": "Select Local Astrometry Path",
+    "select_astrometry_exe_or_cfg_title": "Select solve-field Executable or .cfg (Cancel for Index Dir)",
+    "select_astrometry_index_dir_title": "Select Astrometry.net Index Directory",
+    "configuration_files": "Configuration Files",
 
 
     "config_warning_title": "Config Warning",
