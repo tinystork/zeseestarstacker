@@ -158,52 +158,71 @@ def test_use_radec_hints_toggle(tmp_path, monkeypatch):
     assert "-ra" in captured["cmd"]
 
 
-def test_solve_with_astap_wrapper(monkeypatch, tmp_path):
-    import types
+def test_astap_uses_pxscale_from_header(tmp_path, monkeypatch):
+    img = np.ones((10, 10), dtype=np.float32)
+    hdr = fits.Header()
+    hdr["XPIXSZ"] = 2.4
+    hdr["FOCALLEN"] = 240.0
+    fits_path = tmp_path / "px.fits"
+    fits.writeto(fits_path, img, hdr, overwrite=True)
 
-    dummy_mod = types.SimpleNamespace()
+    solver = AstrometrySolver()
+
     captured = {}
 
-    class DummySolver:
-        def __init__(self, progress_callback=None):
-            pass
-        def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
-            captured["image"] = image_path
-            captured["header"] = fits_header
-            captured["settings"] = settings
-            captured["update"] = update_header_with_solution
-            return "WCS"
+    def fake_run(cmd, capture_output, text, timeout, check, cwd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 1, "", "")
 
-    dummy_mod.AstrometrySolver = DummySolver
-    dummy_mod.ASTAP_DEFAULT_SEARCH_RADIUS = 3.0
-    monkeypatch.setitem(sys.modules, "seestar.alignment.astrometry_solver", dummy_mod)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
-    from zemosaic import zemosaic_astrometry
-
-    fits_path = tmp_path / "img.fits"
-    fits.writeto(fits_path, np.ones((5, 5), dtype=np.float32), overwrite=True)
     header = fits.getheader(fits_path)
 
-    result = zemosaic_astrometry.solve_with_astap(
+    solver._try_solve_astap(
         str(fits_path),
         header,
-        astap_exe_path="astap.exe",
-        astap_data_dir="data",
-        search_radius_deg=2.5,
-        downsample_factor=3,
-        sensitivity=80,
-        timeout_sec=42,
-        update_original_header_in_place=False,
-        progress_callback=None,
+        "astap.exe",
+        str(tmp_path),
+        1.0,
+        None,
+        None,
+        5,
+        False,
     )
 
-    assert result == "WCS"
-    assert captured["image"] == str(fits_path)
-    assert captured["settings"]["local_solver_preference"] == "astap"
-    assert captured["settings"]["astap_path"] == "astap.exe"
-    assert captured["settings"]["astap_data_dir"] == "data"
-    assert captured["settings"]["astap_search_radius"] == 2.5
-    assert captured["settings"]["astap_downsample"] == 3
-    assert captured["settings"]["astap_sensitivity"] == 80
-    assert captured["settings"]["astap_timeout_sec"] == 42
-    assert captured["update"] is False
+    assert "-pxscale" in captured["cmd"]
+    idx = captured["cmd"].index("-pxscale") + 1
+    val = float(captured["cmd"][idx])
+    assert abs(val - ((hdr["XPIXSZ"] / hdr["FOCALLEN"]) * 206.265)) < 0.01
+
+
+def test_astap_adds_fov_when_scale_missing(tmp_path, monkeypatch):
+    img = np.ones((10, 10), dtype=np.float32)
+    fits_path = tmp_path / "nofov.fits"
+    fits.writeto(fits_path, img, overwrite=True)
+
+    solver = AstrometrySolver()
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, check, cwd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    header = fits.getheader(fits_path)
+
+    solver._try_solve_astap(
+        str(fits_path),
+        header,
+        "astap.exe",
+        str(tmp_path),
+        2.0,
+        None,
+        None,
+        5,
+        False,
+    )
+
+    assert "-fov" in captured["cmd"]

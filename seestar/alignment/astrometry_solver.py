@@ -630,6 +630,44 @@ class AstrometrySolver:
             return False # Prudence
         return False
 
+    def _derive_pixel_scale_from_header(self, header):
+        """Return pixel scale (arcsec/pix) derived from FITS header if possible."""
+        if not header:
+            self._log("Pixel scale derivation: header None", "DEBUG")
+            return None
+
+        pixel_um = None
+        focal_mm = None
+
+        for key in ("XPIXSZ", "PIXSIZE1"):
+            if key in header:
+                try:
+                    val = float(header[key])
+                    if val > 0:
+                        pixel_um = val
+                        break
+                except Exception:
+                    pass
+
+        if "FOCALLEN" in header:
+            try:
+                val = float(header["FOCALLEN"])
+                if val > 0:
+                    focal_mm = val
+            except Exception:
+                pass
+
+        if pixel_um and focal_mm:
+            scale = (pixel_um / focal_mm) * 206.265
+            self._log(
+                f"Pixel scale derived from header: {scale:.3f} arcsec/pix (pix={pixel_um}µm, focal={focal_mm}mm)",
+                "DEBUG",
+            )
+            return scale
+
+        self._log("Pixel scale derivation failed due to missing keywords", "DEBUG")
+        return None
+
     # ... (méthodes _try_solve_astap, _solve_astrometry_net_web, _parse_wcs_file_content, _update_fits_header_with_wcs existantes) ...
     # Note: la méthode _try_solve_astap est celle que tu as déjà modifiée pour le nettoyage.
 
@@ -719,6 +757,18 @@ class AstrometrySolver:
                 f"ASTAP: Hints RA={ra_hint} DEC={dec_hint} ajoutés à la commande.",
                 "DEBUG",
             )
+
+        # Determine pixel scale from header if possible
+        pxscale = self._derive_pixel_scale_from_header(fits_header)
+        if isinstance(pxscale, (int, float)) and 0.1 <= pxscale <= 50.0:
+            cmd.extend(["-pxscale", f"{pxscale:.3f}"])
+            self._log(f"ASTAP: Option -pxscale {pxscale:.3f} utilisée.", "DEBUG")
+        else:
+            if "-fov" not in cmd:
+                cmd.extend(["-fov", "0"])
+                self._log("ASTAP: Option -fov 0 ajoutée (échelle inconnue).", "DEBUG")
+            else:
+                self._log("ASTAP: Échelle inconnue mais -fov déjà spécifié.", "DEBUG")
 
         self._log(f"ASTAP: Commande finale: {' '.join(cmd)}", "DEBUG")
         wcs_object = None
