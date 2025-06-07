@@ -11,6 +11,9 @@ DEFAULT_CONFIG = {
     "astap_default_search_radius": 3.0, 
     "astap_default_downsample": 2, 
     "astap_default_sensitivity": 100,
+    "solver_method": "astap",
+    "astrometry_local_path": "",
+    "astrometry_api_key": "",
     "language": "en",
     "num_processing_workers": -1, # -1 pour auto
     "stacking_normalize_method": "linear_fit",
