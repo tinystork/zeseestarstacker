@@ -3202,8 +3202,9 @@ class SeestarStackerGUI:
             except Exception:
                 pass
 
+            run_path = project_root / "zemosaic" / "run_zemosaic.py"
             subprocess.Popen(
-                [sys.executable, "-m", "zemosaic.run_zemosaic"],
+                [sys.executable, str(run_path)],
                 cwd=str(project_root),
                 env=env,
             )
