@@ -713,6 +713,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, solver_settings: dict,
                     search_radius_deg=solver_settings.get('astap_search_radius'),
                     downsample_factor=solver_settings.get('astap_downsample'),
                     sensitivity=solver_settings.get('astap_sensitivity'),
+                    use_radec_hints=solver_settings.get('use_radec_hints'),
                     timeout_sec=solver_settings.get('astap_timeout_sec', 180),
                     update_original_header_in_place=True,
                     progress_callback=progress_callback,
@@ -1868,6 +1869,7 @@ def run_hierarchical_mosaic(
             solver_settings.setdefault('ansvr_timeout_sec', 120)
             solver_settings.setdefault('astap_timeout_sec', 180)
             solver_settings.setdefault('astrometry_net_timeout_sec', 300)
+            solver_settings.setdefault('use_radec_hints', False)
         except Exception as e_solver_inst:
             pcb("run_warn_solver_init_failed", prog=None, lvl="WARN", error=str(e_solver_inst))
             astrometry_solver = None

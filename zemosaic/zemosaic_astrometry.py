@@ -17,6 +17,7 @@ def solve_with_astap(
     search_radius_deg: float | None = None,
     downsample_factor: int | None = None,
     sensitivity: int | None = None,
+    use_radec_hints: bool = False,
     timeout_sec: int = 180,
     update_original_header_in_place: bool = True,
     progress_callback=None,
@@ -36,6 +37,7 @@ def solve_with_astap(
         else ASTAP_DEFAULT_SEARCH_RADIUS,
         "astap_downsample": downsample_factor,
         "astap_sensitivity": sensitivity,
+        "use_radec_hints": use_radec_hints,
         "astap_timeout_sec": timeout_sec,
         # Defaults for other solver parameters
         "local_ansvr_path": None,
@@ -44,7 +46,6 @@ def solve_with_astap(
         "astrometry_net_timeout_sec": 300,
         "scale_est_arcsec_per_pix": None,
         "scale_tolerance_percent": 20,
-        "use_radec_hints": False,
     }
 
     return solver_instance.solve(
