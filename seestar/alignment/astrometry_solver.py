@@ -339,7 +339,7 @@ class AstrometrySolver:
         astap_downsample_val = settings.get('astap_downsample', 2)
         astap_sensitivity_val = settings.get('astap_sensitivity', 100)
         astap_timeout = settings.get('astap_timeout_sec', 120)
-        use_radec_hints = settings.get('use_radec_hints', True)
+        use_radec_hints = settings.get('use_radec_hints', False)
 
         ansvr_config_path = settings.get('local_ansvr_path', "")
         ansvr_timeout = settings.get('ansvr_timeout_sec', 120)
@@ -652,7 +652,7 @@ class AstrometrySolver:
         update_header_with_solution,
         astap_downsample=2,
         astap_sensitivity=100,
-        use_radec_hints=True,
+        use_radec_hints=False,
     ):
         self._log(f"Entering _try_solve_astap for {os.path.basename(image_path)}", "DEBUG")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
