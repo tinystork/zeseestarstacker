@@ -275,6 +275,22 @@ class SeestarStackerGUI:
 
         self.logger.info("DEBUG (GUI __init__): Initialisation SeestarStackerGUI terminée.")
 
+    @property
+    def config(self):
+        """Alias de compatibilité pour l'ancien attribut ``config``.
+
+        Certains modules externes peuvent encore accéder à ``self.config`` en
+        supposant récupérer un dictionnaire de paramètres. Cette propriété
+        renvoie le ``__dict__`` de ``self.settings`` si disponible afin d'éviter
+        une erreur d'attribut manquant.
+        """
+        if hasattr(self, "settings"):
+            try:
+                return self.settings.__dict__
+            except Exception:
+                return {}
+        return {}
+
 
 
 
