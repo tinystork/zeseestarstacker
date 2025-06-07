@@ -1,10 +1,18 @@
 # zemosaic/run_zemosaic.py
 import sys  # Ajout pour sys.path et sys.modules
+import os
+
+# --- Support exécution directe du script ---
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    __package__ = os.path.basename(current_dir)
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import argparse
 import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
-import os
 import logging
 
 # Determine verbosity from environment variable or command-line flag
