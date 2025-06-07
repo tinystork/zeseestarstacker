@@ -633,3 +633,36 @@ def test_output_scale_warning_and_adjust(monkeypatch, caplog):
     )
 
 
+def test_grid_uses_resolved_wcs(monkeypatch):
+    import importlib
+    importlib.reload(worker)
+
+    captured = {}
+
+    def dummy_calc_grid(wcs_list, shape_list, drizzle_scale_factor=1.0, progress_callback=None):
+        captured["wcs"] = wcs_list
+        return make_wcs(0, 0), (50, 50)
+
+    monkeypatch.setattr(worker, "_calculate_final_mosaic_grid", dummy_calc_grid)
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+
+    class DummySolver:
+        def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
+            return make_wcs(5, 5, shape=(80, 80))
+
+    in_wcs = make_wcs(0, 0, shape=(100, 100))
+
+    worker.prepare_tiles_and_calc_grid(
+        [("dummy.fits", in_wcs)],
+        crop_percent=10.0,
+        re_solve_cropped_tiles=True,
+        solver_settings={},
+        solver_instance=DummySolver(),
+        drizzle_scale_factor=1.0,
+        progress_callback=None,
+    )
+
+    assert captured.get("wcs")
+    assert np.allclose(captured["wcs"][0].wcs.crval, [5, 5])
+
+
