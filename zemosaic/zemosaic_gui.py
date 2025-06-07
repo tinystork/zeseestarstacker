@@ -22,10 +22,16 @@ except ImportError:
 try:
     from .locales.zemosaic_localization import ZeMosaicLocalization
     ZEMOSAIC_LOCALIZATION_AVAILABLE = True
-except ImportError as e_loc:
-    ZEMOSAIC_LOCALIZATION_AVAILABLE = False
-    ZeMosaicLocalization = None # Factice
-    print(f"ERREUR (zemosaic_gui): Impossible d'importer 'ZeMosaicLocalization': {e_loc}")
+except ImportError:
+    try:
+        from zemosaic.locales.zemosaic_localization import ZeMosaicLocalization
+        ZEMOSAIC_LOCALIZATION_AVAILABLE = True
+    except ImportError as e_loc:
+        ZEMOSAIC_LOCALIZATION_AVAILABLE = False
+        ZeMosaicLocalization = None  # Factice
+        print(
+            f"ERREUR (zemosaic_gui): Impossible d'importer 'ZeMosaicLocalization': {e_loc}"
+        )
 
 # --- Configuration Import ---
 try:
