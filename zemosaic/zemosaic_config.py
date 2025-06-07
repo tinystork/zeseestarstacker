@@ -178,3 +178,7 @@ def get_astrometry_local_path() -> str:
 
 def get_astrometry_api_key() -> str:
     return load_config().get("astrometry_api_key", "")
+
+
+def get_solver_method() -> str:
+    return load_config().get("solver_method", "astap")

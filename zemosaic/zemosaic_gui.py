@@ -381,16 +381,16 @@ class ZeMosaicGUI:
 
 
         # --- ASTAP Configuration Frame ---
-        astap_cfg_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        # ... (contenu de astap_cfg_frame) ...
-        astap_cfg_frame.pack(fill=tk.X, pady=(0,10)); astap_cfg_frame.columnconfigure(1, weight=1)
-        self.translatable_widgets["astap_config_frame_title"] = astap_cfg_frame
-        ttk.Label(astap_cfg_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = astap_cfg_frame.grid_slaves(row=0,column=0)[0]
-        ttk.Entry(astap_cfg_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = astap_cfg_frame.grid_slaves(row=0,column=2)[0]
-        ttk.Label(astap_cfg_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = astap_cfg_frame.grid_slaves(row=1,column=0)[0]
-        ttk.Entry(astap_cfg_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = astap_cfg_frame.grid_slaves(row=1,column=2)[0]
+        self.astap_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        # ... (contenu de astap_frame) ...
+        self.astap_frame.pack(fill=tk.X, pady=(0,10)); self.astap_frame.columnconfigure(1, weight=1)
+        self.translatable_widgets["astap_config_frame_title"] = self.astap_frame
+        ttk.Label(self.astap_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = self.astap_frame.grid_slaves(row=0,column=0)[0]
+        ttk.Entry(self.astap_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.astap_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = self.astap_frame.grid_slaves(row=0,column=2)[0]
+        ttk.Label(self.astap_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = self.astap_frame.grid_slaves(row=1,column=0)[0]
+        ttk.Entry(self.astap_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.astap_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = self.astap_frame.grid_slaves(row=1,column=2)[0]
 
         # --- Solver Settings Frame ---
         solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -428,21 +428,21 @@ class ZeMosaicGUI:
         self._on_solver_choice_change()
 
         # --- Parameters Frame ---
-        params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        # ... (contenu de params_frame) ...
-        params_frame.pack(fill=tk.X, pady=(0,10))
-        self.translatable_widgets["mosaic_astap_params_frame_title"] = params_frame
-        param_row_idx = 0 
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
-        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        self.astap_params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        # ... (contenu de astap_params_frame) ...
+        self.astap_params_frame.pack(fill=tk.X, pady=(0,10))
+        self.translatable_widgets["mosaic_astap_params_frame_title"] = self.astap_params_frame
+        param_row_idx = 0
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(self.astap_params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(self.astap_params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(self.astap_params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(self.astap_params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
         
         # --- Stacking Options Frame ---
         stacking_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10") 
@@ -736,14 +736,23 @@ class ZeMosaicGUI:
             pass # Widget peut avoir été détruit
 
     def _on_solver_choice_change(self, *args):
-        if hasattr(self, 'astrometry_subframe'):
-            try:
-                if self.solver_choice_var.get() == 'astrometry':
+        try:
+            if self.solver_choice_var.get() == "astrometry":
+                if hasattr(self, "astap_frame"):
+                    self.astap_frame.pack_forget()
+                if hasattr(self, "astap_params_frame"):
+                    self.astap_params_frame.pack_forget()
+                if hasattr(self, "astrometry_subframe"):
                     self.astrometry_subframe.grid()
-                else:
+            else:
+                if hasattr(self, "astrometry_subframe"):
                     self.astrometry_subframe.grid_remove()
-            except tk.TclError:
-                pass
+                if hasattr(self, "astap_frame"):
+                    self.astap_frame.pack(fill=tk.X, pady=(0,10))
+                if hasattr(self, "astap_params_frame"):
+                    self.astap_params_frame.pack(fill=tk.X, pady=(0,10))
+        except tk.TclError:
+            pass
 
     def _update_rejection_params_state(self, event=None):
         """
@@ -1271,13 +1280,24 @@ class ZeMosaicGUI:
                             elif sys.platform == 'darwin': subprocess.Popen(['open', output_dir_final])
                             else: subprocess.Popen(['xdg-open', output_dir_final])
                         except Exception as e_open_dir: self._log_message(self._tr("log_key_error_opening_folder", error=e_open_dir), level="ERROR"); messagebox.showerror(self._tr("error_title"), self._tr("error_cannot_open_folder", error=e_open_dir), parent=self.root)
+
+    def _on_save_settings(self):
+        self.config["solver_method"] = self.solver_choice_var.get()
+        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+            zemosaic_config.save_config(self.config)
                         
     def _on_closing(self):
         if self.is_processing:
             if messagebox.askokcancel(self._tr("q_quit_title"), self._tr("q_quit_while_processing_msg"), icon='warning', parent=self.root):
-                self.is_processing = False; self._stop_gui_chrono(); self.root.destroy()
-            else: return 
-        else: self._stop_gui_chrono(); self.root.destroy()
+                self.is_processing = False
+                self._stop_gui_chrono()
+                self._on_save_settings()
+                self.root.destroy()
+            else: return
+        else:
+            self._stop_gui_chrono()
+            self._on_save_settings()
+            self.root.destroy()
 
 if __name__ == '__main__':
     root_app = tk.Tk()
