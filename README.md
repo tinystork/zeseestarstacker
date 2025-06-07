@@ -137,9 +137,20 @@ pip install -r requirements.txt
 
 # packages needed for the unit tests
 pip install pytest numpy astropy reproject
-# or, if provided, use the dedicated file
-pip install -r tests/requirements.txt
+# or install them using the dedicated file
+pip install -r requirements-test.txt
 ```
+
+### Test Dependencies
+
+The unit tests rely on a few additional packages:
+
+- `pytest`
+- `numpy`
+- `astropy`
+- `reproject`
+
+They can be installed individually or via the `requirements-test.txt` file.
 
 **Run the tests**
 
