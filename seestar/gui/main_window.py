@@ -4264,7 +4264,9 @@ class SeestarStackerGUI:
             local_solver_preference=self.settings.local_solver_preference,
             astap_search_radius=self.settings.astap_search_radius,
             save_as_float32=self.settings.save_final_as_float32,
+
             enable_interbatch_reproj=self.settings.enable_interbatch_reproj
+
             # Lire depuis self.settings
             
         )

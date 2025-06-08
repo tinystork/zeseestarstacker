@@ -314,7 +314,9 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `astrometry_solve_field_dir`: directory containing the `solve-field` executable
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
-- `enable_interbatch_reproj`: when true, reproject each batch using the previous batch's WCS
+
+ - `enable_interbatch_reproj`: when true, reproject each batch using the project's reference WCS
+
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be

@@ -183,7 +183,9 @@ except ImportError as e:
 # pour éviter les dépendances circulaires au chargement initial.
 
 
+
 from ..alignment.astrometry_solver import AstrometrySolver, solve_image_wcs  # Déplacé vers _worker/_process_file
+
 
 
 # --- Configuration des Avertissements ---
@@ -239,13 +241,12 @@ class SeestarQueuedStacker:
         self.warned_unaligned_source_folders = set()
         
         # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
+
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
-
-        self.enable_reprojection_between_batches = False
-
         self.enable_interbatch_reproj = False
+
         # --- FIN NOUVEAU ---
 
         self.progress_callback = None; self.preview_callback = None
@@ -3194,6 +3195,7 @@ class SeestarQueuedStacker:
         )
 
         # Vérifier le résultat de _stack_batch
+
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
             print(f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
                   f"Shape image lot: {stacked_batch_data_np.shape}, "
@@ -3238,6 +3240,7 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d,
                 batch_wcs,
             )
+
             
             # Mise à jour de l'aperçu SUM/W après accumulation de ce lot
             # (Seulement si on n'est pas en mode Drizzle, car Drizzle Incrémental a son propre update)
@@ -3396,6 +3399,7 @@ class SeestarQueuedStacker:
                     input_header = hdul[0].header
                     print(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Données chargées depuis FITS temp '{current_filename_for_log}': Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
 
+
                     if data_loaded.ndim == 3 and data_loaded.shape[0] == num_output_channels:
                         input_image_cxhxw = data_loaded.astype(np.float32)
                         print(f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]")
@@ -3434,6 +3438,7 @@ class SeestarQueuedStacker:
 
                 y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw_current_file).reshape(2, -1)
                 sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
+
                 
                 if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
                     raise ValueError("Coordonnées célestes non finies obtenues depuis le WCS du fichier temporaire.")
@@ -3677,7 +3682,9 @@ class SeestarQueuedStacker:
 
 
 
+
     def _combine_batch_result(self, stacked_batch_data_np, stack_info_header, batch_coverage_map_2d, batch_wcs=None):
+
         """
         [MODE SUM/W - CLASSIQUE] Accumule le résultat d'un batch classique
         (image moyenne du lot et sa carte de couverture/poids 2D)
@@ -3713,6 +3720,7 @@ class SeestarQueuedStacker:
         # Vérifier la cohérence des shapes
         # stacked_batch_data_np peut être HWC ou HW. memmap_shape est HWC.
         # batch_coverage_map_2d doit être HW.
+
         expected_shape_hw = self.memmap_shape[:2]
 
         
@@ -3740,6 +3748,7 @@ class SeestarQueuedStacker:
                     f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
                     "WARN",
                 )
+
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
             print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot.")
@@ -3802,13 +3811,14 @@ class SeestarQueuedStacker:
             print(f"  -> signal_to_add_to_sum_float64 - Shape: {signal_to_add_to_sum_float64.shape}, "
                   f"Range: [{np.min(signal_to_add_to_sum_float64):.2f} - {np.max(signal_to_add_to_sum_float64):.2f}]")
 
+
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
             batch_wht = batch_coverage_map_2d.astype(np.float32)
-            print("[InterBatchReproj]",
-                  "enabled=", self.enable_interbatch_reproj,
-                  "refWCS=", bool(self.reference_wcs_object),
-                  "batchWCS=", bool(batch_wcs))
             try:
+                print("[InterBatchReproj]",
+                      "enabled=", self.enable_interbatch_reproj,
+                      "refWCS=", bool(self.reference_wcs_object),
+                      "batchWCS=", bool(batch_wcs))
                 if self.enable_interbatch_reproj and self.reference_wcs_object and batch_wcs is not None:
                     from reproject import reproject_interp
                     shp = self.memmap_shape[:2]
@@ -3833,6 +3843,7 @@ class SeestarQueuedStacker:
             if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
+
 
             # Mise à jour des compteurs globaux
             self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
@@ -4995,6 +5006,7 @@ class SeestarQueuedStacker:
                          astap_data_dir="",
                          local_ansvr_path="",
                          astap_search_radius=3.0,
+
                          local_solver_preference="none",
                          save_as_float32=False, # <-- NOUVEL ARGUMENT AJOUTÉ ICI
                          enable_interbatch_reproj=False
@@ -5007,18 +5019,21 @@ class SeestarQueuedStacker:
         MODIFIED: Ajout arguments save_as_float32 et enable_interbatch_reproj.
         Version: V_StartProcessing_SaveDtypeOption_1
         """
+
         print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
         
         print("  --- BACKEND ARGS REÇUS (depuis GUI/SettingsManager) ---")
         print(f"    input_dir='{input_dir}', output_dir='{output_dir}'")
         print(f"    is_mosaic_run (arg de func): {is_mosaic_run}")
         print(f"    use_drizzle (global arg de func): {use_drizzle}")
+
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
         print(f"    enable_interbatch_reproj (arg de func): {enable_interbatch_reproj}")
         print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
+
 
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
@@ -5115,11 +5130,10 @@ class SeestarQueuedStacker:
         self.apply_low_wht_mask = bool(apply_low_wht_mask); self.low_wht_percentile = int(low_wht_percentile); self.low_wht_soften_px = int(low_wht_soften_px)
 
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
+
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
-
-        self.enable_reprojection_between_batches = bool(enable_reprojection_between_batches)
-        self.enable_interbatch_reproj = self.enable_reprojection_between_batches
+        self.enable_interbatch_reproj = bool(enable_interbatch_reproj)
 
         # --- FIN NOUVEAU ---
 

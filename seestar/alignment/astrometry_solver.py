@@ -1146,10 +1146,7 @@ def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="Unk
 def solve_image_wcs(image_path, fits_header, settings, update_header_with_solution=True):
     """Convenience wrapper for :class:`AstrometrySolver`.
 
-    This function simply constructs an :class:`AstrometrySolver` object and
-    invokes its :meth:`~AstrometrySolver.solve` method with the provided
-    arguments. The return value of ``AstrometrySolver.solve`` is propagated
-    back to the caller.
+
 
     Parameters
     ----------
