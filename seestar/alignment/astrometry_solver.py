@@ -266,6 +266,15 @@ class AstrometrySolver:
         self.default_focal_length_mm_for_cfg = 250.0 # Valeur Seestar S50 par défaut
         self._settings_dict_from_solve = {} # Initialiser aussi pour ansvr_search_radius_deg
 
+    def _extract_scale_arcsec(self, wcs_obj):
+        """Return pixel scale in arcsec/pixel from a WCS object."""
+        if wcs_obj and hasattr(wcs_obj, "pixel_scale_matrix"):
+            try:
+                return float(np.sqrt(np.abs(np.linalg.det(wcs_obj.pixel_scale_matrix))) * 3600.0)
+            except Exception:
+                return float("nan")
+        return float("nan")
+
 
 
 
@@ -383,6 +392,7 @@ class AstrometrySolver:
         if solver_preference == "astap":
             if astap_exe and os.path.isfile(astap_exe):
                 self._log("Priorité au solveur local: ASTAP.", "INFO")
+                t0 = time.time()
                 wcs_solution = self._try_solve_astap(
                     image_path,
                     fits_header,
@@ -398,7 +408,12 @@ class AstrometrySolver:
                     use_radec_hints,
                 )
                 if wcs_solution:
-                    self._log("Solution trouvée avec ASTAP.", "INFO")
+                    dt = time.time() - t0
+                    scale = self._extract_scale_arcsec(wcs_solution)
+                    self._log(
+                        f"🔭 [Solver] ASTAP OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                        "INFO",
+                    )
                     return wcs_solution
                 else:
                     local_solver_attempted_and_failed = True 
@@ -414,15 +429,27 @@ class AstrometrySolver:
                     f"Preparing _try_solve_local_ansvr for {os.path.basename(image_path)}",
                     "DEBUG",
                 )
-                wcs_solution = self._try_solve_local_ansvr(image_path, fits_header, ansvr_config_path,
-                                                           scale_est, scale_tol, ansvr_timeout,
-                                                           update_header_with_solution)
+                t0 = time.time()
+                wcs_solution = self._try_solve_local_ansvr(
+                    image_path,
+                    fits_header,
+                    ansvr_config_path,
+                    scale_est,
+                    scale_tol,
+                    ansvr_timeout,
+                    update_header_with_solution,
+                )
                 self._log(
                     f"Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}",
                     'DEBUG',
                 )
                 if wcs_solution:
-                    self._log("Solution trouvée avec Astrometry.net Local (solve-field).", "INFO")
+                    dt = time.time() - t0
+                    scale = self._extract_scale_arcsec(wcs_solution)
+                    self._log(
+                        f"🔭 [Solver] ansvr OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                        "INFO",
+                    )
                     return wcs_solution
                 else:
                     local_solver_attempted_and_failed = True
@@ -438,6 +465,7 @@ class AstrometrySolver:
                 else: 
                     self._log("Aucun solveur local préféré. Tentative avec Astrometry.net (web service)...", "INFO")
                 
+                t0 = time.time()
                 wcs_solution = self._solve_astrometry_net_web(
                     image_path_for_solver=image_path,
                     fits_header_original=fits_header,
@@ -445,10 +473,15 @@ class AstrometrySolver:
                     scale_est_arcsec_per_pix=scale_est,
                     scale_tolerance_percent=scale_tol,
                     timeout_sec=anet_web_timeout,
-                    update_header_with_solution=update_header_with_solution
+                    update_header_with_solution=update_header_with_solution,
                 )
                 if wcs_solution:
-                    self._log("Solution trouvée avec Astrometry.net (web service).", "INFO")
+                    dt = time.time() - t0
+                    scale = self._extract_scale_arcsec(wcs_solution)
+                    self._log(
+                        f"🔭 [Solver] Astrometry.net-API OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                        "INFO",
+                    )
                     return wcs_solution
                 else:
                     self._log("Astrometry.net (web service) a échoué ou n'a pas trouvé de solution.", "WARN")

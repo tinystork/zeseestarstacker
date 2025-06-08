@@ -3389,9 +3389,13 @@ class SeestarQueuedStacker:
                         )
                         wcs_for_pixmap = self.reference_wcs_object
                         input_shape_hw_current_file = target_shape_hw
+                        self.update_progress(
+                            f"🌀 [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
+                            "INFO_DETAIL",
+                        )
                     except Exception as e:
                         self.update_progress(
-                            f"⚠️ Reprojection failed for current batch ({type(e).__name__}): {e}",
+                            f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
                             "WARN",
                         )
 
@@ -3688,9 +3692,13 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = reproject_to_reference_wcs(
                     batch_coverage_map_2d, input_wcs, target_wcs, expected_shape_hw
                 )
+                self.update_progress(
+                    f"🌀 [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
+                    "INFO_DETAIL",
+                )
             except Exception as e:
                 self.update_progress(
-                    f"⚠️ Reprojection failed for current batch ({type(e).__name__}): {e}",
+                    f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
                     "WARN"
                 )
         
@@ -3852,7 +3860,8 @@ class SeestarQueuedStacker:
             result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
         else:
             result = np.nanmean(arr_clip, axis=0)
-        return result.astype(np.float32)
+        rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
+        return result.astype(np.float32), rejected_pct
 
 ################################################################################################################################################
 
@@ -4055,18 +4064,26 @@ class SeestarQueuedStacker:
                 if getattr(settings, 'stack_reject_algo', 'none') == 'winsorized_sigma_clip':
                     if is_color_batch:
                         channels = []
+                        rejected_vals = []
                         for c in range(3):
                             imgs = [img[..., c] for img in valid_images_for_ccdproc]
-                            channels.append(
-                                self._stack_winsorized_sigma(imgs, weights_for_stack,
-                                                             kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
-                                                             winsor_limits=winsor_tuple))
+                            res_img, rej_pct = self._stack_winsorized_sigma(
+                                imgs,
+                                weights_for_stack,
+                                kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
+                                winsor_limits=winsor_tuple,
+                            )
+                            channels.append(res_img)
+                            rejected_vals.append(rej_pct)
                         stacked_batch_data_np = np.stack(channels, axis=-1)
+                        rejected_pct = float(np.mean(rejected_vals))
                     else:
-                        stacked_batch_data_np = self._stack_winsorized_sigma(valid_images_for_ccdproc,
-                                                                            weights_for_stack,
-                                                                            kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
-                                                                            winsor_limits=winsor_tuple)
+                        stacked_batch_data_np, rejected_pct = self._stack_winsorized_sigma(
+                            valid_images_for_ccdproc,
+                            weights_for_stack,
+                            kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
+                            winsor_limits=winsor_tuple,
+                        )
                 else:
                     method_arr = 'average'
                     if is_color_batch:
@@ -4099,6 +4116,11 @@ class SeestarQueuedStacker:
             return None, None, None
 
         stacked_batch_data_np = stacked_batch_data_np.astype(np.float32)
+        if self.stacking_mode == "winsorized":
+            self.update_progress(
+                f"🎚️  [Stack] Windsorized Sigma Clip appliqué : κ={self.kappa:.2f}, images={num_valid_images_for_processing}, rej ≈ {rejected_pct:.1f} %",
+                "INFO_DETAIL",
+            )
 
 
         # --- 5. NOUVEAU : Calculer batch_coverage_map_2d (HxW, float32) ---
