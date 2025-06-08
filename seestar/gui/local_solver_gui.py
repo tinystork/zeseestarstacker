@@ -79,6 +79,19 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             value=getattr(self.parent_gui.settings, 'local_ansvr_path', "")
         )
 
+        self.ansvr_host_port_var = tk.StringVar(
+            value=getattr(self.parent_gui.settings, 'ansvr_host_port', '127.0.0.1:8080')
+        )
+
+        self.reproject_batches_var = tk.BooleanVar(
+            value=getattr(
+                self.parent_gui.settings, 'enable_reprojection_between_batches', False
+            )
+        )
+
+        self.reproject_batches_var.trace_add('write', lambda *args: self._update_warning())
+        self.local_solver_choice_var.trace_add('write', lambda *args: self._update_warning())
+
         # Construction de l'interface utilisateur
         self._build_ui()
 
@@ -136,7 +149,10 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             for widget in self.ansvr_frame.winfo_children():
                 self._set_widget_state_recursive(widget, ansvr_state)
         
-        print(f"DEBUG (LocalSolverSettingsWindow _on_solver_choice_change): États des cadres mis à jour - ASTAP: {astap_state}, Ansvr: {ansvr_state}") # DEBUG
+        print(
+            f"DEBUG (LocalSolverSettingsWindow _on_solver_choice_change): États des cadres mis à jour - ASTAP: {astap_state}, Ansvr: {ansvr_state}"
+        )  # DEBUG
+        self._update_warning()
 
     def _set_widget_state_recursive(self, widget, state):
         """
@@ -152,6 +168,20 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         if hasattr(widget, 'winfo_children'):
             for child in widget.winfo_children():
                 self._set_widget_state_recursive(child, state)
+
+    def _update_warning(self, *args):
+        show = False
+        choice = self.local_solver_choice_var.get()
+        if self.reproject_batches_var.get():
+            if choice == 'astap' and not self.astap_path_var.get().strip():
+                show = True
+            elif choice == 'ansvr' and not self.ansvr_host_port_var.get().strip():
+                show = True
+            elif choice == 'astrometry':
+                show = True
+        self.warning_label.configure(
+            text='⚠️ Aucun solveur local configuré' if show else ''
+        )
 
 ####################################################################################################################################################
 
@@ -169,26 +199,119 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(expand=True, fill=tk.BOTH)
 
-        info_label = ttk.Label(
+        solver_choice_frame = ttk.LabelFrame(
             main_frame,
-            text=self.parent_gui.tr("solver_settings_moved", default="Astrometry solver settings are now available in Mosaic Options."),
-            justify=tk.LEFT,
-            wraplength=400,
+            text=self.parent_gui.tr(
+                "local_solver_choice_frame_title", default="Solver"
+            ),
+            padding="10",
         )
-        info_label.pack(pady=10, padx=5)
+        solver_choice_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # --- Boutons OK / Annuler (inchangés) ---
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text="ASTAP",
+            variable=self.local_solver_choice_var,
+            value="astap",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text="Astrometry.net",
+            variable=self.local_solver_choice_var,
+            value="astrometry",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+
+        ttk.Radiobutton(
+            solver_choice_frame,
+            text="Ansvr",
+            variable=self.local_solver_choice_var,
+            value="ansvr",
+            command=self._on_solver_choice_change,
+        ).pack(anchor=tk.W, pady=2)
+
+        self.astap_frame = ttk.LabelFrame(
+            main_frame,
+            text="ASTAP",
+            padding="10",
+        )
+        self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        astap_path_sub = ttk.Frame(self.astap_frame)
+        astap_path_sub.pack(fill=tk.X, pady=(5, 2))
+        ttk.Label(astap_path_sub, text="Executable:").pack(side=tk.LEFT)
+        ttk.Entry(astap_path_sub, textvariable=self.astap_path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
+        )
+        ttk.Button(
+            astap_path_sub,
+            text=self.parent_gui.tr("browse", default="Browse..."),
+            command=self._browse_astap_path,
+            width=12,
+        ).pack(side=tk.RIGHT, padx=(5, 0))
+
+        astrom_frame = ttk.LabelFrame(
+            main_frame,
+            text="Astrometry.net",
+            padding="10",
+        )
+        astrom_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        api_key_sub = ttk.Frame(astrom_frame)
+        api_key_sub.pack(fill=tk.X, pady=(5, 2))
+        ttk.Label(api_key_sub, text="API Key:").pack(side=tk.LEFT)
+        ttk.Entry(api_key_sub, textvariable=self.parent_gui.astrometry_api_key_var, show="*").pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
+        )
+
+        self.ansvr_frame = ttk.LabelFrame(
+            main_frame,
+            text="Ansvr",
+            padding="10",
+        )
+        self.ansvr_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ansvr_host_sub = ttk.Frame(self.ansvr_frame)
+        ansvr_host_sub.pack(fill=tk.X, pady=(5, 2))
+        ttk.Label(ansvr_host_sub, text="Host:Port:").pack(side=tk.LEFT)
+        ttk.Entry(ansvr_host_sub, textvariable=self.ansvr_host_port_var, width=15).pack(
+            side=tk.LEFT, padx=(5, 0)
+        )
+
+        ttk.Checkbutton(
+            main_frame,
+            text=self.parent_gui.tr(
+                "reproject_batches_label",
+                default="Activer la reprojection entre batchs (nécessite WCS)",
+            ),
+            variable=self.reproject_batches_var,
+        ).pack(anchor=tk.W, pady=(10, 0))
+
+        self.warning_label = ttk.Label(
+            main_frame,
+            foreground="red",
+        )
+        self.warning_label.pack(anchor=tk.W)
+
+        self._update_warning()
+
         button_frame = ttk.Frame(main_frame, padding="5")
         button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
-        # ... (boutons OK et Annuler comme avant) ...
-        cancel_button = ttk.Button(button_frame,
-                                   text=self.parent_gui.tr("cancel", default="Cancel"),
-                                   command=self._on_cancel)
+        cancel_button = ttk.Button(
+            button_frame,
+            text=self.parent_gui.tr("cancel", default="Cancel"),
+            command=self._on_cancel,
+        )
         cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
-        ok_button = ttk.Button(button_frame,
-                                    text=self.parent_gui.tr("ok", default="OK"),
-                                    command=self._on_ok)
+        ok_button = ttk.Button(
+            button_frame,
+            text=self.parent_gui.tr("ok", default="OK"),
+            command=self._on_ok,
+        )
         ok_button.pack(side=tk.RIGHT)
+
 
 
 
@@ -412,6 +535,8 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         astap_sensitivity = self.astap_sensitivity_var.get()
         cluster_threshold = self.cluster_threshold_var.get()
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
+        ansvr_host_port = self.ansvr_host_port_var.get().strip()
+        reproject_batches = self.reproject_batches_var.get()
 
         # Valider que si un solveur est choisi, son chemin principal est rempli
         validation_ok = True
@@ -442,6 +567,8 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.astap_data_dir = astap_data_dir
         setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius)
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
+        self.parent_gui.settings.ansvr_host_port = ansvr_host_port
+        self.parent_gui.settings.enable_reprojection_between_batches = reproject_batches
         try:
             self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()
         except Exception:
@@ -457,14 +584,16 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             zemosaic_config.save_config(self.parent_gui.config)
         except Exception:
             pass
-        
+
         print(
-            f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Down={astap_downsample}, Sens={astap_sensitivity}, Cluster={cluster_threshold}, Ansvr Local='{local_ansvr_path}'"
+            f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Down={astap_downsample}, Sens={astap_sensitivity}, Cluster={cluster_threshold}, Ansvr Local='{local_ansvr_path}', HostPort='{ansvr_host_port}', ReprojBatches={reproject_batches}"
         )  # DEBUG
         print("  LocalSolverSettingsWindow: Paramètres mis à jour dans parent_gui.settings.")
         print(f"DEBUG (LocalSolverSettingsWindow _on_ok): Validation OK. Sauvegarde des settings. Préparation fermeture fenêtre.")
         print(f"  -> local_solver_preference: {solver_choice}")
         print(f"  -> local_ansvr_path à sauvegarder: {local_ansvr_path}")
+        print(f"  -> ansvr_host_port à sauvegarder: {ansvr_host_port}")
+        print(f"  -> reproject_batches: {reproject_batches}")
         self.grab_release()
         self.destroy()
 

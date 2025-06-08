@@ -165,6 +165,12 @@ class SettingsManager:
             self.astap_data_dir = getattr(self, 'astap_data_dir', default_values_from_code.get('astap_data_dir', ''))
             self.astap_search_radius = getattr(self, 'astap_search_radius', default_values_from_code.get('astap_search_radius', 30.0))
             self.local_ansvr_path = getattr(self, 'local_ansvr_path', default_values_from_code.get('local_ansvr_path', ''))
+            self.ansvr_host_port = getattr(self, 'ansvr_host_port', default_values_from_code.get('ansvr_host_port', '127.0.0.1:8080'))
+            self.enable_reprojection_between_batches = getattr(
+                gui_instance,
+                'reproject_batches_var',
+                tk.BooleanVar(value=default_values_from_code.get('enable_reprojection_between_batches', False)),
+            ).get()
             self.use_radec_hints = getattr(
                 gui_instance,
                 'use_radec_hints_var',
@@ -240,6 +246,8 @@ class SettingsManager:
             if not hasattr(self, 'astap_data_dir'): self.astap_data_dir = self.get_default_values()['astap_data_dir']
             if not hasattr(self, 'astap_search_radius'): self.astap_search_radius = self.get_default_values()['astap_search_radius']
             if not hasattr(self, 'local_ansvr_path'): self.local_ansvr_path = self.get_default_values()['local_ansvr_path']
+            if not hasattr(self, 'ansvr_host_port'): self.ansvr_host_port = self.get_default_values()['ansvr_host_port']
+            if not hasattr(self, 'enable_reprojection_between_batches'): self.enable_reprojection_between_batches = self.get_default_values()['enable_reprojection_between_batches']
             
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
             getattr(gui_instance, 'weight_snr_var', tk.BooleanVar()).set(self.weight_by_snr)
@@ -353,6 +361,8 @@ class SettingsManager:
             getattr(gui_instance, 'astap_search_radius_var', tk.DoubleVar()).set(self.astap_search_radius)
             print(f"DEBUG (Settings apply_to_ui): astap_search_radius appliqué à l'UI (valeur: {self.astap_search_radius})")
             getattr(gui_instance, 'use_radec_hints_var', tk.BooleanVar()).set(self.use_radec_hints)
+            getattr(gui_instance, 'ansvr_host_port_var', tk.StringVar()).set(self.ansvr_host_port)
+            getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.enable_reprojection_between_batches)
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
             print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # Version Log (ancienne)
@@ -458,6 +468,8 @@ class SettingsManager:
         defaults_dict['astap_search_radius'] = 3.0
         defaults_dict['use_radec_hints'] = False
         defaults_dict['local_ansvr_path'] = ""
+        defaults_dict['ansvr_host_port'] = '127.0.0.1:8080'
+        defaults_dict['enable_reprojection_between_batches'] = False
         
         defaults_dict['mosaic_mode_active'] = False
         defaults_dict['mosaic_settings'] = {
@@ -882,7 +894,20 @@ class SettingsManager:
                 self.local_ansvr_path = defaults_fallback['local_ansvr_path']
             else:
                 self.local_ansvr_path = current_local_ansvr_path.strip()
-            print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}") 
+            current_ansvr_host_port = getattr(self, 'ansvr_host_port', defaults_fallback['ansvr_host_port'])
+            if not isinstance(current_ansvr_host_port, str):
+                messages.append("Ansvr host/port invalide, réinitialisé.")
+                self.ansvr_host_port = defaults_fallback['ansvr_host_port']
+            else:
+                self.ansvr_host_port = current_ansvr_host_port.strip()
+            self.enable_reprojection_between_batches = bool(
+                getattr(
+                    self,
+                    'enable_reprojection_between_batches',
+                    defaults_fallback['enable_reprojection_between_batches'],
+                )
+            )
+            print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}")
 
             # Validation du facteur d'échelle mosaïque
             # MODIFIÉ : Ce bloc de validation est maintenant inclus ici
@@ -1011,6 +1036,8 @@ class SettingsManager:
             'astap_search_radius': float(getattr(self, 'astap_search_radius', 30.0)), # Maintenu comme avant
             'use_radec_hints': bool(getattr(self, 'use_radec_hints', False)),
             'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
+            'ansvr_host_port': str(getattr(self, 'ansvr_host_port', '127.0.0.1:8080')),
+            'enable_reprojection_between_batches': bool(getattr(self, 'enable_reprojection_between_batches', False)),
         }
 
         if 'use_local_solver_priority' in settings_data: # Nettoyage de l'ancienne clé si elle existait par erreur
