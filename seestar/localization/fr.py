@@ -389,6 +389,22 @@ FR_TRANSLATIONS = {
     'invalid_astap_radius_range': "Le Rayon de Recherche ASTAP doit être entre 0.1 et 90.0 degrés.",
     'invalid_astap_radius_value': "Valeur invalide pour le Rayon de Recherche ASTAP. Veuillez entrer un nombre.",
     'settings_save_failed_on_ok': "Paramètres mis à jour en mémoire, mais échec de la sauvegarde vers le fichier depuis cette fenêtre. Ils seront sauvegardés à la fermeture de l'application principale s'ils ne sont pas écrasés.",
+
+    # --- Nouvelles chaînes pour Local Solver GUI ---
+    'solver_config_title': "Configuration locale des solveurs astrométriques",
+    'solver_label': "Solveur",
+    'solver_astap': "ASTAP",
+    'solver_astrometry': "Astrometry.net",
+    'solver_ansvr': "Ansvr",
+    'astap_exe_label': "Exécutable :",
+    'astap_data_label': "Répertoire de données :",
+    'astrometry_api_key_label': "Clé API :",
+    'astrometry_dir_label': "Dossier solve-field :",
+    'ansvr_hostport_label': "Hôte:Port :",
+    'enable_batch_reproject': "Activer la reprojection entre batchs (nécessite WCS)",
+    'ok_button': "OK",
+    'cancel_button': "Annuler",
+    'tooltip_enable_batch_reproject': "Nécessite un solveur fonctionnel (ASTAP, Astrometry.net ou Ansvr)",
     #--- Tooltips pour Feathering ---
     'tooltip_apply_feathering': "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
     'tooltip_feather_blur_px': "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",

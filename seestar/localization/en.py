@@ -353,6 +353,22 @@ EN_TRANSLATIONS = {
     'invalid_astap_radius_range': "ASTAP Search Radius must be between 0.1 and 90.0 degrees.",
     'invalid_astap_radius_value': "Invalid value for ASTAP Search Radius. Please enter a number.",
     'settings_save_failed_on_ok': "Settings were updated in memory, but failed to save to file from this window. They will be saved when the main application closes if not overwritten.",
+
+    # --- New Local Solver GUI strings ---
+    'solver_config_title': "Local Astrometry Solvers Configuration",
+    'solver_label': "Solver",
+    'solver_astap': "ASTAP",
+    'solver_astrometry': "Astrometry.net",
+    'solver_ansvr': "Ansvr",
+    'astap_exe_label': "Executable:",
+    'astap_data_label': "Data Dir:",
+    'astrometry_api_key_label': "API Key:",
+    'astrometry_dir_label': "solve-field Dir:",
+    'ansvr_hostport_label': "Host:Port:",
+    'enable_batch_reproject': "Enable inter-batch reprojection (requires WCS)",
+    'ok_button': "OK",
+    'cancel_button': "Cancel",
+    'tooltip_enable_batch_reproject': "Requires a working solver (ASTAP, Astrometry.net, or Ansvr)",
     
     # final log popup 
     'Post-Processing Applied': "Post-Processing Applied",
