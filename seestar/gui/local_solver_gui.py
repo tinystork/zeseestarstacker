@@ -96,7 +96,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         self.reproject_batches_var = tk.BooleanVar(
             value=getattr(
-                self.parent_gui.settings, 'enable_reprojection_between_batches', False
+                self.parent_gui.settings, 'enable_interbatch_reproj', False
             )
         )
 
@@ -657,7 +657,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius)
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         self.parent_gui.settings.ansvr_host_port = ansvr_host_port
-        self.parent_gui.settings.enable_reprojection_between_batches = reproject_batches
+        self.parent_gui.settings.enable_interbatch_reproj = reproject_batches
 
         self.parent_gui.settings.astrometry_solve_field_dir = astrometry_dir
 
