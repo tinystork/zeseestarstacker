@@ -1050,6 +1050,7 @@ class SeestarStackerGUI:
         self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram)
         self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2))
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
+
         self.auto_zoom_histo_check = ttk.Checkbutton(
             self.histo_toolbar,
             text=self.tr("auto_zoom_histo_check", default="Auto zoom histogram"),
@@ -1069,6 +1070,7 @@ class SeestarStackerGUI:
             command=self.histogram_widget.zoom_histogram,
         )
         self.hist_zoom_btn.pack(side=tk.LEFT, padx=2)
+
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2); self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
         self.preview_frame = ttk.LabelFrame(right_frame, text="Preview")
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0); self.preview_canvas.pack(fill=tk.BOTH, expand=True)
