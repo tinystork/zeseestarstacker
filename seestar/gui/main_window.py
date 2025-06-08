@@ -431,6 +431,8 @@ class SeestarStackerGUI:
         # --- NOUVELLE VARIABLE TKINTER POUR L'OPTION DE SAUVEGARDE ---
         self.save_as_float32_var = tk.BooleanVar(value=False) # Défaut à False (donc uint16)
         print(f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()}).")
+        self.reproject_batches_var = tk.BooleanVar(value=False)
+        self.ansvr_host_port_var = tk.StringVar(value='127.0.0.1:8080')
         # --- FIN NOUVELLE VARIABLE ---
 
         print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter.") # Version Log
