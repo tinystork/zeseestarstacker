@@ -3,14 +3,19 @@ Module pour la fenêtre de configuration des solveurs astrométriques locaux.
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os # Pour les opérations sur les chemins
+import os  # Pour les opérations sur les chemins
 from zemosaic import zemosaic_config
+from .ui_utils import ToolTip
 
 class LocalSolverSettingsWindow(tk.Toplevel):
     """
     Fenêtre de dialogue pour configurer les chemins d'accès
     aux solveurs astrométriques locaux comme ASTAP ou Astrometry.net local.
     """
+
+    def tr(self, key, default=None):
+        """Shortcut to parent GUI translation."""
+        return self.tr(key, default=default)
     def __init__(self, parent_gui):
         """
         Initialise la fenêtre de configuration des solveurs locaux.
@@ -28,7 +33,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                 self.parent_gui.config = {}
         self.withdraw()  # Cacher pendant la configuration
 
-        self.title(self.parent_gui.tr("local_solver_window_title", default="Local Astrometry Solvers Configuration"))
+        self.title(self.tr("solver_config_title", default="Local Astrometry Solvers Configuration"))
         self.transient(parent_gui.root)
 
         print("DEBUG (LocalSolverSettingsWindow __init__): Début initialisation.") # DEBUG
@@ -92,6 +97,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                 self.parent_gui.settings, 'enable_reprojection_between_batches', False
             )
         )
+
+        if not self.reproject_batches_var.get() and self._solver_configured():
+            self.reproject_batches_var.set(True)
 
         self.reproject_batches_var.trace_add('write', lambda *args: self._update_warning())
         self.local_solver_choice_var.trace_add('write', lambda *args: self._update_warning())
@@ -197,6 +205,22 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             text='⚠️ Aucun solveur local configuré' if show else ''
         )
 
+    def _solver_configured(self):
+        choice = self.local_solver_choice_var.get()
+        if choice == 'astap':
+            return bool(self.astap_path_var.get().strip())
+        if choice == 'ansvr':
+            return bool(self.ansvr_host_port_var.get().strip())
+        if choice == 'astrometry':
+            return bool(self.astrometry_solve_field_dir_var.get().strip())
+        return any(
+            [
+                self.astap_path_var.get().strip(),
+                self.ansvr_host_port_var.get().strip(),
+                self.astrometry_solve_field_dir_var.get().strip(),
+            ]
+        )
+
 ####################################################################################################################################################
 
 
@@ -215,16 +239,14 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         solver_choice_frame = ttk.LabelFrame(
             main_frame,
-            text=self.parent_gui.tr(
-                "local_solver_choice_frame_title", default="Solver"
-            ),
+            text=self.tr("solver_label", default="Solver"),
             padding="10",
         )
         solver_choice_frame.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Radiobutton(
             solver_choice_frame,
-            text="ASTAP",
+            text=self.tr("solver_astap", default="ASTAP"),
             variable=self.local_solver_choice_var,
             value="astap",
             command=self._on_solver_choice_change,
@@ -232,7 +254,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         ttk.Radiobutton(
             solver_choice_frame,
-            text="Astrometry.net",
+            text=self.tr("solver_astrometry", default="Astrometry.net"),
             variable=self.local_solver_choice_var,
             value="astrometry",
             command=self._on_solver_choice_change,
@@ -240,7 +262,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         ttk.Radiobutton(
             solver_choice_frame,
-            text="Ansvr",
+            text=self.tr("solver_ansvr", default="Ansvr"),
             variable=self.local_solver_choice_var,
             value="ansvr",
             command=self._on_solver_choice_change,
@@ -248,20 +270,20 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         self.astap_frame = ttk.LabelFrame(
             main_frame,
-            text="ASTAP",
+            text=self.tr("solver_astap", default="ASTAP"),
             padding="10",
         )
         self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
 
         astap_path_sub = ttk.Frame(self.astap_frame)
         astap_path_sub.pack(fill=tk.X, pady=(5, 2))
-        ttk.Label(astap_path_sub, text="Executable:").pack(side=tk.LEFT)
+        ttk.Label(astap_path_sub, text=self.tr("astap_exe_label", default="Executable:")).pack(side=tk.LEFT)
         ttk.Entry(astap_path_sub, textvariable=self.astap_path_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
         )
         ttk.Button(
             astap_path_sub,
-            text=self.parent_gui.tr("browse", default="Browse..."),
+            text=self.tr("browse", default="Browse..."),
             command=self._browse_astap_path,
             width=12,
         ).pack(side=tk.RIGHT, padx=(5, 0))
@@ -269,21 +291,20 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         astap_data_sub = ttk.Frame(self.astap_frame)
         astap_data_sub.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(astap_data_sub, text="Data Dir:").pack(side=tk.LEFT)
+        ttk.Label(astap_data_sub, text=self.tr("astap_data_label", default="Data Dir:")).pack(side=tk.LEFT)
         ttk.Entry(astap_data_sub, textvariable=self.astap_data_dir_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
         )
         ttk.Button(
             astap_data_sub,
-            text=self.parent_gui.tr("browse", default="Browse..."),
+            text=self.tr("browse", default="Browse..."),
             command=self._browse_astap_data_dir,
             width=12,
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
         self.astrometry_frame = ttk.LabelFrame(
-
             main_frame,
-            text="Astrometry.net",
+            text=self.tr("solver_astrometry", default="Astrometry.net"),
             padding="10",
         )
 
@@ -292,46 +313,45 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         api_key_sub = ttk.Frame(self.astrometry_frame)
 
         api_key_sub.pack(fill=tk.X, pady=(5, 2))
-        ttk.Label(api_key_sub, text="API Key:").pack(side=tk.LEFT)
+        ttk.Label(api_key_sub, text=self.tr("astrometry_api_key_label", default="API Key:")).pack(side=tk.LEFT)
         ttk.Entry(api_key_sub, textvariable=self.parent_gui.astrometry_api_key_var, show="*").pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
         )
 
         astrometry_dir_sub = ttk.Frame(self.astrometry_frame)
         astrometry_dir_sub.pack(fill=tk.X, pady=(2, 5))
-        ttk.Label(astrometry_dir_sub, text="solve-field Dir:").pack(side=tk.LEFT)
+        ttk.Label(astrometry_dir_sub, text=self.tr("astrometry_dir_label", default="solve-field Dir:")).pack(side=tk.LEFT)
         ttk.Entry(astrometry_dir_sub, textvariable=self.astrometry_solve_field_dir_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0)
         )
         ttk.Button(
             astrometry_dir_sub,
-            text=self.parent_gui.tr("browse", default="Browse..."),
+            text=self.tr("browse", default="Browse..."),
             command=self._browse_astrometry_dir,
             width=12,
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
         self.ansvr_frame = ttk.LabelFrame(
             main_frame,
-            text="Ansvr",
+            text=self.tr("solver_ansvr", default="Ansvr"),
             padding="10",
         )
         self.ansvr_frame.pack(fill=tk.X, padx=5, pady=5)
 
         ansvr_host_sub = ttk.Frame(self.ansvr_frame)
         ansvr_host_sub.pack(fill=tk.X, pady=(5, 2))
-        ttk.Label(ansvr_host_sub, text="Host:Port:").pack(side=tk.LEFT)
+        ttk.Label(ansvr_host_sub, text=self.tr("ansvr_hostport_label", default="Host:Port:")).pack(side=tk.LEFT)
         ttk.Entry(ansvr_host_sub, textvariable=self.ansvr_host_port_var, width=15).pack(
             side=tk.LEFT, padx=(5, 0)
         )
 
-        ttk.Checkbutton(
+        reproject_cb = ttk.Checkbutton(
             main_frame,
-            text=self.parent_gui.tr(
-                "reproject_batches_label",
-                default="Activer la reprojection entre batchs (nécessite WCS)",
-            ),
+            text=self.tr("enable_batch_reproject", default="Enable inter-batch reprojection (requires WCS)"),
             variable=self.reproject_batches_var,
-        ).pack(anchor=tk.W, pady=(10, 0))
+        )
+        reproject_cb.pack(anchor=tk.W, pady=(10, 0))
+        ToolTip(reproject_cb, lambda: self.tr("tooltip_enable_batch_reproject", default="Requires a working solver (ASTAP, Astrometry.net, or Ansvr)"))
 
         self.warning_label = ttk.Label(
             main_frame,
@@ -346,13 +366,13 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
         cancel_button = ttk.Button(
             button_frame,
-            text=self.parent_gui.tr("cancel", default="Cancel"),
+            text=self.tr("cancel_button", default="Cancel"),
             command=self._on_cancel,
         )
         cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
         ok_button = ttk.Button(
             button_frame,
-            text=self.parent_gui.tr("ok", default="OK"),
+            text=self.tr("ok_button", default="OK"),
             command=self._on_ok,
         )
         ok_button.pack(side=tk.RIGHT)
@@ -373,13 +393,13 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         elif os.path.exists(current_path):
              initial_dir = os.path.dirname(current_path)
 
-        file_types = [(self.parent_gui.tr("executable_files", default="Executable Files"), "*.*")] 
+        file_types = [(self.tr("executable_files", default="Executable Files"), "*.*")] 
         if os.name == 'nt': 
-            file_types = [(self.parent_gui.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"), 
-                          (self.parent_gui.tr("all_files", default="All Files"), "*.*")]
+            file_types = [(self.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"), 
+                          (self.tr("all_files", default="All Files"), "*.*")]
         
         filepath = filedialog.askopenfilename(
-            title=self.parent_gui.tr("select_astap_executable_title", default="Select ASTAP Executable"),
+            title=self.tr("select_astap_executable_title", default="Select ASTAP Executable"),
             initialdir=initial_dir if initial_dir else os.path.expanduser("~"), 
             filetypes=file_types,
             parent=self 
@@ -394,7 +414,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             initial_dir = os.path.expanduser("~")
 
         dirpath = filedialog.askdirectory(
-            title=self.parent_gui.tr("select_astap_data_dir_title", default="Select ASTAP Star Index Data Directory"),
+            title=self.tr("select_astap_data_dir_title", default="Select ASTAP Star Index Data Directory"),
             initialdir=initial_dir,
             parent=self 
         )
@@ -408,7 +428,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             initial_dir = os.path.expanduser("~")
 
         dirpath = filedialog.askdirectory(
-            title=self.parent_gui.tr("select_astrometry_exec_dir_title", default="Select solve-field Directory"),
+            title=self.tr("select_astrometry_exec_dir_title", default="Select solve-field Directory"),
             initialdir=initial_dir,
             parent=self,
         )
@@ -443,12 +463,12 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         _log_browser(f"Ouverture de la boîte de dialogue pour fichiers (initialdir: {initial_dir_ansvr})")
         filepath_selected = filedialog.askopenfilename(
-            title=self.parent_gui.tr("select_ansvr_exe_or_cfg_title", default="Select solve-field Executable or .cfg (Cancel for Index Dir)"),
+            title=self.tr("select_ansvr_exe_or_cfg_title", default="Select solve-field Executable or .cfg (Cancel for Index Dir)"),
             initialdir=initial_dir_ansvr,
             filetypes=[
-                (self.parent_gui.tr("configuration_files", default="Configuration Files"), "*.cfg"),
-                (self.parent_gui.tr("executable_files", default="Executable Files"), "*.*" if os.name != 'nt' else "*.exe"),
-                (self.parent_gui.tr("all_files", default="All Files"), "*.*")
+                (self.tr("configuration_files", default="Configuration Files"), "*.cfg"),
+                (self.tr("executable_files", default="Executable Files"), "*.*" if os.name != 'nt' else "*.exe"),
+                (self.tr("all_files", default="All Files"), "*.*")
             ],
             parent=self
         )
@@ -456,7 +476,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         if not filepath_selected: # L'utilisateur a annulé la sélection de fichier ou n'a rien choisi
             _log_browser("Aucun fichier sélectionné. Ouverture de la boîte de dialogue pour répertoires.")
             dirpath_selected = filedialog.askdirectory(
-                title=self.parent_gui.tr("select_ansvr_index_dir_title", default="Select Astrometry.net Index Directory"),
+                title=self.tr("select_ansvr_index_dir_title", default="Select Astrometry.net Index Directory"),
                 initialdir=initial_dir_ansvr, # On peut réutiliser le même initialdir
                 parent=self
             )
@@ -503,21 +523,21 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         # Définir les types de fichiers en fonction de l'OS
         if os.name == 'nt': # Cas Windows
             file_types_list = [
-                (self.parent_gui.tr("configuration_files", default="Config Files"), "*.cfg"),
-                (self.parent_gui.tr("executable_files", default="Executable Files (.exe)"), "*.exe"), # Plus spécifique pour Windows
-                (self.parent_gui.tr("all_files", default="All Files"), "*.*")
+                (self.tr("configuration_files", default="Config Files"), "*.cfg"),
+                (self.tr("executable_files", default="Executable Files (.exe)"), "*.exe"), # Plus spécifique pour Windows
+                (self.tr("all_files", default="All Files"), "*.*")
             ]
             # print(f"DEBUG (LSW _browse_ansvr_file): Types de fichiers pour Windows: {file_types_list}") # Optionnel
         else: # Cas non-Windows (Linux, macOS, etc.)
             file_types_list = [
-                (self.parent_gui.tr("executable_files", default="Executable Files (any)"), "*"), # Souvent sans extension
-                (self.parent_gui.tr("configuration_files", default="Config Files (.cfg)"), "*.cfg"),
-                (self.parent_gui.tr("all_files", default="All Files"), "*.*")
+                (self.tr("executable_files", default="Executable Files (any)"), "*"), # Souvent sans extension
+                (self.tr("configuration_files", default="Config Files (.cfg)"), "*.cfg"),
+                (self.tr("all_files", default="All Files"), "*.*")
             ]
             # print(f"DEBUG (LSW _browse_ansvr_file): Types de fichiers pour non-Windows: {file_types_list}") # Optionnel
 
         filepath = filedialog.askopenfilename(
-            title=self.parent_gui.tr("select_ansvr_exe_or_cfg_title_v2", default="Select solve-field Executable or .cfg File"),
+            title=self.tr("select_ansvr_exe_or_cfg_title_v2", default="Select solve-field Executable or .cfg File"),
             initialdir=initial_dir_ansvr,
             filetypes=file_types_list,
             parent=self  # Important pour la modalité correcte
@@ -560,7 +580,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         print(f"DEBUG (LSW _browse_ansvr_index_dir): Ouverture dialogue sélection répertoire. Initialdir: '{initial_dir_ansvr}'")
 
         dirpath = filedialog.askdirectory(
-            title=self.parent_gui.tr("select_ansvr_index_dir_title_v2", default="Select Astrometry.net Index Directory"),
+            title=self.tr("select_ansvr_index_dir_title_v2", default="Select Astrometry.net Index Directory"),
             initialdir=initial_dir_ansvr,
             parent=self  # Important pour la modalité correcte
         )
@@ -603,20 +623,20 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         # Valider que si un solveur est choisi, son chemin principal est rempli
         validation_ok = True
         if solver_choice == "astap" and not astap_path:
-            messagebox.showerror(self.parent_gui.tr("error"), 
-                                 self.parent_gui.tr("astap_path_required_error", default="ASTAP is selected, but the executable path is missing."),
+            messagebox.showerror(self.tr("error"), 
+                                 self.tr("astap_path_required_error", default="ASTAP is selected, but the executable path is missing."),
                                  parent=self)
             validation_ok = False
 
 
         elif solver_choice == "ansvr" and not local_ansvr_path:
-            messagebox.showerror(self.parent_gui.tr("error"),
-                                 self.parent_gui.tr("ansvr_path_required_error", default="Astrometry.net Local is selected, but the path/config is missing."),
+            messagebox.showerror(self.tr("error"),
+                                 self.tr("ansvr_path_required_error", default="Astrometry.net Local is selected, but the path/config is missing."),
                                  parent=self)
             validation_ok = False
         elif solver_choice == "astrometry" and not astrometry_dir:
-            messagebox.showerror(self.parent_gui.tr("error"),
-                                 self.parent_gui.tr("astrometry_path_required_error", default="Astrometry.net is selected, but the solve-field directory is missing."),
+            messagebox.showerror(self.tr("error"),
+                                 self.tr("astrometry_path_required_error", default="Astrometry.net is selected, but the solve-field directory is missing."),
                                  parent=self)
             validation_ok = False
         
