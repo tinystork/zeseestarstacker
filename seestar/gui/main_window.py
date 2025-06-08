@@ -202,6 +202,7 @@ class SeestarStackerGUI:
         
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
+        self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
 
         if stack_immediately_from and isinstance(stack_immediately_from, str) and os.path.isdir(stack_immediately_from):
             self.logger.info(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}")
@@ -1045,6 +1046,23 @@ class SeestarStackerGUI:
         self.histogram_frame.config(height=hist_height_pixels); self.histogram_frame.pack_propagate(False)
         self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram)
         self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2))
+        self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
+        self.hist_zoom_btn = ttk.Button(
+            self.histogram_frame,
+            text=self.tr("zoom_histo_button", default="Zoom Histogram"),
+            command=self.histogram_widget.zoom_histogram,
+        ); self.hist_zoom_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
+        self.hist_reset_view_btn = ttk.Button(
+            self.histogram_frame,
+            text=self.tr("reset_histo_button", default="Reset Histogram"),
+            command=self.histogram_widget.reset_histogram_view,
+        ); self.hist_reset_view_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
+        self.auto_zoom_histo_check = ttk.Checkbutton(
+            self.histogram_frame,
+            text=self.tr("auto_zoom_histo_check", default="Auto zoom histogram"),
+            variable=self.auto_zoom_histogram_var,
+            command=lambda: setattr(self.histogram_widget, 'auto_zoom_enabled', self.auto_zoom_histogram_var.get()),
+        ); self.auto_zoom_histo_check.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2); self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
         self.preview_frame = ttk.LabelFrame(right_frame, text="Preview")
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0); self.preview_canvas.pack(fill=tk.BOTH, expand=True)

@@ -194,6 +194,9 @@ EN_TRANSLATIONS = {
     # --- Preview Area (Right Panel) ---
     'preview': "Preview",
     'histogram': "Histogram",
+    'zoom_histo_button': "Zoom Histogram",
+    'reset_histo_button': "Reset Histogram",
+    'auto_zoom_histo_check': "Auto zoom histogram",
 
     # --- Control Buttons ---
     'start': "Start",
