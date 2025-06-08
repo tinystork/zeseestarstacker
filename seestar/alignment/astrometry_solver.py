@@ -1099,7 +1099,7 @@ class AstrometrySolver:
             traceback.print_exc(limit=1)
             return None
 
-    def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
+def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
         """
         Met à jour un header FITS existant avec les informations d'un objet WCS.
         """
@@ -1141,5 +1141,32 @@ class AstrometrySolver:
         except Exception as e_hdr_update:
             self._log(f"Erreur lors de la mise à jour du header FITS avec WCS: {e_hdr_update}", "ERROR")
             traceback.print_exc(limit=1)
+
+
+def solve_image_wcs(image_path, fits_header, settings, update_header_with_solution=True):
+    """Convenience wrapper for :class:`AstrometrySolver`.
+
+    Parameters
+    ----------
+    image_path : str
+        Path to the FITS image to solve.
+    fits_header : astropy.io.fits.Header
+        FITS header associated with the image (may be ``None``).
+    settings : dict
+        Dictionary of solver settings taken from :class:`SettingsManager`.
+    update_header_with_solution : bool, optional
+        If ``True`` the provided ``fits_header`` is updated with the solved WCS.
+
+    Returns
+    -------
+    astropy.wcs.WCS or None
+        The solved WCS object, or ``None`` if solving failed.
+    """
+    try:
+        solver = AstrometrySolver()
+        return solver.solve(image_path, fits_header, settings, update_header_with_solution)
+    except Exception:
+        return None
+
 
 # --- END OF FILE seestar/alignment/astrometry_solver.py ---
