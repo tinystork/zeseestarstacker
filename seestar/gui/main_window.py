@@ -1041,28 +1041,36 @@ class SeestarStackerGUI:
         self.open_output_button = ttk.Button(control_frame, text="Open Output", command=self._open_output_folder, state=tk.DISABLED); self.open_output_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.add_files_button = ttk.Button(control_frame, text="Add Folder", command=self.file_handler.add_folder, state=tk.NORMAL); self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
         self.show_folders_button = ttk.Button(control_frame, text="View Inputs", command=self._show_input_folder_list, state=tk.DISABLED); self.show_folders_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+
+        self.histo_toolbar = ttk.Frame(control_frame)
+        self.histo_toolbar.pack(side=tk.RIGHT, padx=6)
         self.histogram_frame = ttk.LabelFrame(right_frame, text="Histogram")
         hist_fig_height_inches = 2.2; hist_fig_dpi = 80; hist_height_pixels = int(hist_fig_height_inches * hist_fig_dpi * 1.1)
         self.histogram_frame.config(height=hist_height_pixels); self.histogram_frame.pack_propagate(False)
         self.histogram_widget = HistogramWidget(self.histogram_frame, range_change_callback=self.update_stretch_from_histogram)
         self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,2), pady=(0,2))
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
-        self.hist_zoom_btn = ttk.Button(
-            self.histogram_frame,
-            text=self.tr("zoom_histo_button", default="Zoom Histogram"),
-            command=self.histogram_widget.zoom_histogram,
-        ); self.hist_zoom_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
-        self.hist_reset_view_btn = ttk.Button(
-            self.histogram_frame,
-            text=self.tr("reset_histo_button", default="Reset Histogram"),
-            command=self.histogram_widget.reset_histogram_view,
-        ); self.hist_reset_view_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
+
         self.auto_zoom_histo_check = ttk.Checkbutton(
-            self.histogram_frame,
+            self.histo_toolbar,
             text=self.tr("auto_zoom_histo_check", default="Auto zoom histogram"),
             variable=self.auto_zoom_histogram_var,
             command=lambda: setattr(self.histogram_widget, 'auto_zoom_enabled', self.auto_zoom_histogram_var.get()),
-        ); self.auto_zoom_histo_check.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
+        )
+        self.auto_zoom_histo_check.pack(side=tk.LEFT, padx=2)
+        self.hist_reset_view_btn = ttk.Button(
+            self.histo_toolbar,
+            text=self.tr("reset_histo_button", default="Reset Histogram"),
+            command=self.histogram_widget.reset_histogram_view,
+        )
+        self.hist_reset_view_btn.pack(side=tk.LEFT, padx=2)
+        self.hist_zoom_btn = ttk.Button(
+            self.histo_toolbar,
+            text=self.tr("zoom_histo_button", default="Zoom Histogram"),
+            command=self.histogram_widget.zoom_histogram,
+        )
+        self.hist_zoom_btn.pack(side=tk.LEFT, padx=2)
+
         self.hist_reset_btn = ttk.Button(self.histogram_frame, text="R", command=self.histogram_widget.reset_zoom, width=2); self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0,2), pady=2)
         self.preview_frame = ttk.LabelFrame(right_frame, text="Preview")
         self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0); self.preview_canvas.pack(fill=tk.BOTH, expand=True)
