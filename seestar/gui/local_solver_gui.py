@@ -189,7 +189,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                 show = True
             elif choice == 'ansvr' and not self.ansvr_host_port_var.get().strip():
                 show = True
+
             elif choice == 'astrometry' and not self.astrometry_solve_field_dir_var.get().strip():
+
                 show = True
         self.warning_label.configure(
             text='⚠️ Aucun solveur local configuré' if show else ''
@@ -264,6 +266,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             width=12,
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
+
         astap_data_sub = ttk.Frame(self.astap_frame)
         astap_data_sub.pack(fill=tk.X, pady=(2, 5))
         ttk.Label(astap_data_sub, text="Data Dir:").pack(side=tk.LEFT)
@@ -278,13 +281,16 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
         self.astrometry_frame = ttk.LabelFrame(
+
             main_frame,
             text="Astrometry.net",
             padding="10",
         )
+
         self.astrometry_frame.pack(fill=tk.X, padx=5, pady=5)
 
         api_key_sub = ttk.Frame(self.astrometry_frame)
+
         api_key_sub.pack(fill=tk.X, pady=(5, 2))
         ttk.Label(api_key_sub, text="API Key:").pack(side=tk.LEFT)
         ttk.Entry(api_key_sub, textvariable=self.parent_gui.astrometry_api_key_var, show="*").pack(
@@ -331,6 +337,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             main_frame,
             foreground="red",
         )
+
         self.warning_label.pack(anchor=tk.W)
 
         self._update_warning()
@@ -589,7 +596,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
         ansvr_host_port = self.ansvr_host_port_var.get().strip()
         reproject_batches = self.reproject_batches_var.get()
+
         astrometry_dir = self.astrometry_solve_field_dir_var.get().strip()
+
 
         # Valider que si un solveur est choisi, son chemin principal est rempli
         validation_ok = True
@@ -627,7 +636,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         self.parent_gui.settings.ansvr_host_port = ansvr_host_port
         self.parent_gui.settings.enable_reprojection_between_batches = reproject_batches
+
         self.parent_gui.settings.astrometry_solve_field_dir = astrometry_dir
+
         try:
             self.parent_gui.settings.astrometry_api_key = self.parent_gui.astrometry_api_key_var.get().strip()
         except Exception:
@@ -645,14 +656,18 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             pass
 
         print(
+
             f"  LocalSolverSettingsWindow: Préférence Sauvegardée='{solver_choice}', ASTAP='{astap_path}', Data ASTAP='{astap_data_dir}', Radius ASTAP={astap_radius}, Down={astap_downsample}, Sens={astap_sensitivity}, Cluster={cluster_threshold}, Ansvr Local='{local_ansvr_path}', HostPort='{ansvr_host_port}', Astrometry Dir='{astrometry_dir}', ReprojBatches={reproject_batches}"
+
         )  # DEBUG
         print("  LocalSolverSettingsWindow: Paramètres mis à jour dans parent_gui.settings.")
         print(f"DEBUG (LocalSolverSettingsWindow _on_ok): Validation OK. Sauvegarde des settings. Préparation fermeture fenêtre.")
         print(f"  -> local_solver_preference: {solver_choice}")
         print(f"  -> local_ansvr_path à sauvegarder: {local_ansvr_path}")
         print(f"  -> ansvr_host_port à sauvegarder: {ansvr_host_port}")
+
         print(f"  -> astrometry_dir à sauvegarder: {astrometry_dir}")
+
         print(f"  -> reproject_batches: {reproject_batches}")
         self.grab_release()
         self.destroy()
