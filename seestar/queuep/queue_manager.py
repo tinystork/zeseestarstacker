@@ -243,6 +243,7 @@ class SeestarQueuedStacker:
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
         self.enable_reprojection_between_batches = False
+        self.enable_interbatch_reproj = False
         # --- FIN NOUVEAU ---
 
         self.progress_callback = None; self.preview_callback = None
@@ -3801,6 +3802,10 @@ class SeestarQueuedStacker:
 
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
             batch_wht = batch_coverage_map_2d.astype(np.float32)
+            print("[InterBatchReproj]",
+                  "enabled=", self.enable_interbatch_reproj,
+                  "refWCS=", bool(self.reference_wcs_object),
+                  "batchWCS=", bool(batch_wcs))
             try:
                 if self.enable_reprojection_between_batches and self.reference_wcs_object and batch_wcs is not None:
                     from reproject import reproject_interp
@@ -5111,6 +5116,7 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
         self.enable_reprojection_between_batches = bool(enable_reprojection_between_batches)
+        self.enable_interbatch_reproj = self.enable_reprojection_between_batches
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}
