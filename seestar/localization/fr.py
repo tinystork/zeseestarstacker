@@ -216,6 +216,9 @@ FR_TRANSLATIONS = {
     # --- Zone Aperçu (Panneau Droit) ---
     'preview': "Aperçu",
     'histogram': "Histogramme",
+    'zoom_histo_button': "Zoom Histogramme",
+    'reset_histo_button': "Réinitialiser Histogramme",
+    'auto_zoom_histo_check': "Zoom auto histogramme",
 
     # --- Boutons de Contrôle ---
     'start': "Démarrer",
