@@ -34,6 +34,7 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
+from ..core.reprojection import reproject_to_reference_wcs
 print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -240,6 +241,8 @@ class SeestarQueuedStacker:
         # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
+        # Option de reprojection des lots intermédiaires
+        self.enable_reprojection_between_batches = False
         # --- FIN NOUVEAU ---
 
         self.progress_callback = None; self.preview_callback = None
@@ -3356,7 +3359,7 @@ class SeestarQueuedStacker:
                     if not hdul or len(hdul) == 0 or hdul[0].data is None: 
                         raise IOError(f"FITS temp invalide/vide: {temp_fits_filepath}")
                     
-                    data_loaded = hdul[0].data 
+                    data_loaded = hdul[0].data
                     input_header = hdul[0].header
                     print(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Données chargées depuis FITS temp '{current_filename_for_log}': Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
 
@@ -3365,16 +3368,35 @@ class SeestarQueuedStacker:
                         print(f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]")
                     else:
                         raise ValueError(f"Shape FITS temp {data_loaded.shape} non CxHxW comme attendu.")
-                    
-                    with warnings.catch_warnings(): 
+
+                    with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        wcs_input_from_file = WCS(input_header, naxis=2) 
+                        wcs_input_from_file = WCS(input_header, naxis=2)
                     if not wcs_input_from_file or not wcs_input_from_file.is_celestial:
                         raise ValueError("WCS non céleste ou invalide dans le fichier FITS temporaire.")
 
-                input_shape_hw_current_file = (input_image_cxhxw.shape[1], input_image_cxhxw.shape[2])
+                image_hwc = np.moveaxis(input_image_cxhxw, 0, -1)
+                target_shape_hw = self.drizzle_output_shape_hw or self.memmap_shape[:2]
+                wcs_for_pixmap = wcs_input_from_file
+                input_shape_hw_current_file = image_hwc.shape[:2]
+                if self.enable_reprojection_between_batches and self.reference_wcs_object:
+                    try:
+                        image_hwc = reproject_to_reference_wcs(
+                            image_hwc,
+                            wcs_input_from_file,
+                            self.reference_wcs_object,
+                            target_shape_hw,
+                        )
+                        wcs_for_pixmap = self.reference_wcs_object
+                        input_shape_hw_current_file = target_shape_hw
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ Reprojection failed for current batch ({type(e).__name__}): {e}",
+                            "WARN",
+                        )
+
                 y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw_current_file).reshape(2, -1)
-                sky_ra_deg, sky_dec_deg = wcs_input_from_file.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
+                sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
                 
                 if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
                     raise ValueError("Coordonnées célestes non finies obtenues depuis le WCS du fichier temporaire.")
@@ -3411,9 +3433,9 @@ class SeestarQueuedStacker:
                 weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
 
                 for ch_idx in range(num_output_channels):
-                    channel_data_2d = input_image_cxhxw[ch_idx, :, :].astype(np.float32)
-                    if not np.all(np.isfinite(channel_data_2d)): 
-                        channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0 
+                    channel_data_2d = image_hwc[:, :, ch_idx].astype(np.float32)
+                    if not np.all(np.isfinite(channel_data_2d)):
+                        channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
                     
                     print(f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}")
                     if weight_map_param_for_add is not None:
@@ -3655,6 +3677,22 @@ class SeestarQueuedStacker:
         # stacked_batch_data_np peut être HWC ou HW. memmap_shape est HWC.
         # batch_coverage_map_2d doit être HW.
         expected_shape_hw = self.memmap_shape[:2]
+
+        if self.enable_reprojection_between_batches and self.reference_wcs_object:
+            try:
+                input_wcs = WCS(stack_info_header, naxis=2)
+                target_wcs = self.reference_wcs_object
+                stacked_batch_data_np = reproject_to_reference_wcs(
+                    stacked_batch_data_np, input_wcs, target_wcs, expected_shape_hw
+                )
+                batch_coverage_map_2d = reproject_to_reference_wcs(
+                    batch_coverage_map_2d, input_wcs, target_wcs, expected_shape_hw
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Reprojection failed for current batch ({type(e).__name__}): {e}",
+                    "WARN"
+                )
         
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
@@ -4876,14 +4914,15 @@ class SeestarQueuedStacker:
                          local_ansvr_path="",
                          astap_search_radius=3.0,
                          local_solver_preference="none",
-                         save_as_float32=False # <-- NOUVEL ARGUMENT AJOUTÉ ICI
+                         save_as_float32=False, # <-- NOUVEL ARGUMENT AJOUTÉ ICI
+                         enable_reprojection_between_batches=False
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MODIFIED: Ajout argument save_as_float32 et assignation à self.
+        MODIFIED: Ajout arguments save_as_float32 et enable_reprojection_between_batches.
         Version: V_StartProcessing_SaveDtypeOption_1
         """
         print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
@@ -4895,6 +4934,7 @@ class SeestarQueuedStacker:
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
+        print(f"    enable_reprojection_between_batches (arg de func): {enable_reprojection_between_batches}")
         print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
@@ -4995,6 +5035,7 @@ class SeestarQueuedStacker:
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
+        self.enable_reprojection_between_batches = bool(enable_reprojection_between_batches)
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}

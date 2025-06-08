@@ -4234,7 +4234,8 @@ class SeestarStackerGUI:
             local_ansvr_path=self.settings.local_ansvr_path,
             local_solver_preference=self.settings.local_solver_preference,
             astap_search_radius=self.settings.astap_search_radius,
-            save_as_float32=self.settings.save_final_as_float32
+            save_as_float32=self.settings.save_final_as_float32,
+            enable_reprojection_between_batches=self.settings.enable_reprojection_between_batches
             # Lire depuis self.settings
             
         )
