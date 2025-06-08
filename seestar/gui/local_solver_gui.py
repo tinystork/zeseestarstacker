@@ -15,7 +15,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
     def tr(self, key, default=None):
         """Shortcut to parent GUI translation."""
+
         return self.parent_gui.tr(key, default=default)
+
     def __init__(self, parent_gui):
         """
         Initialise la fenêtre de configuration des solveurs locaux.
