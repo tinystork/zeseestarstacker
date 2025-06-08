@@ -242,7 +242,9 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
+
         self.enable_reprojection_between_batches = False
+
         self.enable_interbatch_reproj = False
         # --- FIN NOUVEAU ---
 
@@ -3410,7 +3412,7 @@ class SeestarQueuedStacker:
                 target_shape_hw = self.drizzle_output_shape_hw or self.memmap_shape[:2]
                 wcs_for_pixmap = wcs_input_from_file
                 input_shape_hw_current_file = image_hwc.shape[:2]
-                if self.enable_reprojection_between_batches and self.reference_wcs_object:
+                if self.enable_interbatch_reproj and self.reference_wcs_object:
                     try:
                         image_hwc = reproject_to_reference_wcs(
                             image_hwc,
@@ -3715,13 +3717,13 @@ class SeestarQueuedStacker:
 
         
         input_wcs = batch_wcs
-        if input_wcs is None and self.enable_reprojection_between_batches and self.reference_wcs_object:
+        if input_wcs is None and self.enable_interbatch_reproj and self.reference_wcs_object:
             try:
                 input_wcs = WCS(stack_info_header, naxis=2)
             except Exception:
                 input_wcs = None
 
-        if self.enable_reprojection_between_batches and self.reference_wcs_object and input_wcs is not None:
+        if self.enable_interbatch_reproj and self.reference_wcs_object and input_wcs is not None:
             try:
                 stacked_batch_data_np = reproject_to_reference_wcs(
                     stacked_batch_data_np, input_wcs, self.reference_wcs_object, expected_shape_hw
@@ -3807,7 +3809,7 @@ class SeestarQueuedStacker:
                   "refWCS=", bool(self.reference_wcs_object),
                   "batchWCS=", bool(batch_wcs))
             try:
-                if self.enable_reprojection_between_batches and self.reference_wcs_object and batch_wcs is not None:
+                if self.enable_interbatch_reproj and self.reference_wcs_object and batch_wcs is not None:
                     from reproject import reproject_interp
                     shp = self.memmap_shape[:2]
                     if batch_sum.ndim == 3:
@@ -4995,14 +4997,14 @@ class SeestarQueuedStacker:
                          astap_search_radius=3.0,
                          local_solver_preference="none",
                          save_as_float32=False, # <-- NOUVEL ARGUMENT AJOUTÉ ICI
-                         enable_reprojection_between_batches=False
+                         enable_interbatch_reproj=False
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MODIFIED: Ajout arguments save_as_float32 et enable_reprojection_between_batches.
+        MODIFIED: Ajout arguments save_as_float32 et enable_interbatch_reproj.
         Version: V_StartProcessing_SaveDtypeOption_1
         """
         print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
@@ -5014,7 +5016,7 @@ class SeestarQueuedStacker:
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
-        print(f"    enable_reprojection_between_batches (arg de func): {enable_reprojection_between_batches}")
+        print(f"    enable_interbatch_reproj (arg de func): {enable_interbatch_reproj}")
         print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
@@ -5115,8 +5117,10 @@ class SeestarQueuedStacker:
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
+
         self.enable_reprojection_between_batches = bool(enable_reprojection_between_batches)
         self.enable_interbatch_reproj = self.enable_reprojection_between_batches
+
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}
