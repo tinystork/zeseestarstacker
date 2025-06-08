@@ -183,7 +183,7 @@ except ImportError as e:
 # pour éviter les dépendances circulaires au chargement initial.
 
 
-from ..alignment.astrometry_solver import AstrometrySolver # Déplacé vers _worker/_process_file
+from ..alignment.astrometry_solver import AstrometrySolver, solve_image_wcs  # Déplacé vers _worker/_process_file
 
 
 # --- Configuration des Avertissements ---
@@ -242,7 +242,7 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
-        self.enable_reprojection_between_batches = False
+        self.enable_interbatch_reproj = False
         # --- FIN NOUVEAU ---
 
         self.progress_callback = None; self.preview_callback = None
@@ -3195,15 +3195,45 @@ class SeestarQueuedStacker:
             print(f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
                   f"Shape image lot: {stacked_batch_data_np.shape}, "
                   f"Shape carte couverture lot: {batch_coverage_map_2d.shape}")
-            
-            # --- Combiner le résultat du batch dans les accumulateurs SUM/WHT globaux ---
-            # _combine_batch_result attend :
-            #   (self, stacked_batch_data_np, stack_info_header, batch_coverage_map_2d)
+
+            batch_wcs = None
+            try:
+                temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                temp_f.close()
+                data_to_write = stacked_batch_data_np
+                if stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3:
+                    data_to_write = np.moveaxis(stacked_batch_data_np, -1, 0)
+                fits.writeto(temp_f.name, data_to_write.astype(np.float32), header=stack_info_header, overwrite=True)
+                solver_settings = {
+                    "local_solver_preference": self.local_solver_preference,
+                    "api_key": self.api_key,
+                    "astap_path": self.astap_path,
+                    "astap_data_dir": self.astap_data_dir,
+                    "astap_search_radius": self.astap_search_radius,
+                    "local_ansvr_path": self.local_ansvr_path,
+                    "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
+                    "scale_tolerance_percent": 20,
+                    "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+                    "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+                    "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
+                    "use_radec_hints": getattr(self, "use_radec_hints", False),
+                }
+                batch_wcs = solve_image_wcs(temp_f.name, stack_info_header, solver_settings, update_header_with_solution=False)
+            except Exception as e_solve_batch:
+                print(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
+                batch_wcs = None
+            finally:
+                try:
+                    os.remove(temp_f.name)
+                except Exception:
+                    pass
+
             print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
             self._combine_batch_result(
                 stacked_batch_data_np,
                 stack_info_header,
-                batch_coverage_map_2d # La carte de couverture 2D du lot
+                batch_coverage_map_2d,
+                batch_wcs,
             )
             
             # Mise à jour de l'aperçu SUM/W après accumulation de ce lot
@@ -3379,7 +3409,7 @@ class SeestarQueuedStacker:
                 target_shape_hw = self.drizzle_output_shape_hw or self.memmap_shape[:2]
                 wcs_for_pixmap = wcs_input_from_file
                 input_shape_hw_current_file = image_hwc.shape[:2]
-                if self.enable_reprojection_between_batches and self.reference_wcs_object:
+                if self.enable_interbatch_reproj and self.reference_wcs_object:
                     try:
                         image_hwc = reproject_to_reference_wcs(
                             image_hwc,
@@ -3644,7 +3674,7 @@ class SeestarQueuedStacker:
 
 
 
-    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header, batch_coverage_map_2d):
+    def _combine_batch_result(self, stacked_batch_data_np, stack_info_header, batch_coverage_map_2d, batch_wcs=None):
         """
         [MODE SUM/W - CLASSIQUE] Accumule le résultat d'un batch classique
         (image moyenne du lot et sa carte de couverture/poids 2D)
@@ -3682,15 +3712,21 @@ class SeestarQueuedStacker:
         # batch_coverage_map_2d doit être HW.
         expected_shape_hw = self.memmap_shape[:2]
 
-        if self.enable_reprojection_between_batches and self.reference_wcs_object:
+        
+        input_wcs = batch_wcs
+        if input_wcs is None and self.enable_interbatch_reproj and self.reference_wcs_object:
             try:
                 input_wcs = WCS(stack_info_header, naxis=2)
-                target_wcs = self.reference_wcs_object
+            except Exception:
+                input_wcs = None
+
+        if self.enable_interbatch_reproj and self.reference_wcs_object and input_wcs is not None:
+            try:
                 stacked_batch_data_np = reproject_to_reference_wcs(
-                    stacked_batch_data_np, input_wcs, target_wcs, expected_shape_hw
+                    stacked_batch_data_np, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
                 batch_coverage_map_2d = reproject_to_reference_wcs(
-                    batch_coverage_map_2d, input_wcs, target_wcs, expected_shape_hw
+                    batch_coverage_map_2d, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
                 self.update_progress(
                     f"🌀 [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
@@ -3699,9 +3735,8 @@ class SeestarQueuedStacker:
             except Exception as e:
                 self.update_progress(
                     f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
-                    "WARN"
+                    "WARN",
                 )
-        
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
             print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot.")
@@ -3764,15 +3799,37 @@ class SeestarQueuedStacker:
             print(f"  -> signal_to_add_to_sum_float64 - Shape: {signal_to_add_to_sum_float64.shape}, "
                   f"Range: [{np.min(signal_to_add_to_sum_float64):.2f} - {np.max(signal_to_add_to_sum_float64):.2f}]")
 
-            # --- Accumulation dans les memmaps ---
-            self.cumulative_sum_memmap[:] += signal_to_add_to_sum_float64.astype(self.memmap_dtype_sum)
+            batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
+            batch_wht = batch_coverage_map_2d.astype(np.float32)
+            try:
+                print("[InterBatchReproj]",
+                      "enabled=", self.enable_interbatch_reproj,
+                      "refWCS=", bool(self.reference_wcs_object),
+                      "batchWCS=", bool(batch_wcs))
+                if self.enable_interbatch_reproj and self.reference_wcs_object and batch_wcs is not None:
+                    from reproject import reproject_interp
+                    shp = self.memmap_shape[:2]
+                    if batch_sum.ndim == 3:
+                        channels = []
+                        for ch in range(batch_sum.shape[2]):
+                            c, _ = reproject_interp((batch_sum[..., ch], batch_wcs), self.reference_wcs_object, shape_out=shp)
+                            channels.append(c)
+                        sum_reproj = np.stack(channels, axis=2)
+                    else:
+                        sum_reproj, _ = reproject_interp((batch_sum, batch_wcs), self.reference_wcs_object, shape_out=shp)
+                    wht_reproj, _ = reproject_interp((batch_wht, batch_wcs), self.reference_wcs_object, shape_out=shp)
+                    self.cumulative_sum_memmap[:] += sum_reproj.astype(self.memmap_dtype_sum)
+                    self.cumulative_wht_memmap[:] += wht_reproj.astype(self.memmap_dtype_wht)
+                else:
+                    self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
+                    self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
+            except Exception as e:
+                print(f"[InterBatchReproj] fallback → direct add: {e}")
+                self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
+                self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
             if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM terminée et flushée.")
-
-            # batch_coverage_map_2d est déjà HW et float32 (dtype de self.memmap_dtype_wht)
-            self.cumulative_wht_memmap[:] += batch_coverage_map_2d # Pas besoin de astype si déjà float32
             if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition WHT terminée et flushée.")
+            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
 
             # Mise à jour des compteurs globaux
             self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
@@ -4937,14 +4994,14 @@ class SeestarQueuedStacker:
                          astap_search_radius=3.0,
                          local_solver_preference="none",
                          save_as_float32=False, # <-- NOUVEL ARGUMENT AJOUTÉ ICI
-                         enable_reprojection_between_batches=False
+                         enable_interbatch_reproj=False
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MODIFIED: Ajout arguments save_as_float32 et enable_reprojection_between_batches.
+        MODIFIED: Ajout arguments save_as_float32 et enable_interbatch_reproj.
         Version: V_StartProcessing_SaveDtypeOption_1
         """
         print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
@@ -4956,7 +5013,7 @@ class SeestarQueuedStacker:
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
-        print(f"    enable_reprojection_between_batches (arg de func): {enable_reprojection_between_batches}")
+        print(f"    enable_interbatch_reproj (arg de func): {enable_interbatch_reproj}")
         print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
@@ -5057,7 +5114,7 @@ class SeestarQueuedStacker:
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
-        self.enable_reprojection_between_batches = bool(enable_reprojection_between_batches)
+        self.enable_interbatch_reproj = bool(enable_interbatch_reproj)
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}
