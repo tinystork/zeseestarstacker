@@ -2916,21 +2916,24 @@ class SeestarStackerGUI:
  
     def update_remaining_files(self):
         """Met à jour l'affichage des fichiers restants / total ajouté."""
-        if hasattr(self, "queued_stacker") and self.processing:
-            try:
-                total_queued = self.queued_stacker.files_in_queue; processed_total = self.queued_stacker.processed_files_count
-                remaining_estimated = max(0, total_queued - processed_total)
-                self.remaining_files_var.set(f"{remaining_estimated}/{total_queued}")
-            except tk.TclError: pass
-            except AttributeError:
-                try: self.remaining_files_var.set(self.tr("no_files_waiting"))
-                except tk.TclError: pass
-            except Exception as e: print(f"Error updating remaining files display: {e}")
-            try: self.remaining_files_var.set("Error")
-            except tk.TclError: pass
-        elif not self.processing:
-             try: self.remaining_files_var.set(self.tr("no_files_waiting"))
-             except tk.TclError: pass
+        try:
+            qs = getattr(self, "queued_stacker", None)
+
+            if (qs is not None and
+                isinstance(getattr(qs, "files_in_queue", None), int) and
+                isinstance(getattr(qs, "processed_files_count", None), int)):
+
+                remaining = max(0, qs.files_in_queue - qs.processed_files_count)
+                total     = qs.files_in_queue
+                self.remaining_files_var.set(f"{remaining}/{total}")
+            else:
+                # Données indisponibles : on affiche un placeholder neutre
+                self.remaining_files_var.set("--")
+
+        except Exception as e:
+            # Toute erreur reste dans la console, pas dans l'UI
+            self.remaining_files_var.set("--")
+            print(f"[Remaining-label] {type(e).__name__}: {e}")
 
 
 
