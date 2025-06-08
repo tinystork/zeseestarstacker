@@ -174,6 +174,7 @@ class SettingsManager:
                 'reproject_batches_var',
                 tk.BooleanVar(value=default_values_from_code.get('enable_interbatch_reproj', False)),
             ).get()
+
             self.use_radec_hints = getattr(
                 gui_instance,
                 'use_radec_hints_var',
@@ -254,6 +255,7 @@ class SettingsManager:
             if not hasattr(self, 'astrometry_solve_field_dir'): self.astrometry_solve_field_dir = self.get_default_values()['astrometry_solve_field_dir']
 
             if not hasattr(self, 'enable_interbatch_reproj'): self.enable_interbatch_reproj = self.get_default_values()['enable_interbatch_reproj']
+
             
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
             getattr(gui_instance, 'weight_snr_var', tk.BooleanVar()).set(self.weight_by_snr)
@@ -372,6 +374,7 @@ class SettingsManager:
             getattr(gui_instance, 'astrometry_solve_field_dir_var', tk.StringVar()).set(self.astrometry_solve_field_dir)
 
             getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.enable_interbatch_reproj)
+
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
             print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # Version Log (ancienne)
@@ -481,7 +484,9 @@ class SettingsManager:
 
         defaults_dict['astrometry_solve_field_dir'] = ""
 
+
         defaults_dict['enable_interbatch_reproj'] = False
+
         
         defaults_dict['mosaic_mode_active'] = False
         defaults_dict['mosaic_settings'] = {
@@ -920,6 +925,7 @@ class SettingsManager:
             else:
                 self.astrometry_solve_field_dir = current_astrometry_dir.strip()
 
+
             self.enable_interbatch_reproj = bool(
                 getattr(
                     self,
@@ -927,6 +933,7 @@ class SettingsManager:
                     defaults_fallback['enable_interbatch_reproj'],
                 )
             )
+
             print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}")
 
             # Validation du facteur d'échelle mosaïque
@@ -1058,9 +1065,11 @@ class SettingsManager:
             'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
             'ansvr_host_port': str(getattr(self, 'ansvr_host_port', '127.0.0.1:8080')),
 
+
             'astrometry_solve_field_dir': str(getattr(self, 'astrometry_solve_field_dir', "")),
 
             'enable_interbatch_reproj': bool(getattr(self, 'enable_interbatch_reproj', False)),
+
         }
 
         if 'use_local_solver_priority' in settings_data: # Nettoyage de l'ancienne clé si elle existait par erreur
