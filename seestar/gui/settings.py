@@ -166,6 +166,9 @@ class SettingsManager:
             self.astap_search_radius = getattr(self, 'astap_search_radius', default_values_from_code.get('astap_search_radius', 30.0))
             self.local_ansvr_path = getattr(self, 'local_ansvr_path', default_values_from_code.get('local_ansvr_path', ''))
             self.ansvr_host_port = getattr(self, 'ansvr_host_port', default_values_from_code.get('ansvr_host_port', '127.0.0.1:8080'))
+
+            self.astrometry_solve_field_dir = getattr(self, 'astrometry_solve_field_dir', default_values_from_code.get('astrometry_solve_field_dir', ''))
+
             self.enable_reprojection_between_batches = getattr(
                 gui_instance,
                 'reproject_batches_var',
@@ -247,6 +250,9 @@ class SettingsManager:
             if not hasattr(self, 'astap_search_radius'): self.astap_search_radius = self.get_default_values()['astap_search_radius']
             if not hasattr(self, 'local_ansvr_path'): self.local_ansvr_path = self.get_default_values()['local_ansvr_path']
             if not hasattr(self, 'ansvr_host_port'): self.ansvr_host_port = self.get_default_values()['ansvr_host_port']
+
+            if not hasattr(self, 'astrometry_solve_field_dir'): self.astrometry_solve_field_dir = self.get_default_values()['astrometry_solve_field_dir']
+
             if not hasattr(self, 'enable_reprojection_between_batches'): self.enable_reprojection_between_batches = self.get_default_values()['enable_reprojection_between_batches']
             
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
@@ -362,6 +368,9 @@ class SettingsManager:
             print(f"DEBUG (Settings apply_to_ui): astap_search_radius appliqué à l'UI (valeur: {self.astap_search_radius})")
             getattr(gui_instance, 'use_radec_hints_var', tk.BooleanVar()).set(self.use_radec_hints)
             getattr(gui_instance, 'ansvr_host_port_var', tk.StringVar()).set(self.ansvr_host_port)
+
+            getattr(gui_instance, 'astrometry_solve_field_dir_var', tk.StringVar()).set(self.astrometry_solve_field_dir)
+
             getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.enable_reprojection_between_batches)
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
@@ -469,6 +478,9 @@ class SettingsManager:
         defaults_dict['use_radec_hints'] = False
         defaults_dict['local_ansvr_path'] = ""
         defaults_dict['ansvr_host_port'] = '127.0.0.1:8080'
+
+        defaults_dict['astrometry_solve_field_dir'] = ""
+
         defaults_dict['enable_reprojection_between_batches'] = False
         
         defaults_dict['mosaic_mode_active'] = False
@@ -856,7 +868,7 @@ class SettingsManager:
                 messages.append(f"Rayon recherche ASTAP ('{original_radius_str}') invalide (erreur: {e_val_rad}), réinitialisé à {self.astap_search_radius:.1f}°")
                 print(f"    DEBUG VALIDATE: Exception lors de la validation du rayon ('{original_radius_str}'), réinitialisé à {self.astap_search_radius:.1f}°")
             print(f"DEBUG (Settings validate_settings): {param_name_debug} FINAL après validation: {getattr(self, param_name_debug, 'ERREUR_ATTR_FINAL')}°")
-            valid_solver_prefs = ["none", "astap", "ansvr"]
+            valid_solver_prefs = ["none", "astap", "astrometry", "ansvr"]
             current_pref = getattr(self, 'local_solver_preference', defaults_fallback['local_solver_preference'])
             if not isinstance(current_pref, str) or current_pref not in valid_solver_prefs:
                 messages.append(f"Préférence solveur local ('{current_pref}') invalide, réinitialisée à '{defaults_fallback['local_solver_preference']}'.")
@@ -900,6 +912,14 @@ class SettingsManager:
                 self.ansvr_host_port = defaults_fallback['ansvr_host_port']
             else:
                 self.ansvr_host_port = current_ansvr_host_port.strip()
+
+            current_astrometry_dir = getattr(self, 'astrometry_solve_field_dir', defaults_fallback['astrometry_solve_field_dir'])
+            if not isinstance(current_astrometry_dir, str):
+                messages.append("Chemin solve-field invalide, réinitialisé.")
+                self.astrometry_solve_field_dir = defaults_fallback['astrometry_solve_field_dir']
+            else:
+                self.astrometry_solve_field_dir = current_astrometry_dir.strip()
+
             self.enable_reprojection_between_batches = bool(
                 getattr(
                     self,
@@ -1037,6 +1057,9 @@ class SettingsManager:
             'use_radec_hints': bool(getattr(self, 'use_radec_hints', False)),
             'local_ansvr_path': str(getattr(self, 'local_ansvr_path', "")),
             'ansvr_host_port': str(getattr(self, 'ansvr_host_port', '127.0.0.1:8080')),
+
+            'astrometry_solve_field_dir': str(getattr(self, 'astrometry_solve_field_dir', "")),
+
             'enable_reprojection_between_batches': bool(getattr(self, 'enable_reprojection_between_batches', False)),
         }
 

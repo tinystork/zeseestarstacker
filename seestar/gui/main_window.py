@@ -433,6 +433,9 @@ class SeestarStackerGUI:
         print(f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()}).")
         self.reproject_batches_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value='127.0.0.1:8080')
+
+        self.astrometry_solve_field_dir_var = tk.StringVar(value="")
+
         # --- FIN NOUVELLE VARIABLE ---
 
         print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter.") # Version Log
@@ -3205,6 +3208,8 @@ class SeestarStackerGUI:
                 env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
             if getattr(self.settings, "astrometry_api_key", ""):
                 env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
+            if getattr(self.settings, "astrometry_solve_field_dir", ""):
+                env["ZEMOSAIC_ASTROMETRY_DIR"] = str(self.settings.astrometry_solve_field_dir)
             if getattr(self.settings, "local_solver_preference", ""):
                 env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
             try:

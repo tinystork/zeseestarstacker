@@ -310,8 +310,11 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `astap_sensitivity`: detection sensitivity percentage for ASTAP
 - `use_radec_hints`: include FITS RA/DEC as hints when solving with ASTAP *(defaults to false; enable only if your FITS headers contain reliable coordinates)*
 - `local_ansvr_path`: path to a local `ansvr.cfg`
+- `ansvr_host_port`: host and port for a running ansvr instance (default `127.0.0.1:8080`)
+- `astrometry_solve_field_dir`: directory containing the `solve-field` executable
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
+- `enable_reprojection_between_batches`: when true, reproject each batch using the previous batch's WCS
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
