@@ -255,7 +255,7 @@ class SeestarQueuedStacker:
 
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def __init__(self):
+    def __init__(self, settings: SettingsManager | None = None):
         print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
         
         # --- 1. Attributs Critiques et Simples ---
@@ -298,6 +298,7 @@ class SeestarQueuedStacker:
         self.enable_interbatch_reproj = False
         # Nouveau flag pour reprojection inter-batch Classic
         self.enable_inter_batch_reprojection = False
+        self.inter_batch_reprojection = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
 
@@ -340,6 +341,13 @@ class SeestarQueuedStacker:
         self.incremental_drizzle_sci_arrays = []  
         self.incremental_drizzle_wht_arrays = []  
         print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
+
+        if settings is not None:
+            try:
+                self.inter_batch_reprojection = bool(getattr(settings, 'inter_batch_reprojection', False))
+                print(f"  -> Flag inter_batch_reprojection initialisé depuis settings: {self.inter_batch_reprojection}")
+            except Exception:
+                print("  -> Impossible de lire inter_batch_reprojection depuis settings. Valeur par défaut utilisée.")
 
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
@@ -2096,19 +2104,9 @@ class SeestarQueuedStacker:
                         self.stacked_batches_count, self.total_batches_estimated
                     )
                     current_batch_items_with_masks_for_stack_batch = []
-                if self.enable_inter_batch_reprojection and self.intermediate_classic_batch_files:
+                if self.inter_batch_reprojection and len(self.intermediate_classic_batch_files) > 1:
                     self.update_progress("🏁 Reprojection inter-batch (Classic)…")
-                    target_wcs, target_shape = self._compute_output_grid_from_batches(
-                        self.intermediate_classic_batch_files
-                    )
-                    final_sci, final_wht = self._combine_intermediate_drizzle_batches(
-                        self.intermediate_classic_batch_files, target_wcs, target_shape
-                    )
-                    self._save_final_stack(
-                        output_filename_suffix="_classic_reproj",
-                        drizzle_final_sci_data=final_sci,
-                        drizzle_final_wht_data=final_wht
-                    )
+                    self._reproject_classic_batches(self.intermediate_classic_batch_files)
                 else:
                     self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
                     if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
@@ -3497,6 +3495,16 @@ class SeestarQueuedStacker:
                     batch_wcs,
                 )
 
+                if self.inter_batch_reprojection:
+                    sci_p, wht_p_list = self._save_and_solve_classic_batch(
+                        stacked_batch_data_np,
+                        batch_coverage_map_2d,
+                        stack_info_header,
+                        current_batch_num,
+                    )
+                    if sci_p and wht_p_list:
+                        self.intermediate_classic_batch_files.append((sci_p, wht_p_list))
+
                 if not self.drizzle_active_session:
                     print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
                     self._update_preview_sum_w()
@@ -4751,6 +4759,16 @@ class SeestarQueuedStacker:
             h, w = hdul[0].data.shape[-2:]
         return wcs_first, (h, w)
 
+    def _reproject_classic_batches(self, batch_files):
+        target_wcs, target_shape = self._compute_output_grid_from_batches(batch_files)
+        final_sci, final_wht = self._combine_intermediate_drizzle_batches(batch_files, target_wcs, target_shape)
+        if final_sci is not None:
+            self._save_final_stack(
+                output_filename_suffix="_classic_reproj",
+                drizzle_final_sci_data=final_sci,
+                drizzle_final_wht_data=final_wht,
+            )
+
 
 ############################################################################################################################################
 
@@ -5464,6 +5482,7 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = bool(reproject_between_batches)
         self.enable_inter_batch_reprojection = self.reproject_between_batches
         self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
+        self.inter_batch_reprojection = self.reproject_between_batches or self.inter_batch_reprojection
 
         # --- FIN NOUVEAU ---
 

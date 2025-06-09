@@ -165,7 +165,7 @@ class SeestarStackerGUI:
         self.astrometry_api_key_var = tk.StringVar()
         self.localization = Localization("en")
         self.settings = SettingsManager()
-        self.queued_stacker = SeestarQueuedStacker()
+        self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
         self.processing = False
         self.thread = None
         self.current_preview_data = None
