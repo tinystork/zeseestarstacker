@@ -3201,6 +3201,7 @@ class SeestarQueuedStacker:
                   f"Shape image lot: {stacked_batch_data_np.shape}, "
                   f"Shape carte couverture lot: {batch_coverage_map_2d.shape}")
 
+
             batch_wcs = None
             try:
                 temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
@@ -3260,6 +3261,7 @@ class SeestarQueuedStacker:
                     os.remove(temp_f.name)
                 except Exception:
                     pass
+
 
             print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
             self._combine_batch_result(
@@ -3789,6 +3791,7 @@ class SeestarQueuedStacker:
                 f"ℹ️ [Reproject] Ignoré pour le lot {self.stacked_batches_count} (enable={self.enable_interbatch_reproj}, ref={bool(self.reference_wcs_object)}, wcs={'ok' if input_wcs is not None else 'none'})",
                 "INFO_DETAIL",
             )
+
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
