@@ -5027,12 +5027,13 @@ class SeestarQueuedStacker:
         max_val_for_01_norm = np.nanmax(self.raw_adu_data_for_ui_histogram)
         range_for_01_norm = max_val_for_01_norm - min_val_for_01_norm
 
-        data_01_for_gui_preview = self.raw_adu_data_for_ui_histogram.copy() # Commencer avec une copie
+        data_01_for_gui_preview = self.raw_adu_data_for_ui_histogram.copy()  # Commencer avec une copie
         if np.isfinite(min_val_for_01_norm) and np.isfinite(max_val_for_01_norm) and range_for_01_norm > 1e-9:
             data_01_for_gui_preview = (data_01_for_gui_preview - min_val_for_01_norm) / range_for_01_norm
-        elif np.any(np.isfinite(data_01_for_gui_preview)): # Image constante
-            data_01_for_gui_preview = np.full_like(data_01_for_gui_preview, 0.5)
-        else: # Tout NaN/Inf
+        elif np.any(np.isfinite(data_01_for_gui_preview)):
+            # Image parfaitement plate : renvoyer du noir pour éviter la sortie grise/blanche
+            data_01_for_gui_preview = np.zeros_like(data_01_for_gui_preview)
+        else:  # Tout NaN/Inf
             data_01_for_gui_preview = np.zeros_like(data_01_for_gui_preview)
         
         data_01_for_gui_preview = np.clip(data_01_for_gui_preview, 0.0, 1.0).astype(np.float32)
