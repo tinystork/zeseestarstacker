@@ -4102,8 +4102,21 @@ class SeestarQueuedStacker:
 
             self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
             self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
-            if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
-            if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
+            if hasattr(self.cumulative_sum_memmap, 'flush'):
+                self.cumulative_sum_memmap.flush()
+            if hasattr(self.cumulative_wht_memmap, 'flush'):
+                self.cumulative_wht_memmap.flush()
+            try:
+                dbg_sum_min = float(np.min(self.cumulative_sum_memmap))
+                dbg_sum_max = float(np.max(self.cumulative_sum_memmap))
+                dbg_wht_min = float(np.min(self.cumulative_wht_memmap))
+                dbg_wht_max = float(np.max(self.cumulative_wht_memmap))
+                print(
+                    f"DEBUG QM [_combine_batch_result SUM/W]: after += flush -> SUM min={dbg_sum_min:.3f}, max={dbg_sum_max:.3f}; "
+                    f"WHT min={dbg_wht_min:.3f}, max={dbg_wht_max:.3f}"
+                )
+            except Exception as dbg_e:
+                print(f"DEBUG QM [_combine_batch_result SUM/W]: erreur stats apres += : {dbg_e}")
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
 
             try:
