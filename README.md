@@ -61,7 +61,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation.
+    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation. If you plan to run the unit tests that exercise this feature, install it (included in `requirements-test.txt`).
 
 **(Français)**
 
@@ -70,7 +70,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots.
+    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots. Si vous prévoyez d'exécuter les tests unitaires utilisant cette fonctionnalité, installez-le (inclus dans `requirements-test.txt`).
 
 ---
 
@@ -149,6 +149,7 @@ The unit tests rely on a few additional packages:
 - `numpy`
 - `astropy`
 - `reproject`
+- `psutil` *(only required when testing the optional memory usage features)*
 
 They can be installed individually or via the `requirements-test.txt` file.
 
@@ -162,7 +163,8 @@ The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
 
 ## Running Tests
 
-Install the additional packages required for the test suite:
+Install the additional packages required for the test suite (the file now includes
+`psutil` for the optional memory-related tests):
 
 ```bash
 pip install -r requirements-test.txt
