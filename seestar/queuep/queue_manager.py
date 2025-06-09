@@ -1853,10 +1853,10 @@ class SeestarQueuedStacker:
 
                     else: # Stacking Classique ou Drizzle Standard (non-mosaïque)
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
-                        item_result_tuple = self._process_file( 
+                        item_result_tuple = self._process_file(
                             file_path,
-                            reference_image_data_for_global_alignment, 
-                            solve_astrometry_for_this_file=False       
+                            reference_image_data_for_global_alignment,
+                            solve_astrometry_for_this_file=self.reproject_between_batches
                         )
                         self.processed_files_count += 1 
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
