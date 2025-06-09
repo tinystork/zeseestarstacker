@@ -3784,11 +3784,13 @@ class SeestarQueuedStacker:
                     f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
                     "WARN",
                 )
+
         else:
             self.update_progress(
                 f"ℹ️ [Reproject] Ignoré pour le lot {self.stacked_batches_count} (enable={self.enable_interbatch_reproj}, ref={bool(self.reference_wcs_object)}, wcs={'ok' if input_wcs is not None else 'none'})",
                 "INFO_DETAIL",
             )
+
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
