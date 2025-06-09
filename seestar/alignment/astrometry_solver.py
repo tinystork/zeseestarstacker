@@ -1099,7 +1099,7 @@ class AstrometrySolver:
             traceback.print_exc(limit=1)
             return None
 
-def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
+    def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
         """
         Met à jour un header FITS existant avec les informations d'un objet WCS.
         """
