@@ -3087,9 +3087,11 @@ class SeestarQueuedStacker:
 
             print(f"  -> [2/7] Vérification variance pour '{file_name}'...")
             std_dev = np.std(img_data_array_loaded)
-            variance_threshold = 0.0015
+            variance_threshold = 1e-4  # anciennement 0.0015
             if std_dev < variance_threshold:
-                raise ValueError(f"Faible variance: {std_dev:.4f} (seuil: {variance_threshold}).")
+                raise ValueError(
+                    f"Faible variance: {std_dev:.4f} (seuil: {variance_threshold})."
+                )
             print(f"     - Variance OK (std: {std_dev:.4f}).")
 
             print(f"  -> [3/7] Pré-traitement pour '{file_name}'...")
