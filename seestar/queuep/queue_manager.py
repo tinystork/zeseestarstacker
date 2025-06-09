@@ -5434,7 +5434,7 @@ class SeestarQueuedStacker:
 
             self.reference_wcs_object = None 
             
-            if self.drizzle_active_session or self.is_mosaic_run: 
+            if self.drizzle_active_session or self.is_mosaic_run or self.reproject_between_batches:
                 print("DEBUG QM (start_processing): Plate-solving de la référence principale requis...")
                 
                 if not os.path.exists(reference_image_path_for_solving):
@@ -5504,9 +5504,11 @@ class SeestarQueuedStacker:
                     else: 
                         self.update_progress("❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.", "ERROR")
                         return False 
-            else: 
-                print("DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique seul).")
-                self.reference_wcs_object = None 
+            else:
+                print(
+                    "DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique sans reprojection)."
+                )
+                self.reference_wcs_object = None
             
             if reference_image_data_for_shape_determination is not None:
                 del reference_image_data_for_shape_determination
