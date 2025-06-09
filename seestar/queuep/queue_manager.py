@@ -3364,28 +3364,70 @@ class SeestarQueuedStacker:
                 except Exception:
                     pass
 
-            if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
-                try:
-                    self.update_progress(
-                        f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
-                        "INFO_DETAIL",
-                    )
-                    stacked_batch_data_np, _ = self._reproject_to_reference(
-                        stacked_batch_data_np, batch_wcs
-                    )
-                    batch_coverage_map_2d, _ = self._reproject_to_reference(
-                        batch_coverage_map_2d, batch_wcs
-                    )
-                    batch_wcs = self.reference_wcs_object
-                    self.update_progress(
-                        f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
-                        "INFO_DETAIL",
-                    )
-                except Exception as e:
-                    self.update_progress(
-                        f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
-                        "WARN",
-                    )
+            if self.reproject_between_batches and self.reference_wcs_object:
+                if batch_wcs is None:
+                    try:
+                        hdr_wcs = WCS(stack_info_header, naxis=2)
+                        if hdr_wcs.is_celestial:
+                            M_fallback = self._calculate_M_from_wcs(
+                                self.reference_wcs_object,
+                                hdr_wcs,
+                                stacked_batch_data_np.shape[:2],
+                            )
+                            if M_fallback is not None:
+                                A = np.asarray(M_fallback, dtype=float)[:2, :2]
+                                t = np.asarray(M_fallback, dtype=float)[:2, 2]
+                                approx_wcs = self.reference_wcs_object.deepcopy()
+                                try:
+                                    A_inv = np.linalg.inv(A)
+                                except np.linalg.LinAlgError:
+                                    approx_wcs = None
+                                else:
+                                    if getattr(approx_wcs.wcs, "cd", None) is not None:
+                                        approx_wcs.wcs.cd = approx_wcs.wcs.cd @ A_inv
+                                    elif getattr(approx_wcs.wcs, "pc", None) is not None and getattr(approx_wcs.wcs, "cdelt", None) is not None:
+                                        cd_matrix = approx_wcs.wcs.pc @ np.diag(approx_wcs.wcs.cdelt)
+                                        cd_matrix = cd_matrix @ A_inv
+                                        approx_wcs.wcs.pc = np.identity(2)
+                                        approx_wcs.wcs.cdelt = [cd_matrix[0, 0], cd_matrix[1, 1]]
+                                    approx_wcs.wcs.crpix = A @ approx_wcs.wcs.crpix + t
+                                    approx_wcs.pixel_shape = (
+                                        stacked_batch_data_np.shape[1],
+                                        stacked_batch_data_np.shape[0],
+                                    )
+                                if approx_wcs is not None:
+                                    batch_wcs = approx_wcs
+                                    self.update_progress(
+                                        f"⚠️ [FallbackWCS] WCS approximatif utilisé pour lot {current_batch_num}",
+                                        "WARN",
+                                    )
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ [FallbackWCS] Impossible d'estimer WCS lot {current_batch_num}: {e}",
+                            "WARN",
+                        )
+                if batch_wcs is not None:
+                    try:
+                        self.update_progress(
+                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                            "INFO_DETAIL",
+                        )
+                        stacked_batch_data_np, _ = self._reproject_to_reference(
+                            stacked_batch_data_np, batch_wcs
+                        )
+                        batch_coverage_map_2d, _ = self._reproject_to_reference(
+                            batch_coverage_map_2d, batch_wcs
+                        )
+                        batch_wcs = self.reference_wcs_object
+                        self.update_progress(
+                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
+                            "INFO_DETAIL",
+                        )
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
+                            "WARN",
+                        )
 
 
             print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
