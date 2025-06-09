@@ -169,10 +169,10 @@ class SettingsManager:
 
             self.astrometry_solve_field_dir = getattr(self, 'astrometry_solve_field_dir', default_values_from_code.get('astrometry_solve_field_dir', ''))
 
-            self.enable_interbatch_reproj = getattr(
+            self.reproject_between_batches = getattr(
                 gui_instance,
                 'reproject_batches_var',
-                tk.BooleanVar(value=default_values_from_code.get('enable_interbatch_reproj', False)),
+                tk.BooleanVar(value=default_values_from_code.get('reproject_between_batches', False)),
             ).get()
 
             self.use_radec_hints = getattr(
@@ -254,7 +254,7 @@ class SettingsManager:
 
             if not hasattr(self, 'astrometry_solve_field_dir'): self.astrometry_solve_field_dir = self.get_default_values()['astrometry_solve_field_dir']
 
-            if not hasattr(self, 'enable_interbatch_reproj'): self.enable_interbatch_reproj = self.get_default_values()['enable_interbatch_reproj']
+            if not hasattr(self, 'reproject_between_batches'): self.reproject_between_batches = self.get_default_values()['reproject_between_batches']
 
             
             getattr(gui_instance, 'use_weighting_var', tk.BooleanVar()).set(self.use_quality_weighting)
@@ -373,7 +373,7 @@ class SettingsManager:
 
             getattr(gui_instance, 'astrometry_solve_field_dir_var', tk.StringVar()).set(self.astrometry_solve_field_dir)
 
-            getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.enable_interbatch_reproj)
+            getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.reproject_between_batches)
 
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
@@ -485,7 +485,7 @@ class SettingsManager:
         defaults_dict['astrometry_solve_field_dir'] = ""
 
 
-        defaults_dict['enable_interbatch_reproj'] = False
+        defaults_dict['reproject_between_batches'] = False
 
         
         defaults_dict['mosaic_mode_active'] = False
@@ -926,11 +926,11 @@ class SettingsManager:
                 self.astrometry_solve_field_dir = current_astrometry_dir.strip()
 
 
-            self.enable_interbatch_reproj = bool(
+            self.reproject_between_batches = bool(
                 getattr(
                     self,
-                    'enable_interbatch_reproj',
-                    defaults_fallback['enable_interbatch_reproj'],
+                    'reproject_between_batches',
+                    defaults_fallback['reproject_between_batches'],
                 )
             )
 
@@ -1068,7 +1068,7 @@ class SettingsManager:
 
             'astrometry_solve_field_dir': str(getattr(self, 'astrometry_solve_field_dir', "")),
 
-            'enable_interbatch_reproj': bool(getattr(self, 'enable_interbatch_reproj', False)),
+            'reproject_between_batches': bool(getattr(self, 'reproject_between_batches', False)),
 
         }
 
@@ -1134,7 +1134,14 @@ class SettingsManager:
 
         print("DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Application des valeurs du JSON (avec fallback sur défauts)...")
         
-        old_use_local_priority_val = settings_data.pop('use_local_solver_priority', None) 
+        old_use_local_priority_val = settings_data.pop('use_local_solver_priority', None)
+
+        old_reproj_val = settings_data.pop('enable_interbatch_reproj', None)
+        if old_reproj_val is not None and 'reproject_between_batches' not in settings_data:
+            print(
+                f"  INFO (SettingsManager load_settings): Ancienne clé 'enable_interbatch_reproj' ({old_reproj_val}) convertie vers 'reproject_between_batches'."
+            )
+            settings_data['reproject_between_batches'] = old_reproj_val
         
         if old_use_local_priority_val is not None:
             if 'local_solver_preference' not in settings_data:
