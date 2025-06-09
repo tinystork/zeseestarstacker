@@ -3418,6 +3418,10 @@ class SeestarQueuedStacker:
                 input_shape_hw_current_file = image_hwc.shape[:2]
                 if self.enable_interbatch_reproj and self.reference_wcs_object:
                     try:
+                        self.update_progress(
+                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                            "INFO_DETAIL",
+                        )
                         image_hwc = reproject_to_reference_wcs(
                             image_hwc,
                             wcs_input_from_file,
@@ -3427,7 +3431,7 @@ class SeestarQueuedStacker:
                         wcs_for_pixmap = self.reference_wcs_object
                         input_shape_hw_current_file = target_shape_hw
                         self.update_progress(
-                            f"🌀 [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
+                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
                             "INFO_DETAIL",
                         )
                     except Exception as e:
@@ -3733,6 +3737,10 @@ class SeestarQueuedStacker:
 
         if self.enable_interbatch_reproj and self.reference_wcs_object and input_wcs is not None:
             try:
+                self.update_progress(
+                    f"➡️ [Reproject] Entrée dans reproject pour le batch {self.stacked_batches_count}/{self.total_batches_estimated}",
+                    "INFO_DETAIL",
+                )
                 stacked_batch_data_np = reproject_to_reference_wcs(
                     stacked_batch_data_np, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
@@ -3740,7 +3748,7 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
                 self.update_progress(
-                    f"🌀 [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
+                    f"✅ [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
                     "INFO_DETAIL",
                 )
             except Exception as e:
