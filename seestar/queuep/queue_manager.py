@@ -4760,6 +4760,7 @@ class SeestarQueuedStacker:
         return wcs_first, (h, w)
 
     def _reproject_classic_batches(self, batch_files):
+
         """Reproject saved classic batches to a common grid using reproject_and_coadd."""
 
         from seestar.enhancement.reproject_utils import (
@@ -4822,6 +4823,7 @@ class SeestarQueuedStacker:
             drizzle_final_sci_data=final_img_hwc,
             drizzle_final_wht_data=final_cov,
         )
+
 
 
 ############################################################################################################################################
