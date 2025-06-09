@@ -245,6 +245,8 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
+        self.reproject_between_batches = False
+        # Preserve old attribute name for backward compatibility
         self.enable_interbatch_reproj = False
 
         # --- FIN NOUVEAU ---
@@ -2869,7 +2871,7 @@ class SeestarQueuedStacker:
 
 
     def _calculate_weights(self, batch_scores):
-        num_images = len(batch_scores);
+        num_images = len(batch_scores); 
         if num_images == 0: return np.array([])
         raw_weights = np.ones(num_images, dtype=np.float32)
         for i, scores in enumerate(batch_scores):
@@ -2885,6 +2887,43 @@ class SeestarQueuedStacker:
         if sum_weights_final > 1e-9: normalized_weights = normalized_weights * (num_images / sum_weights_final)
         else: normalized_weights = np.ones(num_images, dtype=np.float32)
         return normalized_weights
+
+    def _reproject_to_reference(self, image_array, input_wcs):
+        """Reproject ``image_array`` from ``input_wcs`` to the reference WCS.
+
+        Parameters
+        ----------
+        image_array : np.ndarray
+            Array ``HxW`` or ``HxWx3`` to reproject.
+        input_wcs : astropy.wcs.WCS
+            WCS describing ``image_array``.
+
+        Returns
+        -------
+        tuple
+            ``(reprojected_image, footprint)`` both ``float32``.
+        """
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        target_shape = self.memmap_shape[:2]
+        if image_array.ndim == 3:
+            channels = []
+            footprint = None
+            for ch in range(image_array.shape[2]):
+                reproj_ch, footprint = reproject_interp(
+                    (image_array[..., ch], input_wcs),
+                    self.reference_wcs_object,
+                    shape_out=target_shape,
+                )
+                channels.append(reproj_ch)
+            result = np.stack(channels, axis=2)
+        else:
+            result, footprint = reproject_interp(
+                (image_array, input_wcs),
+                self.reference_wcs_object,
+                shape_out=target_shape,
+            )
+        return result.astype(np.float32), footprint.astype(np.float32)
 
 
 
@@ -3277,6 +3316,29 @@ class SeestarQueuedStacker:
                 except Exception:
                     pass
 
+            if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
+                try:
+                    self.update_progress(
+                        f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                        "INFO_DETAIL",
+                    )
+                    stacked_batch_data_np, _ = self._reproject_to_reference(
+                        stacked_batch_data_np, batch_wcs
+                    )
+                    batch_coverage_map_2d, _ = self._reproject_to_reference(
+                        batch_coverage_map_2d, batch_wcs
+                    )
+                    batch_wcs = self.reference_wcs_object
+                    self.update_progress(
+                        f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
+                        "INFO_DETAIL",
+                    )
+                except Exception as e:
+                    self.update_progress(
+                        f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
+                        "WARN",
+                    )
+
 
             print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
             self._combine_batch_result(
@@ -3461,7 +3523,7 @@ class SeestarQueuedStacker:
                 target_shape_hw = self.drizzle_output_shape_hw or self.memmap_shape[:2]
                 wcs_for_pixmap = wcs_input_from_file
                 input_shape_hw_current_file = image_hwc.shape[:2]
-                if self.enable_interbatch_reproj and self.reference_wcs_object:
+                if self.reproject_between_batches and self.reference_wcs_object:
                     try:
                         self.update_progress(
                             f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
@@ -3773,39 +3835,40 @@ class SeestarQueuedStacker:
         expected_shape_hw = self.memmap_shape[:2]
 
         
-        input_wcs = batch_wcs
-        if input_wcs is None and self.enable_interbatch_reproj and self.reference_wcs_object:
-            try:
-                input_wcs = WCS(stack_info_header, naxis=2)
-            except Exception:
-                input_wcs = None
+        if not self.reproject_between_batches:
+            input_wcs = batch_wcs
+            if input_wcs is None and self.reference_wcs_object:
+                try:
+                    input_wcs = WCS(stack_info_header, naxis=2)
+                except Exception:
+                    input_wcs = None
 
-        if self.enable_interbatch_reproj and self.reference_wcs_object and input_wcs is not None:
-            try:
+            if self.reference_wcs_object and input_wcs is not None:
+                try:
+                    self.update_progress(
+                        f"➡️ [Reproject] Entrée dans reproject pour le batch {self.stacked_batches_count}/{self.total_batches_estimated}",
+                        "INFO_DETAIL",
+                    )
+                    stacked_batch_data_np, _ = self._reproject_to_reference(
+                        stacked_batch_data_np, input_wcs
+                    )
+                    batch_coverage_map_2d, _ = self._reproject_to_reference(
+                        batch_coverage_map_2d, input_wcs
+                    )
+                    self.update_progress(
+                        f"✅ [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
+                        "INFO_DETAIL",
+                    )
+                except Exception as e:
+                    self.update_progress(
+                        f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
+                        "WARN",
+                    )
+            else:
                 self.update_progress(
-                    f"➡️ [Reproject] Entrée dans reproject pour le batch {self.stacked_batches_count}/{self.total_batches_estimated}",
+                    f"ℹ️ [Reproject] Ignoré pour le lot {self.stacked_batches_count} (enable={self.reproject_between_batches}, ref={bool(self.reference_wcs_object)}, wcs={'ok' if input_wcs is not None else 'none'})",
                     "INFO_DETAIL",
                 )
-                stacked_batch_data_np = reproject_to_reference_wcs(
-                    stacked_batch_data_np, input_wcs, self.reference_wcs_object, expected_shape_hw
-                )
-                batch_coverage_map_2d = reproject_to_reference_wcs(
-                    batch_coverage_map_2d, input_wcs, self.reference_wcs_object, expected_shape_hw
-                )
-                self.update_progress(
-                    f"✅ [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
-                    "INFO_DETAIL",
-                )
-            except Exception as e:
-                self.update_progress(
-                    f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
-                    "WARN",
-                )
-        else:
-            self.update_progress(
-                f"ℹ️ [Reproject] Ignoré pour le lot {self.stacked_batches_count} (enable={self.enable_interbatch_reproj}, ref={bool(self.reference_wcs_object)}, wcs={'ok' if input_wcs is not None else 'none'})",
-                "INFO_DETAIL",
-            )
 
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
@@ -3875,10 +3938,10 @@ class SeestarQueuedStacker:
             batch_wht = batch_coverage_map_2d.astype(np.float32)
             try:
                 print("[InterBatchReproj]",
-                      "enabled=", self.enable_interbatch_reproj,
+                      "enabled=", self.reproject_between_batches,
                       "refWCS=", bool(self.reference_wcs_object),
                       "batchWCS=", bool(batch_wcs))
-                if self.enable_interbatch_reproj and self.reference_wcs_object and batch_wcs is not None:
+                if not self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
                     from seestar.enhancement.reproject_utils import reproject_interp as _reproj_interp
                     try:
                         from reproject import reproject_interp as _real_interp
@@ -5081,15 +5144,15 @@ class SeestarQueuedStacker:
                          astap_search_radius=3.0,
 
                          local_solver_preference="none",
-                         save_as_float32=False, # <-- NOUVEL ARGUMENT AJOUTÉ ICI
-                         enable_interbatch_reproj=False
+                         save_as_float32=False,
+                         reproject_between_batches=False
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MODIFIED: Ajout arguments save_as_float32 et enable_interbatch_reproj.
+        MODIFIED: Ajout arguments save_as_float32 et reproject_between_batches.
         Version: V_StartProcessing_SaveDtypeOption_1
         """
 
@@ -5103,7 +5166,7 @@ class SeestarQueuedStacker:
         print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
         print(f"    mosaic_settings (dict brut): {mosaic_settings}")
         print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
-        print(f"    enable_interbatch_reproj (arg de func): {enable_interbatch_reproj}")
+        print(f"    reproject_between_batches (arg de func): {reproject_between_batches}")
         print(f"    output_filename (arg de func): {output_filename}")
         print("  --- FIN BACKEND ARGS REÇUS ---")
 
@@ -5206,7 +5269,8 @@ class SeestarQueuedStacker:
 
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
-        self.enable_interbatch_reproj = bool(enable_interbatch_reproj)
+        self.reproject_between_batches = bool(reproject_between_batches)
+        self.enable_interbatch_reproj = self.reproject_between_batches
 
         # --- FIN NOUVEAU ---
 
