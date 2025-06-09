@@ -4106,6 +4106,29 @@ class SeestarQueuedStacker:
             if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
 
+            try:
+                sum_min = float(np.min(self.cumulative_sum_memmap))
+                sum_max = float(np.max(self.cumulative_sum_memmap))
+                wht_min = float(np.min(self.cumulative_wht_memmap))
+                wht_max = float(np.max(self.cumulative_wht_memmap))
+                self.update_progress(
+                    f"ℹ️ SUM min={sum_min:.2f}, max={sum_max:.2f}",
+                    "INFO_DETAIL",
+                )
+                self.update_progress(
+                    f"ℹ️ WHT min={wht_min:.2f}, max={wht_max:.2f}",
+                    "INFO_DETAIL",
+                )
+                if np.allclose(self.cumulative_wht_memmap, 0.0):
+                    self.update_progress(
+                        "⚠️ Carte de poids cumulée entièrement nulle", "WARN"
+                    )
+                    warnings.warn(
+                        "Cumulative weight map sums to zero", UserWarning
+                    )
+            except Exception as e:
+                self.update_progress(f"⚠️ Erreur calcul stats stack: {e}", "WARN")
+
 
             # Mise à jour des compteurs globaux
             self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
