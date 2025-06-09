@@ -3213,12 +3213,16 @@ class SeestarQueuedStacker:
             elif data_final_pour_retour.ndim == 2: luminance_mask_src = data_final_pour_retour
             else: valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool); print(f"     - Masque (tous valides, shape inattendue).")
             
-            if 'valid_pixel_mask_2d' not in locals() or valid_pixel_mask_2d is None : 
+            if 'valid_pixel_mask_2d' not in locals() or valid_pixel_mask_2d is None :
                 print(f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]")
                 max_lum_val = np.nanmax(luminance_mask_src)
-                mask_threshold = 1.0 if (is_drizzle_or_mosaic_mode and max_lum_val > 1.5 + 1e-5) else 1e-5 # +1e-5 pour float
-                valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(bool)
-                print(f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
+                if max_lum_val <= 1e-5:
+                    valid_pixel_mask_2d = np.ones(luminance_mask_src.shape, dtype=bool)
+                    print("     - Luminance très faible, masque par défaut tout True.")
+                else:
+                    mask_threshold = 1.0 if (is_drizzle_or_mosaic_mode and max_lum_val > 1.5 + 1e-5) else 1e-5  # +1e-5 pour float
+                    valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(bool)
+                    print(f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
 
             print(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting: quality_scores = self._calculate_quality_metrics(prepared_img_after_initial_proc)
