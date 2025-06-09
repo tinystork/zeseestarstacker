@@ -891,7 +891,7 @@ class SeestarQueuedStacker:
             epsilon = 1e-9 # Pour éviter division par zéro
             wht_for_division = np.maximum(current_wht_map, epsilon)
             # Broadcaster wht_for_division (H,W) pour correspondre à current_sum (H,W,C)
-            wht_broadcasted = wht_for_division[..., np.newaxis] 
+            wht_broadcasted = wht_for_division[:, :, np.newaxis]
             
             avg_img_fullres = None
             with np.errstate(divide='ignore', invalid='ignore'):
@@ -2991,6 +2991,40 @@ class SeestarQueuedStacker:
             )
         return result.astype(np.float32), footprint.astype(np.float32)
 
+    def _reproject_batch_to_reference(self, batch_image, batch_wht, batch_wcs):
+        """Reproject batch data and weight map to the reference WCS."""
+        if self.reference_wcs_object is None or batch_wcs is None:
+            return batch_image, batch_wht
+
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        target_shape = self.memmap_shape[:2]
+
+        if batch_image.ndim == 3:
+            channels = []
+            for ch in range(batch_image.shape[2]):
+                reproj_ch, _ = reproject_interp(
+                    (batch_image[:, :, ch], batch_wcs),
+                    self.reference_wcs_object,
+                    shape_out=target_shape,
+                )
+                channels.append(reproj_ch)
+            batch_image = np.stack(channels, axis=2)
+        else:
+            batch_image, _ = reproject_interp(
+                (batch_image, batch_wcs),
+                self.reference_wcs_object,
+                shape_out=target_shape,
+            )
+
+        batch_wht, _ = reproject_interp(
+            (batch_wht, batch_wcs),
+            self.reference_wcs_object,
+            shape_out=target_shape,
+        )
+
+        return batch_image.astype(np.float32), batch_wht.astype(np.float32)
+
 
 
 
@@ -3160,18 +3194,9 @@ class SeestarQueuedStacker:
                     print(f"     - APRÈS ALIGNEMENT (Astroalign): aligned_img_astroalign - Range: [{np.min(aligned_img_astroalign):.4g}, {np.max(aligned_img_astroalign):.4g}], Shape: {aligned_img_astroalign.shape}, Dtype: {aligned_img_astroalign.dtype}")
                     data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
                     
-                    if not is_drizzle_or_mosaic_mode: 
-                        print(f"       - STACKING CLASSIQUE: Normalisation 0-1 de data_final_pour_retour (qui est aligned_img_astroalign)...")
-                        min_val_aligned = np.nanmin(data_final_pour_retour); max_val_aligned = np.nanmax(data_final_pour_retour)
-                        print(f"         Pour Normalisation Classique: min_val_aligned={min_val_aligned:.4g}, max_val_aligned={max_val_aligned:.4g}")
-                        if np.isfinite(min_val_aligned) and np.isfinite(max_val_aligned) and max_val_aligned > min_val_aligned + 1e-7:
-                            data_final_pour_retour = (data_final_pour_retour - min_val_aligned) / (max_val_aligned - min_val_aligned)
-                            print(f"         Normalisation 0-1 effectuée (dynamique normale).")
-                        else: 
-                            print(f"         AVERTISSEMENT: Image alignée plate ou avec NaN/Inf. data_final_pour_retour sera mis à ZÉRO.")
-                            data_final_pour_retour = np.zeros_like(data_final_pour_retour)
-                        data_final_pour_retour = np.clip(data_final_pour_retour, 0.0, 1.0)
-                        print(f"       - STACKING CLASSIQUE: data_final_pour_retour NORMALISÉ 0-1. Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}], Moy: {np.mean(data_final_pour_retour):.4g}")
+                    if not is_drizzle_or_mosaic_mode:
+                        # In classic stacking mode, keep the aligned image as-is
+                        pass
                     else: 
                         # Pour Drizzle Standard, data_final_pour_retour est déjà aligned_img_astroalign.
                         # _align_image est censé avoir préservé la plage ADU si l'entrée était ADU.
@@ -3323,28 +3348,23 @@ class SeestarQueuedStacker:
                 f"Shape carte couverture lot: {batch_coverage_map_2d.shape}"
             )
 
-            if self.enable_inter_batch_reprojection:
-                sci_path, wht_paths = self._save_and_solve_classic_batch(
+            batch_wcs = None
+            try:
+                hdr_wcs = WCS(stack_info_header, naxis=2)
+                if hdr_wcs.is_celestial:
+                    batch_wcs = hdr_wcs
+            except Exception:
+                batch_wcs = None
 
+            if self.enable_inter_batch_reprojection and batch_wcs is not None:
+                stacked_batch_data_np, batch_coverage_map_2d = self._reproject_batch_to_reference(
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
-                    stack_info_header,
-                    current_batch_num,
+                    batch_wcs,
                 )
-                if sci_path and wht_paths:
-                    self.intermediate_classic_batch_files.append((sci_path, wht_paths))
-                else:
-                    # Fallback to in-memory accumulation if solving failed
-                    self._combine_batch_result(
-                        stacked_batch_data_np,
-                        stack_info_header,
-                        batch_coverage_map_2d,
-                    )
-                    if not self.drizzle_active_session:
-                        self._update_preview_sum_w()
+                batch_wcs = self.reference_wcs_object
 
-            else:
-                batch_wcs = None
+            if not self.enable_inter_batch_reprojection:
                 try:
                     temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                     temp_f.close()
@@ -3933,9 +3953,11 @@ class SeestarQueuedStacker:
         """
         print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D.")
         if batch_coverage_map_2d is not None:
-            print(f"  -> Reçu de _stack_batch -> batch_coverage_map_2d - Shape: {batch_coverage_map_2d.shape}, "
-                  f"Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}], "
-                  f"Sum: {np.sum(batch_coverage_map_2d):.2f}")
+            print(
+                f"  -> Reçu de _stack_batch -> batch_coverage_map_2d - Shape: {batch_coverage_map_2d.shape}, "
+                f"Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}], "
+                f"Mean: {np.mean(batch_coverage_map_2d):.2f}"
+            )
         else:
             print(f"  -> Reçu de _stack_batch -> batch_coverage_map_2d est None.")
 
@@ -4043,55 +4065,29 @@ class SeestarQueuedStacker:
             # Si stacked_batch_data_np est HWC et batch_coverage_map_2d est HW, il faut broadcaster.
             signal_to_add_to_sum_float64 = None # Utiliser float64 pour la multiplication et l'accumulation
             if is_color_batch_data: # Image couleur HWC
-                signal_to_add_to_sum_float64 = stacked_batch_data_np.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)[..., np.newaxis]
+                signal_to_add_to_sum_float64 = stacked_batch_data_np.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)[:, :, np.newaxis]
             else: # Image N&B HW
                 # Si SUM memmap est HWC (ce qui est le cas avec memmap_shape), il faut adapter
                 if self.memmap_shape[2] == 3: # Si l'accumulateur global est couleur
                     # On met l'image N&B dans les 3 canaux de l'accumulateur
                     temp_hwc = np.stack([stacked_batch_data_np]*3, axis=-1)
-                    signal_to_add_to_sum_float64 = temp_hwc.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)[..., np.newaxis]
+                    signal_to_add_to_sum_float64 = temp_hwc.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)[:, :, np.newaxis]
                 else: # Si l'accumulateur global est N&B (ne devrait pas arriver avec memmap_shape HWC)
                     signal_to_add_to_sum_float64 = stacked_batch_data_np.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)
 
             print(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation pour {num_physical_images_in_batch} images physiques.")
-            print(f"  -> signal_to_add_to_sum_float64 - Shape: {signal_to_add_to_sum_float64.shape}, "
-                  f"Range: [{np.min(signal_to_add_to_sum_float64):.2f} - {np.max(signal_to_add_to_sum_float64):.2f}]")
+            print(
+                f"  -> signal_to_add_to_sum_float64 - Shape: {signal_to_add_to_sum_float64.shape}, "
+                f"Range: [{np.min(signal_to_add_to_sum_float64):.2f} - {np.max(signal_to_add_to_sum_float64):.2f}], "
+                f"Mean: {np.mean(signal_to_add_to_sum_float64):.2f}"
+            )
 
 
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
             batch_wht = batch_coverage_map_2d.astype(np.float32)
-            try:
-                print("[InterBatchReproj]",
-                      "enabled=", self.reproject_between_batches,
-                      "refWCS=", bool(self.reference_wcs_object),
-                      "batchWCS=", bool(batch_wcs))
-                if not self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
-                    from seestar.enhancement.reproject_utils import reproject_interp as _reproj_interp
-                    try:
-                        from reproject import reproject_interp as _real_interp
-                        reproj_func = _real_interp
-                    except ImportError:
-                        reproj_func = _reproj_interp
 
-                    shp = self.memmap_shape[:2]
-                    if batch_sum.ndim == 3:
-                        channels = []
-                        for ch in range(batch_sum.shape[2]):
-                            c, _ = reproj_func((batch_sum[..., ch], batch_wcs), self.reference_wcs_object, shape_out=shp)
-                            channels.append(c)
-                        sum_reproj = np.stack(channels, axis=2)
-                    else:
-                        sum_reproj, _ = reproj_func((batch_sum, batch_wcs), self.reference_wcs_object, shape_out=shp)
-                    wht_reproj, _ = reproj_func((batch_wht, batch_wcs), self.reference_wcs_object, shape_out=shp)
-                    self.cumulative_sum_memmap[:] += sum_reproj.astype(self.memmap_dtype_sum)
-                    self.cumulative_wht_memmap[:] += wht_reproj.astype(self.memmap_dtype_wht)
-                else:
-                    self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
-                    self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
-            except Exception as e:
-                print(f"[InterBatchReproj] fallback → direct add: {e}")
-                self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
-                self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
+            self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
+            self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
             if hasattr(self.cumulative_sum_memmap, 'flush'): self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, 'flush'): self.cumulative_wht_memmap.flush()
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
@@ -4904,7 +4900,7 @@ class SeestarQueuedStacker:
                 
                 final_wht_map_for_postproc = np.maximum(final_wht_map_2d_from_memmap, 0.0)
                 wht_for_div_classic = np.maximum(final_wht_map_2d_from_memmap.astype(np.float64), 1e-9)
-                wht_for_div_classic_broadcastable = wht_for_div_classic[..., np.newaxis]
+                wht_for_div_classic_broadcastable = wht_for_div_classic[:, :, np.newaxis]
                 
                 with np.errstate(divide='ignore', invalid='ignore'): 
                     final_image_initial_raw = final_sum / wht_for_div_classic_broadcastable
