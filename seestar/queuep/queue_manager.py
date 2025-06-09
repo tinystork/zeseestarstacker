@@ -296,6 +296,10 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = False
         # Preserve old attribute name for backward compatibility
         self.enable_interbatch_reproj = False
+        # Nouveau flag pour reprojection inter-batch Classic
+        self.enable_inter_batch_reprojection = False
+        # Liste des fichiers intermédiaires en mode Classic avec reprojection
+        self.intermediate_classic_batch_files = []
 
         # --- FIN NOUVEAU ---
 
@@ -2092,12 +2096,26 @@ class SeestarQueuedStacker:
                         self.stacked_batches_count, self.total_batches_estimated
                     )
                     current_batch_items_with_masks_for_stack_batch = []
-                self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
-                if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
-                    self._save_final_stack(output_filename_suffix="_classic_sumw")
+                if self.enable_inter_batch_reprojection and self.intermediate_classic_batch_files:
+                    self.update_progress("🏁 Reprojection inter-batch (Classic)…")
+                    target_wcs, target_shape = self._compute_output_grid_from_batches(
+                        self.intermediate_classic_batch_files
+                    )
+                    final_sci, final_wht = self._combine_intermediate_drizzle_batches(
+                        self.intermediate_classic_batch_files, target_wcs, target_shape
+                    )
+                    self._save_final_stack(
+                        output_filename_suffix="_classic_reproj",
+                        drizzle_final_sci_data=final_sci,
+                        drizzle_final_wht_data=final_wht
+                    )
                 else:
-                    self.update_progress("   Aucune image accumulée dans le stack classique. Sauvegarde ignorée.")
-                    self.final_stacked_path = None 
+                    self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
+                    if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
+                        self._save_final_stack(output_filename_suffix="_classic_sumw")
+                    else:
+                        self.update_progress("   Aucune image accumulée dans le stack classique. Sauvegarde ignorée.")
+                        self.final_stacked_path = None
             else: # Cas imprévu
                 print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS LE 'else' FINAL (ÉTAT NON GÉRÉ) ***")
                 self.update_progress("⚠️ État de finalisation non géré. Aucune action de sauvegarde principale.")
@@ -3299,153 +3317,167 @@ class SeestarQueuedStacker:
         # Vérifier le résultat de _stack_batch
 
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
-            print(f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
-                  f"Shape image lot: {stacked_batch_data_np.shape}, "
-                  f"Shape carte couverture lot: {batch_coverage_map_2d.shape}")
-
-
-            batch_wcs = None
-            try:
-                temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-                temp_f.close()
-                img_for_solver = stacked_batch_data_np
-                if img_for_solver.ndim == 3:
-                    img_for_solver = img_for_solver[..., 0]
-                fits.writeto(
-                    temp_f.name,
-                    img_for_solver.astype(np.float32),
-                    header=stack_info_header,
-                    overwrite=True,
-                )
-                solver_settings = {
-                    "local_solver_preference": self.local_solver_preference,
-                    "api_key": self.api_key,
-                    "astap_path": self.astap_path,
-                    "astap_data_dir": self.astap_data_dir,
-                    "astap_search_radius": self.astap_search_radius,
-                    "local_ansvr_path": self.local_ansvr_path,
-                    "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
-                    "scale_tolerance_percent": 20,
-                    "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
-                    "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                    "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
-                    "use_radec_hints": getattr(self, "use_radec_hints", False),
-                }
-                self.update_progress(
-                    f"🔭 [Solve] Résolution WCS du lot {current_batch_num}",
-                    "INFO_DETAIL",
-                )
-                batch_wcs = solve_image_wcs(
-                    temp_f.name,
-                    stack_info_header,
-                    solver_settings,
-                    update_header_with_solution=False,
-                )
-                if batch_wcs:
-                    self.update_progress(
-                        f"✅ [Solve] WCS lot {current_batch_num} obtenu",
-                        "INFO_DETAIL",
-                    )
-                else:
-                    self.update_progress(
-                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}",
-                        "WARN",
-                    )
-            except Exception as e_solve_batch:
-                print(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
-                self.update_progress(
-                    f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e_solve_batch}",
-                    "WARN",
-                )
-                batch_wcs = None
-            finally:
-                try:
-                    os.remove(temp_f.name)
-                except Exception:
-                    pass
-
-            if self.reproject_between_batches and self.reference_wcs_object:
-                if batch_wcs is None:
-                    try:
-                        hdr_wcs = WCS(stack_info_header, naxis=2)
-                        if hdr_wcs.is_celestial:
-                            M_fallback = self._calculate_M_from_wcs(
-                                self.reference_wcs_object,
-                                hdr_wcs,
-                                stacked_batch_data_np.shape[:2],
-                            )
-                            if M_fallback is not None:
-                                A = np.asarray(M_fallback, dtype=float)[:2, :2]
-                                t = np.asarray(M_fallback, dtype=float)[:2, 2]
-                                approx_wcs = self.reference_wcs_object.deepcopy()
-                                try:
-                                    A_inv = np.linalg.inv(A)
-                                except np.linalg.LinAlgError:
-                                    approx_wcs = None
-                                else:
-                                    if getattr(approx_wcs.wcs, "cd", None) is not None:
-                                        approx_wcs.wcs.cd = approx_wcs.wcs.cd @ A_inv
-                                    elif getattr(approx_wcs.wcs, "pc", None) is not None and getattr(approx_wcs.wcs, "cdelt", None) is not None:
-                                        cd_matrix = approx_wcs.wcs.pc @ np.diag(approx_wcs.wcs.cdelt)
-                                        cd_matrix = cd_matrix @ A_inv
-                                        approx_wcs.wcs.pc = np.identity(2)
-                                        approx_wcs.wcs.cdelt = [cd_matrix[0, 0], cd_matrix[1, 1]]
-                                    approx_wcs.wcs.crpix = A @ approx_wcs.wcs.crpix + t
-                                    approx_wcs.pixel_shape = (
-                                        stacked_batch_data_np.shape[1],
-                                        stacked_batch_data_np.shape[0],
-                                    )
-                                if approx_wcs is not None:
-                                    batch_wcs = approx_wcs
-                                    self.update_progress(
-                                        f"⚠️ [FallbackWCS] WCS approximatif utilisé pour lot {current_batch_num}",
-                                        "WARN",
-                                    )
-                    except Exception as e:
-                        self.update_progress(
-                            f"⚠️ [FallbackWCS] Impossible d'estimer WCS lot {current_batch_num}: {e}",
-                            "WARN",
-                        )
-                if batch_wcs is not None:
-                    try:
-                        self.update_progress(
-                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
-                            "INFO_DETAIL",
-                        )
-                        stacked_batch_data_np, _ = self._reproject_to_reference(
-                            stacked_batch_data_np, batch_wcs
-                        )
-                        batch_coverage_map_2d, _ = self._reproject_to_reference(
-                            batch_coverage_map_2d, batch_wcs
-                        )
-                        batch_wcs = self.reference_wcs_object
-                        self.update_progress(
-                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
-                            "INFO_DETAIL",
-                        )
-                    except Exception as e:
-                        self.update_progress(
-                            f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
-                            "WARN",
-                        )
-
-
-            print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
-            self._combine_batch_result(
-                stacked_batch_data_np,
-                stack_info_header,
-                batch_coverage_map_2d,
-                batch_wcs,
+            print(
+                f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
+                f"Shape image lot: {stacked_batch_data_np.shape}, "
+                f"Shape carte couverture lot: {batch_coverage_map_2d.shape}"
             )
 
-            
-            # Mise à jour de l'aperçu SUM/W après accumulation de ce lot
-            # (Seulement si on n'est pas en mode Drizzle, car Drizzle Incrémental a son propre update)
-            # Cette condition est redondante ici car _process_completed_batch n'est appelée
-            # que si not self.drizzle_active_session.
-            if not self.drizzle_active_session:
-                print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
-                self._update_preview_sum_w() # Met à jour l'aperçu avec les données SUM/W actuelles
+            if self.enable_inter_batch_reprojection:
+                sci_path, wht_paths = self._save_and_solve_classic_batch(
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    stack_info_header,
+                    current_batch_num,
+                )
+                if sci_path and wht_paths:
+                    self.intermediate_classic_batch_files.append((sci_path, wht_paths))
+                else:
+                    # Fallback to in-memory accumulation if solving failed
+                    self._combine_batch_result(
+                        stacked_batch_data_np,
+                        stack_info_header,
+                        batch_coverage_map_2d,
+                    )
+                    if not self.drizzle_active_session:
+                        self._update_preview_sum_w()
+            else:
+                batch_wcs = None
+                try:
+                    temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                    temp_f.close()
+                    img_for_solver = stacked_batch_data_np
+                    if img_for_solver.ndim == 3:
+                        img_for_solver = img_for_solver[..., 0]
+                    fits.writeto(
+                        temp_f.name,
+                        img_for_solver.astype(np.float32),
+                        header=stack_info_header,
+                        overwrite=True,
+                    )
+                    solver_settings = {
+                        "local_solver_preference": self.local_solver_preference,
+                        "api_key": self.api_key,
+                        "astap_path": self.astap_path,
+                        "astap_data_dir": self.astap_data_dir,
+                        "astap_search_radius": self.astap_search_radius,
+                        "local_ansvr_path": self.local_ansvr_path,
+                        "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
+                        "scale_tolerance_percent": 20,
+                        "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+                        "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+                        "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
+                        "use_radec_hints": getattr(self, "use_radec_hints", False),
+                    }
+                    self.update_progress(
+                        f"🔭 [Solve] Résolution WCS du lot {current_batch_num}",
+                        "INFO_DETAIL",
+                    )
+                    batch_wcs = solve_image_wcs(
+                        temp_f.name,
+                        stack_info_header,
+                        solver_settings,
+                        update_header_with_solution=False,
+                    )
+                    if batch_wcs:
+                        self.update_progress(
+                            f"✅ [Solve] WCS lot {current_batch_num} obtenu",
+                            "INFO_DETAIL",
+                        )
+                    else:
+                        self.update_progress(
+                            f"⚠️ [Solve] Échec WCS lot {current_batch_num}",
+                            "WARN",
+                        )
+                except Exception as e_solve_batch:
+                    print(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
+                    self.update_progress(
+                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e_solve_batch}",
+                        "WARN",
+                    )
+                    batch_wcs = None
+                finally:
+                    try:
+                        os.remove(temp_f.name)
+                    except Exception:
+                        pass
+
+                if self.reproject_between_batches and self.reference_wcs_object:
+                    if batch_wcs is None:
+                        try:
+                            hdr_wcs = WCS(stack_info_header, naxis=2)
+                            if hdr_wcs.is_celestial:
+                                M_fallback = self._calculate_M_from_wcs(
+                                    self.reference_wcs_object,
+                                    hdr_wcs,
+                                    stacked_batch_data_np.shape[:2],
+                                )
+                                if M_fallback is not None:
+                                    A = np.asarray(M_fallback, dtype=float)[:2, :2]
+                                    t = np.asarray(M_fallback, dtype=float)[:2, 2]
+                                    approx_wcs = self.reference_wcs_object.deepcopy()
+                                    try:
+                                        A_inv = np.linalg.inv(A)
+                                    except np.linalg.LinAlgError:
+                                        approx_wcs = None
+                                    else:
+                                        if getattr(approx_wcs.wcs, "cd", None) is not None:
+                                            approx_wcs.wcs.cd = approx_wcs.wcs.cd @ A_inv
+                                        elif getattr(approx_wcs.wcs, "pc", None) is not None and getattr(approx_wcs.wcs, "cdelt", None) is not None:
+                                            cd_matrix = approx_wcs.wcs.pc @ np.diag(approx_wcs.wcs.cdelt)
+                                            cd_matrix = cd_matrix @ A_inv
+                                            approx_wcs.wcs.pc = np.identity(2)
+                                            approx_wcs.wcs.cdelt = [cd_matrix[0, 0], cd_matrix[1, 1]]
+                                        approx_wcs.wcs.crpix = A @ approx_wcs.wcs.crpix + t
+                                        approx_wcs.pixel_shape = (
+                                            stacked_batch_data_np.shape[1],
+                                            stacked_batch_data_np.shape[0],
+                                        )
+                                    if approx_wcs is not None:
+                                        batch_wcs = approx_wcs
+                                        self.update_progress(
+                                            f"⚠️ [FallbackWCS] WCS approximatif utilisé pour lot {current_batch_num}",
+                                            "WARN",
+                                        )
+                        except Exception as e:
+                            self.update_progress(
+                                f"⚠️ [FallbackWCS] Impossible d'estimer WCS lot {current_batch_num}: {e}",
+                                "WARN",
+                            )
+                    if batch_wcs is not None:
+                        try:
+                            self.update_progress(
+                                f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                                "INFO_DETAIL",
+                            )
+                            stacked_batch_data_np, _ = self._reproject_to_reference(
+                                stacked_batch_data_np, batch_wcs
+                            )
+                            batch_coverage_map_2d, _ = self._reproject_to_reference(
+                                batch_coverage_map_2d, batch_wcs
+                            )
+                            batch_wcs = self.reference_wcs_object
+                            self.update_progress(
+                                f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
+                                "INFO_DETAIL",
+                            )
+                        except Exception as e:
+                            self.update_progress(
+                                f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
+                                "WARN",
+                            )
+
+                print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
+                self._combine_batch_result(
+                    stacked_batch_data_np,
+                    stack_info_header,
+                    batch_coverage_map_2d,
+                    batch_wcs,
+                )
+
+                if not self.drizzle_active_session:
+                    print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
+                    self._update_preview_sum_w()
             
         else: # _stack_batch a échoué ou n'a rien retourné de valide
             # Le nombre d'images du lot qui a échoué à l'étape _stack_batch
@@ -4649,6 +4681,76 @@ class SeestarQueuedStacker:
         print("="*70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
+    def _run_astap_and_update_header(self, fits_path: str) -> bool:
+        """Solve the provided FITS with ASTAP and update its header in place."""
+        try:
+            header = fits.getheader(fits_path)
+        except Exception as e:
+            self.update_progress(f"   [ASTAP] Échec lecture header: {e}", "ERROR")
+            return False
+
+        solver_settings = {
+            "local_solver_preference": self.local_solver_preference,
+            "api_key": self.api_key,
+            "astap_path": self.astap_path,
+            "astap_data_dir": self.astap_data_dir,
+            "astap_search_radius": self.astap_search_radius,
+            "local_ansvr_path": self.local_ansvr_path,
+            "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
+            "scale_tolerance_percent": 20,
+            "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+            "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+            "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
+            "use_radec_hints": getattr(self, "use_radec_hints", False),
+        }
+
+        self.update_progress(f"   [ASTAP] Solve {os.path.basename(fits_path)}…")
+        wcs = solve_image_wcs(fits_path, header, solver_settings, update_header_with_solution=True)
+        if wcs is None:
+            self.update_progress("   [ASTAP] Échec résolution", "WARN")
+            return False
+        try:
+            with fits.open(fits_path, mode="update") as hdul:
+                hdul[0].header = header
+                hdul.flush()
+        except Exception as e:
+            self.update_progress(f"   [ASTAP] Erreur écriture header: {e}", "WARN")
+        return True
+
+    def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
+        """Save a classic batch and solve it with ASTAP."""
+        out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
+        os.makedirs(out_dir, exist_ok=True)
+
+        sci_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}.fits")
+        wht_paths: list[str] = []
+
+        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(sci_fits, overwrite=True)
+        for ch_i in range(stacked_np.shape[2]):
+            wht_path = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits")
+            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(wht_path, overwrite=True)
+            wht_paths.append(wht_path)
+
+        luminance = (stacked_np[..., 0] * 0.299 + stacked_np[..., 1] * 0.587 + stacked_np[..., 2] * 0.114).astype(np.float32)
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp.close()
+        fits.PrimaryHDU(data=luminance, header=header).writeto(tmp.name, overwrite=True)
+        solved_ok = self._run_astap_and_update_header(tmp.name)
+        if solved_ok:
+            solved_hdr = fits.getheader(tmp.name)
+            with fits.open(sci_fits, mode="update") as hdul:
+                hdul[0].header.update(solved_hdr)
+                hdul.flush()
+        os.remove(tmp.name)
+        return (sci_fits, wht_paths) if solved_ok else (None, None)
+
+    def _compute_output_grid_from_batches(self, batch_files):
+        """Calcule la grille finale (shape & WCS) à partir du 1er lot résolu."""
+        with fits.open(batch_files[0][0]) as hdul:
+            wcs_first = WCS(hdul[0].header, naxis=2)
+            h, w = hdul[0].data.shape[-2:]
+        return wcs_first, (h, w)
+
 
 ############################################################################################################################################
 
@@ -5360,7 +5462,8 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
         self.reproject_between_batches = bool(reproject_between_batches)
-        self.enable_interbatch_reproj = self.reproject_between_batches
+        self.enable_inter_batch_reprojection = self.reproject_between_batches
+        self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
 
         # --- FIN NOUVEAU ---
 
