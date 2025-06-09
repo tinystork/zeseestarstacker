@@ -3325,10 +3325,24 @@ class SeestarQueuedStacker:
 
             if self.enable_inter_batch_reprojection:
                 sci_path, wht_paths = self._save_and_solve_classic_batch(
-                    stacked_batch_data_np, batch_coverage_map_2d, stack_info_header, current_batch_num
+
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    stack_info_header,
+                    current_batch_num,
                 )
                 if sci_path and wht_paths:
                     self.intermediate_classic_batch_files.append((sci_path, wht_paths))
+                else:
+                    # Fallback to in-memory accumulation if solving failed
+                    self._combine_batch_result(
+                        stacked_batch_data_np,
+                        stack_info_header,
+                        batch_coverage_map_2d,
+                    )
+                    if not self.drizzle_active_session:
+                        self._update_preview_sum_w()
+
             else:
                 batch_wcs = None
                 try:
@@ -4706,17 +4720,32 @@ class SeestarQueuedStacker:
         return True
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
-        """Enregistre un lot classique puis lance ASTAP. Retourne (sci, [whtR,G,B])."""
+
+        """Save a classic batch and solve it with ASTAP."""
         out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
         os.makedirs(out_dir, exist_ok=True)
+
         sci_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}.fits")
-        wht_paths = []
+        wht_paths: list[str] = []
+
         fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(sci_fits, overwrite=True)
         for ch_i in range(stacked_np.shape[2]):
-            wht_ch_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits")
-            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(wht_ch_fits, overwrite=True)
-            wht_paths.append(wht_ch_fits)
-        solved_ok = self._run_astap_and_update_header(sci_fits)
+            wht_path = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits")
+            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(wht_path, overwrite=True)
+            wht_paths.append(wht_path)
+
+        luminance = (stacked_np[..., 0] * 0.299 + stacked_np[..., 1] * 0.587 + stacked_np[..., 2] * 0.114).astype(np.float32)
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp.close()
+        fits.PrimaryHDU(data=luminance, header=header).writeto(tmp.name, overwrite=True)
+        solved_ok = self._run_astap_and_update_header(tmp.name)
+        if solved_ok:
+            solved_hdr = fits.getheader(tmp.name)
+            with fits.open(sci_fits, mode="update") as hdul:
+                hdul[0].header.update(solved_hdr)
+                hdul.flush()
+        os.remove(tmp.name)
+
         return (sci_fits, wht_paths) if solved_ok else (None, None)
 
     def _compute_output_grid_from_batches(self, batch_files):
