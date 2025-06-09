@@ -4144,9 +4144,18 @@ class SeestarQueuedStacker:
 
 
             # Mise à jour des compteurs globaux
-            self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
+            self.images_in_cumulative_stack += num_physical_images_in_batch  # Compte les images physiques
             self.total_exposure_seconds += batch_exposure
-            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images_in_cumulative_stack={self.images_in_cumulative_stack}, total_exposure_seconds={self.total_exposure_seconds:.1f}")
+            print(
+                f"DEBUG QM [_combine_batch_result SUM/W]: images ajoutées="
+                f"{num_physical_images_in_batch}, nouveau total="
+                f"{self.images_in_cumulative_stack}"
+            )
+            print(
+                f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: "
+                f"images_in_cumulative_stack={self.images_in_cumulative_stack}, "
+                f"total_exposure_seconds={self.total_exposure_seconds:.1f}"
+            )
 
             # --- Mise à jour Header Cumulatif (comme avant) ---
             if self.current_stack_header is None:
