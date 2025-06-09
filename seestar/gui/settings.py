@@ -175,6 +175,12 @@ class SettingsManager:
                 tk.BooleanVar(value=default_values_from_code.get('reproject_between_batches', False)),
             ).get()
 
+            self.inter_batch_reprojection = getattr(
+                gui_instance,
+                'inter_batch_reproj_var',
+                tk.BooleanVar(value=default_values_from_code.get('inter_batch_reprojection', False)),
+            ).get()
+
             self.use_radec_hints = getattr(
                 gui_instance,
                 'use_radec_hints_var',
@@ -375,6 +381,8 @@ class SettingsManager:
 
             getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.reproject_between_batches)
 
+            getattr(gui_instance, 'inter_batch_reproj_var', tk.BooleanVar()).set(self.inter_batch_reprojection)
+
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
             print("DEBUG (SettingsManager apply_to_ui V_LocalSolverPref): Fin application paramètres UI principale.") # Version Log (ancienne)
@@ -486,6 +494,7 @@ class SettingsManager:
 
 
         defaults_dict['reproject_between_batches'] = False
+        defaults_dict['inter_batch_reprojection'] = False
 
         
         defaults_dict['mosaic_mode_active'] = False
@@ -934,6 +943,14 @@ class SettingsManager:
                 )
             )
 
+            self.inter_batch_reprojection = bool(
+                getattr(
+                    self,
+                    'inter_batch_reprojection',
+                    defaults_fallback['inter_batch_reprojection'],
+                )
+            )
+
             print(f"DEBUG (SettingsManager validate_settings V_LocalSolverPref): Solveurs locaux validés: Pref='{self.local_solver_preference}', ASTAP Radius={self.astap_search_radius}")
 
             # Validation du facteur d'échelle mosaïque
@@ -1069,6 +1086,7 @@ class SettingsManager:
             'astrometry_solve_field_dir': str(getattr(self, 'astrometry_solve_field_dir', "")),
 
             'reproject_between_batches': bool(getattr(self, 'reproject_between_batches', False)),
+            'inter_batch_reprojection': bool(getattr(self, 'inter_batch_reprojection', False)),
 
         }
 

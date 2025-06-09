@@ -255,7 +255,7 @@ class SeestarQueuedStacker:
 
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def __init__(self):
+    def __init__(self, settings: SettingsManager | None = None):
         print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
         
         # --- 1. Attributs Critiques et Simples ---
@@ -298,6 +298,7 @@ class SeestarQueuedStacker:
         self.enable_interbatch_reproj = False
         # Nouveau flag pour reprojection inter-batch Classic
         self.enable_inter_batch_reprojection = False
+        self.inter_batch_reprojection = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
 
@@ -340,6 +341,13 @@ class SeestarQueuedStacker:
         self.incremental_drizzle_sci_arrays = []  
         self.incremental_drizzle_wht_arrays = []  
         print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
+
+        if settings is not None:
+            try:
+                self.inter_batch_reprojection = bool(getattr(settings, 'inter_batch_reprojection', False))
+                print(f"  -> Flag inter_batch_reprojection initialisé depuis settings: {self.inter_batch_reprojection}")
+            except Exception:
+                print("  -> Impossible de lire inter_batch_reprojection depuis settings. Valeur par défaut utilisée.")
 
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
@@ -2096,19 +2104,9 @@ class SeestarQueuedStacker:
                         self.stacked_batches_count, self.total_batches_estimated
                     )
                     current_batch_items_with_masks_for_stack_batch = []
-                if self.enable_inter_batch_reprojection and self.intermediate_classic_batch_files:
+                if self.inter_batch_reprojection and len(self.intermediate_classic_batch_files) > 1:
                     self.update_progress("🏁 Reprojection inter-batch (Classic)…")
-                    target_wcs, target_shape = self._compute_output_grid_from_batches(
-                        self.intermediate_classic_batch_files
-                    )
-                    final_sci, final_wht = self._combine_intermediate_drizzle_batches(
-                        self.intermediate_classic_batch_files, target_wcs, target_shape
-                    )
-                    self._save_final_stack(
-                        output_filename_suffix="_classic_reproj",
-                        drizzle_final_sci_data=final_sci,
-                        drizzle_final_wht_data=final_wht
-                    )
+                    self._reproject_classic_batches(self.intermediate_classic_batch_files)
                 else:
                     self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
                     if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
@@ -3497,6 +3495,16 @@ class SeestarQueuedStacker:
                     batch_wcs,
                 )
 
+                if self.inter_batch_reprojection:
+                    sci_p, wht_p_list = self._save_and_solve_classic_batch(
+                        stacked_batch_data_np,
+                        batch_coverage_map_2d,
+                        stack_info_header,
+                        current_batch_num,
+                    )
+                    if sci_p and wht_p_list:
+                        self.intermediate_classic_batch_files.append((sci_p, wht_p_list))
+
                 if not self.drizzle_active_session:
                     print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
                     self._update_preview_sum_w()
@@ -4751,6 +4759,70 @@ class SeestarQueuedStacker:
             h, w = hdul[0].data.shape[-2:]
         return wcs_first, (h, w)
 
+    def _reproject_classic_batches(self, batch_files):
+        """Reproject saved classic batches to a common grid using reproject_and_coadd."""
+
+        from seestar.enhancement.reproject_utils import (
+            reproject_and_coadd,
+            reproject_interp,
+        )
+
+        channel_arrays_wcs = [[] for _ in range(3)]
+        channel_footprints = [[] for _ in range(3)]
+        wcs_for_grid = []
+
+        for sci_path, wht_paths in batch_files:
+            try:
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
+                batch_wcs = WCS(hdr, naxis=2)
+                h, w = data_cxhxw.shape[-2:]
+                batch_wcs.pixel_shape = (w, h)
+            except Exception:
+                continue
+
+            try:
+                coverage = fits.getdata(wht_paths[0]).astype(np.float32)
+            except Exception:
+                coverage = np.ones((h, w), dtype=np.float32)
+
+            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            wcs_for_grid.append(batch_wcs)
+            for ch in range(img_hwc.shape[2]):
+                channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
+                channel_footprints[ch].append(coverage)
+
+        if len(wcs_for_grid) < 2:
+            return
+
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_for_grid)
+        if out_wcs is None or out_shape is None:
+            return
+
+        final_channels = []
+        final_cov = None
+        for ch in range(3):
+            sci, cov = reproject_and_coadd(
+                channel_arrays_wcs[ch],
+                output_projection=out_wcs,
+                shape_out=out_shape,
+                input_weights=channel_footprints[ch],
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=True,
+            )
+            final_channels.append(sci.astype(np.float32))
+            if final_cov is None:
+                final_cov = cov.astype(np.float32)
+
+        final_img_hwc = np.stack(final_channels, axis=-1)
+        self._save_final_stack(
+            "_classic_reproject",
+            drizzle_final_sci_data=final_img_hwc,
+            drizzle_final_wht_data=final_cov,
+        )
+
 
 ############################################################################################################################################
 
@@ -5464,6 +5536,7 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = bool(reproject_between_batches)
         self.enable_inter_batch_reprojection = self.reproject_between_batches
         self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
+        self.inter_batch_reprojection = self.reproject_between_batches or self.inter_batch_reprojection
 
         # --- FIN NOUVEAU ---
 
