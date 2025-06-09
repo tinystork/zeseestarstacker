@@ -3325,6 +3325,7 @@ class SeestarQueuedStacker:
 
             if self.enable_inter_batch_reprojection:
                 sci_path, wht_paths = self._save_and_solve_classic_batch(
+
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
                     stack_info_header,
@@ -3341,6 +3342,7 @@ class SeestarQueuedStacker:
                     )
                     if not self.drizzle_active_session:
                         self._update_preview_sum_w()
+
             else:
                 batch_wcs = None
                 try:
@@ -4718,6 +4720,7 @@ class SeestarQueuedStacker:
         return True
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
+
         """Save a classic batch and solve it with ASTAP."""
         out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
         os.makedirs(out_dir, exist_ok=True)
@@ -4742,6 +4745,7 @@ class SeestarQueuedStacker:
                 hdul[0].header.update(solved_hdr)
                 hdul.flush()
         os.remove(tmp.name)
+
         return (sci_fits, wht_paths) if solved_ok else (None, None)
 
     def _compute_output_grid_from_batches(self, batch_files):
