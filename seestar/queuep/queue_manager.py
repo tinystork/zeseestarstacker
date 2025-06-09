@@ -3977,6 +3977,7 @@ class SeestarQueuedStacker:
 
 
         # --- Vérifications initiales ---
+
         if stacked_batch_data_np is None or stack_info_header is None or batch_coverage_map_2d is None:
             self.update_progress("⚠️ Erreur interne: Données batch/couverture invalides pour accumulation SUM/W.")
             print(
@@ -3997,6 +3998,7 @@ class SeestarQueuedStacker:
              )
              self.processing_error = "Memmap non initialisé"; self.stop_processing = True
              return
+
 
         # Vérifier la cohérence des shapes
         # stacked_batch_data_np peut être HWC ou HW. memmap_shape est HWC.
@@ -4041,6 +4043,7 @@ class SeestarQueuedStacker:
                 )
 
 
+
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
             print(
@@ -4081,11 +4084,13 @@ class SeestarQueuedStacker:
              return
 
 
+
         try:
             num_physical_images_in_batch = int(stack_info_header.get('NIMAGES', 1))
             batch_exposure = float(stack_info_header.get('TOTEXP', 0.0))
 
             # Vérifier si la carte de couverture a des poids significatifs
+
             if np.sum(batch_coverage_map_2d) < 1e-6 and num_physical_images_in_batch > 0:
                 self.update_progress(f"⚠️ Lot avec {num_physical_images_in_batch} images mais somme de couverture quasi nulle. Lot ignoré pour accumulation.")
                 print(
@@ -4094,6 +4099,7 @@ class SeestarQueuedStacker:
                 )
                 self.failed_stack_count += num_physical_images_in_batch # Compter ces images comme échec d'empilement
                 return
+
 
             # Préparer les données pour l'accumulation (types et shapes)
             # stacked_batch_data_np est déjà en float32
@@ -4175,8 +4181,8 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"📊 images_in_cumulative_stack={self.images_in_cumulative_stack}",
                 "INFO_DETAIL",
-
             )
+
 
             # --- Mise à jour Header Cumulatif (comme avant) ---
             if self.current_stack_header is None:
