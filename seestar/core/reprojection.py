@@ -1,6 +1,6 @@
 """Utility functions for WCS reprojection."""
 
-from reproject import reproject_interp
+from seestar.enhancement.reproject_utils import reproject_interp
 import numpy as np
 from astropy.wcs import WCS
 

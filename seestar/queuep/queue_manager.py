@@ -2660,12 +2660,27 @@ class SeestarQueuedStacker:
             self.update_progress("⚠️ Moins de 1 panneau aligné disponible pour la mosaïque. Traitement annulé.")
             self.final_stacked_path = None; self.processing_error = "Mosaïque: Moins de 1 panneau aligné"; return
         
+        from seestar.enhancement.reproject_utils import (
+            reproject_and_coadd as _reproject_and_coadd,
+            reproject_interp as _reproject_interp,
+        )
         try:
-            from reproject.mosaicking import reproject_and_coadd
-            from reproject import reproject_interp 
+            from reproject.mosaicking import reproject_and_coadd as _real_reproject_and_coadd
+            from reproject import reproject_interp as _real_reproject_interp
+            reproject_and_coadd = _real_reproject_and_coadd
+            reproject_interp = _real_reproject_interp
+            _reproject_available = True
         except ImportError:
+            reproject_and_coadd = _reproject_and_coadd
+            reproject_interp = _reproject_interp
+            _reproject_available = False
+
+        if not _reproject_available:
             error_msg = "Bibliothèque reproject non disponible pour l'assemblage mosaïque."
-            self.update_progress(f"❌ {error_msg}"); self.processing_error = error_msg; self.final_stacked_path = None; return
+            self.update_progress(f"❌ {error_msg}", "ERROR")
+            self.processing_error = error_msg
+            self.final_stacked_path = None
+            return
 
         input_data_for_reproject = []; input_footprints_for_reproject = []; all_wcs_for_grid_calc = []
 
@@ -3864,17 +3879,23 @@ class SeestarQueuedStacker:
                       "refWCS=", bool(self.reference_wcs_object),
                       "batchWCS=", bool(batch_wcs))
                 if self.enable_interbatch_reproj and self.reference_wcs_object and batch_wcs is not None:
-                    from reproject import reproject_interp
+                    from seestar.enhancement.reproject_utils import reproject_interp as _reproj_interp
+                    try:
+                        from reproject import reproject_interp as _real_interp
+                        reproj_func = _real_interp
+                    except ImportError:
+                        reproj_func = _reproj_interp
+
                     shp = self.memmap_shape[:2]
                     if batch_sum.ndim == 3:
                         channels = []
                         for ch in range(batch_sum.shape[2]):
-                            c, _ = reproject_interp((batch_sum[..., ch], batch_wcs), self.reference_wcs_object, shape_out=shp)
+                            c, _ = reproj_func((batch_sum[..., ch], batch_wcs), self.reference_wcs_object, shape_out=shp)
                             channels.append(c)
                         sum_reproj = np.stack(channels, axis=2)
                     else:
-                        sum_reproj, _ = reproject_interp((batch_sum, batch_wcs), self.reference_wcs_object, shape_out=shp)
-                    wht_reproj, _ = reproject_interp((batch_wht, batch_wcs), self.reference_wcs_object, shape_out=shp)
+                        sum_reproj, _ = reproj_func((batch_sum, batch_wcs), self.reference_wcs_object, shape_out=shp)
+                    wht_reproj, _ = reproj_func((batch_wht, batch_wcs), self.reference_wcs_object, shape_out=shp)
                     self.cumulative_sum_memmap[:] += sum_reproj.astype(self.memmap_dtype_sum)
                     self.cumulative_wht_memmap[:] += wht_reproj.astype(self.memmap_dtype_wht)
                 else:
