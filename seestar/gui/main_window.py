@@ -25,27 +25,36 @@ import sys # Pour sys.executable
 import tempfile # <-- AJOUTÉ
 import logging
 from zemosaic import zemosaic_config
-print("-" * 20)
-print("DEBUG MW: Tentative d'importation de SeestarQueuedStacker...")
+
+logger = logging.getLogger(__name__)
+
+logger.debug("-" * 20)
+logger.debug("Tentative d'importation de SeestarQueuedStacker...")
 try:
     # L'import que vous avez déjà
     from ..queuep.queue_manager import SeestarQueuedStacker
-    print(f"DEBUG MW: Import de 'SeestarQueuedStacker' réussi.")
-    print(f"DEBUG MW: Type de l'objet importé: {type(SeestarQueuedStacker)}")
+    logger.debug("Import de 'SeestarQueuedStacker' réussi.")
+    logger.debug("Type de l'objet importé: %s", type(SeestarQueuedStacker))
     # Vérifier si l'attribut existe sur la CLASSE importée
-    print(f"DEBUG MW: La CLASSE importée a 'set_progress_callback'? {hasattr(SeestarQueuedStacker, 'set_progress_callback')}")
-    print(f"DEBUG MW: Attributs de la CLASSE importée: {dir(SeestarQueuedStacker)}")
+    logger.debug(
+        "La CLASSE importée a 'set_progress_callback'? %s",
+        hasattr(SeestarQueuedStacker, 'set_progress_callback'),
+    )
+    logger.debug("Attributs de la CLASSE importée: %s", dir(SeestarQueuedStacker))
 except ImportError as imp_err:
-    print(f"ERREUR MW: ÉCHEC de l'import de SeestarQueuedStacker: {imp_err}")
+    logger.error("ÉCHEC de l'import de SeestarQueuedStacker: %s", imp_err)
     traceback.print_exc()
     # Si l'import échoue, l'application ne peut pas continuer
     sys.exit("Échec de l'importation critique.")
 except Exception as gen_err:
-    print(f"ERREUR MW: Erreur INATTENDUE pendant l'import de SeestarQueuedStacker: {gen_err}")
+    logger.error(
+        "Erreur INATTENDUE pendant l'import de SeestarQueuedStacker: %s",
+        gen_err,
+    )
     traceback.print_exc()
     sys.exit("Échec de l'importation critique.")
 # Print separator to clearly show the start of queued stacker import logs
-print("-" * 20)
+logger.debug("-" * 20)
 # Seestar imports
 from ..core.image_processing import load_and_validate_fits, debayer_image
 from ..localization import Localization
@@ -58,7 +67,7 @@ try:
     from ..tools.stretch import apply_auto_white_balance as calculate_auto_wb
     _tools_available = True
 except ImportError as tool_err:
-    print(f"Warning: Could not import stretch/color tools: {tool_err}.")
+    logger.warning("Could not import stretch/color tools: %s.", tool_err)
     _tools_available = False
     # Dummy implementations if tools are missing
     class StretchPresets:
