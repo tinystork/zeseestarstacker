@@ -3308,12 +3308,12 @@ class SeestarQueuedStacker:
             try:
                 temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                 temp_f.close()
-                data_to_write = stacked_batch_data_np
-                if stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3:
-                    data_to_write = np.moveaxis(stacked_batch_data_np, -1, 0)
+                img_for_solver = stacked_batch_data_np
+                if img_for_solver.ndim == 3:
+                    img_for_solver = img_for_solver[..., 0]
                 fits.writeto(
                     temp_f.name,
-                    data_to_write.astype(np.float32),
+                    img_for_solver.astype(np.float32),
                     header=stack_info_header,
                     overwrite=True,
                 )
