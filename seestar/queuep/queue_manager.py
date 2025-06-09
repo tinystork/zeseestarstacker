@@ -3979,12 +3979,22 @@ class SeestarQueuedStacker:
         # --- Vérifications initiales ---
         if stacked_batch_data_np is None or stack_info_header is None or batch_coverage_map_2d is None:
             self.update_progress("⚠️ Erreur interne: Données batch/couverture invalides pour accumulation SUM/W.")
-            print("DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données batch/couverture invalides).")
+            print(
+                "DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données batch/couverture invalides) "
+                f"stacked_batch_data_np is None? {stacked_batch_data_np is None}, "
+                f"header is None? {stack_info_header is None}, "
+                f"coverage is None? {batch_coverage_map_2d is None}"
+            )
             return
 
         if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
              self.update_progress("❌ Erreur critique: Accumulateurs Memmap SUM/WHT non initialisés.")
-             print("ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé.")
+             print(
+                 f"ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé. "
+                 f"cumulative_sum_memmap is None? {self.cumulative_sum_memmap is None}, "
+                 f"cumulative_wht_memmap is None? {self.cumulative_wht_memmap is None}, "
+                 f"memmap_shape is None? {self.memmap_shape is None}"
+             )
              self.processing_error = "Memmap non initialisé"; self.stop_processing = True
              return
 
@@ -4033,7 +4043,10 @@ class SeestarQueuedStacker:
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
-            print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot.")
+            print(
+                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot. "
+                f"expected={expected_shape_hw}, got={batch_coverage_map_2d.shape}"
+            )
             try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
             except: self.failed_stack_count += 1 # Au moins une image
             return
@@ -4042,19 +4055,27 @@ class SeestarQueuedStacker:
         is_color_batch_data = (stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3)
         if is_color_batch_data and stacked_batch_data_np.shape != self.memmap_shape:
             self.update_progress(f"❌ Incompatibilité shape image lot (couleur): Attendu {self.memmap_shape}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
-            print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur).")
+            print(
+                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur). "
+                f"expected={self.memmap_shape}, got={stacked_batch_data_np.shape}"
+            )
             try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
             except: self.failed_stack_count += 1
             return
         elif not is_color_batch_data and stacked_batch_data_np.ndim == 2 and stacked_batch_data_np.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape image lot (N&B): Attendu {expected_shape_hw}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
-            print(f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B).")
+            print(
+                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B). "
+                f"expected={expected_shape_hw}, got={stacked_batch_data_np.shape}"
+            )
             try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
             except: self.failed_stack_count += 1
             return
         elif not is_color_batch_data and stacked_batch_data_np.ndim != 2 : # Cas N&B mais pas 2D
              self.update_progress(f"❌ Shape image lot N&B inattendue: {stacked_batch_data_np.shape}. Accumulation échouée.")
-             print(f"ERREUR QM [_combine_batch_result SUM/W]: Shape image lot N&B inattendue.")
+             print(
+                 f"ERREUR QM [_combine_batch_result SUM/W]: Shape image lot N&B inattendue - got {stacked_batch_data_np.shape}"
+             )
              try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
              except: self.failed_stack_count += 1
              return
@@ -4067,7 +4088,10 @@ class SeestarQueuedStacker:
             # Vérifier si la carte de couverture a des poids significatifs
             if np.sum(batch_coverage_map_2d) < 1e-6 and num_physical_images_in_batch > 0:
                 self.update_progress(f"⚠️ Lot avec {num_physical_images_in_batch} images mais somme de couverture quasi nulle. Lot ignoré pour accumulation.")
-                print(f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (somme couverture quasi nulle).")
+                print(
+                    f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (somme couverture quasi nulle). "
+                    f"sum={np.sum(batch_coverage_map_2d):.3e}"
+                )
                 self.failed_stack_count += num_physical_images_in_batch # Compter ces images comme échec d'empilement
                 return
 
@@ -4144,17 +4168,14 @@ class SeestarQueuedStacker:
 
 
             # Mise à jour des compteurs globaux
-            self.images_in_cumulative_stack += num_physical_images_in_batch  # Compte les images physiques
+
+            self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
             self.total_exposure_seconds += batch_exposure
-            print(
-                f"DEBUG QM [_combine_batch_result SUM/W]: images ajoutées="
-                f"{num_physical_images_in_batch}, nouveau total="
-                f"{self.images_in_cumulative_stack}"
-            )
-            print(
-                f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: "
-                f"images_in_cumulative_stack={self.images_in_cumulative_stack}, "
-                f"total_exposure_seconds={self.total_exposure_seconds:.1f}"
+            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images_in_cumulative_stack={self.images_in_cumulative_stack}, total_exposure_seconds={self.total_exposure_seconds:.1f}")
+            self.update_progress(
+                f"📊 images_in_cumulative_stack={self.images_in_cumulative_stack}",
+                "INFO_DETAIL",
+
             )
 
             # --- Mise à jour Header Cumulatif (comme avant) ---
