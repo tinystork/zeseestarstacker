@@ -3,7 +3,11 @@ Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
 (Version Révisée 9: Imports strictement nécessaires au niveau module)
 """
-print("DEBUG QM: Début chargement module queue_manager.py")
+import logging
+
+logger = logging.getLogger(__name__)
+
+logger.debug("Début chargement module queue_manager.py")
 
 # --- Standard Library Imports ---
 import gc
@@ -17,7 +21,7 @@ import time
 import traceback
 import warnings
 
-print("DEBUG QM: Imports standard OK.")
+logger.debug("Imports standard OK.")
 
 # --- Third-Party Library Imports ---
 from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
@@ -35,29 +39,46 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
 from ..core.reprojection import reproject_to_reference_wcs
-print("DEBUG QM: Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
+logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
 try:
     # On importe juste Drizzle ici, car la CLASSE est utilisée dans les méthodes
     from drizzle.resample import Drizzle
     _OO_DRIZZLE_AVAILABLE = True
-    print("DEBUG QM: Import drizzle.resample.Drizzle OK.")
+    logger.debug("Import drizzle.resample.Drizzle OK.")
 except ImportError as e_driz_cls:
     _OO_DRIZZLE_AVAILABLE = False
-    Drizzle = None # Définir comme None si indisponible
-    print(f"ERROR QM: Échec import drizzle.resample.Drizzle: {e_driz_cls}")
+    Drizzle = None  # Définir comme None si indisponible
+    logger.error("Échec import drizzle.resample.Drizzle: %s", e_driz_cls)
 
 
 # --- Core/Internal Imports (Needed for __init__ or core logic) ---
-try: from ..core.hot_pixels import detect_and_correct_hot_pixels
-except ImportError as e: print(f"ERREUR QM: Échec import detect_and_correct_hot_pixels: {e}"); raise
-try: from ..core.image_processing import (load_and_validate_fits, debayer_image, save_fits_image, save_preview_image)
-except ImportError as e: print(f"ERREUR QM: Échec import image_processing: {e}"); raise
-try: from ..core.utils import estimate_batch_size
-except ImportError as e: print(f"ERREUR QM: Échec import utils: {e}"); raise
-try: from ..enhancement.color_correction import ChromaticBalancer
-except ImportError as e_cb: print(f"ERREUR QM: Échec import ChromaticBalancer: {e_cb}"); raise
+try:
+    from ..core.hot_pixels import detect_and_correct_hot_pixels
+except ImportError as e:
+    logger.error("Échec import detect_and_correct_hot_pixels: %s", e)
+    raise
+try:
+    from ..core.image_processing import (
+        load_and_validate_fits,
+        debayer_image,
+        save_fits_image,
+        save_preview_image,
+    )
+except ImportError as e:
+    logger.error("Échec import image_processing: %s", e)
+    raise
+try:
+    from ..core.utils import estimate_batch_size
+except ImportError as e:
+    logger.error("Échec import utils: %s", e)
+    raise
+try:
+    from ..enhancement.color_correction import ChromaticBalancer
+except ImportError as e_cb:
+    logger.error("Échec import ChromaticBalancer: %s", e_cb)
+    raise
 
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS (si utilisés uniquement dans des méthodes spécifiques) ---
 # Ces modules/fonctions sont gérés par des appels conditionnels ou try/except dans les méthodes où ils sont utilisés.
@@ -68,7 +89,7 @@ except ImportError as e_cb: print(f"ERREUR QM: Échec import ChromaticBalancer: 
 
 # --- Configuration des Avertissements ---
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
-print("DEBUG QM: Configuration warnings OK.")
+logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
 
 
@@ -76,13 +97,17 @@ print("DEBUG QM: Configuration warnings OK.")
 # Core Alignment (Instancié dans __init__)
 try:
     from ..core.alignment import SeestarAligner
-    print("DEBUG QM: Import SeestarAligner OK.")
-except ImportError as e: print(f"ERREUR QM: Échec import SeestarAligner: {e}"); raise
+    logger.debug("Import SeestarAligner OK.")
+except ImportError as e:
+    logger.error("Échec import SeestarAligner: %s", e)
+    raise
 # Core Hot Pixels (Utilisé dans _worker -> _process_file)
 try:
     from ..core.hot_pixels import detect_and_correct_hot_pixels
-    print("DEBUG QM: Import detect_and_correct_hot_pixels OK.")
-except ImportError as e: print(f"ERREUR QM: Échec import detect_and_correct_hot_pixels: {e}"); raise
+    logger.debug("Import detect_and_correct_hot_pixels OK.")
+except ImportError as e:
+    logger.error("Échec import detect_and_correct_hot_pixels: %s", e)
+    raise
 # Core Image Processing (Utilisé PARTOUT)
 try:
     from ..core.image_processing import (
@@ -91,17 +116,21 @@ try:
         save_fits_image,
         save_preview_image
     )
-    print("DEBUG QM: Imports image_processing OK.")
-except ImportError as e: print(f"ERREUR QM: Échec import image_processing: {e}"); raise
+    logger.debug("Imports image_processing OK.")
+except ImportError as e:
+    logger.error("Échec import image_processing: %s", e)
+    raise
 # --- IMPORT POUR L'ALIGNEUR LOCAL ---
 try:
     from ..core import SeestarLocalAligner # Devrait être FastSeestarAligner aliasé
     _LOCAL_ALIGNER_AVAILABLE = True
-    print("DEBUG QM: Import SeestarLocalAligner (local CV) OK.")
+    logger.debug("Import SeestarLocalAligner (local CV) OK.")
 except ImportError:
     _LOCAL_ALIGNER_AVAILABLE = False
-    SeestarLocalAligner = None # Définir pour que le code ne plante pas à l'instanciation
-    print("WARN QM: SeestarLocalAligner (local CV) non importable. Alignement mosaïque local désactivé.")
+    SeestarLocalAligner = None  # Définir pour que le code ne plante pas à l'instanciation
+    logger.warning(
+        "SeestarLocalAligner (local CV) non importable. Alignement mosaïque local désactivé."
+    )
 # ---  ---
 
 
@@ -109,36 +138,55 @@ except ImportError:
 # Core Utils (Utilisé PARTOUT)
 try:
     from ..core.utils import estimate_batch_size
-    print("DEBUG QM: Imports utils OK.")
-except ImportError as e: print(f"ERREUR QM: Échec import utils: {e}"); raise
+    logger.debug("Imports utils OK.")
+except ImportError as e:
+    logger.error("Échec import utils: %s", e)
+    raise
 # Enhancement Color Correction (Instancié dans __init__)
 try:
     from ..enhancement.color_correction import ChromaticBalancer
-    print("DEBUG QM: Import ChromaticBalancer OK.")
-except ImportError as e: print(f"ERREUR QM: Échec import ChromaticBalancer: {e}"); raise
+    logger.debug("Import ChromaticBalancer OK.")
+except ImportError as e:
+    logger.error("Échec import ChromaticBalancer: %s", e)
+    raise
 
 try:
-    from ..enhancement.stack_enhancement import feather_by_weight_map # NOUVEL IMPORT
+    from ..enhancement.stack_enhancement import feather_by_weight_map  # NOUVEL IMPORT
     _FEATHERING_AVAILABLE = True
-    print("DEBUG QM: Import feather_by_weight_map depuis stack_enhancement OK.")
+    logger.debug("Import feather_by_weight_map depuis stack_enhancement OK.")
 except ImportError as e_feather:
     _FEATHERING_AVAILABLE = False
-    print(f"ERREUR QM: Échec import feather_by_weight_map depuis stack_enhancement: {e_feather}")
+    logger.error(
+        "Échec import feather_by_weight_map depuis stack_enhancement: %s",
+        e_feather,
+    )
     # Définir une fonction factice pour que le code ne plante pas si l'import échoue
     # lors des appels ultérieurs, bien qu'on vérifiera _FEATHERING_AVAILABLE.
     def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
-        print("ERREUR: Fonction feather_by_weight_map non disponible (échec import).")
+        logger.error(
+            "Fonction feather_by_weight_map non disponible (échec import)."
+        )
         return img # Retourner l'image originale
 try:
     from ..enhancement.stack_enhancement import apply_low_wht_mask # NOUVEL IMPORT
     _LOW_WHT_MASK_AVAILABLE = True
-    print("DEBUG QM: Import apply_low_wht_mask depuis stack_enhancement OK.")
+    logger.debug("Import apply_low_wht_mask depuis stack_enhancement OK.")
 except ImportError as e_low_wht:
     _LOW_WHT_MASK_AVAILABLE = False
-    print(f"ERREUR QM: Échec import apply_low_wht_mask: {e_low_wht}")
+    logger.error(
+        "Échec import apply_low_wht_mask: %s",
+        e_low_wht,
+    )
     def apply_low_wht_mask(img, wht, percentile=5, soften_px=128, progress_callback=None): # Factice
-        if progress_callback: progress_callback("   [LowWHTMask] ERREUR: Fonction apply_low_wht_mask non disponible (échec import).", None)
-        else: print("ERREUR: Fonction apply_low_wht_mask non disponible (échec import).")
+        if progress_callback:
+            progress_callback(
+                "   [LowWHTMask] ERREUR: Fonction apply_low_wht_mask non disponible (échec import).",
+                None,
+            )
+        else:
+            logger.error(
+                "Fonction apply_low_wht_mask non disponible (échec import)."
+            )
         return img
 # --- Optional Third-Party Imports (Post-processing related) ---
 # Ces imports sont tentés globalement. Des flags indiquent leur disponibilité.
@@ -146,37 +194,37 @@ _PHOTOUTILS_BG_SUB_AVAILABLE = False
 try:
     from ..core.background import subtract_background_2d
     _PHOTOUTILS_BG_SUB_AVAILABLE = True
-    print("DEBUG QM: Import subtract_background_2d (Photutils) OK.")
+    logger.debug("Import subtract_background_2d (Photutils) OK.")
 except ImportError as e:
-    subtract_background_2d = None # Fonction factice
-    print(f"WARN QM: Échec import subtract_background_2d (Photutils): {e}")
+    subtract_background_2d = None  # Fonction factice
+    logger.warning("Échec import subtract_background_2d (Photutils): %s", e)
 
-_BN_AVAILABLE = False # Neutralisation de fond globale
+_BN_AVAILABLE = False  # Neutralisation de fond globale
 try:
     from ..tools.stretch import neutralize_background_automatic
     _BN_AVAILABLE = True
-    print("DEBUG QM: Import neutralize_background_automatic OK.")
+    logger.debug("Import neutralize_background_automatic OK.")
 except ImportError as e:
-    neutralize_background_automatic = None # Fonction factice
-    print(f"WARN QM: Échec import neutralize_background_automatic: {e}")
+    neutralize_background_automatic = None  # Fonction factice
+    logger.warning("Échec import neutralize_background_automatic: %s", e)
 
-_SCNR_AVAILABLE = False # SCNR Final
+_SCNR_AVAILABLE = False  # SCNR Final
 try:
     from ..enhancement.color_correction import apply_scnr
     _SCNR_AVAILABLE = True
-    print("DEBUG QM: Import apply_scnr OK.")
+    logger.debug("Import apply_scnr OK.")
 except ImportError as e:
-    apply_scnr = None # Fonction factice
-    print(f"WARN QM: Échec import apply_scnr: {e}")
+    apply_scnr = None  # Fonction factice
+    logger.warning("Échec import apply_scnr: %s", e)
 
-_CROP_AVAILABLE = False # Rognage Final
+_CROP_AVAILABLE = False  # Rognage Final
 try:
     from ..enhancement.stack_enhancement import apply_edge_crop
     _CROP_AVAILABLE = True
-    print("DEBUG QM: Import apply_edge_crop OK.")
+    logger.debug("Import apply_edge_crop OK.")
 except ImportError as e:
-    apply_edge_crop = None # Fonction factice
-    print(f"WARN QM: Échec import apply_edge_crop: {e}")
+    apply_edge_crop = None  # Fonction factice
+    logger.warning("Échec import apply_edge_crop: %s", e)
 
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS ---
 # Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
@@ -190,7 +238,7 @@ from ..alignment.astrometry_solver import AstrometrySolver, solve_image_wcs  # D
 
 # --- Configuration des Avertissements ---
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
-print("DEBUG QM: Configuration warnings OK.")
+logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
 
 
@@ -200,7 +248,7 @@ class SeestarQueuedStacker:
     Gère l'alignement et l'empilement dans un thread séparé.
     Ajout de la pondération basée sur la qualité (SNR, Nombre d'étoiles).
     """
-    print("DEBUG QM: Lecture de la définition de la classe SeestarQueuedStacker...")
+    logger.debug("Lecture de la définition de la classe SeestarQueuedStacker...")
 
 
 

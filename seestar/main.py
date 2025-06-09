@@ -11,6 +11,9 @@ import traceback
 import warnings
 from astropy.io.fits.verify import VerifyWarning
 import argparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 # --- MODIFIED Robust PYTHONPATH Modification ---
 try:
@@ -23,7 +26,7 @@ try:
     if project_root_dir in sys.path:
         sys.path.remove(project_root_dir) # L'enlever s'il est déjà là pour le remettre en tête
     sys.path.insert(0, project_root_dir)
-    print(f"DEBUG [seestar/main.py sys.path]: Project root '{project_root_dir}' mis en tête de sys.path.")
+    logger.debug("Project root '%s' mis en tête de sys.path.", project_root_dir)
 
     # 2. S'assurer que le DOSSIER DU SCRIPT LUI-MÊME (seestar/) N'EST PAS dans sys.path
     #    s'il a été ajouté automatiquement parce qu'on lance le script depuis ce dossier.
@@ -32,7 +35,10 @@ try:
     if seestar_package_dir in sys.path and seestar_package_dir != project_root_dir:
         try:
             sys.path.remove(seestar_package_dir)
-            print(f"DEBUG [seestar/main.py sys.path]: Supprimé seestar_package_dir '{seestar_package_dir}' de sys.path pour éviter ambiguïté.")
+            logger.debug(
+                "Supprimé seestar_package_dir '%s' de sys.path pour éviter ambiguïté.",
+                seestar_package_dir,
+            )
         except ValueError:
             pass # N'était pas là, c'est bien.
             
@@ -44,58 +50,83 @@ try:
         package_name = os.path.basename(seestar_package_dir)
         if package_name: # S'assurer que le nom n'est pas vide
             __package__ = package_name
-            print(f"DEBUG [seestar/main.py sys.path]: __package__ défini à '{__package__}'.")
+            logger.debug("__package__ défini à '%s'.", __package__)
         else:
-            print(f"WARN [seestar/main.py sys.path]: Impossible de déterminer le nom du package depuis {seestar_package_dir}.")
+            logger.warning(
+                "Impossible de déterminer le nom du package depuis %s.",
+                seestar_package_dir,
+            )
 
 
 except Exception as path_e:
-    print(f"Erreur configuration sys.path/package: {path_e}")
+    logger.error("Erreur configuration sys.path/package: %s", path_e)
     traceback.print_exc()
 # --- FIN MODIFIED ---
 
 
 # --- Bloc de débogage des imports (gardé) ---
 # ... (identique à avant) ...
-print(f"--------------------")
-print(f"DEBUG [seestar/main.py import check]: __package__ est maintenant: {__package__}")
-print(f"DEBUG [seestar/main.py import check]: sys.path au moment de l'import de SeestarStackerGUI: ")
-for p_idx, p_path in enumerate(sys.path): print(f"  [{p_idx}] {p_path}")
-print(f"--------------------")
+logger.debug("--------------------")
+logger.debug("__package__ est maintenant: %s", __package__)
+logger.debug("sys.path au moment de l'import de SeestarStackerGUI:")
+for p_idx, p_path in enumerate(sys.path):
+    logger.debug("  [%s] %s", p_idx, p_path)
+logger.debug("--------------------")
 try:
     import queuep.queue_manager
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.queuep.queue_manager CHARGÉ : {queuep.queue_manager.__file__}")
+    logger.debug(
+        "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
+        queuep.queue_manager.__file__,
+    )
     import gui.main_window
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.gui.main_window CHARGÉ : {gui.main_window.__file__}")
-except Exception as e_qm_debug: print(f"DEBUG [seestar/main.py import check]: ERREUR import pour debug: {e_qm_debug}")
-print(f"--------------------")
+    logger.debug(
+        "Chemin module seestar.gui.main_window CHARGÉ : %s",
+        gui.main_window.__file__,
+    )
+except Exception as e_qm_debug:
+    logger.debug("ERREUR import pour debug: %s", e_qm_debug)
+logger.debug("--------------------")
 # --- FIN Bloc de débogage ---
 
 
 
 # --- NOUVEAU BLOC DE DÉBOGAGE POUR LES IMPORTS ---
-print(f"--------------------")
-print(f"DEBUG [seestar/main.py import check]: sys.path au moment de l'import de SeestarStackerGUI: ")
+logger.debug("--------------------")
+logger.debug("sys.path au moment de l'import de SeestarStackerGUI:")
 for p_idx, p_path in enumerate(sys.path):
-    print(f"  [{p_idx}] {p_path}")
-print(f"--------------------")
+    logger.debug("  [%s] %s", p_idx, p_path)
+logger.debug("--------------------")
 
 try:
     # Tentative d'import pour vérifier le chemin
     # Maintenant, on importe directement car project_root_dir est dans sys.path
     import queuep.queue_manager
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.queuep.queue_manager CHARGÉ : {queuep.queue_manager.__file__}")
+    logger.debug(
+        "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
+        queuep.queue_manager.__file__,
+    )
     import gui.main_window
-    print(f"DEBUG [seestar/main.py import check]: Chemin module seestar.gui.main_window CHARGÉ : {gui.main_window.__file__}")
+    logger.debug(
+        "Chemin module seestar.gui.main_window CHARGÉ : %s",
+        gui.main_window.__file__,
+    )
 
 except ImportError as e_qm_debug:
-    print(f"DEBUG [seestar/main.py import check]: ERREUR import seestar.queuep.queue_manager (ou autre) pour debug: {e_qm_debug}")
-    print(f"  Cela peut indiquer un problème avec sys.path ou la structure du package.")
+    logger.debug(
+        "ERREUR import seestar.queuep.queue_manager (ou autre) pour debug: %s",
+        e_qm_debug,
+    )
+    logger.debug("  Cela peut indiquer un problème avec sys.path ou la structure du package.")
 except AttributeError:
-    print(f"DEBUG [seestar/main.py import check]: Module seestar importé mais pas d'attribut __file__.")
+    logger.debug(
+        "Module seestar importé mais pas d'attribut __file__."
+    )
 except Exception as e_debug_other:
-    print(f"DEBUG [seestar/main.py import check]: Erreur inattendue vérification imports: {e_debug_other}")
-print(f"--------------------")
+    logger.debug(
+        "Erreur inattendue vérification imports: %s",
+        e_debug_other,
+    )
+logger.debug("--------------------")
 # --- FIN NOUVEAU BLOC DE DÉBOGAGE ---
 
 
@@ -113,16 +144,21 @@ warnings.filterwarnings(
 
 
 # --- NOUVELLE VÉRIFICATION RADICALE ---
-print("--------------------")
-print("DEBUG [seestar/main.py RADICAL CHECK]: Vérification du contenu de queue_manager.py...")
+logger.debug("--------------------")
+logger.debug(
+    "DEBUG [seestar/main.py RADICAL CHECK]: Vérification du contenu de queue_manager.py..."
+)
 try:
     import importlib.util
     spec = importlib.util.find_spec("seestar.queuep.queue_manager")
     if spec and spec.origin:
         queue_manager_path = spec.origin
-        print(f"  Chemin trouvé pour seestar.queuep.queue_manager: {queue_manager_path}")
+        logger.debug(
+            "  Chemin trouvé pour seestar.queuep.queue_manager: %s",
+            queue_manager_path,
+        )
         if os.path.exists(queue_manager_path):
-            print(f"  Le fichier {queue_manager_path} EXISTE.")
+            logger.debug("  Le fichier %s EXISTE.", queue_manager_path)
             with open(queue_manager_path, 'r', encoding='utf-8') as f_qm_content:
                 content = f_qm_content.read()
                 # Chercher la définition de set_preview_callback
@@ -132,26 +168,42 @@ try:
                     snippet_end = content.find("\n", idx_def + 800) # Cherche la fin de ligne dans les ~20 lignes suivantes
                     if snippet_end == -1: snippet_end = idx_def + 800 # Si pas de \n, prendre une tranche fixe
                     snippet = content[idx_def:snippet_end]
-                    print(f"  Extrait de set_preview_callback dans {queue_manager_path} (lignes ~{content.count(os.linesep, 0, idx_def)+1}):")
-                    print("    " + "---- SNIPPET START ----")
+                    logger.debug(
+                        "  Extrait de set_preview_callback dans %s (lignes ~%s):",
+                        queue_manager_path,
+                        content.count(os.linesep, 0, idx_def) + 1,
+                    )
+                    logger.debug("    ---- SNIPPET START ----")
                     for line_in_snippet in snippet.splitlines()[:10]: # Afficher les 10 premières lignes du snippet
-                        print(f"    | {line_in_snippet}")
-                    print("    " + "---- SNIPPET END ----")
+                        logger.debug("    | %s", line_in_snippet)
+                    logger.debug("    ---- SNIPPET END ----")
                     if "_cleanup_mosaic_panel_stacks_temp()" in snippet or \
                        "_cleanup_drizzle_batch_outputs()" in snippet or \
                        "cleanup_unaligned_files()" in snippet:
-                        print("  ALERTE RADICAL CHECK: Un appel _cleanup_ semble être présent dans le snippet de set_preview_callback !")
+                        logger.debug(
+                            "  ALERTE RADICAL CHECK: Un appel _cleanup_ semble être présent dans le snippet de set_preview_callback !"
+                        )
                     else:
-                        print("  INFO RADICAL CHECK: Aucun appel _cleanup_ évident dans les premières lignes du snippet de set_preview_callback.")
+                        logger.debug(
+                            "  INFO RADICAL CHECK: Aucun appel _cleanup_ évident dans les premières lignes du snippet de set_preview_callback."
+                        )
                 else:
-                    print(f"  ERREUR RADICAL CHECK: 'def set_preview_callback' non trouvée dans {queue_manager_path}")
+                    logger.debug(
+                        "  ERREUR RADICAL CHECK: 'def set_preview_callback' non trouvée dans %s",
+                        queue_manager_path,
+                    )
         else:
-            print(f"  ERREUR RADICAL CHECK: Le fichier {queue_manager_path} N'EXISTE PAS (problème find_spec).")
+            logger.debug(
+                "  ERREUR RADICAL CHECK: Le fichier %s N'EXISTE PAS (problème find_spec).",
+                queue_manager_path,
+            )
     else:
-        print("  ERREUR RADICAL CHECK: Spec pour seestar.queuep.queue_manager non trouvé.")
+        logger.debug(
+            "  ERREUR RADICAL CHECK: Spec pour seestar.queuep.queue_manager non trouvé."
+        )
 except Exception as e_radical:
-    print(f"  ERREUR pendant la vérification radicale: {e_radical}")
-print("--------------------")
+    logger.debug("  ERREUR pendant la vérification radicale: %s", e_radical)
+logger.debug("--------------------")
 # --- FIN NOUVELLE VÉRIFICATION RADICALE ---
 
 # --- Import Application and Version ---
@@ -163,34 +215,38 @@ try:
     from .gui import SeestarStackerGUI  # '.' signifie le package courant (seestar)
     from . import __version__ as SEESTAR_VERSION # Accéder à __version__ via __init__.py du package courant
     # Assure-toi que seestar/__init__.py définit bien __version__
-    print(f"DEBUG [seestar/main.py]: Import de .gui.SeestarStackerGUI et .__version__ réussi.")
+    logger.debug(
+        "Import de .gui.SeestarStackerGUI et .__version__ réussi.")
 
 except ImportError as e:
-    print(f"\n--- Import Error ---")
-    print(f"Error: {e}")
-    print(f"__package__ au moment de l'erreur: {__package__}") 
-    print("\nCould not import the Seestar application components.")
-    print("Suggestions:")
-    print("1. Vérifiez que la racine du projet (contenant 'seestar/') est dans sys.path.")
-    print("2. Vérifiez que __package__ est correctement défini si ce script est lancé directement.")
-    print("3. Assurez-vous que les sous-modules (gui, core, etc.) ont des __init__.py.")
-    print("4. Vérifiez que __version__ est défini dans seestar/__init__.py.")
+    logger.error("--- Import Error ---")
+    logger.error("Error: %s", e)
+    logger.error("__package__ au moment de l'erreur: %s", __package__)
+    logger.error("Could not import the Seestar application components.")
+    logger.error("Suggestions:")
+    logger.error("1. Vérifiez que la racine du projet (contenant 'seestar/') est dans sys.path.")
+    logger.error("2. Vérifiez que __package__ est correctement défini si ce script est lancé directement.")
+    logger.error("3. Assurez-vous que les sous-modules (gui, core, etc.) ont des __init__.py.")
+    logger.error("4. Vérifiez que __version__ est défini dans seestar/__init__.py.")
 
     try:
-        print(f"Script path: {current_script_path}")
-        print(f"Project root added to path: {project_root_dir}")
+        logger.error("Script path: %s", current_script_path)
+        logger.error("Project root added to path: %s", project_root_dir)
     except NameError:
-         print("Path variables not set due to earlier error.")
-    print(f"Current sys.path (at import error):")
-    for p_path in sys.path: print(f"  {p_path}")
-    print("-" * 20)
-    try: input("Appuyez sur Entrée pour quitter...")
+         logger.error("Path variables not set due to earlier error.")
+    logger.error("Current sys.path (at import error):")
+    for p_path in sys.path:
+        logger.error("  %s", p_path)
+    logger.error("-" * 20)
+    try:
+        input("Appuyez sur Entrée pour quitter...")
     except EOFError: pass
     sys.exit(1)
-except Exception as e: 
-    print(f"Unexpected error during initial import: {e}")
+except Exception as e:
+    logger.error("Unexpected error during initial import: %s", e)
     traceback.print_exc()
-    try: input("Appuyez sur Entrée pour quitter...")
+    try:
+        input("Appuyez sur Entrée pour quitter...")
     except EOFError: pass
     sys.exit(1)
 
