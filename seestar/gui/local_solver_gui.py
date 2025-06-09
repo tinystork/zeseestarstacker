@@ -658,6 +658,11 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         self.parent_gui.settings.ansvr_host_port = ansvr_host_port
         self.parent_gui.settings.reproject_between_batches = reproject_batches
+        if hasattr(self.parent_gui, 'reproject_batches_var'):
+            try:
+                self.parent_gui.reproject_batches_var.set(reproject_batches)
+            except Exception:
+                pass
 
         self.parent_gui.settings.astrometry_solve_field_dir = astrometry_dir
 
