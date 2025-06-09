@@ -9,7 +9,50 @@ import numpy as np
 from astropy.wcs import WCS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import types
+
+# Create minimal stub for seestar package to avoid heavy dependencies
+if "seestar" not in sys.modules:
+    seestar_pkg = types.ModuleType("seestar")
+    seestar_pkg.__path__ = []
+    enhancement_pkg = types.ModuleType("seestar.enhancement")
+    enhancement_pkg.__path__ = []
+    reproj_mod = types.ModuleType("seestar.enhancement.reproject_utils")
+    alignment_pkg = types.ModuleType("seestar.alignment")
+    alignment_pkg.__path__ = []
+    solver_mod = types.ModuleType("seestar.alignment.astrometry_solver")
+
+    class _DummySolver:
+        def __init__(self, *a, **k):
+            pass
+
+        def solve(self, *a, **k):
+            return None
+
+    solver_mod.AstrometrySolver = _DummySolver
+
+    def _missing(*_a, **_k):
+        raise ImportError("reproject not available")
+
+    reproj_mod.reproject_and_coadd = _missing
+    reproj_mod.reproject_interp = _missing
+
+    enhancement_pkg.reproject_utils = reproj_mod
+    seestar_pkg.enhancement = enhancement_pkg
+    seestar_pkg.alignment = alignment_pkg
+    alignment_pkg.astrometry_solver = solver_mod
+    sys.modules["seestar"] = seestar_pkg
+    sys.modules["seestar.enhancement"] = enhancement_pkg
+    sys.modules["seestar.enhancement.reproject_utils"] = reproj_mod
+    sys.modules["seestar.alignment"] = alignment_pkg
+    sys.modules["seestar.alignment.astrometry_solver"] = solver_mod
+
 import zemosaic.zemosaic_worker as worker
+
+pytestmark = pytest.mark.skipif(
+    not getattr(worker, "PSUTIL_AVAILABLE", True),
+    reason="psutil not available"
+)
 
 
 def make_wcs(ra, dec, shape=(100, 100)):
