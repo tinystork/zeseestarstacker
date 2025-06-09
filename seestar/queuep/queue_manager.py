@@ -3208,7 +3208,12 @@ class SeestarQueuedStacker:
                 data_to_write = stacked_batch_data_np
                 if stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3:
                     data_to_write = np.moveaxis(stacked_batch_data_np, -1, 0)
-                fits.writeto(temp_f.name, data_to_write.astype(np.float32), header=stack_info_header, overwrite=True)
+                fits.writeto(
+                    temp_f.name,
+                    data_to_write.astype(np.float32),
+                    header=stack_info_header,
+                    overwrite=True,
+                )
                 solver_settings = {
                     "local_solver_preference": self.local_solver_preference,
                     "api_key": self.api_key,
@@ -3223,9 +3228,32 @@ class SeestarQueuedStacker:
                     "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
                     "use_radec_hints": getattr(self, "use_radec_hints", False),
                 }
-                batch_wcs = solve_image_wcs(temp_f.name, stack_info_header, solver_settings, update_header_with_solution=False)
+                self.update_progress(
+                    f"🔭 [Solve] Résolution WCS du lot {current_batch_num}",
+                    "INFO_DETAIL",
+                )
+                batch_wcs = solve_image_wcs(
+                    temp_f.name,
+                    stack_info_header,
+                    solver_settings,
+                    update_header_with_solution=False,
+                )
+                if batch_wcs:
+                    self.update_progress(
+                        f"✅ [Solve] WCS lot {current_batch_num} obtenu",
+                        "INFO_DETAIL",
+                    )
+                else:
+                    self.update_progress(
+                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}",
+                        "WARN",
+                    )
             except Exception as e_solve_batch:
                 print(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
+                self.update_progress(
+                    f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e_solve_batch}",
+                    "WARN",
+                )
                 batch_wcs = None
             finally:
                 try:
@@ -3418,6 +3446,10 @@ class SeestarQueuedStacker:
                 input_shape_hw_current_file = image_hwc.shape[:2]
                 if self.enable_interbatch_reproj and self.reference_wcs_object:
                     try:
+                        self.update_progress(
+                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                            "INFO_DETAIL",
+                        )
                         image_hwc = reproject_to_reference_wcs(
                             image_hwc,
                             wcs_input_from_file,
@@ -3427,7 +3459,7 @@ class SeestarQueuedStacker:
                         wcs_for_pixmap = self.reference_wcs_object
                         input_shape_hw_current_file = target_shape_hw
                         self.update_progress(
-                            f"🌀 [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
+                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
                             "INFO_DETAIL",
                         )
                     except Exception as e:
@@ -3733,6 +3765,10 @@ class SeestarQueuedStacker:
 
         if self.enable_interbatch_reproj and self.reference_wcs_object and input_wcs is not None:
             try:
+                self.update_progress(
+                    f"➡️ [Reproject] Entrée dans reproject pour le batch {self.stacked_batches_count}/{self.total_batches_estimated}",
+                    "INFO_DETAIL",
+                )
                 stacked_batch_data_np = reproject_to_reference_wcs(
                     stacked_batch_data_np, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
@@ -3740,7 +3776,7 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d, input_wcs, self.reference_wcs_object, expected_shape_hw
                 )
                 self.update_progress(
-                    f"🌀 [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
+                    f"✅ [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
                     "INFO_DETAIL",
                 )
             except Exception as e:
@@ -3748,6 +3784,11 @@ class SeestarQueuedStacker:
                     f"⚠️ [Reproject] Batch {self.stacked_batches_count} ignoré : {type(e).__name__}: {e}",
                     "WARN",
                 )
+        else:
+            self.update_progress(
+                f"ℹ️ [Reproject] Ignoré pour le lot {self.stacked_batches_count} (enable={self.enable_interbatch_reproj}, ref={bool(self.reference_wcs_object)}, wcs={'ok' if input_wcs is not None else 'none'})",
+                "INFO_DETAIL",
+            )
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
             self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
@@ -4133,6 +4174,10 @@ class SeestarQueuedStacker:
             try:
                 weights_for_stack = weight_scalars_for_ccdproc
                 if getattr(settings, 'stack_reject_algo', 'none') == 'winsorized_sigma_clip':
+                    self.update_progress(
+                        f"➡️ [Winsor] Début Winsorized Sigma Clip pour le lot {current_batch_num}",
+                        "INFO_DETAIL",
+                    )
                     if is_color_batch:
                         channels = []
                         rejected_vals = []
@@ -4155,6 +4200,10 @@ class SeestarQueuedStacker:
                             kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
                             winsor_limits=winsor_tuple,
                         )
+                    self.update_progress(
+                        f"✅ [Winsor] Fin Winsorized Sigma Clip pour le lot {current_batch_num}, rej ≈ {rejected_pct:.1f} %",
+                        "INFO_DETAIL",
+                    )
                 else:
                     method_arr = 'average'
                     if is_color_batch:
