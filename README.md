@@ -160,6 +160,20 @@ SEESTAR_VERBOSE=1 pytest -q
 
 The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
 
+## Running Tests
+
+Install the additional packages required for the test suite:
+
+```bash
+pip install -r requirements-test.txt
+```
+
+Then execute the tests with `pytest`:
+
+```bash
+pytest -q
+```
+
 
 ---
 ## Optional GPU Acceleration (CUDA)
