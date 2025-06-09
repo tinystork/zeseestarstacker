@@ -30,6 +30,8 @@ from seestar.tools import (
     save_fits_as_png # Kept
 )
 
+from seestar.enhancement import reproject_utils
+
 # GUI (expose the main class)
 from seestar.gui import SeestarStackerGUI
 
@@ -50,6 +52,7 @@ __all__ = [
     'apply_auto_white_balance',
     'apply_enhanced_stretch',
     'save_fits_as_png',
+    'reproject_utils',
     # GUI
     'SeestarStackerGUI',
     # Package Info

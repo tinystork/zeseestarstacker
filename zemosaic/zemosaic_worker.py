@@ -39,11 +39,18 @@ except ImportError as e:
 
 # ─────────────────────────── REPROJECT ───────────────────────────────
 REPROJECT_AVAILABLE = False
-find_optimal_celestial_wcs = reproject_and_coadd = reproject_interp = None
+find_optimal_celestial_wcs = None
+from seestar.enhancement.reproject_utils import (
+    reproject_and_coadd,
+    reproject_interp,
+)
 try:
-    from reproject.mosaicking import find_optimal_celestial_wcs
-    from reproject.mosaicking import reproject_and_coadd
-    from reproject import reproject_interp
+    from reproject.mosaicking import find_optimal_celestial_wcs as _focw
+    from reproject.mosaicking import reproject_and_coadd as _real_reproject_and_coadd
+    from reproject import reproject_interp as _real_reproject_interp
+    reproject_and_coadd = _real_reproject_and_coadd
+    reproject_interp = _real_reproject_interp
+    find_optimal_celestial_wcs = _focw
     REPROJECT_AVAILABLE = True
     logger.info("Reproject importé.")
 except ImportError as e:
