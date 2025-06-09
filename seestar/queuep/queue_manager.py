@@ -4141,6 +4141,10 @@ class SeestarQueuedStacker:
             try:
                 weights_for_stack = weight_scalars_for_ccdproc
                 if getattr(settings, 'stack_reject_algo', 'none') == 'winsorized_sigma_clip':
+                    self.update_progress(
+                        f"➡️ [Winsor] Début Winsorized Sigma Clip pour le lot {current_batch_num}",
+                        "INFO_DETAIL",
+                    )
                     if is_color_batch:
                         channels = []
                         rejected_vals = []
@@ -4163,6 +4167,10 @@ class SeestarQueuedStacker:
                             kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
                             winsor_limits=winsor_tuple,
                         )
+                    self.update_progress(
+                        f"✅ [Winsor] Fin Winsorized Sigma Clip pour le lot {current_batch_num}, rej ≈ {rejected_pct:.1f} %",
+                        "INFO_DETAIL",
+                    )
                 else:
                     method_arr = 'average'
                     if is_color_batch:
