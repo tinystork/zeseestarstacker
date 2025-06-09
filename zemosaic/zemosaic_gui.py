@@ -1252,7 +1252,8 @@ class ZeMosaicGUI:
             # --- NOUVEAUX ARGUMENTS POUR LE ROGNAGE ---
             apply_master_tile_crop_val,
             master_tile_crop_percent_val,
-            self.save_final_uint16_var.get()
+            self.save_final_uint16_var.get(),
+            False
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
         
