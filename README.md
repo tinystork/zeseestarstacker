@@ -315,7 +315,7 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
 
- - `enable_interbatch_reproj`: when true, reproject each batch using the project's reference WCS
+- `reproject_between_batches`: when true, reproject each batch using the project's reference WCS
 
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
