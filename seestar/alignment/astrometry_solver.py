@@ -502,7 +502,7 @@ class AstrometrySolver:
 
 
 
-# --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
+    # --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
 
     def _try_solve_local_ansvr(self, image_path, fits_header,
                                ansvr_user_provided_path,
@@ -701,14 +701,9 @@ class AstrometrySolver:
         self._log("Pixel scale derivation failed due to missing keywords", "DEBUG")
         return None
 
+
     # ... (méthodes _try_solve_astap, _solve_astrometry_net_web, _parse_wcs_file_content, _update_fits_header_with_wcs existantes) ...
     # Note: la méthode _try_solve_astap est celle que tu as déjà modifiée pour le nettoyage.
-
-# --- END OF FILE seestar/alignment/astrometry_solver.py ---
-
-
-
-# --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
 
     def _try_solve_astap(
         self,
