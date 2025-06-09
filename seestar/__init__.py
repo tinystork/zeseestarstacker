@@ -5,7 +5,7 @@ Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
 """
 
-__version__ = "3.0.0" # Version incrémentée - zemosaic intégré
+__version__ = "3.0.0"  # Version incrémentée - zemosaic intégré
 __author__ = "Tinystork"
 
 # Core functionalities (unchanged from your original structure)
@@ -17,17 +17,17 @@ from seestar.core import (
     save_fits_image,
     save_preview_image,
     estimate_batch_size,
-    apply_denoise # Keep apply_denoise function available even if GUI option removed
+    apply_denoise,  # Keep apply_denoise available if GUI option removed
 )
 
 # Tools (updated imports based on the new stretch.py)
 from seestar.tools import (
-    StretchPresets, # Changed from Stretch class
-    ColorCorrection, # Added
-    apply_auto_stretch, # Added helper
-    apply_auto_white_balance, # Added helper
-    apply_enhanced_stretch, # Kept this name, assuming it's useful elsewhere
-    save_fits_as_png # Kept
+    StretchPresets,  # Changed from Stretch class
+    ColorCorrection,  # Added
+    apply_auto_stretch,  # Added helper
+    apply_auto_white_balance,  # Added helper
+    apply_enhanced_stretch,  # Kept this name, assuming it's useful elsewhere
+    save_fits_as_png  # Kept
 )
 
 from seestar.enhancement import reproject_utils
