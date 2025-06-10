@@ -94,13 +94,13 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             value=getattr(self.parent_gui.settings, 'ansvr_host_port', '127.0.0.1:8080')
         )
 
-        self.reproject_batches_var = tk.BooleanVar(
+        self.reproject_between_batches_var = tk.BooleanVar(
             value=getattr(
                 self.parent_gui.settings, 'reproject_between_batches', False
             )
         )
 
-        self.reproject_batches_var.trace_add('write', lambda *args: self._update_warning())
+        self.reproject_between_batches_var.trace_add('write', lambda *args: self._update_warning())
         self.local_solver_choice_var.trace_add('write', lambda *args: self._update_warning())
 
         # Construction de l'interface utilisateur
@@ -191,7 +191,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
     def _update_warning(self, *args):
         show = False
         choice = self.local_solver_choice_var.get()
-        if self.reproject_batches_var.get():
+        if self.reproject_between_batches_var.get():
             if choice == 'astap' and not self.astap_path_var.get().strip():
                 show = True
             elif choice == 'ansvr' and not self.ansvr_host_port_var.get().strip():
@@ -347,7 +347,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         reproject_cb = ttk.Checkbutton(
             main_frame,
             text=self.tr("enable_batch_reproject", default="Enable inter-batch reprojection (requires WCS)"),
-            variable=self.reproject_batches_var,
+            variable=self.reproject_between_batches_var,
         )
         reproject_cb.pack(anchor=tk.W, pady=(10, 0))
         ToolTip(reproject_cb, lambda: self.tr("tooltip_enable_batch_reproject", default="Requires a working solver (ASTAP, Astrometry.net, or Ansvr)"))
@@ -614,7 +614,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         cluster_threshold = self.cluster_threshold_var.get()
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
         ansvr_host_port = self.ansvr_host_port_var.get().strip()
-        reproject_batches = self.reproject_batches_var.get()
+        reproject_batches = self.reproject_between_batches_var.get()
 
         astrometry_dir = self.astrometry_solve_field_dir_var.get().strip()
 
@@ -655,9 +655,9 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         self.parent_gui.settings.ansvr_host_port = ansvr_host_port
         self.parent_gui.settings.reproject_between_batches = reproject_batches
-        if hasattr(self.parent_gui, 'reproject_batches_var'):
+        if hasattr(self.parent_gui, 'reproject_between_batches_var'):
             try:
-                self.parent_gui.reproject_batches_var.set(reproject_batches)
+                self.parent_gui.reproject_between_batches_var.set(reproject_batches)
             except Exception:
                 pass
 
