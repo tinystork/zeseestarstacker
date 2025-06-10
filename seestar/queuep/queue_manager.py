@@ -5143,15 +5143,19 @@ class SeestarQueuedStacker:
                 
                 self._close_memmaps() 
                 
+                eps = 1e-9
                 final_wht_map_for_postproc = np.maximum(final_wht_map_2d_from_memmap, 0.0)
-                wht_for_div_classic = np.maximum(final_wht_map_2d_from_memmap.astype(np.float64), 1e-9)
-                wht_for_div_classic_broadcastable = wht_for_div_classic[:, :, np.newaxis]
-                
-                with np.errstate(divide='ignore', invalid='ignore'): 
-                    final_image_initial_raw = final_sum / wht_for_div_classic_broadcastable
-                final_image_initial_raw = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-                self.update_progress(f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
-                print(f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+                wht_safe = np.maximum(final_wht_map_2d_from_memmap, eps)[..., np.newaxis]
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    final_image_initial_raw = final_sum / wht_safe
+                final_image_initial_raw = np.nan_to_num(final_image_initial_raw,
+                                                      nan=0.0, posinf=0.0, neginf=0.0)
+                final_image_initial_raw = final_image_initial_raw.astype(np.float32)
+                self.update_progress(
+                    f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+                print(
+                    f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
 
         except Exception as e_get_raw:
             self.processing_error = f"Erreur obtention donnees brutes finales: {e_get_raw}"
