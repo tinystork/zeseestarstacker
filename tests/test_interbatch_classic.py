@@ -29,7 +29,7 @@ class DummyStacker:
         self.reference_wcs_object = make_wcs(shape=self.memmap_shape[:2])
         self.cumulative_sum_memmap = np.zeros(self.memmap_shape, dtype=np.float32)
         self.cumulative_wht_memmap = np.zeros(self.memmap_shape[:2], dtype=np.float32)
-        self.enable_inter_batch_reprojection = True
+        self.reproject_between_batches = True
         self.images_in_cumulative_stack = 0
 
     def _reproject_batch_to_reference(self, img, wht, wcs_in):
