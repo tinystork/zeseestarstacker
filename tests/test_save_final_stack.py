@@ -17,8 +17,10 @@ if "seestar.gui" not in sys.modules:
     gui_pkg = types.ModuleType("seestar.gui")
     gui_pkg.__path__ = []
     settings_mod = types.ModuleType("seestar.gui.settings")
+
     class DummySettingsManager:
         pass
+
     settings_mod.SettingsManager = DummySettingsManager
     hist_mod = types.ModuleType("seestar.gui.histogram_widget")
     hist_mod.HistogramWidget = object
@@ -32,8 +34,10 @@ if "seestar.gui" not in sys.modules:
 
 qm = importlib.import_module("seestar.queuep.queue_manager")
 
+
 class Dummy:
     pass
+
 
 def _make_obj(tmp_path, save_as_float32):
     obj = Dummy()
@@ -93,23 +97,14 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
     obj.preserve_linear_output = True
 
     shape = (2, 2)
-    sci_arrays = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
-    wht_arrays = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
-
     from drizzle.resample import Drizzle
 
-    obj.incremental_drizzle_objects = [
-        Drizzle(out_img=sci_arrays[i], out_wht=wht_arrays[i], out_shape=shape)
-        for i in range(3)
-    ]
-    # Manually fill arrays after initialization to avoid Drizzle checks on exptime
-    sci_arrays[0][:] = 1.0
-    sci_arrays[1][:] = 2.0
-    sci_arrays[2][:] = 3.0
-    for arr in wht_arrays:
-        arr[:] = 1.0
-    obj.incremental_drizzle_sci_arrays = []
-    obj.incremental_drizzle_wht_arrays = []
+    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
+    obj.incremental_drizzle_objects[0].out_img[:] = 1.0
+    obj.incremental_drizzle_objects[1].out_img[:] = 2.0
+    obj.incremental_drizzle_objects[2].out_img[:] = 3.0
+    for d in obj.incremental_drizzle_objects:
+        d.out_wht[:] = 1.0
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,

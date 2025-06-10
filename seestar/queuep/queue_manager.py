@@ -340,10 +340,8 @@ class SeestarQueuedStacker:
         self.total_exposure_seconds = 0.0 
         self.intermediate_drizzle_batch_files = [] 
         
-        self.incremental_drizzle_objects = []     
-        self.incremental_drizzle_sci_arrays = []  
-        self.incremental_drizzle_wht_arrays = []  
-        logger.debug("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
+        self.incremental_drizzle_objects = []
+        logger.debug("  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide.")
 
         if settings is not None:
             try:
@@ -640,21 +638,14 @@ class SeestarQueuedStacker:
 
             self.update_progress(f"💧 Initialisation des objets Drizzle persistants pour mode Incrémental (Shape: {current_output_shape_hw_for_accum_or_driz})...")
             self.incremental_drizzle_objects = []
-            self.incremental_drizzle_sci_arrays = []
-            self.incremental_drizzle_wht_arrays = []
-            num_channels_driz = 3 
+            num_channels_driz = 3
 
             try:
                 for _ in range(num_channels_driz):
-                    sci_arr = np.zeros(current_output_shape_hw_for_accum_or_driz, dtype=np.float32)
-                    wht_arr = np.zeros(current_output_shape_hw_for_accum_or_driz, dtype=np.float32)
-                    self.incremental_drizzle_sci_arrays.append(sci_arr)
-                    self.incremental_drizzle_wht_arrays.append(wht_arr)
-                    
-                    driz_obj = Drizzle( # Assumes Drizzle is imported
-                        out_img=sci_arr, out_wht=wht_arr,
+                    driz_obj = Drizzle(
                         out_shape=current_output_shape_hw_for_accum_or_driz,
-                        kernel=self.drizzle_kernel, fillval=str(getattr(self, "drizzle_fillval", "0.0"))
+                        kernel=self.drizzle_kernel,
+                        fillval=str(getattr(self, "drizzle_fillval", "0.0"))
                     )
                     self.incremental_drizzle_objects.append(driz_obj)
                 logger.debug(f"  -> {len(self.incremental_drizzle_objects)} objets Drizzle persistants créés pour mode Incrémental.")
@@ -699,8 +690,6 @@ class SeestarQueuedStacker:
                 logger.debug(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
                 
                 self.incremental_drizzle_objects = []
-                self.incremental_drizzle_sci_arrays = []
-                self.incremental_drizzle_wht_arrays = []
 
             except (IOError, OSError, ValueError, TypeError) as e_memmap:
                 self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
@@ -3768,16 +3757,21 @@ class SeestarQueuedStacker:
                     if weight_map_param_for_add is not None:
                         logger.debug(f"                         weight_map range [{np.min(weight_map_param_for_add):.3g}, {np.max(weight_map_param_for_add):.3g}]")
                     
-                    self.incremental_drizzle_objects[ch_idx].add_image(
-                        data=channel_data_2d, 
+                    driz_obj = self.incremental_drizzle_objects[ch_idx]
+                    driz_obj.add_image(
+                        data=channel_data_2d,
                         pixmap=pixmap_for_this_file,
-                        exptime=exptime_for_drizzle_add, 
-                        in_units=in_units_for_drizzle_add, 
-                        pixfrac=self.drizzle_pixfrac, 
-                        weight_map=weight_map_param_for_add 
+                        exptime=exptime_for_drizzle_add,
+                        in_units=in_units_for_drizzle_add,
+                        pixfrac=self.drizzle_pixfrac,
+                        weight_map=weight_map_param_for_add,
                     )
-                    logger.debug(f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}]")
-                    logger.debug(f"                             out_wht range [{np.min(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}]")
+                    logger.debug(
+                        f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]"
+                    )
+                    logger.debug(
+                        f"                             out_wht range [{np.min(driz_obj.out_wht):.3g}, {np.max(driz_obj.out_wht):.3g}]"
+                    )
 
                 files_added_to_drizzle_this_batch += 1
                 self.images_in_cumulative_stack += 1 
@@ -3810,18 +3804,14 @@ class SeestarQueuedStacker:
 
         self.update_progress(f"   -> Préparation aperçu Drizzle Incrémental VRAI (Lot #{current_batch_num})...")
         try:
-            if self.preview_callback and self.incremental_drizzle_sci_arrays and self.incremental_drizzle_wht_arrays:
+            if self.preview_callback and self.incremental_drizzle_objects:
                 avg_img_channels_preview = []
                 for c in range(num_output_channels):
-                    # Pour l'aperçu, on veut afficher l'image moyenne estimée: out_img / out_wht (où out_wht est non nul)
-                    # Cependant, out_img est déjà un "flux" (data*wt/exptime). out_wht est sum(wt^2/exptime).
-                    # Une meilleure approximation de l'image moyenne est sci_arrays[c] / sqrt(wht_arrays[c]) si wt=1.
-                    # Ou plus simplement, juste afficher sci_arrays[c] (out_img), qui est déjà une sorte de moyenne pondérée.
-                    
-                    # Pour l'instant, on affiche directement sci_arrays[c] (qui est out_img de Drizzle)
-                    # car la division par out_wht peut être instable si out_wht est petit ou a des artefacts.
-                    preview_channel_data = self.incremental_drizzle_sci_arrays[c].astype(np.float32)
-                    avg_img_channels_preview.append(np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0))
+                    driz_obj = self.incremental_drizzle_objects[c]
+                    preview_channel_data = driz_obj.out_img.astype(np.float32)
+                    avg_img_channels_preview.append(
+                        np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0)
+                    )
                 
                 preview_data_HWC_raw = np.stack(avg_img_channels_preview, axis=-1)
                 min_p, max_p = np.nanmin(preview_data_HWC_raw), np.nanmax(preview_data_HWC_raw)
