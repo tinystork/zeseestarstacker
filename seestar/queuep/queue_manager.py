@@ -334,11 +334,12 @@ class SeestarQueuedStacker:
         self.apply_feathering = False
         self.feather_blur_px = 256
         
-        self.current_batch_data = [] 
-        self.current_stack_header = None 
-        self.images_in_cumulative_stack = 0 
-        self.total_exposure_seconds = 0.0 
-        self.intermediate_drizzle_batch_files = [] 
+        self.current_batch_data = []
+        self.current_stack_header = None
+        self.images_in_cumulative_stack = 0
+        self.cumulative_drizzle_data = None
+        self.total_exposure_seconds = 0.0
+        self.intermediate_drizzle_batch_files = []
         
         self.incremental_drizzle_objects = []
         logger.debug("  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide.")
@@ -707,6 +708,7 @@ class SeestarQueuedStacker:
         self.processed_files.clear()
         with self.folders_lock: self.additional_folders = []
         self.current_batch_data = []; self.current_stack_header = None; self.images_in_cumulative_stack = 0
+        self.cumulative_drizzle_data = None
         self.total_exposure_seconds = 0.0; self.final_stacked_path = None; self.processing_error = None
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
         self.stacked_batches_count = 0; self.total_batches_estimated = 0
@@ -3824,8 +3826,9 @@ class SeestarQueuedStacker:
                     preview_data_HWC_norm = np.zeros_like(preview_data_HWC_raw)
                 
                 preview_data_HWC_final = np.clip(preview_data_HWC_norm, 0.0, 1.0).astype(np.float32)
-                self.current_stack_data = preview_data_HWC_final 
-                self._update_preview() 
+                self.current_stack_data = preview_data_HWC_final
+                self.cumulative_drizzle_data = preview_data_HWC_final
+                self._update_preview_incremental_drizzle()
                 logger.debug(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
             else:
                 logger.debug(f"    WARN QM [ProcIncrDrizLoop M81_Scale_2_Full]: Impossible de mettre à jour l'aperçu Driz Incr VRAI.")
