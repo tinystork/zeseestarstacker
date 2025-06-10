@@ -4212,7 +4212,14 @@ class SeestarQueuedStacker:
                     f"WHT {pre_wht_min:.3f}->{post_wht_min:.3f}, {pre_wht_max:.3f}->{post_wht_max:.3f}"
                 )
                 if np.isclose(pre_sum_min, post_sum_min) and np.isclose(pre_sum_max, post_sum_max):
-                    print("WARNING QM [_combine_batch_result]: cumulative SUM memmap unchanged after +=, possible dtype/broadcasting issue")
+                    warn_msg = (
+                        f"⚠️ Batch #{current_batch_num} addition produced no change to cumulative SUM. "
+                        "Possible dtype/broadcast issue."
+                    )
+                    print(
+                        "WARNING QM [_combine_batch_result]: cumulative SUM memmap unchanged after +=, possible dtype/broadcasting issue"
+                    )
+                    self.update_progress(warn_msg, "WARN")
             except Exception as dbg_e:
                 print(f"DEBUG QM [_combine_batch_result SUM/W]: erreur stats apres += : {dbg_e}")
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
