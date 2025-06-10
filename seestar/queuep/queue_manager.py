@@ -1621,9 +1621,16 @@ class SeestarQueuedStacker:
 
 
             # --- 1.A Plate-solving de la référence ---
-            self.update_progress("DEBUG WORKER: Section 1.A - Plate-solving de la référence...")
-            self.reference_wcs_object = None 
-            temp_wcs_ancre = None # Spécifique pour la logique mosaïque locale
+            if self.drizzle_active_session or self.is_mosaic_run or self.reproject_between_batches:
+                self.update_progress(
+                    "DEBUG WORKER: Section 1.A - Plate-solving de la référence..."
+                )
+            else:
+                logger.debug(
+                    "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
+                )
+            self.reference_wcs_object = None
+            temp_wcs_ancre = None  # Spécifique pour la logique mosaïque locale
 
             logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
             logger.debug(f"    self.is_mosaic_run = {self.is_mosaic_run}")
