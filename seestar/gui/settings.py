@@ -171,7 +171,7 @@ class SettingsManager:
 
             self.reproject_between_batches = getattr(
                 gui_instance,
-                'reproject_batches_var',
+                'reproject_between_batches_var',
                 tk.BooleanVar(value=default_values_from_code.get('reproject_between_batches', False)),
             ).get()
 
@@ -373,7 +373,7 @@ class SettingsManager:
 
             getattr(gui_instance, 'astrometry_solve_field_dir_var', tk.StringVar()).set(self.astrometry_solve_field_dir)
 
-            getattr(gui_instance, 'reproject_batches_var', tk.BooleanVar()).set(self.reproject_between_batches)
+            getattr(gui_instance, 'reproject_between_batches_var', tk.BooleanVar()).set(self.reproject_between_batches)
 
             
             print("DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI.") # Version Log
