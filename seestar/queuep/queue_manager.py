@@ -292,6 +292,10 @@ class SeestarQueuedStacker:
 
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
         logger.debug(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
+        self.preserve_linear_output = False
+        logger.debug(
+            f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
+        )
         # Option de reprojection des lots intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -5014,10 +5018,12 @@ class SeestarQueuedStacker:
         logger.debug("\n" + "=" * 80)
         self.update_progress(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
         logger.debug(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
-        
-        save_as_float32_setting = getattr(self, 'save_final_as_float32', False) 
+
+        save_as_float32_setting = getattr(self, 'save_final_as_float32', False)
+        preserve_linear_output_setting = getattr(self, 'preserve_linear_output', False)
         self.update_progress(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
         logger.debug(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
+        logger.debug(f"  DEBUG QM: preserve_linear_output active?: {preserve_linear_output_setting}")
         
         is_reproject_mosaic_mode = (output_filename_suffix == "_mosaic_reproject" and 
                                     drizzle_final_sci_data is not None and 
@@ -5199,50 +5205,62 @@ class SeestarQueuedStacker:
             self.raw_adu_data_for_ui_histogram = None
 
         # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
-        logger.debug(
-            f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
-        )
-        data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
-        if data_for_percentile_norm.ndim == 3:
-            luminance = (
-                0.299 * data_for_percentile_norm[..., 0]
-                + 0.587 * data_for_percentile_norm[..., 1]
-                + 0.114 * data_for_percentile_norm[..., 2]
-            )
-        else:
-            luminance = data_for_percentile_norm
-        finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
-
-        if finite_luminance.size > 20:
-            bp_val = np.percentile(finite_luminance, 0.1)
-            wp_val = np.percentile(finite_luminance, 99.9)
-            if wp_val <= bp_val + 1e-7:
-                min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
-                if max_finite > min_finite + 1e-7:
-                    bp_val, wp_val = min_finite, max_finite
-                else:
-                    bp_val, wp_val = 0.0, max(1e-7, max_finite)
-            if wp_val <= bp_val:
-                wp_val = bp_val + 1e-7
-            final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
-                wp_val - bp_val
-            )
+        if preserve_linear_output_setting:
             logger.debug(
-                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+                "  DEBUG QM [_save_final_stack]: preserve_linear_output actif - saut de la normalisation par percentiles."
+            )
+            final_image_normalized_for_cosmetics = np.clip(
+                np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32),
+                0.0,
+                1.0,
             )
         else:
-            max_overall = np.nanmax(data_for_percentile_norm)
-            if max_overall > 1e-9:
-                final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+            logger.debug(
+                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
+            )
+            data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+            if data_for_percentile_norm.ndim == 3:
+                luminance = (
+                    0.299 * data_for_percentile_norm[..., 0]
+                    + 0.587 * data_for_percentile_norm[..., 1]
+                    + 0.114 * data_for_percentile_norm[..., 2]
+                )
             else:
-                final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
-            logger.debug(
-                "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
+                luminance = data_for_percentile_norm
+            finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
+
+            if finite_luminance.size > 20:
+                bp_val = np.percentile(finite_luminance, 0.1)
+                wp_val = np.percentile(finite_luminance, 99.9)
+                if wp_val <= bp_val + 1e-7:
+                    min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
+                    if max_finite > min_finite + 1e-7:
+                        bp_val, wp_val = min_finite, max_finite
+                    else:
+                        bp_val, wp_val = 0.0, max(1e-7, max_finite)
+                if wp_val <= bp_val:
+                    wp_val = bp_val + 1e-7
+                final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
+                    wp_val - bp_val
+                )
+                logger.debug(
+                    f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+                )
+            else:
+                max_overall = np.nanmax(data_for_percentile_norm)
+                if max_overall > 1e-9:
+                    final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+                else:
+                    final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
+                logger.debug(
+                    "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
+                )
+
+            final_image_normalized_for_cosmetics = np.clip(
+                final_image_normalized_for_cosmetics, 0.0, 1.0
             )
 
-        final_image_normalized_for_cosmetics = np.clip(
-            final_image_normalized_for_cosmetics, 0.0, 1.0
-        ).astype(np.float32)
+        final_image_normalized_for_cosmetics = final_image_normalized_for_cosmetics.astype(np.float32)
         logger.debug(
             f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
         )
@@ -5621,6 +5639,7 @@ class SeestarQueuedStacker:
 
                          local_solver_preference="none",
                          save_as_float32=False,
+                         preserve_linear_output=False,
                          reproject_between_batches=False
                          ):
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
@@ -5745,6 +5764,10 @@ class SeestarQueuedStacker:
 
         self.save_final_as_float32 = bool(save_as_float32)
         logger.debug(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
+        self.preserve_linear_output = bool(preserve_linear_output)
+        logger.debug(
+            f"    [OutputFormat] self.preserve_linear_output (attribut d'instance) mis à : {self.preserve_linear_output} (depuis argument {preserve_linear_output})"
+        )
         self.reproject_between_batches = bool(reproject_between_batches)
 
         # --- FIN NOUVEAU ---
