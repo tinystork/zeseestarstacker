@@ -29,6 +29,10 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Customizable: Supports custom application icon and preview background image.
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
+*   **Smart Quality Control:**
+    *   SNR-based weighting
+    *   Star count/sharpness analysis
+*   **Memory Optimization:** Batch processing with auto RAM management
 
 **(Français)**
 
@@ -49,6 +53,10 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Personnalisable : Supporte une icône d'application et une image de fond d'aperçu personnalisées.
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
+*   **Contrôle Qualité Intelligent :**
+    *   Pondération par rapport signal/bruit (SNR)
+    *   Analyse du nombre/netteté des étoiles
+*   **Optimisation Mémoire :** Traitement par lots avec gestion automatique de la RAM
 
 ---
 
