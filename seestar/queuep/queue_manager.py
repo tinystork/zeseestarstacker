@@ -5220,6 +5220,7 @@ class SeestarQueuedStacker:
         else:
             self.raw_adu_data_for_ui_histogram = None
 
+
         if preserve_linear_output:
             logger.debug(
                 "  DEBUG QM [_save_final_stack]: preserve_linear_output=True -> Pas de normalisation par percentiles."
@@ -5275,7 +5276,46 @@ class SeestarQueuedStacker:
             ).astype(np.float32)
             logger.debug(
                 f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
+
             )
+            data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+            if data_for_percentile_norm.ndim == 3:
+                luminance = (
+                    0.299 * data_for_percentile_norm[..., 0]
+                    + 0.587 * data_for_percentile_norm[..., 1]
+                    + 0.114 * data_for_percentile_norm[..., 2]
+                )
+            else:
+                luminance = data_for_percentile_norm
+            finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
+
+            if finite_luminance.size > 20:
+                bp_val = np.percentile(finite_luminance, 0.1)
+                wp_val = np.percentile(finite_luminance, 99.9)
+                if wp_val <= bp_val + 1e-7:
+                    min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
+                    if max_finite > min_finite + 1e-7:
+                        bp_val, wp_val = min_finite, max_finite
+                    else:
+                        bp_val, wp_val = 0.0, max(1e-7, max_finite)
+                if wp_val <= bp_val:
+                    wp_val = bp_val + 1e-7
+                final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
+                    wp_val - bp_val
+                )
+                logger.debug(
+                    f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+                )
+            else:
+                max_overall = np.nanmax(data_for_percentile_norm)
+                if max_overall > 1e-9:
+                    final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+                else:
+                    final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
+                logger.debug(
+                    "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
+                )
+
 
         effective_image_count = self.images_in_cumulative_stack
 
@@ -5331,11 +5371,14 @@ class SeestarQueuedStacker:
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
         else: # Sauvegarde en uint16
-            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...") 
+            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
             logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
-            # data_after_postproc est l'image [0,1] après tous les post-traitements cosmétiques
-            data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16) 
-            data_for_primary_hdu_save = data_scaled_uint16 
+            # data_after_postproc est l'image après tous les post-traitements cosmétiques
+            if preserve_linear_output_flag:
+                data_scaled_uint16 = (data_after_postproc * 65535.0).astype(np.uint16)
+            else:
+                data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            data_for_primary_hdu_save = data_scaled_uint16
             self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             final_header['BITPIX'] = 16 
