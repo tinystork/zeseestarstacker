@@ -5372,18 +5372,17 @@ class SeestarQueuedStacker:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); self.final_stacked_path = None
 
         # --- ÉTAPE 7: Sauvegarde preview PNG ---
-        # Utiliser final_image_initial_raw et laisser save_preview_image appliquer son propre stretch par défaut.
-        if final_image_initial_raw is not None:
-            self.update_progress(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (final_image_initial_raw) - Range: [{np.nanmin(final_image_initial_raw):.4f}, {np.nanmax(final_image_initial_raw):.4f}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
-            logger.debug(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (final_image_initial_raw) - Range: [{np.nanmin(final_image_initial_raw):.4f}, {np.nanmax(final_image_initial_raw):.4f}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
+        # Utiliser data_after_postproc (qui est l'image [0,1] après tous les post-traitements)
+        # et laisser save_preview_image appliquer son propre stretch par défaut.
+        if data_after_postproc is not None: 
+            self.update_progress(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
+            logger.debug(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
             try:
-                save_preview_image(final_image_initial_raw, preview_path, apply_stretch=False)
-                self.raw_adu_data_for_ui_histogram = final_image_initial_raw
-                self.update_progress("     ✅ Sauvegarde Preview PNG terminee.")
-            except Exception as prev_err:
-                self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
-        else:
-            self.update_progress("ⓘ Aucune image a sauvegarder pour preview PNG (final_image_initial_raw est None).");
+                save_preview_image(data_after_postproc, preview_path, 
+                                   enhanced_stretch=False) # ou True si vous préférez le stretch "enhanced" pour le PNG
+                self.update_progress("     ✅ Sauvegarde Preview PNG terminee.") 
+            except Exception as prev_err: self.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.") 
+        else: self.update_progress("ⓘ Aucune image a sauvegarder pour preview PNG (data_after_postproc est None)."); 
             
         self.update_progress(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc}).")
         logger.debug("\n" + "=" * 80); logger.debug(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."); logger.debug("=" * 80 + "\n")
