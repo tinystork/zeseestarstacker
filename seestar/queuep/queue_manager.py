@@ -4928,13 +4928,6 @@ class SeestarQueuedStacker:
 
         return (sci_fits, wht_paths) if solved_ok else (None, None)
 
-    def _compute_output_grid_from_batches(self, batch_files):
-        """Calcule la grille finale (shape & WCS) à partir du 1er lot résolu."""
-        with fits.open(batch_files[0][0]) as hdul:
-            wcs_first = WCS(hdul[0].header, naxis=2)
-            h, w = hdul[0].data.shape[-2:]
-        return wcs_first, (h, w)
-
     def _reproject_classic_batches(self, batch_files):
 
         """Reproject saved classic batches to a common grid using reproject_and_coadd."""
