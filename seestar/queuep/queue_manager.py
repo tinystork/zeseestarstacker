@@ -4013,6 +4013,19 @@ class SeestarQueuedStacker:
 
         expected_shape_hw = self.memmap_shape[:2]
 
+        try:
+            print(
+                f"DEBUG QM [_combine_batch_result]: stacked_batch_data_np shape={stacked_batch_data_np.shape}, "
+                f"min={np.min(stacked_batch_data_np):.3f}, max={np.max(stacked_batch_data_np):.3f}"
+            )
+            print(
+                f"DEBUG QM [_combine_batch_result]: batch_coverage_map_2d shape={batch_coverage_map_2d.shape}, "
+                f"min={np.min(batch_coverage_map_2d):.3f}, max={np.max(batch_coverage_map_2d):.3f}"
+            )
+        except Exception as dbg_err:
+            print(f"DEBUG QM [_combine_batch_result]: erreur stats initiales: {dbg_err}")
+
+
         
         if not self.reproject_between_batches:
             input_wcs = batch_wcs
@@ -4052,44 +4065,66 @@ class SeestarQueuedStacker:
 
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
-            self.update_progress(
-                f"❌ Batch #{current_batch_num} ignoré: shape carte couverture {batch_coverage_map_2d.shape} au lieu de {expected_shape_hw}.",
-                "ERROR",
-            )
-            print(
-                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot. "
-                f"expected={expected_shape_hw}, got={batch_coverage_map_2d.shape}"
-            )
-            try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
-            except: self.failed_stack_count += 1 # Au moins une image
-            return
+            handled_cov = False
+            if batch_coverage_map_2d.shape == expected_shape_hw[::-1]:
+                batch_coverage_map_2d = batch_coverage_map_2d.T
+                handled_cov = True
+                print("DEBUG QM [_combine_batch_result]: transposed coverage map to match memmap_shape")
+            if not handled_cov:
+                self.update_progress(
+                    f"❌ Batch #{current_batch_num} ignoré: shape carte couverture {batch_coverage_map_2d.shape} au lieu de {expected_shape_hw}.",
+                    "ERROR",
+                )
+                print(
+                    f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot. "
+                    f"expected={expected_shape_hw}, got={batch_coverage_map_2d.shape}"
+                )
+                try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
+                except: self.failed_stack_count += 1 # Au moins une image
+                return
 
         # S'assurer que stacked_batch_data_np a la bonne dimension pour la multiplication (HWC ou HW)
         is_color_batch_data = (stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3)
         if is_color_batch_data and stacked_batch_data_np.shape != self.memmap_shape:
-            self.update_progress(
-                f"❌ Batch #{current_batch_num} ignoré: image couleur shape {stacked_batch_data_np.shape} au lieu de {self.memmap_shape}.",
-                "ERROR",
-            )
-            print(
-                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur). "
-                f"expected={self.memmap_shape}, got={stacked_batch_data_np.shape}"
-            )
-            try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
-            except: self.failed_stack_count += 1
-            return
+            handled_img = False
+            if stacked_batch_data_np.shape[:2] == self.memmap_shape[:2][::-1]:
+                stacked_batch_data_np = stacked_batch_data_np.transpose(1, 0, 2)
+                handled_img = True
+                print("DEBUG QM [_combine_batch_result]: transposed stacked_batch_data_np from WHC to HWC")
+            elif stacked_batch_data_np.shape[0] == 3 and stacked_batch_data_np.shape[1:] == self.memmap_shape[:2]:
+                stacked_batch_data_np = stacked_batch_data_np.transpose(1, 2, 0)
+                handled_img = True
+                print("DEBUG QM [_combine_batch_result]: rearranged stacked_batch_data_np from CHW to HWC")
+            if not handled_img:
+                self.update_progress(
+                    f"❌ Batch #{current_batch_num} ignoré: image couleur shape {stacked_batch_data_np.shape} au lieu de {self.memmap_shape}.",
+                    "ERROR",
+                )
+                print(
+                    f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur). "
+                    f"expected={self.memmap_shape}, got={stacked_batch_data_np.shape}"
+                )
+                try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
+                except: self.failed_stack_count += 1
+                return
         elif not is_color_batch_data and stacked_batch_data_np.ndim == 2 and stacked_batch_data_np.shape != expected_shape_hw:
-            self.update_progress(
-                f"❌ Batch #{current_batch_num} ignoré: image N&B shape {stacked_batch_data_np.shape} au lieu de {expected_shape_hw}.",
-                "ERROR",
-            )
-            print(
-                f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B). "
-                f"expected={expected_shape_hw}, got={stacked_batch_data_np.shape}"
-            )
-            try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
-            except: self.failed_stack_count += 1
-            return
+            handled_gray = False
+            if stacked_batch_data_np.shape == expected_shape_hw[::-1]:
+                stacked_batch_data_np = stacked_batch_data_np.T
+                handled_gray = True
+                print("DEBUG QM [_combine_batch_result]: transposed gray image to match memmap_shape")
+            if not handled_gray:
+                self.update_progress(
+                    f"❌ Batch #{current_batch_num} ignoré: image N&B shape {stacked_batch_data_np.shape} au lieu de {expected_shape_hw}.",
+                    "ERROR",
+                )
+                print(
+                    f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B). "
+                    f"expected={expected_shape_hw}, got={stacked_batch_data_np.shape}"
+                )
+                try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
+                except: self.failed_stack_count += 1
+                return
         elif not is_color_batch_data and stacked_batch_data_np.ndim != 2 : # Cas N&B mais pas 2D
              self.update_progress(
                  f"❌ Batch #{current_batch_num} ignoré: dimensions image N&B inattendues {stacked_batch_data_np.shape}.",
@@ -4152,6 +4187,11 @@ class SeestarQueuedStacker:
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
             batch_wht = batch_coverage_map_2d.astype(np.float32)
 
+            pre_sum_min = float(np.min(self.cumulative_sum_memmap))
+            pre_sum_max = float(np.max(self.cumulative_sum_memmap))
+            pre_wht_min = float(np.min(self.cumulative_wht_memmap))
+            pre_wht_max = float(np.max(self.cumulative_wht_memmap))
+
             self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
             self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
             if hasattr(self.cumulative_sum_memmap, 'flush'):
@@ -4159,14 +4199,20 @@ class SeestarQueuedStacker:
             if hasattr(self.cumulative_wht_memmap, 'flush'):
                 self.cumulative_wht_memmap.flush()
             try:
-                dbg_sum_min = float(np.min(self.cumulative_sum_memmap))
-                dbg_sum_max = float(np.max(self.cumulative_sum_memmap))
-                dbg_wht_min = float(np.min(self.cumulative_wht_memmap))
-                dbg_wht_max = float(np.max(self.cumulative_wht_memmap))
+                post_sum_min = float(np.min(self.cumulative_sum_memmap))
+                post_sum_max = float(np.max(self.cumulative_sum_memmap))
+                post_wht_min = float(np.min(self.cumulative_wht_memmap))
+                post_wht_max = float(np.max(self.cumulative_wht_memmap))
                 print(
-                    f"DEBUG QM [_combine_batch_result SUM/W]: after += flush -> SUM min={dbg_sum_min:.3f}, max={dbg_sum_max:.3f}; "
-                    f"WHT min={dbg_wht_min:.3f}, max={dbg_wht_max:.3f}"
+                    f"DEBUG QM [_combine_batch_result SUM/W]: after += flush -> SUM min={post_sum_min:.3f}, max={post_sum_max:.3f}; "
+                    f"WHT min={post_wht_min:.3f}, max={post_wht_max:.3f}"
                 )
+                print(
+                    f"DEBUG QM [_combine_batch_result]: memmap change SUM {pre_sum_min:.3f}->{post_sum_min:.3f}, {pre_sum_max:.3f}->{post_sum_max:.3f}; "
+                    f"WHT {pre_wht_min:.3f}->{post_wht_min:.3f}, {pre_wht_max:.3f}->{post_wht_max:.3f}"
+                )
+                if np.isclose(pre_sum_min, post_sum_min) and np.isclose(pre_sum_max, post_sum_max):
+                    print("WARNING QM [_combine_batch_result]: cumulative SUM memmap unchanged after +=, possible dtype/broadcasting issue")
             except Exception as dbg_e:
                 print(f"DEBUG QM [_combine_batch_result SUM/W]: erreur stats apres += : {dbg_e}")
             print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
