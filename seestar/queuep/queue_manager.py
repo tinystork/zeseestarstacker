@@ -5120,11 +5120,10 @@ class SeestarQueuedStacker:
             elif is_true_incremental_drizzle_from_objects:
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI")
                 logger.debug("  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI")
-                if not self.incremental_drizzle_sci_arrays or not self.incremental_drizzle_wht_arrays or \
-                   len(self.incremental_drizzle_sci_arrays) != 3 or len(self.incremental_drizzle_wht_arrays) != 3:
-                    raise ValueError("Donnees Drizzle incremental (sci/wht arrays) invalides ou manquantes.")
-                sci_arrays_hw_list = self.incremental_drizzle_sci_arrays 
-                wht_arrays_hw_list = self.incremental_drizzle_wht_arrays                 
+                if not self.incremental_drizzle_objects or len(self.incremental_drizzle_objects) != 3:
+                    raise ValueError("Objets Drizzle incremental invalides ou manquants.")
+                sci_arrays_hw_list = [d.out_img for d in self.incremental_drizzle_objects]
+                wht_arrays_hw_list = [d.out_wht for d in self.incremental_drizzle_objects]
                 avg_img_channels_list = []
                 processed_wht_channels_list_for_mean = [] 
                 for c in range(3): 
