@@ -5009,13 +5009,28 @@ class SeestarQueuedStacker:
 
 
     def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False,
-                          drizzle_final_sci_data=None, drizzle_final_wht_data=None):
+                          drizzle_final_sci_data=None, drizzle_final_wht_data=None,
+                          preserve_linear_output: bool = False):
         """
         Calcule l'image finale, applique les post-traitements et sauvegarde.
         MODIFIED:
         - self.last_saved_data_for_preview (pour GUI) est maintenant l'image normalisée [0,1] SANS stretch cosmétique du backend.
         - save_preview_image (pour PNG) est appelé avec apply_stretch=True sur ces données [0,1].
         - La sauvegarde FITS reste basée sur self.raw_adu_data_for_ui_histogram (si float32) ou les données cosmétiques [0,1] (si uint16).
+        Parameters
+        ----------
+        output_filename_suffix : str, optional
+            Suffixe ajouté au nom du fichier de sortie.
+        stopped_early : bool, optional
+            Indique si le traitement s'est arrêté prématurément.
+        drizzle_final_sci_data : ndarray, optional
+            Données science fournies pour les modes Drizzle/Mosaïque.
+        drizzle_final_wht_data : ndarray, optional
+            Carte de poids correspondante.
+        preserve_linear_output : bool, optional
+            Si ``True``, saute la normalisation par percentiles et conserve la
+            dynamique linéaire de ``final_image_initial_raw``.
+
         Version: V_SaveFinal_CorrectedDataFlow_1
         """
         logger.debug("\n" + "=" * 80)
@@ -5205,54 +5220,62 @@ class SeestarQueuedStacker:
         else:
             self.raw_adu_data_for_ui_histogram = None
 
-        # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
-        logger.debug(
-            f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
-        )
-        data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
-        if data_for_percentile_norm.ndim == 3:
-            luminance = (
-                0.299 * data_for_percentile_norm[..., 0]
-                + 0.587 * data_for_percentile_norm[..., 1]
-                + 0.114 * data_for_percentile_norm[..., 2]
-            )
-        else:
-            luminance = data_for_percentile_norm
-        finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
-
-        if finite_luminance.size > 20:
-            bp_val = np.percentile(finite_luminance, 0.1)
-            wp_val = np.percentile(finite_luminance, 99.9)
-            if wp_val <= bp_val + 1e-7:
-                min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
-                if max_finite > min_finite + 1e-7:
-                    bp_val, wp_val = min_finite, max_finite
-                else:
-                    bp_val, wp_val = 0.0, max(1e-7, max_finite)
-            if wp_val <= bp_val:
-                wp_val = bp_val + 1e-7
-            final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
-                wp_val - bp_val
-            )
+        if preserve_linear_output:
             logger.debug(
-                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+                "  DEBUG QM [_save_final_stack]: preserve_linear_output=True -> Pas de normalisation par percentiles."
             )
+            final_image_normalized_for_cosmetics = np.clip(
+                np.nan_to_num(final_image_initial_raw, nan=0.0), 0.0, 1.0
+            ).astype(np.float32)
         else:
-            max_overall = np.nanmax(data_for_percentile_norm)
-            if max_overall > 1e-9:
-                final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+            # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
+            logger.debug(
+                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
+            )
+            data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+            if data_for_percentile_norm.ndim == 3:
+                luminance = (
+                    0.299 * data_for_percentile_norm[..., 0]
+                    + 0.587 * data_for_percentile_norm[..., 1]
+                    + 0.114 * data_for_percentile_norm[..., 2]
+                )
             else:
-                final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
-            logger.debug(
-                "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
-            )
+                luminance = data_for_percentile_norm
+            finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
 
-        final_image_normalized_for_cosmetics = np.clip(
-            final_image_normalized_for_cosmetics, 0.0, 1.0
-        ).astype(np.float32)
-        logger.debug(
-            f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
-        )
+            if finite_luminance.size > 20:
+                bp_val = np.percentile(finite_luminance, 0.1)
+                wp_val = np.percentile(finite_luminance, 99.9)
+                if wp_val <= bp_val + 1e-7:
+                    min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
+                    if max_finite > min_finite + 1e-7:
+                        bp_val, wp_val = min_finite, max_finite
+                    else:
+                        bp_val, wp_val = 0.0, max(1e-7, max_finite)
+                if wp_val <= bp_val:
+                    wp_val = bp_val + 1e-7
+                final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
+                    wp_val - bp_val
+                )
+                logger.debug(
+                    f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+                )
+            else:
+                max_overall = np.nanmax(data_for_percentile_norm)
+                if max_overall > 1e-9:
+                    final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+                else:
+                    final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
+                logger.debug(
+                    "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
+                )
+
+            final_image_normalized_for_cosmetics = np.clip(
+                final_image_normalized_for_cosmetics, 0.0, 1.0
+            ).astype(np.float32)
+            logger.debug(
+                f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
+            )
 
         effective_image_count = self.images_in_cumulative_stack
 
