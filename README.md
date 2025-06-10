@@ -371,6 +371,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Warning: Low Variance:** Normal for very dark/cloudy frames.
 *   **App Starts with Invalid Paths:** Use "Browse" to select valid paths before starting. The app checks paths on "Start".
 *   **Quality Weighting Issues:** Try lowering exponents (< 1.0) or disabling one metric (SNR/Stars). Ensure Min Weight is low (0.05-0.15).
+*   **Zero Coverage Warning:** If logs show `Cumulative weight map sums to zero`, no pixels were accumulated. Verify all batch images share the expected shape and that reprojection is configured correctly.
 
 **(Français)**
 
@@ -380,6 +381,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Avertissement : Faible Variance :** Normal pour images très sombres/nuageuses.
 *   **L'App Démarre avec des Chemins Invalides :** Utilisez "Parcourir" pour sélectionner des chemins valides avant de démarrer. L'app vérifie les chemins au "Démarrage".
 *   **Problèmes Pondération Qualité :** Essayez de baisser les exposants (< 1.0) ou désactivez une métrique (SNR/Étoiles). Assurez-vous que Poids Min est bas (0.05-0.15).
+*   **Avertissement Couverture Zéro :** Si les logs affichent `Carte de poids cumulée entièrement nulle`, aucune image n'a été ajoutée au stack. Vérifiez la cohérence des dimensions et la configuration de la reprojection.
 
 ---
 
