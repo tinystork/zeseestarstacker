@@ -4192,6 +4192,20 @@ class SeestarQueuedStacker:
             pre_wht_min = float(np.min(self.cumulative_wht_memmap))
             pre_wht_max = float(np.max(self.cumulative_wht_memmap))
 
+            # Ensure shapes match exactly to avoid silent broadcasting
+            if batch_sum.shape != tuple(self.memmap_shape):
+                self.update_progress(
+                    f"⚠️ Batch #{current_batch_num} shape {batch_sum.shape} incompatible with memmap {self.memmap_shape}.",
+                    "WARN",
+                )
+                batch_sum = batch_sum.reshape(self.memmap_shape)
+            if batch_wht.shape != tuple(self.memmap_shape[:2]):
+                self.update_progress(
+                    f"⚠️ Batch #{current_batch_num} coverage shape {batch_wht.shape} incompatible with memmap {self.memmap_shape[:2]}",
+                    "WARN",
+                )
+                batch_wht = batch_wht.reshape(self.memmap_shape[:2])
+
             self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
             self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
             if hasattr(self.cumulative_sum_memmap, 'flush'):
