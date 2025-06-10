@@ -3715,24 +3715,19 @@ class SeestarStackerGUI:
                 else:
                     self._temp_data_for_final_histo = cosmetic_01_data_for_preview_from_backend # [0,1] pour histo
                     self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1]) pour _temp_data_for_final_histo.")
-            elif raw_adu_data_for_histo_from_backend is not None: 
+            elif raw_adu_data_for_histo_from_backend is not None:
                 self.logger.warning("    [PF_S4] 'last_saved_data_for_preview' est None. Fallback.")
+                # Utiliser directement les valeurs ADU brutes pour l'aperçu et l'histogramme
                 self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend
-                # ... (logique de normalisation pour data_to_display_in_preview_canvas si besoin)
-                try:
-                    temp_min = np.nanmin(raw_adu_data_for_histo_from_backend); temp_max = np.nanmax(raw_adu_data_for_histo_from_backend)
-                    if np.isfinite(temp_min) and np.isfinite(temp_max) and temp_max > temp_min + 1e-7:
-                        data_to_display_in_preview_canvas = (raw_adu_data_for_histo_from_backend - temp_min) / (temp_max - temp_min)
-                        data_to_display_in_preview_canvas = np.clip(data_to_display_in_preview_canvas, 0.0, 1.0)
-                    else: data_to_display_in_preview_canvas = np.zeros_like(raw_adu_data_for_histo_from_backend)
-                except Exception as e_norm: preview_load_error_msg = f"Erreur normalisation ADU pour apercu: {e_norm}"; self.logger.error(f"      [PF_S4] {preview_load_error_msg}")
+                data_to_display_in_preview_canvas = raw_adu_data_for_histo_from_backend
 
             else:
                 preview_load_error_msg = "Aucune donnee d'apercu final du backend."
                 self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
             if data_to_display_in_preview_canvas is not None:
-                self.current_preview_data = data_to_display_in_preview_canvas # C'est maintenant [0,1] NON stretché
+                # L'aperçu n'est pas stretché : il peut être en [0,1] ou en ADU brut
+                self.current_preview_data = data_to_display_in_preview_canvas
                 self.current_stack_header = final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
                 
                 # Reset des gains WB et autres ajustements cosmétiques
