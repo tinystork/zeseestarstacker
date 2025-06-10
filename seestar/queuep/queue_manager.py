@@ -5221,26 +5221,21 @@ class SeestarQueuedStacker:
                 final_image_initial_raw = np.where(invalid_wht_pixels, np.nan, final_image_initial_raw)
 
         # Stocker les données ADU pour histogramme UI uniquement si nécessaire
-        if save_as_float32_setting:
-            self.raw_adu_data_for_ui_histogram = (
-                np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32).copy()
-            )
-            logger.debug(
-                f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]"
-            )
-        else:
-            self.raw_adu_data_for_ui_histogram = None
+        self.raw_adu_data_for_ui_histogram = (
+            np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32).copy()
+        )
+        logger.debug(
+            f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]"
+        )
 
         # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
         if preserve_linear_output_setting:
             logger.debug(
                 "  DEBUG QM [_save_final_stack]: preserve_linear_output actif - saut de la normalisation par percentiles."
             )
-            final_image_normalized_for_cosmetics = np.clip(
-                np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32),
-                0.0,
-                1.0,
-            )
+            final_image_normalized_for_cosmetics = np.nan_to_num(
+                final_image_initial_raw, nan=0.0
+            ).astype(np.float32)
         else:
             logger.debug(
                 f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
@@ -5347,16 +5342,16 @@ class SeestarQueuedStacker:
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
         else: # Sauvegarde en uint16
-            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
-            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
-            # data_after_postproc est l'image après tous les post-traitements cosmétiques
-            if preserve_linear_output_flag:
-                data_scaled_uint16 = (data_after_postproc * 65535.0).astype(np.uint16)
+            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
+            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
+            raw_data = self.raw_adu_data_for_ui_histogram
+            if np.nanmax(raw_data) <= 1.0 + 1e-5:
+                data_scaled_uint16 = (np.clip(raw_data, 0.0, 1.0) * 65535.0).astype(np.uint16)
             else:
-                data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16)
+                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
             data_for_primary_hdu_save = data_scaled_uint16
-            self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
+            self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
+            logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             final_header['BITPIX'] = 16 
         
         if data_for_primary_hdu_save.ndim == 3 and data_for_primary_hdu_save.shape[2] == 3 : 
