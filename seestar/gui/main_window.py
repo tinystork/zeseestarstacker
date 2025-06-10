@@ -3701,64 +3701,72 @@ class SeestarStackerGUI:
         # --- Section 4: Mise à jour de l'Aperçu et de l'Histogramme ---
         self.logger.info("  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final...")
         try:
-            data_to_display_in_preview_canvas = None
-            self._temp_data_for_final_histo = None 
+            data_final = None
+            header_final = None
             preview_load_error_msg = None
 
-            # cosmetic_01_data_for_preview_from_backend est la donnée [0,1] NON STRETCHÉE envoyée par le backend
-            if cosmetic_01_data_for_preview_from_backend is not None:
-                data_to_display_in_preview_canvas = cosmetic_01_data_for_preview_from_backend
-                self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1] non-stretché) pour self.current_preview_data.")
-                if save_as_float32_backend_setting and raw_adu_data_for_histo_from_backend is not None:
-                    self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend # ADU-like pour histo
-                    self.logger.info("    [PF_S4] Utilisation 'raw_adu_data_for_ui_histogram' (ADU-like) pour _temp_data_for_final_histo.")
-                else:
-                    self._temp_data_for_final_histo = cosmetic_01_data_for_preview_from_backend # [0,1] pour histo
-                    self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1]) pour _temp_data_for_final_histo.")
-            elif raw_adu_data_for_histo_from_backend is not None:
-                self.logger.warning("    [PF_S4] 'last_saved_data_for_preview' est None. Fallback.")
-                # Utiliser directement les valeurs ADU brutes pour l'aperçu et l'histogramme
-                self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend
-                data_to_display_in_preview_canvas = raw_adu_data_for_histo_from_backend
-
+            if final_stack_path and os.path.exists(final_stack_path):
+                try:
+                    data_final, header_final = load_and_validate_fits(final_stack_path)
+                    self.logger.info(
+                        f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
+                    )
+                except Exception as e_load:
+                    preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
+                    self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
             else:
-                preview_load_error_msg = "Aucune donnee d'apercu final du backend."
+                preview_load_error_msg = "Fichier FITS final introuvable."
                 self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
-            if data_to_display_in_preview_canvas is not None:
-                # L'aperçu n'est pas stretché : il peut être en [0,1] ou en ADU brut
-                self.current_preview_data = data_to_display_in_preview_canvas
-                self.current_stack_header = final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
-                
-                # Reset des gains WB et autres ajustements cosmétiques
-                self.preview_r_gain.set(1.0); self.preview_g_gain.set(1.0); self.preview_b_gain.set(1.0)
-                # self.preview_stretch_method.set("Asinh") # Sera réglé par apply_auto_stretch
-                self.preview_gamma.set(1.0)
-                self.preview_brightness.set(1.0); self.preview_contrast.set(1.0); self.preview_saturation.set(1.0)
-                self.logger.info("    [PF_S4] Gains WB, Gamma, BCS remis à leurs valeurs par défaut pour l'aperçu final.")
+            if data_final is not None:
+                self.current_preview_data = data_final
+                self._temp_data_for_final_histo = data_final
+                self.current_stack_header = header_final if header_final else fits.Header()
 
-                # Mettre à jour l'histogramme AVANT d'appeler l'auto-stretch qui va lire ses données.
-                if hasattr(self, 'histogram_widget') and self.histogram_widget and self._temp_data_for_final_histo is not None:
-                    self.logger.info(f"    [PF_S4] Mise à jour de l'histogramme avec _temp_data_for_final_histo (Shape: {self._temp_data_for_final_histo.shape}) AVANT appel apply_auto_stretch.")
+                if hasattr(self, 'preview_manager') and self.preview_manager:
+                    linear_params = {
+                        "stretch_method": "Linear",
+                        "black_point": 0.0,
+                        "white_point": 1.0,
+                        "gamma": 1.0,
+                        "r_gain": 1.0,
+                        "g_gain": 1.0,
+                        "b_gain": 1.0,
+                        "brightness": 1.0,
+                        "contrast": 1.0,
+                        "saturation": 1.0,
+                    }
+                    self.preview_manager.update_preview(
+                        self.current_preview_data,
+                        linear_params,
+                        stack_count=images_stacked,
+                        total_images=images_stacked,
+                        current_batch=self.preview_current_batch,
+                        total_batches=self.preview_total_batches,
+                    )
+
+                if hasattr(self, 'histogram_widget') and self.histogram_widget:
                     self.histogram_widget.update_histogram(self._temp_data_for_final_histo)
-                
-                # Activer temporairement le verrou à False pour permettre à cet auto-stretch final de passer
-                self.logger.info("    [PF_S4] APPEL DIRECT apply_auto_stretch pour le stretch final (verrou sera True après).")
-                self._final_stretch_set_by_processing_finished = False # Permettre à l'appel suivant de passer
-                self.apply_auto_stretch() # Appel direct
-                # Le verrou sera remis à True plus bas.
-                
-                if self.current_stack_header: self.update_image_info(self.current_stack_header)
-            else:
-                if not preview_load_error_msg: preview_load_error_msg = "Donnees d'apercu final non disponibles."
-                if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(preview_load_error_msg)
-                if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
 
-            self.logger.info(f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}")
+                if self.current_stack_header:
+                    self.update_image_info(self.current_stack_header)
+            else:
+                if hasattr(self, 'preview_manager'):
+                    self.preview_manager.clear_preview(preview_load_error_msg or "Preview load error")
+                if hasattr(self, 'histogram_widget'):
+                    self.histogram_widget.plot_histogram(None)
+
+            self.logger.info(
+                f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+            )
         except Exception as e_s4:
-            self.logger.error(f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}")
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            self.logger.error(
+                f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
+            )
+            if hasattr(self, 'preview_manager'):
+                self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
+            if hasattr(self, 'histogram_widget'):
+                self.histogram_widget.plot_histogram(None)
             processing_error_details = f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
 
 
