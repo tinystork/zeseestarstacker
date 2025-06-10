@@ -294,13 +294,12 @@ class SeestarQueuedStacker:
         print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
         self.reproject_between_batches = False
-        # Preserve old attribute name for backward compatibility
-        self.enable_interbatch_reproj = False
-        # Nouveau flag pour reprojection inter-batch Classic
-        self.enable_inter_batch_reprojection = False
-        self.inter_batch_reprojection = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
+
+        # Backward compatibility attributes removed in favour of
+        # ``reproject_between_batches``. They may still appear in old settings
+        # files, so we simply ignore them here.
 
         # --- FIN NOUVEAU ---
 
@@ -344,10 +343,16 @@ class SeestarQueuedStacker:
 
         if settings is not None:
             try:
-                self.inter_batch_reprojection = bool(getattr(settings, 'inter_batch_reprojection', False))
-                print(f"  -> Flag inter_batch_reprojection initialisé depuis settings: {self.inter_batch_reprojection}")
+                self.reproject_between_batches = bool(
+                    getattr(settings, 'reproject_between_batches', False)
+                )
+                print(
+                    f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
+                )
             except Exception:
-                print("  -> Impossible de lire inter_batch_reprojection depuis settings. Valeur par défaut utilisée.")
+                print(
+                    "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
+                )
 
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
@@ -2104,7 +2109,7 @@ class SeestarQueuedStacker:
                         self.stacked_batches_count, self.total_batches_estimated
                     )
                     current_batch_items_with_masks_for_stack_batch = []
-                if self.inter_batch_reprojection and len(self.intermediate_classic_batch_files) > 1:
+                if self.reproject_between_batches and len(self.intermediate_classic_batch_files) > 1:
                     self.update_progress("🏁 Reprojection inter-batch (Classic)…")
                     self._reproject_classic_batches(self.intermediate_classic_batch_files)
                 else:
@@ -3360,7 +3365,7 @@ class SeestarQueuedStacker:
             except Exception:
                 batch_wcs = None
 
-            if self.enable_inter_batch_reprojection and batch_wcs is not None:
+            if self.reproject_between_batches and batch_wcs is not None:
                 stacked_batch_data_np, batch_coverage_map_2d = self._reproject_batch_to_reference(
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
@@ -3368,7 +3373,7 @@ class SeestarQueuedStacker:
                 )
                 batch_wcs = self.reference_wcs_object
 
-            if not self.enable_inter_batch_reprojection:
+            if not self.reproject_between_batches:
                 try:
                     temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                     temp_f.close()
@@ -3501,7 +3506,7 @@ class SeestarQueuedStacker:
                     batch_wcs,
                 )
 
-                if self.inter_batch_reprojection:
+                if self.reproject_between_batches:
                     sci_p, wht_p_list = self._save_and_solve_classic_batch(
                         stacked_batch_data_np,
                         batch_coverage_map_2d,
@@ -5748,9 +5753,6 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = bool(save_as_float32)
         print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
         self.reproject_between_batches = bool(reproject_between_batches)
-        self.enable_inter_batch_reprojection = self.reproject_between_batches
-        self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
-        self.inter_batch_reprojection = self.reproject_between_batches or self.inter_batch_reprojection
 
         # --- FIN NOUVEAU ---
 
