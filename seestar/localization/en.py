@@ -128,6 +128,7 @@ EN_TRANSLATIONS = {
     # --- Output Format Section ---
     'output_format_frame_title': "Output FITS Format",
     'save_as_float32_label': "Save final FITS as float32 (larger files, max precision)",
+    'preserve_linear_output_label': "Preserve linear output (skip percentile scaling)",
 
     ### NEW: Tooltips for Expert Tab ###
     'tooltip_bn_grid_size': "BN: RxC grid for background analysis. More zones (32x32) = finer local analysis, noise sensitive. Fewer (8x8) = robust stats, worse for complex gradients. Default: 16x16.",
@@ -158,6 +159,7 @@ EN_TRANSLATIONS = {
     'tooltip_low_wht_soften_px': "Soften Low WHT Mask (px): Radius of Gaussian blur applied to the binary mask of low-weight areas. Allows for a smoother transition of the correction. Range: 32-512. Default: 128.",
     # Tooltips save_as_float32
     'tooltip_save_as_float32': "If checked, the final FITS file will be saved using 32-bit floating-point numbers, preserving the maximum numerical precision from processing but resulting in larger files (approx. 2x). If unchecked (default), the file will be saved as 16-bit unsigned integers (0-65535 range after scaling from 0-1), significantly reducing file size.",
+    'tooltip_preserve_linear_output': "If enabled, skips percentile-based normalization before saving. The uint16 output will scale the raw 0-1 values directly to 0-65535.",
 
     # ... end expert tab ...
     
