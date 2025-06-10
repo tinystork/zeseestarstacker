@@ -450,12 +450,16 @@ class SeestarStackerGUI:
         
         self.apply_low_wht_mask_var = tk.BooleanVar(value=False) 
         self.low_wht_pct_var = tk.IntVar(value=5)                
-        self.low_wht_soften_px_var = tk.IntVar(value=128)        
+        self.low_wht_soften_px_var = tk.IntVar(value=128)
         print("DEBUG (GUI init_variables): Variables Low WHT Mask créées.")
 
         # --- NOUVELLE VARIABLE TKINTER POUR L'OPTION DE SAUVEGARDE ---
         self.save_as_float32_var = tk.BooleanVar(value=False) # Défaut à False (donc uint16)
         print(f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()}).")
+        self.preserve_linear_output_var = tk.BooleanVar(value=False)
+        print(
+            f"DEBUG (GUI init_variables): Variable preserve_linear_output_var créée (valeur initiale: {self.preserve_linear_output_var.get()})."
+        )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value='127.0.0.1:8080')
 
@@ -1007,13 +1011,24 @@ class SeestarStackerGUI:
         print("DEBUG (GUI create_layout): Output Format Frame créé.")
 
         self.save_as_float32_check = ttk.Checkbutton(
-            self.output_format_frame, 
-            text=self.tr("save_as_float32_label", default="Save final FITS as float32 (larger files, max precision)"), 
+            self.output_format_frame,
+            text=self.tr("save_as_float32_label", default="Save final FITS as float32 (larger files, max precision)"),
             variable=self.save_as_float32_var # Variable Tkinter créée dans init_variables
         )
         self.save_as_float32_check.pack(anchor=tk.W, padx=5, pady=5)
         # Pas besoin de command ici, la valeur sera lue par SettingsManager.update_from_ui()
         print("DEBUG (GUI create_layout): Checkbutton save_as_float32 créé.")
+
+        self.preserve_linear_output_check = ttk.Checkbutton(
+            self.output_format_frame,
+            text=self.tr(
+                "preserve_linear_output_label",
+                default="Preserve linear output (skip percentile scaling)",
+            ),
+            variable=self.preserve_linear_output_var,
+        )
+        self.preserve_linear_output_check.pack(anchor=tk.W, padx=5, pady=2)
+        print("DEBUG (GUI create_layout): Checkbutton preserve_linear_output créé.")
         # --- FIN NOUVEAU ---
         
         self.reset_expert_button = ttk.Button(expert_content_frame, text=self.tr("reset_expert_button", default="Reset Expert Settings"), command=self._reset_expert_settings)
@@ -1734,7 +1749,7 @@ class SeestarStackerGUI:
     def _store_widget_references(self):
         """
         Stocke les références aux widgets qui nécessitent des mises à jour linguistiques et des infobulles.
-        MODIFIED: Ajout de la référence pour save_as_float32_check.
+        MODIFIED: Ajout des références pour save_as_float32_check et preserve_linear_output_check.
         """
         print("\nDEBUG (GUI _store_widget_references V_SaveAsFloat32_1): Début stockage références widgets...") # Version Log
         notebook_widget = None
@@ -1837,7 +1852,8 @@ class SeestarStackerGUI:
             "cleanup_temp_check_label": 'cleanup_temp_check',
             "chroma_correction_check": 'chroma_correction_check',
             # NOUVEAU : Clé pour le texte de la nouvelle Checkbutton
-            "save_as_float32_label": 'save_as_float32_check'
+            "save_as_float32_label": 'save_as_float32_check',
+            "preserve_linear_output_label": 'preserve_linear_output_check'
         }
         for key, item in labels_and_checks_keys.items():
             if isinstance(item, tk.Widget): self.widgets_to_translate[key] = item
@@ -1902,7 +1918,8 @@ class SeestarStackerGUI:
             ('low_wht_soften_px_label', 'tooltip_low_wht_soften_px'),
             ('low_wht_soften_px_spinbox', 'tooltip_low_wht_soften_px'),
             # NOUVEAU : Tooltip pour la nouvelle Checkbutton
-            ('save_as_float32_check', 'tooltip_save_as_float32')
+            ('save_as_float32_check', 'tooltip_save_as_float32'),
+            ('preserve_linear_output_check', 'tooltip_preserve_linear_output')
         ]
         
         tooltip_created_count = 0
@@ -4288,6 +4305,7 @@ class SeestarStackerGUI:
             "local_solver_preference": self.settings.local_solver_preference,
             "astap_search_radius": self.settings.astap_search_radius,
             "save_as_float32": self.settings.save_final_as_float32,
+            "preserve_linear_output": self.settings.preserve_linear_output,
             "reproject_between_batches": self.settings.reproject_between_batches,
         }
         import inspect
