@@ -3966,6 +3966,7 @@ class SeestarQueuedStacker:
                                                 pour ce lot spécifique.
         """
         print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D.")
+        current_batch_num = self.stacked_batches_count
         if batch_coverage_map_2d is not None:
             print(
                 f"  -> Reçu de _stack_batch -> batch_coverage_map_2d - Shape: {batch_coverage_map_2d.shape}, "
@@ -3979,7 +3980,10 @@ class SeestarQueuedStacker:
         # --- Vérifications initiales ---
 
         if stacked_batch_data_np is None or stack_info_header is None or batch_coverage_map_2d is None:
-            self.update_progress("⚠️ Erreur interne: Données batch/couverture invalides pour accumulation SUM/W.")
+            self.update_progress(
+                f"⚠️ Accumulation lot #{current_batch_num} ignorée: données ou couverture manquantes.",
+                "WARN",
+            )
             print(
                 "DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données batch/couverture invalides) "
                 f"stacked_batch_data_np is None? {stacked_batch_data_np is None}, "
@@ -3989,7 +3993,10 @@ class SeestarQueuedStacker:
             return
 
         if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
-             self.update_progress("❌ Erreur critique: Accumulateurs Memmap SUM/WHT non initialisés.")
+             self.update_progress(
+                 f"❌ Accumulation lot #{current_batch_num} impossible: memmap SUM/WHT non initialisés.",
+                 "ERROR",
+             )
              print(
                  f"ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé. "
                  f"cumulative_sum_memmap is None? {self.cumulative_sum_memmap is None}, "
@@ -4045,7 +4052,10 @@ class SeestarQueuedStacker:
 
 
         if batch_coverage_map_2d.shape != expected_shape_hw:
-            self.update_progress(f"❌ Incompatibilité shape carte couverture lot: Attendu {expected_shape_hw}, Reçu {batch_coverage_map_2d.shape}. Accumulation échouée.")
+            self.update_progress(
+                f"❌ Batch #{current_batch_num} ignoré: shape carte couverture {batch_coverage_map_2d.shape} au lieu de {expected_shape_hw}.",
+                "ERROR",
+            )
             print(
                 f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot. "
                 f"expected={expected_shape_hw}, got={batch_coverage_map_2d.shape}"
@@ -4057,7 +4067,10 @@ class SeestarQueuedStacker:
         # S'assurer que stacked_batch_data_np a la bonne dimension pour la multiplication (HWC ou HW)
         is_color_batch_data = (stacked_batch_data_np.ndim == 3 and stacked_batch_data_np.shape[2] == 3)
         if is_color_batch_data and stacked_batch_data_np.shape != self.memmap_shape:
-            self.update_progress(f"❌ Incompatibilité shape image lot (couleur): Attendu {self.memmap_shape}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
+            self.update_progress(
+                f"❌ Batch #{current_batch_num} ignoré: image couleur shape {stacked_batch_data_np.shape} au lieu de {self.memmap_shape}.",
+                "ERROR",
+            )
             print(
                 f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur). "
                 f"expected={self.memmap_shape}, got={stacked_batch_data_np.shape}"
@@ -4066,7 +4079,10 @@ class SeestarQueuedStacker:
             except: self.failed_stack_count += 1
             return
         elif not is_color_batch_data and stacked_batch_data_np.ndim == 2 and stacked_batch_data_np.shape != expected_shape_hw:
-            self.update_progress(f"❌ Incompatibilité shape image lot (N&B): Attendu {expected_shape_hw}, Reçu {stacked_batch_data_np.shape}. Accumulation échouée.")
+            self.update_progress(
+                f"❌ Batch #{current_batch_num} ignoré: image N&B shape {stacked_batch_data_np.shape} au lieu de {expected_shape_hw}.",
+                "ERROR",
+            )
             print(
                 f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B). "
                 f"expected={expected_shape_hw}, got={stacked_batch_data_np.shape}"
@@ -4075,7 +4091,10 @@ class SeestarQueuedStacker:
             except: self.failed_stack_count += 1
             return
         elif not is_color_batch_data and stacked_batch_data_np.ndim != 2 : # Cas N&B mais pas 2D
-             self.update_progress(f"❌ Shape image lot N&B inattendue: {stacked_batch_data_np.shape}. Accumulation échouée.")
+             self.update_progress(
+                 f"❌ Batch #{current_batch_num} ignoré: dimensions image N&B inattendues {stacked_batch_data_np.shape}.",
+                 "ERROR",
+             )
              print(
                  f"ERREUR QM [_combine_batch_result SUM/W]: Shape image lot N&B inattendue - got {stacked_batch_data_np.shape}"
              )
@@ -4092,7 +4111,10 @@ class SeestarQueuedStacker:
             # Vérifier si la carte de couverture a des poids significatifs
 
             if np.sum(batch_coverage_map_2d) < 1e-6 and num_physical_images_in_batch > 0:
-                self.update_progress(f"⚠️ Lot avec {num_physical_images_in_batch} images mais somme de couverture quasi nulle. Lot ignoré pour accumulation.")
+                self.update_progress(
+                    f"⚠️ Batch #{current_batch_num} ignoré: somme de couverture quasi nulle ({np.sum(batch_coverage_map_2d):.3e}).",
+                    "WARN",
+                )
                 print(
                     f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (somme couverture quasi nulle). "
                     f"sum={np.sum(batch_coverage_map_2d):.3e}"
