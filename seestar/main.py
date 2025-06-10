@@ -345,8 +345,11 @@ def main():
     parser = argparse.ArgumentParser(description="Seestar Stacker GUI")
     parser.add_argument("--input-dir", type=str, help="Optional: Pre-fill the input directory.")
     parser.add_argument("--stack-from-analyzer", type=str, metavar="ANALYZED_DIR", help="Internal: Launch stacking directly from analyzer for the specified directory.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     print("DEBUG (seestar/main.py): Parsing des arguments fournis...")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     print(f"DEBUG (seestar/main.py): Arguments parsés: {args}")
 
     input_dir_from_args = None

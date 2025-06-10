@@ -256,10 +256,10 @@ class SeestarQueuedStacker:
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def __init__(self, settings: SettingsManager | None = None):
-        print("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
+        logger.debug("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
         
         # --- 1. Attributs Critiques et Simples ---
-        print("  -> Initialisation attributs simples et flags...")
+        logger.debug("  -> Initialisation attributs simples et flags...")
         
         
         self.processing_active = False; self.stop_processing = False; self.processing_error = None
@@ -291,7 +291,7 @@ class SeestarQueuedStacker:
         # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
 
         self.save_final_as_float32 = False # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
-        print(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
+        logger.debug(f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}")
         # Option de reprojection des lots intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -319,7 +319,7 @@ class SeestarQueuedStacker:
         self.memmap_shape = None           
         self.memmap_dtype_sum = np.float32 
         self.memmap_dtype_wht = np.float32 
-        print("  -> Attributs SUM/W (memmap) initialisés à None.")
+        logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
         
         self.use_quality_weighting = False 
         self.weight_by_snr = True          
@@ -339,18 +339,18 @@ class SeestarQueuedStacker:
         self.incremental_drizzle_objects = []     
         self.incremental_drizzle_sci_arrays = []  
         self.incremental_drizzle_wht_arrays = []  
-        print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
+        logger.debug("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
 
         if settings is not None:
             try:
                 self.reproject_between_batches = bool(
                     getattr(settings, 'reproject_between_batches', False)
                 )
-                print(
+                logger.debug(
                     f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
                 )
             except Exception:
-                print(
+                logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
                 )
 
@@ -373,55 +373,55 @@ class SeestarQueuedStacker:
         self.photutils_params_used_in_session = {}
         self.last_saved_data_for_preview = None 
 
-        print("  -> Attributs simples et paramètres par défaut initialisés.")
+        logger.debug("  -> Attributs simples et paramètres par défaut initialisés.")
         
         self.local_aligner_instance = None
         self.is_local_alignment_preferred_for_mosaic = True 
-        print(f"  -> Mosaïque: Préférence pour alignement local: {self.is_local_alignment_preferred_for_mosaic}")
+        logger.debug(f"  -> Mosaïque: Préférence pour alignement local: {self.is_local_alignment_preferred_for_mosaic}")
 
         try:
-            print("  -> Instanciation ChromaticBalancer...")
+            logger.debug("  -> Instanciation ChromaticBalancer...")
             self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15) 
-            print("     ✓ ChromaticBalancer OK.")
+            logger.debug("     ✓ ChromaticBalancer OK.")
         except Exception as e_cb: 
-            print(f"  -> ERREUR ChromaticBalancer: {e_cb}")
+            logger.debug(f"  -> ERREUR ChromaticBalancer: {e_cb}")
             self.chroma_balancer = None
 
         try:
-            print("  -> Instanciation SeestarAligner (pour alignement général astroalign)...")
+            logger.debug("  -> Instanciation SeestarAligner (pour alignement général astroalign)...")
             self.aligner = SeestarAligner() 
-            print("     ✓ SeestarAligner (astroalign) OK.")
+            logger.debug("     ✓ SeestarAligner (astroalign) OK.")
         except Exception as e_align: 
-            print(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
+            logger.debug(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
             self.aligner = None
             raise 
 
         try:
-            print("  -> Instanciation AstrometrySolver...")
+            logger.debug("  -> Instanciation AstrometrySolver...")
             self.astrometry_solver = AstrometrySolver(progress_callback=self.update_progress) 
-            print("     ✓ AstrometrySolver instancié.")
+            logger.debug("     ✓ AstrometrySolver instancié.")
         except Exception as e_as_solver:
-            print(f"  -> ERREUR AstrometrySolver instantiation: {e_as_solver}")
+            logger.debug(f"  -> ERREUR AstrometrySolver instantiation: {e_as_solver}")
             self.astrometry_solver = None 
         
-        print("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
+        logger.debug("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
 
 
         if _LOCAL_ALIGNER_AVAILABLE and SeestarLocalAligner is not None:
             try:
-                print("  -> Instanciation SeestarLocalAligner (pour mosaïque locale si préférée)...")
+                logger.debug("  -> Instanciation SeestarLocalAligner (pour mosaïque locale si préférée)...")
                 self.local_aligner_instance = SeestarLocalAligner(debug=True) 
-                print("     ✓ SeestarLocalAligner instancié.")
+                logger.debug("     ✓ SeestarLocalAligner instancié.")
             except Exception as e_local_align_inst:
-                print(f"  -> ERREUR lors de l'instanciation de SeestarLocalAligner: {e_local_align_inst}")
+                logger.debug(f"  -> ERREUR lors de l'instanciation de SeestarLocalAligner: {e_local_align_inst}")
                 traceback.print_exc(limit=1)
                 self.local_aligner_instance = None
-                print("     WARN QM: Instanciation de SeestarLocalAligner a échoué. Il ne sera pas utilisable.")
+                logger.debug("     WARN QM: Instanciation de SeestarLocalAligner a échoué. Il ne sera pas utilisable.")
         else:
-            print("  -> SeestarLocalAligner n'est pas disponible (import échoué ou classe non définie), instanciation ignorée.")
+            logger.debug("  -> SeestarLocalAligner n'est pas disponible (import échoué ou classe non définie), instanciation ignorée.")
             self.local_aligner_instance = None 
 
-        print("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
+        logger.debug("==== FIN INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====\n")
 
 
 
@@ -441,7 +441,7 @@ class SeestarQueuedStacker:
         """
         # --- NOUVELLE VÉRIFICATION DE LA PRÉSENCE DU FICHIER EN DÉBUT ---
         if not file_path or not isinstance(file_path, str) or file_path.strip() == "":
-            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Chemin fichier source invalide ou vide: '{file_path}'. Sortie précoce.")
+            logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Chemin fichier source invalide ou vide: '{file_path}'. Sortie précoce.")
             return
 
         original_folder_abs = os.path.abspath(os.path.dirname(file_path))
@@ -449,7 +449,7 @@ class SeestarQueuedStacker:
         
         # Ce check doit être fait après avoir extrait le basename pour un meilleur log
         if not os.path.exists(file_path):
-            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' (chemin: '{file_path}') N'EXISTE PAS au début de _move_to_unaligned. Abandon.")
+            logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' (chemin: '{file_path}') N'EXISTE PAS au début de _move_to_unaligned. Abandon.")
             return # Sortie si le fichier n'existe vraiment pas
 
         unaligned_subfolder_name = "unaligned_by_stacker" 
@@ -481,7 +481,7 @@ class SeestarQueuedStacker:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
                 unique_filename = f"{base}_unaligned_{timestamp}{ext}"
                 dest_path = os.path.join(destination_folder_for_this_file, unique_filename)
-                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Conflit de nom pour '{file_basename}', renommé en '{unique_filename}' dans '{destination_folder_for_this_file}'.")
+                logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Conflit de nom pour '{file_basename}', renommé en '{unique_filename}' dans '{destination_folder_for_this_file}'.")
 
             # --- Logique de déplacement/copie avec retry et pause ---
             max_retries = 3
@@ -490,14 +490,14 @@ class SeestarQueuedStacker:
 
             for attempt in range(max_retries):
                 if not os.path.exists(file_path): # Le fichier peut disparaître entre les tentatives
-                    print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' n'existe plus à l'essai {attempt+1}. Abandon des tentatives.")
+                    logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' n'existe plus à l'essai {attempt+1}. Abandon des tentatives.")
                     break # Sortir de la boucle si le fichier a disparu
 
                 try:
                     # Ajouter une petite pause pour laisser le système libérer le fichier
                     if attempt > 0: # Pause uniquement après la première tentative
                         time.sleep(initial_delay_sec * (2 ** (attempt - 1))) # Délai exponentiel
-                        print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Ré-essai {attempt+1}/{max_retries} pour déplacer '{file_basename}' après pause...")
+                        logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Ré-essai {attempt+1}/{max_retries} pour déplacer '{file_basename}' après pause...")
 
                     # Tenter de déplacer
                     shutil.move(file_path, dest_path)
@@ -505,35 +505,35 @@ class SeestarQueuedStacker:
                     break # Succès, sortir de la boucle
 
                 except (OSError, FileNotFoundError, shutil.Error) as e_move:
-                    print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement '{file_basename}' (essai {attempt+1}): {e_move}")
+                    logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement '{file_basename}' (essai {attempt+1}): {e_move}")
                     if attempt == max_retries - 1: # Dernière tentative échouée, essayer de copier
-                        print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement après {max_retries} essais. Tentative de copie en dernier recours...")
+                        logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec déplacement après {max_retries} essais. Tentative de copie en dernier recours...")
                         try:
                             shutil.copy2(file_path, dest_path)
-                            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Copie de '{file_basename}' réussie en dernier recours.")
+                            logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Copie de '{file_basename}' réussie en dernier recours.")
                             final_move_copy_success = True # Considérer comme succès si la copie marche
                         except Exception as e_copy:
-                            print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec de la copie de '{file_basename}' aussi : {e_copy}")
+                            logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec de la copie de '{file_basename}' aussi : {e_copy}")
                             final_move_copy_success = False # La copie a aussi échoué
             # --- Fin Nouvelle logique ---
 
             if final_move_copy_success:
                 self.update_progress(f"   Déplacé vers non alignés: '{file_basename}' (maintenant dans '{unaligned_subfolder_name}' de son dossier source).", "INFO_DETAIL")
-                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' traité (déplacé/copié) vers '{dest_path}'.")
+                logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Fichier '{file_basename}' traité (déplacé/copié) vers '{dest_path}'.")
                 
                 # NOUVEAU : Ajouter le dossier source au set SEULEMENT si le déplacement/copie a réussi
                 self.warned_unaligned_source_folders.add(original_folder_abs)
-                print(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Dossier source '{original_folder_abs}' ajouté à warned_unaligned_source_folders.")
+                logger.debug(f"DEBUG QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Dossier source '{original_folder_abs}' ajouté à warned_unaligned_source_folders.")
 
             else: # Final_move_copy_success est False
                 self.update_progress(f"   ❌ Échec déplacement/copie fichier non-aligné '{file_basename}'.", "ERROR")
-                print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec définitif déplacement/copie de '{file_basename}'.")
+                logger.debug(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: Échec définitif déplacement/copie de '{file_basename}'.")
 
 
         except Exception as e:
             # Gérer toute autre exception inattendue lors de la préparation/finalisation
             error_details = f"Erreur générale _move_to_unaligned pour '{file_basename}': {e}"
-            print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: {error_details}")
+            logger.debug(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: {error_details}")
             traceback.print_exc(limit=1)
             self.update_progress(f"   ❌ Erreur inattendue déplacement/copie fichier non-aligné '{file_basename}': {type(e).__name__}", "ERROR")
 
@@ -558,11 +558,11 @@ class SeestarQueuedStacker:
         Version: V_DrizIncr_StrategyA_Init_MemmapDirFix
         """
         
-        print(f"DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Début avec output_dir='{output_dir}', shape_ref_HWC={reference_image_shape_hwc_input}")
-        print(f"  VALEURS AU DÉBUT DE INITIALIZE:")
-        print(f"    -> self.is_mosaic_run: {getattr(self, 'is_mosaic_run', 'Non Défini')}")
-        print(f"    -> self.drizzle_active_session: {getattr(self, 'drizzle_active_session', 'Non Défini')}")
-        print(f"    -> self.drizzle_mode: {getattr(self, 'drizzle_mode', 'Non Défini')}")
+        logger.debug(f"DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Début avec output_dir='{output_dir}', shape_ref_HWC={reference_image_shape_hwc_input}")
+        logger.debug(f"  VALEURS AU DÉBUT DE INITIALIZE:")
+        logger.debug(f"    -> self.is_mosaic_run: {getattr(self, 'is_mosaic_run', 'Non Défini')}")
+        logger.debug(f"    -> self.drizzle_active_session: {getattr(self, 'drizzle_active_session', 'Non Défini')}")
+        logger.debug(f"    -> self.drizzle_mode: {getattr(self, 'drizzle_mode', 'Non Défini')}")
         
         # --- Nettoyage et création dossiers ---
         try:
@@ -611,13 +611,13 @@ class SeestarQueuedStacker:
                                             self.drizzle_mode == "Incremental" and
                                             not self.is_mosaic_run) 
         
-        print(f"  DEBUG QM [initialize]: Valeur calculée de is_true_incremental_drizzle_mode: {is_true_incremental_drizzle_mode}")
-        print(f"    -> self.drizzle_active_session ÉTAIT: {self.drizzle_active_session}")
-        print(f"    -> self.drizzle_mode ÉTAIT: '{self.drizzle_mode}' (comparé à 'Incremental')")
-        print(f"    -> not self.is_mosaic_run ÉTAIT: {not self.is_mosaic_run} (self.is_mosaic_run était {self.is_mosaic_run})")
+        logger.debug(f"  DEBUG QM [initialize]: Valeur calculée de is_true_incremental_drizzle_mode: {is_true_incremental_drizzle_mode}")
+        logger.debug(f"    -> self.drizzle_active_session ÉTAIT: {self.drizzle_active_session}")
+        logger.debug(f"    -> self.drizzle_mode ÉTAIT: '{self.drizzle_mode}' (comparé à 'Incremental')")
+        logger.debug(f"    -> not self.is_mosaic_run ÉTAIT: {not self.is_mosaic_run} (self.is_mosaic_run était {self.is_mosaic_run})")
 
         if is_true_incremental_drizzle_mode:
-            print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté.")
+            logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté.")
             if self.reference_wcs_object is None:
                 self.update_progress("❌ Erreur: WCS de référence manquant pour initialiser la grille Drizzle Incrémental.", "ERROR")
                 return False
@@ -629,7 +629,7 @@ class SeestarQueuedStacker:
                 if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
                     raise RuntimeError("Échec _create_drizzle_output_wcs pour Drizzle Incrémental.")
                 current_output_shape_hw_for_accum_or_driz = self.drizzle_output_shape_hw
-                print(f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}")
+                logger.debug(f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}")
             except Exception as e_grid:
                 self.update_progress(f"❌ Erreur création grille Drizzle Incrémental: {e_grid}", "ERROR")
                 return False
@@ -653,7 +653,7 @@ class SeestarQueuedStacker:
                         kernel=self.drizzle_kernel, fillval=str(getattr(self, "drizzle_fillval", "0.0"))
                     )
                     self.incremental_drizzle_objects.append(driz_obj)
-                print(f"  -> {len(self.incremental_drizzle_objects)} objets Drizzle persistants créés pour mode Incrémental.")
+                logger.debug(f"  -> {len(self.incremental_drizzle_objects)} objets Drizzle persistants créés pour mode Incrémental.")
             except Exception as e_driz_obj_init:
                 self.update_progress(f"❌ Erreur initialisation objets Drizzle persistants: {e_driz_obj_init}", "ERROR")
                 traceback.print_exc(limit=1)
@@ -662,15 +662,15 @@ class SeestarQueuedStacker:
             self.cumulative_sum_memmap = None
             self.cumulative_wht_memmap = None
             self.memmap_shape = None 
-            print("  -> Memmaps SUM/WHT désactivés pour Drizzle Incrémental VRAI.")
+            logger.debug("  -> Memmaps SUM/WHT désactivés pour Drizzle Incrémental VRAI.")
 
         else: # Mosaïque, Drizzle Final standard, ou Stacking Classique -> Utiliser Memmaps SUM/W
-            print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode NON-Drizzle Incr. VRAI. Initialisation Memmaps SUM/W...")
+            logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode NON-Drizzle Incr. VRAI. Initialisation Memmaps SUM/W...")
             
             # ***** CORRECTION: Créer memmap_dir ICI, seulement si cette branche est exécutée *****
             try:
                 os.makedirs(memmap_dir, exist_ok=True)
-                print(f"  -> Dossier pour memmap '{memmap_dir}' créé (ou existait déjà).")
+                logger.debug(f"  -> Dossier pour memmap '{memmap_dir}' créé (ou existait déjà).")
             except OSError as e_mkdir_memmap:
                 self.update_progress(f"❌ Erreur critique création dossier memmap '{memmap_dir}': {e_mkdir_memmap}", "ERROR")
                 return False
@@ -678,21 +678,21 @@ class SeestarQueuedStacker:
 
             self.memmap_shape = reference_image_shape_hwc_input 
             wht_shape_memmap = self.memmap_shape[:2] 
-            print(f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}")
+            logger.debug(f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}")
 
-            print(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
+            logger.debug(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
             try:
                 self.cumulative_sum_memmap = np.lib.format.open_memmap(
                     self.sum_memmap_path, mode='w+', dtype=self.memmap_dtype_sum, shape=self.memmap_shape
                 )
                 self.cumulative_sum_memmap[:] = 0.0
-                print(f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro.")
+                logger.debug(f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro.")
 
                 self.cumulative_wht_memmap = np.lib.format.open_memmap(
                     self.wht_memmap_path, mode='w+', dtype=self.memmap_dtype_wht, shape=wht_shape_memmap
                 )
                 self.cumulative_wht_memmap[:] = 0 
-                print(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
+                logger.debug(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
                 
                 self.incremental_drizzle_objects = []
                 self.incremental_drizzle_sci_arrays = []
@@ -700,14 +700,14 @@ class SeestarQueuedStacker:
 
             except (IOError, OSError, ValueError, TypeError) as e_memmap:
                 self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
-                print(f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"); traceback.print_exc(limit=2)
+                logger.debug(f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"); traceback.print_exc(limit=2)
                 self.cumulative_sum_memmap = None; self.cumulative_wht_memmap = None
                 self.sum_memmap_path = None; self.wht_memmap_path = None
                 return False
         
         # --- Réinitialisations Communes ---
         self.warned_unaligned_source_folders.clear()
-        print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Réinitialisation des autres états...")
+        logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Réinitialisation des autres états...")
         # self.reference_wcs_object est conservé s'il a été défini par start_processing (plate-solving de réf)
         self.intermediate_drizzle_batch_files = []
         
@@ -733,7 +733,7 @@ class SeestarQueuedStacker:
             except Exception: break
 
         if hasattr(self, 'aligner') and self.aligner: self.aligner.stop_processing = False
-        print("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Initialisation terminée avec succès.")
+        logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Initialisation terminée avec succès.")
         return True
 
 
@@ -745,10 +745,10 @@ class SeestarQueuedStacker:
         message = str(message)
         if self.progress_callback:
             try: self.progress_callback(message, progress)
-            except Exception as e: print(f"Error in progress callback: {e}")
+            except Exception as e: logger.debug(f"Error in progress callback: {e}")
         else:
-            if progress is not None: print(f"[{int(progress)}%] {message}")
-            else: print(message)
+            if progress is not None: logger.debug(f"[{int(progress)}%] {message}")
+            else: logger.debug(message)
 
     def _send_eta_update(self):
         """Compute and send remaining time estimation to the GUI."""
@@ -786,7 +786,7 @@ class SeestarQueuedStacker:
             current_batch = self.stacked_batches_count; total_batches_est = self.total_batches_estimated
             stack_name = f"Stack ({img_count}/{total_imgs_est} Img | Batch {current_batch}/{total_batches_est if total_batches_est > 0 else '?'})"
             self.preview_callback(data_copy, header_copy, stack_name, img_count, total_imgs_est, current_batch, total_batches_est)
-        except Exception as e: print(f"Error in preview callback: {e}"); traceback.print_exc(limit=2)
+        except Exception as e: logger.debug(f"Error in preview callback: {e}"); traceback.print_exc(limit=2)
 
 ###########################################################################################################################################################
 
@@ -862,12 +862,12 @@ class SeestarQueuedStacker:
                 return None
 
             self.update_progress(f"      [FallbackWCS] Matrice M calculée avec succès.", "INFO")
-            # print(f"  DEBUG QM [_calculate_M_from_wcs]: Matrice M de fallback WCS calculée:\n{M}") # Garder pour debug console
+            # logger.debug(f"  DEBUG QM [_calculate_M_from_wcs]: Matrice M de fallback WCS calculée:\n{M}") # Garder pour debug console
             return M
 
         except Exception as e_m_wcs:
             self.update_progress(f"      [FallbackWCS] ERREUR: Exception lors du calcul de M: {e_m_wcs}", "ERROR")
-            # print(f"ERREUR QM [_calculate_M_from_wcs]: {e_m_wcs}") # Garder pour debug console
+            # logger.debug(f"ERREUR QM [_calculate_M_from_wcs]: {e_m_wcs}") # Garder pour debug console
             # if self.debug_mode: traceback.print_exc(limit=1) # Supposant un self.debug_mode
             return None
 
@@ -884,21 +884,21 @@ class SeestarQueuedStacker:
         Calcule l'image moyenne, applique optionnellement le Low WHT Mask,
         normalise, sous-échantillonne et envoie au callback GUI.
         """
-        print("DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W...")
+        logger.debug("DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W...")
 
         if self.preview_callback is None:
-            print("DEBUG QM [_update_preview_sum_w]: Callback preview non défini. Sortie.")
+            logger.debug("DEBUG QM [_update_preview_sum_w]: Callback preview non défini. Sortie.")
             return
         if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None:
-            print("DEBUG QM [_update_preview_sum_w]: Memmaps SUM ou WHT non initialisés. Sortie.")
+            logger.debug("DEBUG QM [_update_preview_sum_w]: Memmaps SUM ou WHT non initialisés. Sortie.")
             return
 
         try:
-            print("DEBUG QM [_update_preview_sum_w]: Lecture des données depuis memmap...")
+            logger.debug("DEBUG QM [_update_preview_sum_w]: Lecture des données depuis memmap...")
             # Lire en float64 pour la division pour maintenir la précision autant que possible
             current_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64) # Shape (H, W, C)
             current_wht_map = np.array(self.cumulative_wht_memmap, dtype=np.float64) # Shape (H, W)
-            print(f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht_map.shape}")
+            logger.debug(f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht_map.shape}")
 
             # Calcul de l'image moyenne (SUM / WHT)
             epsilon = 1e-9 # Pour éviter division par zéro
@@ -910,14 +910,14 @@ class SeestarQueuedStacker:
             with np.errstate(divide='ignore', invalid='ignore'):
                 avg_img_fullres = current_sum / wht_broadcasted
             avg_img_fullres = np.nan_to_num(avg_img_fullres, nan=0.0, posinf=0.0, neginf=0.0)
-            print(f"DEBUG QM [_update_preview_sum_w]: Image moyenne SUM/W calculée. Shape={avg_img_fullres.shape}")
-            print(f"  Range avant normalisation 0-1: [{np.nanmin(avg_img_fullres):.4g}, {np.nanmax(avg_img_fullres):.4g}]")
+            logger.debug(f"DEBUG QM [_update_preview_sum_w]: Image moyenne SUM/W calculée. Shape={avg_img_fullres.shape}")
+            logger.debug(f"  Range avant normalisation 0-1: [{np.nanmin(avg_img_fullres):.4g}, {np.nanmax(avg_img_fullres):.4g}]")
 
             # --- NOUVEAU : Application du Low WHT Mask pour l'aperçu ---
             # Utiliser les settings stockés sur self (qui viennent de l'UI via SettingsManager)
             if hasattr(self, 'apply_low_wht_mask') and self.apply_low_wht_mask:
                 if _LOW_WHT_MASK_AVAILABLE:
-                    print("DEBUG QM [_update_preview_sum_w]: Application du Low WHT Mask pour l'aperçu...")
+                    logger.debug("DEBUG QM [_update_preview_sum_w]: Application du Low WHT Mask pour l'aperçu...")
                     pct_low_wht = getattr(self, 'low_wht_percentile', 5)
                     soften_val_low_wht = getattr(self, 'low_wht_soften_px', 128)
                     
@@ -940,12 +940,12 @@ class SeestarQueuedStacker:
                         progress_callback=self.update_progress # Passer le callback pour les logs internes
                     )
                     # apply_low_wht_mask retourne déjà une image clippée 0-1 et en float32
-                    print(f"DEBUG QM [_update_preview_sum_w]: Low WHT Mask appliqué à l'aperçu. Shape retournée: {avg_img_fullres.shape}")
-                    print(f"  Range après Low WHT Mask (devrait être 0-1): [{np.nanmin(avg_img_fullres):.3f}, {np.nanmax(avg_img_fullres):.3f}]")
+                    logger.debug(f"DEBUG QM [_update_preview_sum_w]: Low WHT Mask appliqué à l'aperçu. Shape retournée: {avg_img_fullres.shape}")
+                    logger.debug(f"  Range après Low WHT Mask (devrait être 0-1): [{np.nanmin(avg_img_fullres):.3f}, {np.nanmax(avg_img_fullres):.3f}]")
                 else:
-                    print("WARN QM [_update_preview_sum_w]: Low WHT Mask activé mais fonction non disponible (échec import). Aperçu non modifié.")
+                    logger.debug("WARN QM [_update_preview_sum_w]: Low WHT Mask activé mais fonction non disponible (échec import). Aperçu non modifié.")
             else:
-                print("DEBUG QM [_update_preview_sum_w]: Low WHT Mask non activé pour l'aperçu.")
+                logger.debug("DEBUG QM [_update_preview_sum_w]: Low WHT Mask non activé pour l'aperçu.")
             # --- FIN NOUVEAU ---
 
             # Normalisation finale 0-1 (nécessaire si Low WHT Mask n'a pas été appliqué,
@@ -963,7 +963,7 @@ class SeestarQueuedStacker:
                  preview_data_normalized = np.zeros_like(avg_img_fullres)
             
             preview_data_normalized = np.clip(preview_data_normalized, 0.0, 1.0).astype(np.float32)
-            print(f"DEBUG QM [_update_preview_sum_w]: Image APERÇU normalisée finale 0-1. Range: [{np.nanmin(preview_data_normalized):.3f}, {np.nanmax(preview_data_normalized):.3f}]")
+            logger.debug(f"DEBUG QM [_update_preview_sum_w]: Image APERÇU normalisée finale 0-1. Range: [{np.nanmin(preview_data_normalized):.3f}, {np.nanmax(preview_data_normalized):.3f}]")
 
             # Sous-échantillonnage pour l'affichage
             preview_data_to_send = preview_data_normalized
@@ -974,9 +974,9 @@ class SeestarQueuedStacker:
                      if new_h > 10 and new_w > 10: # Éviter de réduire à une taille trop petite
                          # cv2.resize attend (W, H) pour dsize
                          preview_data_to_send = cv2.resize(preview_data_normalized, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                         print(f"DEBUG QM [_update_preview_sum_w]: Aperçu sous-échantillonné à {preview_data_to_send.shape}")
+                         logger.debug(f"DEBUG QM [_update_preview_sum_w]: Aperçu sous-échantillonné à {preview_data_to_send.shape}")
                  except Exception as e_resize:
-                     print(f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille APERÇU: {e_resize}")
+                     logger.debug(f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille APERÇU: {e_resize}")
                      # Continuer avec l'image pleine résolution si le resize échoue
             
             # Préparation du header et du nom pour le callback
@@ -998,7 +998,7 @@ class SeestarQueuedStacker:
             stack_name_parts.append(f"({img_count}/{total_imgs_est} Img | Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})")
             stack_name = " ".join(stack_name_parts)
 
-            print(f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image APERÇU shape {preview_data_to_send.shape}...")
+            logger.debug(f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image APERÇU shape {preview_data_to_send.shape}...")
             self.preview_callback(
                 preview_data_to_send, 
                 header_copy, 
@@ -1008,14 +1008,14 @@ class SeestarQueuedStacker:
                 current_batch_num, 
                 total_batches_est
             )
-            print("DEBUG QM [_update_preview_sum_w]: Callback preview terminé.")
+            logger.debug("DEBUG QM [_update_preview_sum_w]: Callback preview terminé.")
 
         except MemoryError as mem_err:
-             print(f"ERREUR QM [_update_preview_sum_w]: ERREUR MÉMOIRE - {mem_err}")
+             logger.debug(f"ERREUR QM [_update_preview_sum_w]: ERREUR MÉMOIRE - {mem_err}")
              self.update_progress(f"❌ ERREUR MÉMOIRE pendant la mise à jour de l'aperçu SUM/W.")
              traceback.print_exc(limit=1)
         except Exception as e:
-            print(f"ERREUR QM [_update_preview_sum_w]: Exception inattendue - {e}")
+            logger.debug(f"ERREUR QM [_update_preview_sum_w]: Exception inattendue - {e}")
             self.update_progress(f"❌ Erreur inattendue pendant la mise à jour de l'aperçu SUM/W: {e}")
             traceback.print_exc(limit=2)
 
@@ -1058,13 +1058,13 @@ class SeestarQueuedStacker:
                 current_batch,
                 total_batches_est
             )
-            # print(f"DEBUG: Preview updated with Incremental Drizzle data (Shape: {data_to_send.shape})") # Optionnel
+            # logger.debug(f"DEBUG: Preview updated with Incremental Drizzle data (Shape: {data_to_send.shape})") # Optionnel
 
         except AttributeError:
              # Cas où cumulative_drizzle_data ou current_stack_header pourrait être None entre-temps
-             print("Warning: Attribut manquant pour l'aperçu Drizzle incrémental.")
+             logger.debug("Warning: Attribut manquant pour l'aperçu Drizzle incrémental.")
         except Exception as e:
-            print(f"Error in _update_preview_incremental_drizzle: {e}")
+            logger.debug(f"Error in _update_preview_incremental_drizzle: {e}")
             traceback.print_exc(limit=2)
 
 
@@ -1107,7 +1107,7 @@ class SeestarQueuedStacker:
         out_h = max(1, out_h); out_w = max(1, out_w)  # sécurité
         out_shape_hw = (out_h, out_w)        # (H,W) pour NumPy
 
-        print(f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}")
+        logger.debug(f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}")
 
         # ------------------ 2. Copier le WCS ------------------
         out_wcs = ref_wcs.deepcopy()
@@ -1119,14 +1119,14 @@ class SeestarQueuedStacker:
             if hasattr(out_wcs.wcs, 'cd') and out_wcs.wcs.cd is not None and np.any(out_wcs.wcs.cd):
                 out_wcs.wcs.cd = ref_wcs.wcs.cd / scale_factor
                 scale_done = True
-                print("[DrizzleWCS] CD matrix divisée par", scale_factor)
+                logger.debug("[DrizzleWCS] CD matrix divisée par", scale_factor)
             # b) Sinon CDELT (+ PC identité si absent)
             elif hasattr(out_wcs.wcs, 'cdelt') and out_wcs.wcs.cdelt is not None and np.any(out_wcs.wcs.cdelt):
                 out_wcs.wcs.cdelt = ref_wcs.wcs.cdelt / scale_factor
                 if not getattr(out_wcs.wcs, 'pc', None) is not None:
                     out_wcs.wcs.pc = np.identity(2)
                 scale_done = True
-                print("[DrizzleWCS] CDELT vector divisé par", scale_factor)
+                logger.debug("[DrizzleWCS] CDELT vector divisé par", scale_factor)
             else:
                 raise ValueError("Input WCS lacks valid CD matrix and CDELT vector.")
         except Exception as e:
@@ -1140,7 +1140,7 @@ class SeestarQueuedStacker:
         #    CRPIX_out = CRPIX_in * scale_factor  (1‑based convention FITS)
         new_crpix = np.round(np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor, 6)
         out_wcs.wcs.crpix = new_crpix.tolist()
-        print(f"[DrizzleWCS] CRPIX in={ref_wcs.wcs.crpix}  ->  out={out_wcs.wcs.crpix}")
+        logger.debug(f"[DrizzleWCS] CRPIX in={ref_wcs.wcs.crpix}  ->  out={out_wcs.wcs.crpix}")
 
         # ------------------ 5. Mettre à jour la taille interne ------------------
         out_wcs.pixel_shape = (out_w, out_h)   # (W,H) pour Astropy
@@ -1150,7 +1150,7 @@ class SeestarQueuedStacker:
         except AttributeError:
             pass
 
-        print(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
+        logger.debug(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
         return out_wcs, out_shape_hw
 
 
@@ -1175,36 +1175,36 @@ class SeestarQueuedStacker:
             tuple: (output_wcs, output_shape_hw) ou (None, None) si échec.
         """
         num_wcs = len(all_input_wcs_list)
-        print(f"DEBUG (Backend _calculate_final_mosaic_grid): Appel avec {num_wcs} WCS d'entrée.")
+        logger.debug(f"DEBUG (Backend _calculate_final_mosaic_grid): Appel avec {num_wcs} WCS d'entrée.")
         self.update_progress(f"📐 Calcul de la grille de sortie mosaïque ({num_wcs} WCS)...")
 
         if num_wcs == 0:
-            print("ERREUR (Backend _calculate_final_mosaic_grid): Aucune information WCS fournie.")
+            logger.debug("ERREUR (Backend _calculate_final_mosaic_grid): Aucune information WCS fournie.")
             return None, None
 
         # --- Validation des WCS d'entrée ---
         valid_wcs_list = []
         for i, wcs_in in enumerate(all_input_wcs_list):
             if wcs_in is None or not wcs_in.is_celestial:
-                print(f"   - WARNING: WCS {i+1} invalide ou non céleste. Ignoré.")
+                logger.debug(f"   - WARNING: WCS {i+1} invalide ou non céleste. Ignoré.")
                 continue
             if wcs_in.pixel_shape is None:
-                print(f"   - WARNING: WCS {i+1} n'a pas de pixel_shape défini. Ignoré.")
+                logger.debug(f"   - WARNING: WCS {i+1} n'a pas de pixel_shape défini. Ignoré.")
                 # Tenter de l'ajouter si possible (basé sur NAXIS du header de référence?)
                 # C'est risqué ici, il vaut mieux s'assurer qu'il est défini AVANT
                 continue
             valid_wcs_list.append(wcs_in)
 
         if not valid_wcs_list:
-            print("ERREUR (Backend _calculate_final_mosaic_grid): Aucun WCS d'entrée valide trouvé.")
+            logger.debug("ERREUR (Backend _calculate_final_mosaic_grid): Aucun WCS d'entrée valide trouvé.")
             return None, None
-        print(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
+        logger.debug(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
 
         try:
             # --- 1. Calculer le "footprint" (empreinte) de chaque image sur le ciel ---
             #    Le footprint est la projection des 4 coins de l'image dans les coordonnées célestes.
             all_footprints_sky = []
-            print("   -> Calcul des footprints célestes...")
+            logger.debug("   -> Calcul des footprints célestes...")
             for wcs_in in valid_wcs_list:
                 # wcs_in.pixel_shape est (nx, ny)
                 nx, ny = wcs_in.pixel_shape
@@ -1221,7 +1221,7 @@ class SeestarQueuedStacker:
             #    Trouver les RA/Dec min/max de tous les coins projetés.
             #    Attention à la discontinuité du RA à 0h/24h (ou 0/360 deg).
             #    SkyCoord gère cela mieux.
-            print("   -> Détermination de l'étendue totale...")
+            logger.debug("   -> Détermination de l'étendue totale...")
             all_corners_flat = SkyCoord(ra=np.concatenate([fp.ra.deg for fp in all_footprints_sky]),
                                         dec=np.concatenate([fp.dec.deg for fp in all_footprints_sky]),
                                         unit='deg', frame='icrs') # Assumer ICRS
@@ -1229,7 +1229,7 @@ class SeestarQueuedStacker:
             # Trouver le centre approximatif pour aider à gérer le wrap RA
             central_ra = np.median(all_corners_flat.ra.wrap_at(180*u.deg).deg)
             central_dec = np.median(all_corners_flat.dec.deg)
-            print(f"      - Centre Approx (RA, Dec): ({central_ra:.4f}, {central_dec:.4f}) deg")
+            logger.debug(f"      - Centre Approx (RA, Dec): ({central_ra:.4f}, {central_dec:.4f}) deg")
 
             # Calculer l'étendue en RA/Dec en tenant compte du wrap
             # On utilise wrap_at(180) pour le RA
@@ -1240,12 +1240,12 @@ class SeestarQueuedStacker:
             # La taille angulaire en RA dépend de la déclinaison
             delta_ra_deg = (max_ra_wrap - min_ra_wrap) * np.cos(np.radians(central_dec))
             delta_dec_deg = max_dec - min_dec
-            print(f"      - Étendue Approx (RA * cos(Dec), Dec): ({delta_ra_deg:.4f}, {delta_dec_deg:.4f}) deg")
+            logger.debug(f"      - Étendue Approx (RA * cos(Dec), Dec): ({delta_ra_deg:.4f}, {delta_dec_deg:.4f}) deg")
 
             # --- 3. Définir le WCS de Sortie ---
             #    Utiliser le centre calculé, la même projection que la référence,
             #    et la nouvelle échelle de pixel.
-            print("   -> Création du WCS de sortie...")
+            logger.debug("   -> Création du WCS de sortie...")
             ref_wcs = valid_wcs_list[0] # Utiliser le premier WCS valide comme base
             output_wcs = WCS(naxis=2)
             output_wcs.wcs.ctype = ref_wcs.wcs.ctype # Garder la projection (ex: TAN)
@@ -1258,8 +1258,8 @@ class SeestarQueuedStacker:
             # Prendre la moyenne des valeurs absolues diagonales comme échelle approx
             avg_input_scale = np.mean(np.abs(np.diag(ref_scale_matrix)))
             output_pixel_scale = avg_input_scale / self.drizzle_scale
-            print(f"      - Échelle Pixel Entrée (Moy): {avg_input_scale * 3600:.3f} arcsec/pix")
-            print(f"      - Échelle Pixel Sortie Cible: {output_pixel_scale * 3600:.3f} arcsec/pix")
+            logger.debug(f"      - Échelle Pixel Entrée (Moy): {avg_input_scale * 3600:.3f} arcsec/pix")
+            logger.debug(f"      - Échelle Pixel Sortie Cible: {output_pixel_scale * 3600:.3f} arcsec/pix")
 
             # Appliquer la nouvelle échelle (CD matrix, en assumant pas de rotation/skew complexe)
             # Mettre le signe correct pour le RA (- pour axe X vers l'Est)
@@ -1269,7 +1269,7 @@ class SeestarQueuedStacker:
             # --- 4. Calculer la Shape de Sortie ---
             #    Projeter l'étendue totale (les coins extrêmes) sur la nouvelle grille WCS
             #    pour déterminer les dimensions en pixels nécessaires.
-            print("   -> Calcul de la shape de sortie...")
+            logger.debug("   -> Calcul de la shape de sortie...")
             # Créer les coordonnées des coins englobants de la mosaïque
             # (On prend les min/max RA/Dec, attention au wrap RA)
             # C'est plus sûr de projeter *tous* les coins d'entrée dans le système de sortie
@@ -1292,7 +1292,7 @@ class SeestarQueuedStacker:
             out_width = max(10, out_width)
             out_height = max(10, out_height)
             output_shape_hw = (out_height, out_width) # Ordre H, W
-            print(f"      - Dimensions Pixels Calculées (W, H): ({out_width}, {out_height})")
+            logger.debug(f"      - Dimensions Pixels Calculées (W, H): ({out_width}, {out_height})")
 
             # --- 5. Finaliser le WCS de Sortie ---
             #    Ajuster CRPIX pour qu'il corresponde au nouveau centre pixel
@@ -1313,12 +1313,12 @@ class SeestarQueuedStacker:
             try: output_wcs._naxis1 = out_width; output_wcs._naxis2 = out_height
             except AttributeError: pass
 
-            print(f"      - WCS Finalisé: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
-            print(f"DEBUG (Backend _calculate_final_mosaic_grid): Calcul grille mosaïque réussi.")
+            logger.debug(f"      - WCS Finalisé: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
+            logger.debug(f"DEBUG (Backend _calculate_final_mosaic_grid): Calcul grille mosaïque réussi.")
             return output_wcs, output_shape_hw # Retourne WCS et shape (H, W)
 
         except Exception as e:
-            print(f"ERREUR (Backend _calculate_final_mosaic_grid): Échec calcul grille mosaïque: {e}")
+            logger.debug(f"ERREUR (Backend _calculate_final_mosaic_grid): Échec calcul grille mosaïque: {e}")
             traceback.print_exc(limit=3)
             return None, None
 
@@ -1411,25 +1411,25 @@ class SeestarQueuedStacker:
 
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
-        # print("DEBUG QM: Appel de set_progress_callback.") # Optionnel
+        # logger.debug("DEBUG QM: Appel de set_progress_callback.") # Optionnel
         self.progress_callback = callback
         # Passer le callback à l'aligneur astroalign s'il existe
         if hasattr(self, 'aligner') and self.aligner is not None and hasattr(self.aligner, 'set_progress_callback') and callable(callback):
             try:
-                # print("DEBUG QM: Tentative de configuration callback sur aligner (astroalign)...")
+                # logger.debug("DEBUG QM: Tentative de configuration callback sur aligner (astroalign)...")
                 self.aligner.set_progress_callback(callback)
-                # print("DEBUG QM: Callback aligner (astroalign) configuré.")
+                # logger.debug("DEBUG QM: Callback aligner (astroalign) configuré.")
             except Exception as e_align_cb: 
-                print(f"Warning QM: Could not set progress callback on aligner (astroalign): {e_align_cb}")
+                logger.debug(f"Warning QM: Could not set progress callback on aligner (astroalign): {e_align_cb}")
         # Passer le callback à l'aligneur local s'il existe
         if hasattr(self, 'local_aligner_instance') and self.local_aligner_instance is not None and \
            hasattr(self.local_aligner_instance, 'set_progress_callback') and callable(callback):
             try:
-                # print("DEBUG QM: Tentative de configuration callback sur local_aligner_instance...")
+                # logger.debug("DEBUG QM: Tentative de configuration callback sur local_aligner_instance...")
                 self.local_aligner_instance.set_progress_callback(callback)
-                # print("DEBUG QM: Callback local_aligner_instance configuré.")
+                # logger.debug("DEBUG QM: Callback local_aligner_instance configuré.")
             except Exception as e_local_cb:
-                print(f"Warning QM: Could not set progress callback on local_aligner_instance: {e_local_cb}")
+                logger.debug(f"Warning QM: Could not set progress callback on local_aligner_instance: {e_local_cb}")
 
 ################################################################################################################################################
 
@@ -1438,7 +1438,7 @@ class SeestarQueuedStacker:
 
     def set_preview_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de l'aperçu."""
-        print("DEBUG QM: Appel de set_preview_callback (VERSION ULTRA PROPRE).") 
+        logger.debug("DEBUG QM: Appel de set_preview_callback (VERSION ULTRA PROPRE).") 
         self.preview_callback = callback
         
 ################################################################################################################################################
@@ -1457,7 +1457,7 @@ class SeestarQueuedStacker:
         # ================================================================================
         # === SECTION 0 : INITIALISATION DU WORKER ET CONFIGURATION DE SESSION ===
         # ================================================================================
-        print("\n" + "=" * 10 + f" DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Initialisation du worker " + "=" * 10)
+        logger.debug("\n" + "=" * 10 + f" DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Initialisation du worker " + "=" * 10)
 
         self.processing_active = True
         self.processing_error = None
@@ -1489,17 +1489,17 @@ class SeestarQueuedStacker:
             self.mosaic_alignment_mode == "astrometry_per_panel"
         )
 
-        print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Configuration de la session:")
-        print(f"  - is_mosaic_run: {self.is_mosaic_run}")
+        logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Configuration de la session:")
+        logger.debug(f"  - is_mosaic_run: {self.is_mosaic_run}")
         if self.is_mosaic_run:
-            print(f"    - mosaic_alignment_mode: '{self.mosaic_alignment_mode}'")
-            print(f"    - -> Utilisation Aligneur Local (FastAligner): {use_local_aligner_for_this_mosaic_run}")
+            logger.debug(f"    - mosaic_alignment_mode: '{self.mosaic_alignment_mode}'")
+            logger.debug(f"    - -> Utilisation Aligneur Local (FastAligner): {use_local_aligner_for_this_mosaic_run}")
             if use_local_aligner_for_this_mosaic_run:
-                print(f"      - Fallback WCS si FastAligner échoue: {use_wcs_fallback_if_local_fails}")
-            print(f"    - -> Utilisation Astrometry par Panneau: {use_astrometry_per_panel_mosaic}") # Crucial
-        print(f"  - drizzle_active_session (pour stacking standard non-mosaïque): {self.drizzle_active_session}")
+                logger.debug(f"      - Fallback WCS si FastAligner échoue: {use_wcs_fallback_if_local_fails}")
+            logger.debug(f"    - -> Utilisation Astrometry par Panneau: {use_astrometry_per_panel_mosaic}") # Crucial
+        logger.debug(f"  - drizzle_active_session (pour stacking standard non-mosaïque): {self.drizzle_active_session}")
         if self.drizzle_active_session and not self.is_mosaic_run:
-            print(f"    - drizzle_mode (standard): '{self.drizzle_mode}'")
+            logger.debug(f"    - drizzle_mode (standard): '{self.drizzle_mode}'")
 
         path_of_processed_ref_panel_basename = None # Pour skipper le panneau d'ancre si local_fast_fallback
         
@@ -1518,11 +1518,11 @@ class SeestarQueuedStacker:
             self.drizzle_fillval = mosaic_drizzle_fillval_effective # <-- Assurez-vous que cet attribut existe sur self
             self.drizzle_wht_threshold = mosaic_drizzle_wht_threshold_effective # <-- Assurez-vous que cet attribut existe sur self
 
-            print(f"DEBUG QM [_worker]: Mode Mosaïque ACTIF. Surcharge des paramètres Drizzle globaux:")
-            print(f"  -> self.drizzle_kernel mis à '{self.drizzle_kernel}' (depuis mosaic_settings)")
-            print(f"  -> self.drizzle_pixfrac mis à '{self.drizzle_pixfrac}' (depuis mosaic_settings)")
-            print(f"  -> self.drizzle_fillval mis à '{self.drizzle_fillval}' (depuis mosaic_settings)")
-            print(f"  -> self.drizzle_wht_threshold mis à '{self.drizzle_wht_threshold}' (depuis mosaic_settings)")
+            logger.debug(f"DEBUG QM [_worker]: Mode Mosaïque ACTIF. Surcharge des paramètres Drizzle globaux:")
+            logger.debug(f"  -> self.drizzle_kernel mis à '{self.drizzle_kernel}' (depuis mosaic_settings)")
+            logger.debug(f"  -> self.drizzle_pixfrac mis à '{self.drizzle_pixfrac}' (depuis mosaic_settings)")
+            logger.debug(f"  -> self.drizzle_fillval mis à '{self.drizzle_fillval}' (depuis mosaic_settings)")
+            logger.debug(f"  -> self.drizzle_wht_threshold mis à '{self.drizzle_wht_threshold}' (depuis mosaic_settings)")
         else:
             # S'assurer que les attributs spécifiques à la mosaïque (qui ne sont pas self.drizzle_*)
             # ont une valeur par défaut, même si le mode mosaïque n'est pas actif.
@@ -1555,7 +1555,7 @@ class SeestarQueuedStacker:
                     if files_for_ref_scan_add: 
                         files_for_ref_scan = files_for_ref_scan_add
                         folder_for_ref_scan = first_additional
-                        print(f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence.")
+                        logger.debug(f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence.")
             
             if not files_for_ref_scan or not folder_for_ref_scan: 
                 raise RuntimeError("Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence.")
@@ -1568,7 +1568,7 @@ class SeestarQueuedStacker:
             self.aligner.bayer_pattern = self.bayer_pattern
             # self.aligner.reference_image_path est déjà setté dans start_processing
 
-            print(f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
+            logger.debug(f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale...")
             # _get_reference_image DOIT s'assurer que s'il ajoute _SOURCE_PATH à son header interne
             # avant de sauvegarder reference_image.fit, il utilise os.path.basename().
             # C'est la source de l'erreur "keyword too long".
@@ -1599,11 +1599,11 @@ class SeestarQueuedStacker:
                 # doit aussi être juste le nom de base.
                 if use_local_aligner_for_this_mosaic_run: 
                     path_of_processed_ref_panel_basename = source_basename_for_wcs_ref
-                    print(f"DEBUG QM [_worker]: Panneau d'ancre identifié par basename: {path_of_processed_ref_panel_basename}")
+                    logger.debug(f"DEBUG QM [_worker]: Panneau d'ancre identifié par basename: {path_of_processed_ref_panel_basename}")
             else:
                 # Si _SOURCE_PATH n'est pas dans le header de reference_image.fit, on ne peut pas le définir
                 # Cela pourrait arriver si _get_reference_image ne l'ajoute pas.
-                print("WARN QM [_worker]: Mot-clé '_SOURCE_PATH' non trouvé dans le header de l'image de référence globale.")
+                logger.debug("WARN QM [_worker]: Mot-clé '_SOURCE_PATH' non trouvé dans le header de l'image de référence globale.")
                 if use_local_aligner_for_this_mosaic_run:
                      path_of_processed_ref_panel_basename = "unknown_reference_panel.fits" # Fallback
 
@@ -1616,7 +1616,7 @@ class SeestarQueuedStacker:
                 # ET si la correction pour _SOURCE_PATH trop long est appliquée DANS _get_reference_image.
                 raise RuntimeError(f"CRITICAL: Fichier de référence '{reference_image_path_for_solver}' non trouvé après appel à _get_reference_image. Vérifier la logique de sauvegarde dans SeestarAligner._get_reference_image pour les headers longs.")
 
-            print(f"DEBUG QM [_worker]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
+            logger.debug(f"DEBUG QM [_worker]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}")
 
 
 
@@ -1625,11 +1625,11 @@ class SeestarQueuedStacker:
             self.reference_wcs_object = None 
             temp_wcs_ancre = None # Spécifique pour la logique mosaïque locale
 
-            print(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
-            print(f"    self.is_mosaic_run = {self.is_mosaic_run}")
-            print(f"    self.local_solver_preference = '{getattr(self, 'local_solver_preference', 'NON_DÉFINI')}'")
-            print(f"    self.astap_search_radius = {getattr(self, 'astap_search_radius', 'NON_DÉFINI')}")
-            print(f"    self.reference_pixel_scale_arcsec = {self.reference_pixel_scale_arcsec}")
+            logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
+            logger.debug(f"    self.is_mosaic_run = {self.is_mosaic_run}")
+            logger.debug(f"    self.local_solver_preference = '{getattr(self, 'local_solver_preference', 'NON_DÉFINI')}'")
+            logger.debug(f"    self.astap_search_radius = {getattr(self, 'astap_search_radius', 'NON_DÉFINI')}")
+            logger.debug(f"    self.reference_pixel_scale_arcsec = {self.reference_pixel_scale_arcsec}")
 
             solver_settings_for_ref_anchor = {
                 'local_solver_preference': self.local_solver_preference,
@@ -1645,12 +1645,12 @@ class SeestarQueuedStacker:
                 'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
             }
             # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
-            print(f"DEBUG QM (_worker): Contenu de solver_settings_for_ref_anchor:") 
+            logger.debug(f"DEBUG QM (_worker): Contenu de solver_settings_for_ref_anchor:") 
             for key_s, val_s in solver_settings_for_ref_anchor.items():               
-                if key_s == 'api_key': print(f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'")
-                else: print(f"    '{key_s}': '{val_s}'")
+                if key_s == 'api_key': logger.debug(f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'")
+                else: logger.debug(f"    '{key_s}': '{val_s}'")
 
-            print(f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
+            logger.debug(f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- CAS 1: Mosaïque Locale (FastAligner avec ou sans fallback WCS) ---
             if use_local_aligner_for_this_mosaic_run: # Flag défini au tout début de _worker
@@ -1691,13 +1691,13 @@ class SeestarQueuedStacker:
                     try: self.reference_pixel_scale_arcsec = np.sqrt(np.abs(np.linalg.det(self.reference_wcs_object.pixel_scale_matrix))) * 3600.0
                     except: pass # Ignorer si erreur de calcul
 
-                if self.reference_wcs_object: print(f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
+                if self.reference_wcs_object: logger.debug(f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
                 
                 mat_identite_ref_panel = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32)
                 valid_mask_ref_panel_pixels = np.ones(mosaic_ref_panel_image_data.shape[:2], dtype=bool)
                 all_aligned_files_with_info_for_mosaic.append((mosaic_ref_panel_image_data.copy(), mosaic_ref_panel_header.copy(), self.reference_wcs_object, mat_identite_ref_panel, valid_mask_ref_panel_pixels))
                 self.aligned_files_count += 1; self.processed_files_count += 1
-                print(f"DEBUG QM [_worker]: Mosaïque Locale: Panneau de référence ajouté à all_aligned_files_with_info_for_mosaic.")
+                logger.debug(f"DEBUG QM [_worker]: Mosaïque Locale: Panneau de référence ajouté à all_aligned_files_with_info_for_mosaic.")
 
             # --- CAS 2: Mosaïque Astrometry.net par panneau OU Drizzle Standard (pour la référence globale) ---
             elif self.drizzle_active_session or use_astrometry_per_panel_mosaic: # `use_astrometry_per_panel_mosaic` est True si mode mosaique="astrometry_per_panel"
@@ -1734,9 +1734,9 @@ class SeestarQueuedStacker:
                     try: self.reference_pixel_scale_arcsec = np.sqrt(np.abs(np.linalg.det(self.reference_wcs_object.pixel_scale_matrix))) * 3600.0
                     except: pass
 
-                print(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
+                logger.debug(f"  DEBUG QM [_worker]: Infos WCS de Référence Globale: CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ...");
             
-            print(f"!!!! DEBUG _worker APRÈS BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
+            logger.debug(f"!!!! DEBUG _worker APRÈS BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- Initialisation grille Drizzle Standard (si applicable pour un run NON-mosaïque) ---
             if self.drizzle_active_session and not self.is_mosaic_run: 
@@ -1751,7 +1751,7 @@ class SeestarQueuedStacker:
                         )
                         if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
                             raise RuntimeError("Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard.")
-                        print(f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}")
+                        logger.debug(f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}")
                         self.update_progress(f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}", "INFO")
                     except Exception as e_grid_driz:
                         error_msg_grid = f"Échec critique création grille de sortie Drizzle Standard: {e_grid_driz}"
@@ -1760,7 +1760,7 @@ class SeestarQueuedStacker:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
                     self.update_progress(error_msg_ref_driz, "ERROR"); raise RuntimeError(error_msg_ref_driz)
             
-            print(f"!!!! DEBUG _worker POST SECTION 1 (après init grille Drizzle si applicable) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
+            logger.debug(f"!!!! DEBUG _worker POST SECTION 1 (après init grille Drizzle si applicable) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
             
             self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
             self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
@@ -1778,13 +1778,13 @@ class SeestarQueuedStacker:
             while not self.stop_processing:
                 iteration_count += 1
                 
-                print(f"!!!! DEBUG _worker LOOP START iter {iteration_count}: self.is_mosaic_run = {self.is_mosaic_run}, "
+                logger.debug(f"!!!! DEBUG _worker LOOP START iter {iteration_count}: self.is_mosaic_run = {self.is_mosaic_run}, "
                       f"self.mosaic_alignment_mode = '{self.mosaic_alignment_mode}', "
                       f"self.drizzle_active_session = {self.drizzle_active_session}, "
                       f"self.drizzle_mode = '{self.drizzle_mode}'")
                 
                 # Log existant (bon à garder)
-                print(f"DEBUG QM [_worker V_LoopFocus - Loop Iter]: DÉBUT Itération #{iteration_count}. " 
+                logger.debug(f"DEBUG QM [_worker V_LoopFocus - Loop Iter]: DÉBUT Itération #{iteration_count}. " 
                       f"Queue approx: {self.queue.qsize()}. "
                       f"Mosaic list AVANT GET: {len(all_aligned_files_with_info_for_mosaic)}")
 
@@ -1794,24 +1794,24 @@ class SeestarQueuedStacker:
                 try:
                     file_path = self.queue.get(timeout=1.0) 
                     file_name_for_log = os.path.basename(file_path)
-                    print(f"DEBUG QM [_worker V_LoopFocus / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue.")
+                    logger.debug(f"DEBUG QM [_worker V_LoopFocus / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue.")
 
                     if path_of_processed_ref_panel_basename and file_name_for_log == path_of_processed_ref_panel_basename:
                         self.update_progress(f"   [WorkerLoop] Panneau d'ancre '{file_name_for_log}' déjà traité. Ignoré dans la boucle principale.")
-                        print(f"DEBUG QM [_worker V_LoopFocus]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité (path_of_processed_ref_panel_basename='{path_of_processed_ref_panel_basename}').")
+                        logger.debug(f"DEBUG QM [_worker V_LoopFocus]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité (path_of_processed_ref_panel_basename='{path_of_processed_ref_panel_basename}').")
                         self.processed_files_count += 1 
                         self.queue.task_done()
                         continue 
 
                     item_result_tuple = None 
 
-                    print(f"  DEBUG _worker (iter {iteration_count}): PRE-CALL _process_file pour '{file_name_for_log}'")
-                    print(f"    - use_local_aligner_for_this_mosaic_run: {use_local_aligner_for_this_mosaic_run}")
-                    print(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
-                    print(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
+                    logger.debug(f"  DEBUG _worker (iter {iteration_count}): PRE-CALL _process_file pour '{file_name_for_log}'")
+                    logger.debug(f"    - use_local_aligner_for_this_mosaic_run: {use_local_aligner_for_this_mosaic_run}")
+                    logger.debug(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
+                    logger.debug(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
 
                     if use_local_aligner_for_this_mosaic_run: 
-                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
+                        logger.debug(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment, 
@@ -1837,14 +1837,14 @@ class SeestarQueuedStacker:
                             )
                             self.aligned_files_count += 1
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
-                            print(f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
+                            logger.debug(f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
                             self.failed_align_count += 1
-                            print(f"  DEBUG QM [_worker / Mosaïque Locale]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
+                            logger.debug(f"  DEBUG QM [_worker / Mosaïque Locale]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
                     elif use_astrometry_per_panel_mosaic: 
-                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file.") # DEBUG
+                        logger.debug(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment, # Passé mais pas utilisé pour l'alignement direct dans ce mode
@@ -1862,14 +1862,14 @@ class SeestarQueuedStacker:
                             )
                             self.aligned_files_count += 1
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
-                            print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
+                            logger.debug(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
                             self.failed_align_count += 1
-                            print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
+                            logger.debug(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
                     else: # Stacking Classique ou Drizzle Standard (non-mosaïque)
-                        print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
+                        logger.debug(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,
@@ -1883,29 +1883,29 @@ class SeestarQueuedStacker:
                             aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple # Déballer les 6
                             
                             if self.drizzle_active_session: # Drizzle Standard (non-mosaïque)
-                                print(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
+                                logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
                                 temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig) 
                                 if temp_driz_file_path:
                                     current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
                                 else:
                                     self.failed_stack_count +=1 # Échec sauvegarde temp, donc échec pour le stack
-                                    print(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
+                                    logger.debug(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
                             else: # Stacking Classique (SUM/W)
-                                print(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
+                                logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
                                 classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val) # Recréer tuple à 5
                                 current_batch_items_with_masks_for_stack_batch.append(classic_stack_item) 
                         else: # _process_file a échoué pour le mode classique/drizzle std
                             self.failed_align_count += 1
-                            print(f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}")
+                            logger.debug(f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
                         
                         # --- Gestion des lots pour Stacking Classique ou Drizzle Standard ---
                         if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
                             self.stacked_batches_count += 1
                             self._send_eta_update()
-                            print(f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd.")
+                            logger.debug(f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd.")
                             if self.drizzle_active_session: # Drizzle Standard Final
-                                print(f"    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final).")
+                                logger.debug(f"    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final).")
                                 batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
                                     current_batch_items_with_masks_for_stack_batch, 
                                     self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count
@@ -1914,7 +1914,7 @@ class SeestarQueuedStacker:
                                     self.intermediate_drizzle_batch_files.append((batch_sci_p, batch_wht_p_list))
                                 else: self.failed_stack_count += len(current_batch_items_with_masks_for_stack_batch)
                             else: # Stacking Classique
-                                print(f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W).")
+                                logger.debug(f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W).")
                                 self._process_completed_batch(
                                     current_batch_items_with_masks_for_stack_batch, 
                                     self.stacked_batches_count, self.total_batches_estimated
@@ -1924,7 +1924,7 @@ class SeestarQueuedStacker:
                     self.queue.task_done()
                 except Empty:
                     # --- NOUVELLE LOGIQUE POUR GÉRER LES DOSSIERS ADDITIONNELS (DÉBUT) ---
-                    print(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. Vérification des dossiers additionnels.")
+                    logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. Vérification des dossiers additionnels.")
                     new_files_added_from_additional_folder = 0
                     folder_to_process_from_additional = None
 
@@ -1932,17 +1932,17 @@ class SeestarQueuedStacker:
                     with self.folders_lock:
                         if self.additional_folders: # Si des dossiers additionnels sont en attente
                             folder_to_process_from_additional = self.additional_folders.pop(0) # Prendre le premier et le retirer
-                            print(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel trouvé et retiré: '{os.path.basename(folder_to_process_from_additional)}'.")
+                            logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel trouvé et retiré: '{os.path.basename(folder_to_process_from_additional)}'.")
                             # Mettre à jour le statut dans l'UI immédiatement (même si pas de fichiers à l'intérieur)
                             self.update_progress(f"🔍 Scan du dossier additionnel: {os.path.basename(folder_to_process_from_additional)}...", None)
                         else:
-                            print(f"DEBUG QM [_worker / EmptyExcept]: self.additional_folders est vide (pas de dossiers additionnels en attente).")
+                            logger.debug(f"DEBUG QM [_worker / EmptyExcept]: self.additional_folders est vide (pas de dossiers additionnels en attente).")
 
                     if folder_to_process_from_additional:
                         # Mettre à jour self.current_folder pour que les logs d'erreurs éventuelles soient pertinents
                         self.current_folder = folder_to_process_from_additional
                         new_files_added_from_additional_folder = self._add_files_to_queue(folder_to_process_from_additional)
-                        print(f"DEBUG QM [_worker / EmptyExcept]: {new_files_added_from_additional_folder} nouveaux fichiers ajoutés de '{os.path.basename(folder_to_process_from_additional)}'.")
+                        logger.debug(f"DEBUG QM [_worker / EmptyExcept]: {new_files_added_from_additional_folder} nouveaux fichiers ajoutés de '{os.path.basename(folder_to_process_from_additional)}'.")
                         
                         # Notifier le GUI que le nombre de dossiers additionnels a diminué
                         # (La mise à jour de l'affichage du nombre de dossiers dans l'UI via le callback)
@@ -1951,12 +1951,12 @@ class SeestarQueuedStacker:
                         if new_files_added_from_additional_folder > 0:
                             # Si de nouveaux fichiers ont été ajoutés, on continue la boucle
                             # et la queue sera traitée à la prochaine itération.
-                            print(f"DEBUG QM [_worker / EmptyExcept]: Nouveaux fichiers détectés, continuer la boucle.")
+                            logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Nouveaux fichiers détectés, continuer la boucle.")
                             continue # <-- CRUCIAL: Retourne au début de la boucle while pour traiter les nouveaux fichiers
                         else:
                             # Si le dossier additionnel était vide de FITS, on log l'info.
                             self.update_progress(f"   ℹ️ Dossier '{os.path.basename(folder_to_process_from_additional)}' ne contient aucun fichier FITS à traiter. Passons au suivant ou finalisons.")
-                            print(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel vide, pas de nouveaux fichiers à traiter.")
+                            logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Dossier additionnel vide, pas de nouveaux fichiers à traiter.")
                             # Si le dossier additionnel ne contenait pas de fichiers FITS, la queue reste vide.
                             # On laisse la logique de fin de traitement prendre le relais à la prochaine itération.
                             # Pas de 'continue' ici, pour permettre l'évaluation de la condition finale de sortie.
@@ -1966,7 +1966,7 @@ class SeestarQueuedStacker:
                     # (et qu'on est arrivé ici sans 'continue' précédent)
                     if not self.additional_folders and self.queue.empty(): 
                         self.update_progress("INFO: Plus aucun fichier ni dossier supplémentaire. Fin de la boucle de traitement.", None)
-                        print(f"DEBUG QM [_worker / EmptyExcept]: Condition de sortie (self.additional_folders et queue vides) remplie. BREAK.")
+                        logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Condition de sortie (self.additional_folders et queue vides) remplie. BREAK.")
                         break # <-- CRUCIAL: Sortie normale de la boucle while
                     else:
                         # Si self.additional_folders n'est PAS vide (même après le pop d'un élément, d'autres ont pu être ajoutés à la volée),
@@ -1976,7 +1976,7 @@ class SeestarQueuedStacker:
                         # Sinon, c'est une boucle infinie si on arrive ici sans `break` ou `continue` et que la queue est vide.
                         # Un `time.sleep` est alors nécessaire pour éviter le CPU à 100%.
                         self.update_progress("INFO: File d'attente vide, en attente de nouveaux ...", None)
-                        print(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. self.additional_folders n'est PAS vide (il reste des dossiers à traiter), OU un 'continue' a été manqué. Sleep et revérification...")
+                        logger.debug(f"DEBUG QM [_worker / EmptyExcept]: Queue vide. self.additional_folders n'est PAS vide (il reste des dossiers à traiter), OU un 'continue' a été manqué. Sleep et revérification...")
                         time.sleep(0.5) # Attendre un peu avant de refaire un `get` (pour éviter boucle serrée)
                         continue # <-- CRUCIAL: Retourne au début de la boucle `while` pour re-tenter de prendre un item ou un autre dossier additionnel
                     # --- NOUVELLE LOGIQUE POUR GÉRER LES DOSSIERS ADDITIONNELS (FIN) ---
@@ -1984,26 +1984,26 @@ class SeestarQueuedStacker:
             # ==============================================================
             # === SECTION 3 : TRAITEMENT FINAL APRÈS LA BOUCLE PRINCIPALE ===
             # ==============================================================
-            print(f"DEBUG QM [_worker V_DrizIncrTrue_Fix1 / FIN DE BOUCLE WHILE]:") # Version Log
-            print(f"  >> self.stop_processing est: {self.stop_processing}")
-            print(f"  >> Taille de all_aligned_files_with_info_for_mosaic IMMÉDIATEMENT APRÈS LA BOUCLE WHILE: {len(all_aligned_files_with_info_for_mosaic)}")
+            logger.debug(f"DEBUG QM [_worker V_DrizIncrTrue_Fix1 / FIN DE BOUCLE WHILE]:") # Version Log
+            logger.debug(f"  >> self.stop_processing est: {self.stop_processing}")
+            logger.debug(f"  >> Taille de all_aligned_files_with_info_for_mosaic IMMÉDIATEMENT APRÈS LA BOUCLE WHILE: {len(all_aligned_files_with_info_for_mosaic)}")
             if all_aligned_files_with_info_for_mosaic: 
-                print(f"  >> Premier item (pour vérif type): {type(all_aligned_files_with_info_for_mosaic[0])}, len: {len(all_aligned_files_with_info_for_mosaic[0]) if isinstance(all_aligned_files_with_info_for_mosaic[0], tuple) else 'N/A'}")
+                logger.debug(f"  >> Premier item (pour vérif type): {type(all_aligned_files_with_info_for_mosaic[0])}, len: {len(all_aligned_files_with_info_for_mosaic[0]) if isinstance(all_aligned_files_with_info_for_mosaic[0], tuple) else 'N/A'}")
 
-            print(f"DEBUG QM [_worker V_DrizIncrTrue_Fix1]: Sortie de la boucle principale. Début de la phase de finalisation...")
-            print(f"  ÉTAT FINAL AVANT BLOC if/elif/else de finalisation:")
-            print(f"    - self.stop_processing: {self.stop_processing}")
-            print(f"    - self.is_mosaic_run: {self.is_mosaic_run}")
-            if self.is_mosaic_run: print(f"      - Mode align.: '{self.mosaic_alignment_mode}', Nb items mosaïque: {len(all_aligned_files_with_info_for_mosaic)}")
-            print(f"    - self.drizzle_active_session (std): {self.drizzle_active_session}")
-            if self.drizzle_active_session and not self.is_mosaic_run: print(f"      - Mode Drizzle (std): '{self.drizzle_mode}', Nb lots Drizzle interm.: {len(self.intermediate_drizzle_batch_files)}")
-            print(f"    - self.images_in_cumulative_stack (classique/DrizIncrVRAI): {self.images_in_cumulative_stack}") 
-            print(f"    - current_batch_items_with_masks_for_stack_batch (non traité si dernier lot partiel): {len(current_batch_items_with_masks_for_stack_batch)}")
+            logger.debug(f"DEBUG QM [_worker V_DrizIncrTrue_Fix1]: Sortie de la boucle principale. Début de la phase de finalisation...")
+            logger.debug(f"  ÉTAT FINAL AVANT BLOC if/elif/else de finalisation:")
+            logger.debug(f"    - self.stop_processing: {self.stop_processing}")
+            logger.debug(f"    - self.is_mosaic_run: {self.is_mosaic_run}")
+            if self.is_mosaic_run: logger.debug(f"      - Mode align.: '{self.mosaic_alignment_mode}', Nb items mosaïque: {len(all_aligned_files_with_info_for_mosaic)}")
+            logger.debug(f"    - self.drizzle_active_session (std): {self.drizzle_active_session}")
+            if self.drizzle_active_session and not self.is_mosaic_run: logger.debug(f"      - Mode Drizzle (std): '{self.drizzle_mode}', Nb lots Drizzle interm.: {len(self.intermediate_drizzle_batch_files)}")
+            logger.debug(f"    - self.images_in_cumulative_stack (classique/DrizIncrVRAI): {self.images_in_cumulative_stack}") 
+            logger.debug(f"    - current_batch_items_with_masks_for_stack_batch (non traité si dernier lot partiel): {len(current_batch_items_with_masks_for_stack_batch)}")
 
-            print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** JUSTE AVANT LE PREMIER 'if self.stop_processing:' ***")
+            logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** JUSTE AVANT LE PREMIER 'if self.stop_processing:' ***")
 
             if self.stop_processing:
-                print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'if self.stop_processing:' ***")
+                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'if self.stop_processing:' ***")
                 self.update_progress("⛔ Traitement interrompu par l'utilisateur ou erreur.")
                 if self.processing_error:
                     self.update_progress(f"   Cause: {self.processing_error}")
@@ -2024,7 +2024,7 @@ class SeestarQueuedStacker:
 
             # --- MODE MOSAÏQUE ---
             elif self.is_mosaic_run:
-                print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif self.is_mosaic_run:' ***")
+                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif self.is_mosaic_run:' ***")
                 # ... (logique mosaïque inchangée, elle appelle _finalize_mosaic_processing qui appelle _save_final_stack
                 #      en passant drizzle_final_sci_data, donc c'est géré par la branche correspondante dans _save_final_stack)
                 self.update_progress("🏁 Finalisation Mosaïque...")
@@ -2037,14 +2037,14 @@ class SeestarQueuedStacker:
                     except Exception as e_finalize_mosaic:
                         # ... (gestion erreur identique)
                         error_msg = f"Erreur CRITIQUE durant finalisation mosaïque: {e_finalize_mosaic}"
-                        print(f"ERREUR QM [_worker V_DrizIncrTrue_Fix1]: {error_msg}"); traceback.print_exc(limit=3)
+                        logger.debug(f"ERREUR QM [_worker V_DrizIncrTrue_Fix1]: {error_msg}"); traceback.print_exc(limit=3)
                         self.update_progress(f"   ❌ {error_msg}", "ERROR")
                         self.processing_error = error_msg; self.final_stacked_path = None
             
             # --- MODE DRIZZLE STANDARD (NON-MOSAÏQUE) ---
             elif self.drizzle_active_session: 
-                print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif self.drizzle_active_session:' (NON-MOSAÏQUE) ***")
-                print(f"DEBUG QM [_worker/Finalize DrizzleStd]: Mode Drizzle Standard: {self.drizzle_mode}")
+                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif self.drizzle_active_session:' (NON-MOSAÏQUE) ***")
+                logger.debug(f"DEBUG QM [_worker/Finalize DrizzleStd]: Mode Drizzle Standard: {self.drizzle_mode}")
 
                 if current_batch_items_with_masks_for_stack_batch:
                     self.stacked_batches_count += 1
@@ -2099,7 +2099,7 @@ class SeestarQueuedStacker:
             # --- MODE STACKING CLASSIQUE (NON-MOSAÏQUE, NON-DRIZZLE) ---
             elif not self.is_mosaic_run and not self.drizzle_active_session: 
                 # ... (logique inchangée pour stacking classique) ...
-                print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif not self.is_mosaic_run and not self.drizzle_active_session:' (CLASSIQUE) ***")
+                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif not self.is_mosaic_run and not self.drizzle_active_session:' (CLASSIQUE) ***")
                 if current_batch_items_with_masks_for_stack_batch:
                     self.stacked_batches_count += 1
                     self._send_eta_update()
@@ -2120,11 +2120,11 @@ class SeestarQueuedStacker:
                         self.update_progress("   Aucune image accumulée dans le stack classique. Sauvegarde ignorée.")
                         self.final_stacked_path = None
             else: # Cas imprévu
-                print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS LE 'else' FINAL (ÉTAT NON GÉRÉ) ***")
+                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS LE 'else' FINAL (ÉTAT NON GÉRÉ) ***")
                 self.update_progress("⚠️ État de finalisation non géré. Aucune action de sauvegarde principale.")
                 self.processing_error = "État de finalisation non géré."; self.final_stacked_path = None
 
-            print("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** APRÈS LE BLOC if/elif/else DE FINALISATION ***")
+            logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** APRÈS LE BLOC if/elif/else DE FINALISATION ***")
 
 
 
@@ -2132,16 +2132,16 @@ class SeestarQueuedStacker:
         # --- FIN DU BLOC TRY PRINCIPAL DU WORKER ---
         except RuntimeError as rte: 
             self.update_progress(f"❌ ERREUR CRITIQUE (RuntimeError) dans le worker: {rte}", "ERROR") # S'assurer que "ERROR" est passé pour le log GUI
-            print(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: RuntimeError: {rte}"); traceback.print_exc(limit=3)
+            logger.debug(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: RuntimeError: {rte}"); traceback.print_exc(limit=3)
             self.processing_error = f"RuntimeError: {rte}"
             self.stop_processing = True # Provoquer l'arrêt propre du thread
         except Exception as e_global_worker: 
             self.update_progress(f"❌ ERREUR INATTENDUE GLOBALE dans le worker: {e_global_worker}", "ERROR")
-            print(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: Exception Globale: {e_global_worker}"); traceback.print_exc(limit=3)
+            logger.debug(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: Exception Globale: {e_global_worker}"); traceback.print_exc(limit=3)
             self.processing_error = f"Erreur Globale: {e_global_worker}"
             self.stop_processing = True # Provoquer l'arrêt propre du thread
         finally:
-            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Entrée dans le bloc FINALLY principal du worker.")
+            logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Entrée dans le bloc FINALLY principal du worker.")
             if hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None \
                or hasattr(self, 'cumulative_wht_memmap') and self.cumulative_wht_memmap is not None:
                 self._close_memmaps()
@@ -2156,7 +2156,7 @@ class SeestarQueuedStacker:
             self.processing_active = False
             self.stop_processing_flag_for_gui = self.stop_processing # Transmettre l'état d'arrêt à l'UI
             gc.collect()
-            print(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Fin du bloc FINALLY principal. Flag processing_active mis à False.")
+            logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Fin du bloc FINALLY principal. Flag processing_active mis à False.")
             self.update_progress("🚪 Thread de traitement principal terminé.")
 
 
@@ -2186,7 +2186,7 @@ class SeestarQueuedStacker:
         MODIFIED V2: Gestion plus robuste de la lecture de _ALIGN_METHOD_LOG depuis le header.
         """
         if not self.output_folder:
-            print("WARN QM [_generate_mosaic_log V2]: Output folder non défini, log non sauvegardé.")
+            logger.debug("WARN QM [_generate_mosaic_log V2]: Output folder non défini, log non sauvegardé.")
             return
 
         log_lines = []
@@ -2317,10 +2317,10 @@ class SeestarQueuedStacker:
                 for line in log_lines:
                     f_log.write(line + "\n")
             self.update_progress(f"📄 Rapport d'alignement mosaïque sauvegardé: {log_filename}", None)
-            print(f"DEBUG QM: Rapport d'alignement mosaïque V2 sauvegardé dans '{log_filepath}'")
+            logger.debug(f"DEBUG QM: Rapport d'alignement mosaïque V2 sauvegardé dans '{log_filepath}'")
         except Exception as e_save_log:
             self.update_progress(f"⚠️ Erreur sauvegarde rapport d'alignement mosaïque V2: {e_save_log}", None)
-            print(f"ERREUR QM: Échec sauvegarde rapport alignement mosaïque V2: {e_save_log}")
+            logger.debug(f"ERREUR QM: Échec sauvegarde rapport alignement mosaïque V2: {e_save_log}")
 
 
 
@@ -2355,9 +2355,9 @@ class SeestarQueuedStacker:
         projected_x_arcsec = coords_in_offset_frame.lon.to(u.arcsec).value
         projected_y_arcsec = coords_in_offset_frame.lat.to(u.arcsec).value
         
-        # print(f"DEBUG _project_to_tangent_plane: SkyCoords (premier): {sky_coords_obj[0].ra.deg:.3f}, {sky_coords_obj[0].dec.deg:.3f}")
-        # print(f"DEBUG _project_to_tangent_plane: Tangent Point: {tangent_point_sky.ra.deg:.3f}, {tangent_point_sky.dec.deg:.3f}")
-        # print(f"DEBUG _project_to_tangent_plane: Projected (premier): x={projected_x_arcsec[0]:.2f}\", y={projected_y_arcsec[0]:.2f}\"")
+        # logger.debug(f"DEBUG _project_to_tangent_plane: SkyCoords (premier): {sky_coords_obj[0].ra.deg:.3f}, {sky_coords_obj[0].dec.deg:.3f}")
+        # logger.debug(f"DEBUG _project_to_tangent_plane: Tangent Point: {tangent_point_sky.ra.deg:.3f}, {tangent_point_sky.dec.deg:.3f}")
+        # logger.debug(f"DEBUG _project_to_tangent_plane: Projected (premier): x={projected_x_arcsec[0]:.2f}\", y={projected_y_arcsec[0]:.2f}\"")
         
         return np.column_stack((projected_x_arcsec, projected_y_arcsec))
 
@@ -2386,8 +2386,8 @@ class SeestarQueuedStacker:
         # Transformer ces coordonnées retour vers le système céleste de base (ex: ICRS)
         deprojected_sky_coords = coords_on_tangent_plane.transform_to(tangent_point_sky.frame) # Utiliser le frame du point de tangence
         
-        # print(f"DEBUG _deproject_from_tangent_plane: Input XY (premier): {xy_arcsec_array[0,0]:.2f}\", {xy_arcsec_array[0,1]:.2f}\"")
-        # print(f"DEBUG _deproject_from_tangent_plane: Deprojected (premier): RA={deprojected_sky_coords[0].ra.deg:.3f}, Dec={deprojected_sky_coords[0].dec.deg:.3f}")
+        # logger.debug(f"DEBUG _deproject_from_tangent_plane: Input XY (premier): {xy_arcsec_array[0,0]:.2f}\", {xy_arcsec_array[0,1]:.2f}\"")
+        # logger.debug(f"DEBUG _deproject_from_tangent_plane: Deprojected (premier): RA={deprojected_sky_coords[0].ra.deg:.3f}, Dec={deprojected_sky_coords[0].dec.deg:.3f}")
 
         return deprojected_sky_coords
 
@@ -2407,7 +2407,7 @@ class SeestarQueuedStacker:
         OMBB pour dimensions et centre, puis orientation "snappée" aux axes cardinaux.
         """
         num_panels = len(panel_info_list_for_grid)
-        print(f"DEBUG QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Début pour {num_panels} panneaux...")
+        logger.debug(f"DEBUG QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Début pour {num_panels} panneaux...")
         # ... (calcul de all_corners_flat_skycoord, tangent_point_sky, tangent_plane_points_arcsec, hull_points_arcsec comme avant)
         # ... jusqu'à obtenir rect de cv2.minAreaRect
         # Les premières parties sont identiques à V_OMBB_Fix5
@@ -2447,7 +2447,7 @@ class SeestarQueuedStacker:
 
             rect = cv2.minAreaRect(hull_points_arcsec.astype(np.float32)) 
             (center_x_tan_arcsec, center_y_tan_arcsec), (dim1_arcsec, dim2_arcsec), angle_cv_deg = rect
-            print(f"DEBUG QM: OMBB brut: centre_tan=({center_x_tan_arcsec:.1f}, {center_y_tan_arcsec:.1f}), dims_tan=({dim1_arcsec:.1f}, {dim2_arcsec:.1f}), angle_cv={angle_cv_deg:.1f}°")
+            logger.debug(f"DEBUG QM: OMBB brut: centre_tan=({center_x_tan_arcsec:.1f}, {center_y_tan_arcsec:.1f}), dims_tan=({dim1_arcsec:.1f}, {dim2_arcsec:.1f}), angle_cv={angle_cv_deg:.1f}°")
 
             # --- NOUVELLE LOGIQUE D'ORIENTATION ET DE DIMENSION ---
             # angle_cv_deg est l'angle du côté dim1_arcsec par rapport à l'axe X du plan tangent.
@@ -2507,13 +2507,13 @@ class SeestarQueuedStacker:
 
             final_wcs_rotation_deg = 0.0 # Forcer l'alignement avec les axes RA/Dec
             self.update_progress(f"   -> Orientation WCS forcée à 0° (alignée RA/Dec).")
-            print(f"DEBUG QM: Angle de rotation WCS final forcé à: {final_wcs_rotation_deg:.1f}°")
+            logger.debug(f"DEBUG QM: Angle de rotation WCS final forcé à: {final_wcs_rotation_deg:.1f}°")
             
             # CRVAL vient du centre de l'OMBB (calculé avant)
             crval_skycoord_list = SeestarQueuedStacker._deproject_from_tangent_plane(np.array([[center_x_tan_arcsec, center_y_tan_arcsec]]), tangent_point_sky)
             crval_skycoord = crval_skycoord_list[0]
             output_crval = [crval_skycoord.ra.deg, crval_skycoord.dec.deg]
-            print(f"DEBUG QM: CRVAL utilisé (centre OMBB): RA={output_crval[0]:.4f}, Dec={output_crval[1]:.4f}")
+            logger.debug(f"DEBUG QM: CRVAL utilisé (centre OMBB): RA={output_crval[0]:.4f}, Dec={output_crval[1]:.4f}")
             # --- FIN NOUVELLE LOGIQUE D'ORIENTATION ---
             
             # ... (Calcul de anchor_pix_scale_deg et output_pixel_scale_deg comme dans V_OMBB_Fix4)
@@ -2553,7 +2553,7 @@ class SeestarQueuedStacker:
             pc_matrix = np.array([[cos_rot, -sin_rot], [sin_rot,  cos_rot]])
             cdelt_matrix = np.array([[-output_pixel_scale_deg, 0.0], [0.0, output_pixel_scale_deg]])
             output_wcs.wcs.cd = np.dot(cdelt_matrix, pc_matrix)
-            print(f"DEBUG QM: WCS orienté (snappé) créé. CRVAL={output_wcs.wcs.crval}, CD=\n{output_wcs.wcs.cd}")
+            logger.debug(f"DEBUG QM: WCS orienté (snappé) créé. CRVAL={output_wcs.wcs.crval}, CD=\n{output_wcs.wcs.cd}")
 
             # --- Reprojection des coins, calcul shape et CRPIX final (comme dans V_OMBB_Fix5) ---
             all_ra_deg = all_corners_flat_skycoord.ra.deg
@@ -2583,11 +2583,11 @@ class SeestarQueuedStacker:
             try: output_wcs._naxis1 = final_output_width_px; output_wcs._naxis2 = final_output_height_px
             except AttributeError: pass
 
-            print(f"DEBUG QM: WCS Mosaïque Finale (SnapToAxes) OK: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
+            logger.debug(f"DEBUG QM: WCS Mosaïque Finale (SnapToAxes) OK: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
             return output_wcs, output_shape_final_hw
 
         except Exception as e_grid:
-            print(f"ERREUR QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Échec calcul final grille/WCS: {e_grid}")
+            logger.debug(f"ERREUR QM [_calculate_local_mosaic_output_grid V_OMBB_SnapToAxes]: Échec calcul final grille/WCS: {e_grid}")
             traceback.print_exc(limit=2)
             return None, None
 
@@ -2605,13 +2605,13 @@ class SeestarQueuedStacker:
         """
         Crée et retourne un header FITS pour le stack final en mode Drizzle "Final".
         """
-        print("DEBUG QM [_update_header_for_drizzle_final]: Création du header pour Drizzle Final...")
+        logger.debug("DEBUG QM [_update_header_for_drizzle_final]: Création du header pour Drizzle Final...")
         
         final_header = fits.Header()
 
         # 1. Copier les informations de base du header de référence (si disponible)
         if self.reference_header_for_wcs:
-            print("DEBUG QM [_update_header_for_drizzle_final]: Copie des clés depuis reference_header_for_wcs...")
+            logger.debug("DEBUG QM [_update_header_for_drizzle_final]: Copie des clés depuis reference_header_for_wcs...")
             # Liste des clés FITS standard et utiles à copier depuis une brute/référence
             keys_to_copy_from_ref = [
                 'INSTRUME', 'TELESCOP', 'OBSERVER', 'OBJECT', 
@@ -2631,9 +2631,9 @@ class SeestarQueuedStacker:
                     except KeyError: # Si pas de commentaire, copier juste la valeur
                         final_header[key] = self.reference_header_for_wcs[key]
                     except Exception as e_copy:
-                        print(f"DEBUG QM [_update_header_for_drizzle_final]: Erreur copie clé '{key}': {e_copy}")
+                        logger.debug(f"DEBUG QM [_update_header_for_drizzle_final]: Erreur copie clé '{key}': {e_copy}")
         else:
-            print("DEBUG QM [_update_header_for_drizzle_final]: reference_header_for_wcs non disponible.")
+            logger.debug("DEBUG QM [_update_header_for_drizzle_final]: reference_header_for_wcs non disponible.")
 
         # 2. Ajouter/Mettre à jour les informations spécifiques au Drizzle Final
         final_header['STACKTYP'] = (f'Drizzle Final ({self.drizzle_scale:.0f}x)', 'Stacking method with Drizzle')
@@ -2659,7 +2659,7 @@ class SeestarQueuedStacker:
         
         # Le WCS sera ajouté par _save_final_stack à partir du self.drizzle_output_wcs
 
-        print("DEBUG QM [_update_header_for_drizzle_final]: Header pour Drizzle Final créé.")
+        logger.debug("DEBUG QM [_update_header_for_drizzle_final]: Header pour Drizzle Final créé.")
         return final_header
 
 
@@ -2680,7 +2680,7 @@ class SeestarQueuedStacker:
         """
         # --- VÉRIFICATION AJOUTÉE ---
         if self.output_folder is None: 
-            print("WARN QM [_cleanup_mosaic_panel_stacks_temp]: self.output_folder non défini, nettoyage annulé.")
+            logger.debug("WARN QM [_cleanup_mosaic_panel_stacks_temp]: self.output_folder non défini, nettoyage annulé.")
             return
         # --- FIN VÉRIFICATION ---
 
@@ -2691,20 +2691,20 @@ class SeestarQueuedStacker:
             try:
                 shutil.rmtree(panel_stacks_dir)
                 self.update_progress(f"🧹 Dossier stacks panneaux temp. supprimé: {os.path.basename(panel_stacks_dir)}")
-                print(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} supprimé.")
+                logger.debug(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} supprimé.")
             except FileNotFoundError:
                 # Devrait être attrapé par isdir, mais sécurité
-                print(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} non trouvé (déjà supprimé ou jamais créé).")
+                logger.debug(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} non trouvé (déjà supprimé ou jamais créé).")
                 pass # Le dossier n'existe pas, rien à faire
             except OSError as e: # Capturer les erreurs d'OS (permissions, etc.)
                 self.update_progress(f"⚠️ Erreur suppression dossier stacks panneaux temp. ({os.path.basename(panel_stacks_dir)}): {e}")
-                print(f"ERREUR QM [_cleanup_mosaic_panel_stacks_temp]: Erreur OSError lors de la suppression de {panel_stacks_dir}: {e}")
+                logger.debug(f"ERREUR QM [_cleanup_mosaic_panel_stacks_temp]: Erreur OSError lors de la suppression de {panel_stacks_dir}: {e}")
             except Exception as e_generic: # Capturer toute autre exception
                 self.update_progress(f"⚠️ Erreur inattendue suppression dossier stacks panneaux temp.: {e_generic}")
-                print(f"ERREUR QM [_cleanup_mosaic_panel_stacks_temp]: Erreur Exception lors de la suppression de {panel_stacks_dir}: {e_generic}")
+                logger.debug(f"ERREUR QM [_cleanup_mosaic_panel_stacks_temp]: Erreur Exception lors de la suppression de {panel_stacks_dir}: {e_generic}")
         else:
             # Log optionnel si le dossier n'existait pas
-            # print(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} non trouvé, aucun nettoyage nécessaire.")
+            # logger.debug(f"DEBUG QM [_cleanup_mosaic_panel_stacks_temp]: Dossier {panel_stacks_dir} non trouvé, aucun nettoyage nécessaire.")
             pass
 
 
@@ -2724,7 +2724,7 @@ class SeestarQueuedStacker:
         Version: V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall
         """
         num_panels = len(aligned_files_info_list) 
-        print(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Début finalisation pour {num_panels} panneaux avec reproject.")
+        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Début finalisation pour {num_panels} panneaux avec reproject.")
         self.update_progress(f"🖼️ Préparation assemblage mosaïque final ({num_panels} images) avec reproject...")
 
         if num_panels < 1: 
@@ -2755,16 +2755,16 @@ class SeestarQueuedStacker:
 
         input_data_for_reproject = []; input_footprints_for_reproject = []; all_wcs_for_grid_calc = []
 
-        print(f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd...")
+        logger.debug(f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd...")
         for i_panel_loop, panel_info_tuple_local in enumerate(aligned_files_info_list):
             try:
                 panel_image_data_HWC_orig, panel_header_orig, wcs_for_panel_input, _transform_matrix_M_panel, _pixel_mask_2d_bool = panel_info_tuple_local
             except (TypeError, ValueError) as e_unpack:
                 self.update_progress(f"    -> ERREUR déballage tuple panneau {i_panel_loop+1}: {e_unpack}. Ignoré.", "ERROR")
-                print(f"ERREUR QM [_finalize_mosaic_processing]: Déballage tuple panneau {i_panel_loop+1}"); continue
+                logger.debug(f"ERREUR QM [_finalize_mosaic_processing]: Déballage tuple panneau {i_panel_loop+1}"); continue
 
             original_filename_for_log = panel_header_orig.get('_SRCFILE', (f"Panel_{i_panel_loop+1}", ""))[0]
-            print(f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}")
+            logger.debug(f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}")
 
             if panel_image_data_HWC_orig is None or wcs_for_panel_input is None:
                 self.update_progress(f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.", "WARN"); continue
@@ -2773,7 +2773,7 @@ class SeestarQueuedStacker:
             footprint_panel = None
             if _pixel_mask_2d_bool is not None and _pixel_mask_2d_bool.shape == current_panel_shape_hw:
                 footprint_panel = np.clip(_pixel_mask_2d_bool.astype(np.float32), 0.0, 1.0) 
-                print(f"      Panel {i_panel_loop+1}: Using provided pixel mask as footprint. Sum: {np.sum(footprint_panel)}")
+                logger.debug(f"      Panel {i_panel_loop+1}: Using provided pixel mask as footprint. Sum: {np.sum(footprint_panel)}")
             else:
                 self.update_progress(f"      WARN: Panneau {i_panel_loop+1}, masque de pixels invalide ou manquant. Utilisation d'un footprint complet (np.ones).")
                 footprint_panel = np.ones(current_panel_shape_hw, dtype=np.float32)
@@ -2786,18 +2786,18 @@ class SeestarQueuedStacker:
             self.update_progress("❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.", "ERROR")
             self.final_stacked_path = None; self.processing_error = "Mosaïque: Aucun panneau valide pour reproject"; return
 
-        print("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject...")
+        logger.debug("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject...")
         output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(all_wcs_for_grid_calc)
 
         if output_wcs is None or output_shape_hw is None:
             error_msg = "Échec calcul grille de sortie pour la mosaïque avec reproject."
             self.update_progress(f"❌ {error_msg}", "ERROR"); self.processing_error = error_msg; self.final_stacked_path = None; return
-        print(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque pour reproject calculée -> Shape={output_shape_hw} (H,W), WCS CRVAL={output_wcs.wcs.crval if output_wcs.wcs else 'N/A'}")
+        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque pour reproject calculée -> Shape={output_shape_hw} (H,W), WCS CRVAL={output_wcs.wcs.crval if output_wcs.wcs else 'N/A'}")
 
         final_mosaic_sci_channels = []; final_mosaic_coverage_channels = [] 
         num_color_channels_expected = 3 
 
-        print(f"  -> Exécution de reproject_and_coadd par canal (pour {num_color_channels_expected} canaux)...")
+        logger.debug(f"  -> Exécution de reproject_and_coadd par canal (pour {num_color_channels_expected} canaux)...")
         total_reproject_time_sec = 0.0
         
         progress_base_finalize = 70 
@@ -2828,7 +2828,7 @@ class SeestarQueuedStacker:
                 continue
 
             try:
-                print(f"    Appel reproject_and_coadd pour canal {i_ch+1}. Nombre d'images pour ce canal: {len(channel_arrays_wcs_list)}")
+                logger.debug(f"    Appel reproject_and_coadd pour canal {i_ch+1}. Nombre d'images pour ce canal: {len(channel_arrays_wcs_list)}")
                 start_time_reproject_ch = time.monotonic()
                 
                 # Removed progress_bar=True from this call
@@ -2851,7 +2851,7 @@ class SeestarQueuedStacker:
                 final_mosaic_coverage_channels.append(mosaic_channel_coverage.astype(np.float32))
                 
                 log_msg_time_console = f"    Canal {i_ch+1} traité en {duration_reproject_ch_sec:.2f} secondes. Shape SCI: {mosaic_channel_sci.shape}, Shape Coverage: {mosaic_channel_coverage.shape}"
-                print(log_msg_time_console)
+                logger.debug(log_msg_time_console)
                 self.update_progress(f"   Canal {i_ch+1}/{num_color_channels_expected} combiné.")
 
             except Exception as e_reproject:
@@ -2870,9 +2870,9 @@ class SeestarQueuedStacker:
             final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1).astype(np.float32)
             final_coverage_map_2D = final_mosaic_coverage_channels[0] 
             
-            print(f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}, Shape Coverage: {final_coverage_map_2D.shape}")
-            print(f"     Range SCI (après reproject mean): [{np.nanmin(final_sci_image_HWC):.4g}, {np.nanmax(final_sci_image_HWC):.4g}]")
-            print(f"     Range Coverage (après reproject): [{np.nanmin(final_coverage_map_2D):.4g}, {np.nanmax(final_coverage_map_2D):.4g}]")
+            logger.debug(f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}, Shape Coverage: {final_coverage_map_2D.shape}")
+            logger.debug(f"     Range SCI (après reproject mean): [{np.nanmin(final_sci_image_HWC):.4g}, {np.nanmax(final_sci_image_HWC):.4g}]")
+            logger.debug(f"     Range Coverage (après reproject): [{np.nanmin(final_coverage_map_2D):.4g}, {np.nanmax(final_coverage_map_2D):.4g}]")
 
             self.current_stack_header = fits.Header() 
             if output_wcs: self.current_stack_header.update(output_wcs.to_header(relax=True))
@@ -2909,7 +2909,7 @@ class SeestarQueuedStacker:
             del final_mosaic_sci_channels, final_mosaic_coverage_channels
             gc.collect()
         
-        print(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Fin.")
+        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Fin.")
 
 
 
@@ -2919,7 +2919,7 @@ class SeestarQueuedStacker:
         """Supprime le dossier contenant les fichiers Drizzle intermédiaires par lot."""
         # AJOUT D'UNE VÉRIFICATION : Ne rien faire si self.output_folder n'est pas encore défini.
         if self.output_folder is None:
-            print("WARN QM [_cleanup_drizzle_batch_outputs]: self.output_folder non défini, nettoyage annulé.")
+            logger.debug("WARN QM [_cleanup_drizzle_batch_outputs]: self.output_folder non défini, nettoyage annulé.")
             return
 
         batch_output_dir = os.path.join(self.output_folder, "drizzle_batch_outputs")
@@ -2931,7 +2931,7 @@ class SeestarQueuedStacker:
                 self.update_progress(f"⚠️ Erreur suppression dossier Drizzle intermédiaires ({os.path.basename(batch_output_dir)}): {e}")
         # else: # Log optionnel si le dossier n'existait pas ou chemin invalide
             # if self.output_folder: # Pour éviter de logguer si c'est juste output_folder qui est None
-            #    print(f"DEBUG QM [_cleanup_drizzle_batch_outputs]: Dossier {batch_output_dir} non trouvé ou invalide pour nettoyage.")
+            #    logger.debug(f"DEBUG QM [_cleanup_drizzle_batch_outputs]: Dossier {batch_output_dir} non trouvé ou invalide pour nettoyage.")
 
 
 
@@ -3057,11 +3057,11 @@ class SeestarQueuedStacker:
         """
         file_name = os.path.basename(file_path)
         quality_scores = {'snr': 0.0, 'stars': 0.0}
-        print(f"\nDEBUG QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]:") # Modifié le nom de version pour le log
-        print(f"  >> Fichier: '{file_name}'")
-        print(f"  >> Solve Astrometry Directly: {solve_astrometry_for_this_file}")
-        print(f"  >> is_mosaic_run: {self.is_mosaic_run}, mosaic_alignment_mode: {getattr(self, 'mosaic_alignment_mode', 'N/A')}")
-        print(f"  >> drizzle_active_session: {self.drizzle_active_session}")
+        logger.debug(f"\nDEBUG QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]:") # Modifié le nom de version pour le log
+        logger.debug(f"  >> Fichier: '{file_name}'")
+        logger.debug(f"  >> Solve Astrometry Directly: {solve_astrometry_for_this_file}")
+        logger.debug(f"  >> is_mosaic_run: {self.is_mosaic_run}, mosaic_alignment_mode: {getattr(self, 'mosaic_alignment_mode', 'N/A')}")
+        logger.debug(f"  >> drizzle_active_session: {self.drizzle_active_session}")
 
         header_final_pour_retour = None
         img_data_array_loaded = None
@@ -3074,7 +3074,7 @@ class SeestarQueuedStacker:
         align_method_log_msg = "Unknown"
 
         try:
-            print(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
+            logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
             loaded_data_tuple = load_and_validate_fits(file_path)
             if loaded_data_tuple and loaded_data_tuple[0] is not None:
                 img_data_array_loaded, header_from_load = loaded_data_tuple
@@ -3088,20 +3088,20 @@ class SeestarQueuedStacker:
                 header_final_pour_retour = header_temp_fallback
                 raise ValueError("Échec chargement/validation FITS (données non retournées).")
             header_final_pour_retour['_SRCFILE'] = (file_name, "Original source filename")
-            print(f"     - FITS original (après load_and_validate): Range: [{np.min(img_data_array_loaded):.4g}, {np.max(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}")
+            logger.debug(f"     - FITS original (après load_and_validate): Range: [{np.min(img_data_array_loaded):.4g}, {np.max(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}")
 
-            print(f"  -> [2/7] Vérification variance pour '{file_name}'...")
+            logger.debug(f"  -> [2/7] Vérification variance pour '{file_name}'...")
             std_dev = np.std(img_data_array_loaded)
             variance_threshold = 1e-4  # anciennement 0.0015
             if std_dev < variance_threshold:
                 raise ValueError(
                     f"Faible variance: {std_dev:.4f} (seuil: {variance_threshold})."
                 )
-            print(f"     - Variance OK (std: {std_dev:.4f}).")
+            logger.debug(f"     - Variance OK (std: {std_dev:.4f}).")
 
-            print(f"  -> [3/7] Pré-traitement pour '{file_name}'...")
+            logger.debug(f"  -> [3/7] Pré-traitement pour '{file_name}'...")
             prepared_img_after_initial_proc = img_data_array_loaded.astype(np.float32)
-            print(f"     - (a) Après conversion float32: Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+            logger.debug(f"     - (a) Après conversion float32: Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
 
             is_color_after_preprocessing = False
             if prepared_img_after_initial_proc.ndim == 2:
@@ -3110,7 +3110,7 @@ class SeestarQueuedStacker:
                 if pattern_upper in ["GRBG", "RGGB", "GBRG", "BGGR"]:
                     prepared_img_after_initial_proc = debayer_image(prepared_img_after_initial_proc, pattern_upper)
                     is_color_after_preprocessing = True
-                    print(f"     - (b) Image débayerisée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+                    logger.debug(f"     - (b) Image débayerisée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
             elif prepared_img_after_initial_proc.ndim == 3 and prepared_img_after_initial_proc.shape[2] == 3:
                 is_color_after_preprocessing = True
             else:
@@ -3123,34 +3123,34 @@ class SeestarQueuedStacker:
                     if med_g > 1e-6:
                         gain_r = np.clip(med_g / max(med_r, 1e-6), 0.5, 2.0); gain_b = np.clip(med_g / max(med_b, 1e-6), 0.5, 2.0)
                         prepared_img_after_initial_proc[...,0] *= gain_r; prepared_img_after_initial_proc[...,2] *= gain_b
-                    print(f"     - (c) WB basique appliquée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
-                except Exception as e_wb: print(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
+                    logger.debug(f"     - (c) WB basique appliquée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+                except Exception as e_wb: logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
                     prepared_img_after_initial_proc, self.hot_pixel_threshold, self.neighborhood_size)
-                print(f"     - (d) Correction HP. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
+                logger.debug(f"     - (d) Correction HP. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]")
             
             is_drizzle_or_mosaic_mode = (self.drizzle_active_session or self.is_mosaic_run)
-            print(f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}")
+            logger.debug(f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}")
             
             image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
-            print(f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+            logger.debug(f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
 
             current_max_val = np.nanmax(image_for_alignment_or_drizzle_input)
             if is_drizzle_or_mosaic_mode:
                 if current_max_val <= 1.0 + 1e-5 and current_max_val > -1e-5: 
-                    print(f"       - (g) DRIZZLE/MOSAIQUE: Détection plage [0,1] (max_val={current_max_val:.4g}). Rescale vers ADU 0-65535.")
+                    logger.debug(f"       - (g) DRIZZLE/MOSAIQUE: Détection plage [0,1] (max_val={current_max_val:.4g}). Rescale vers ADU 0-65535.")
                     image_for_alignment_or_drizzle_input = image_for_alignment_or_drizzle_input * 65535.0
-                    print(f"         Nouveau range image_for_alignment_or_drizzle_input: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+                    logger.debug(f"         Nouveau range image_for_alignment_or_drizzle_input: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
                 image_for_alignment_or_drizzle_input = np.clip(image_for_alignment_or_drizzle_input, 0.0, None) 
-                print(f"     - (h) Pré-traitement final POUR DRIZZLE/MOSAIQUE: image_for_alignment_or_drizzle_input - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+                logger.debug(f"     - (h) Pré-traitement final POUR DRIZZLE/MOSAIQUE: image_for_alignment_or_drizzle_input - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
                 data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
             else: 
-                print(f"     - (g) STACKING CLASSIQUE: image_for_alignment_or_drizzle_input (pour alignement) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+                logger.debug(f"     - (g) STACKING CLASSIQUE: image_for_alignment_or_drizzle_input (pour alignement) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
             
-            print(f"  -> [4/7] Alignement/Résolution WCS pour '{file_name}'...")
-            print(f"     - AVANT ALIGNEMENT: image_for_alignment_or_drizzle_input - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}], Shape: {image_for_alignment_or_drizzle_input.shape}")
+            logger.debug(f"  -> [4/7] Alignement/Résolution WCS pour '{file_name}'...")
+            logger.debug(f"     - AVANT ALIGNEMENT: image_for_alignment_or_drizzle_input - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}], Shape: {image_for_alignment_or_drizzle_input.shape}")
 
             if not solve_astrometry_for_this_file and self.is_mosaic_run and \
                self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]:
@@ -3196,7 +3196,7 @@ class SeestarQueuedStacker:
                 
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
-                    print(f"     - APRÈS ALIGNEMENT (Astroalign): aligned_img_astroalign - Range: [{np.min(aligned_img_astroalign):.4g}, {np.max(aligned_img_astroalign):.4g}], Shape: {aligned_img_astroalign.shape}, Dtype: {aligned_img_astroalign.dtype}")
+                    logger.debug(f"     - APRÈS ALIGNEMENT (Astroalign): aligned_img_astroalign - Range: [{np.min(aligned_img_astroalign):.4g}, {np.max(aligned_img_astroalign):.4g}], Shape: {aligned_img_astroalign.shape}, Dtype: {aligned_img_astroalign.dtype}")
                     data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
                     
                     if not is_drizzle_or_mosaic_mode:
@@ -3205,33 +3205,33 @@ class SeestarQueuedStacker:
                     else: 
                         # Pour Drizzle Standard, data_final_pour_retour est déjà aligned_img_astroalign.
                         # _align_image est censé avoir préservé la plage ADU si l'entrée était ADU.
-                        print(f"       - DRIZZLE STANDARD: data_final_pour_retour (venant de aligned_img_astroalign) gardé en ADU. Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}]")
+                        logger.debug(f"       - DRIZZLE STANDARD: data_final_pour_retour (venant de aligned_img_astroalign) gardé en ADU. Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}]")
                 else:
                     align_method_log_msg = "Astroalign_Standard_Fail"; raise RuntimeError(f"Échec Alignement Astroalign standard pour {file_name}.")
                 matrice_M_calculee = None 
             
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (align_method_log_msg, "Alignment method used")
 
-            print(f"  -> [5/7] Création du masque de pixels valides pour '{file_name}'...")
+            logger.debug(f"  -> [5/7] Création du masque de pixels valides pour '{file_name}'...")
             if data_final_pour_retour is None: raise ValueError("Données finales pour masque sont None.")
             if data_final_pour_retour.ndim == 3: luminance_mask_src = 0.299 * data_final_pour_retour[..., 0] + 0.587 * data_final_pour_retour[..., 1] + 0.114 * data_final_pour_retour[..., 2]
             elif data_final_pour_retour.ndim == 2: luminance_mask_src = data_final_pour_retour
-            else: valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool); print(f"     - Masque (tous valides, shape inattendue).")
+            else: valid_pixel_mask_2d = np.ones(data_final_pour_retour.shape[:2], dtype=bool); logger.debug(f"     - Masque (tous valides, shape inattendue).")
             
             if 'valid_pixel_mask_2d' not in locals() or valid_pixel_mask_2d is None :
-                print(f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]")
+                logger.debug(f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]")
                 max_lum_val = np.nanmax(luminance_mask_src)
                 if max_lum_val <= 1e-5:
                     valid_pixel_mask_2d = np.ones(luminance_mask_src.shape, dtype=bool)
-                    print("     - Luminance très faible, masque par défaut tout True.")
+                    logger.debug("     - Luminance très faible, masque par défaut tout True.")
                 else:
                     mask_threshold = 1.0 if (is_drizzle_or_mosaic_mode and max_lum_val > 1.5 + 1e-5) else 1e-5  # +1e-5 pour float
                     valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(bool)
-                    print(f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
+                    logger.debug(f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
 
-            print(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
+            logger.debug(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting: quality_scores = self._calculate_quality_metrics(prepared_img_after_initial_proc)
-            else: print(f"     - Pondération qualité désactivée.")
+            else: logger.debug(f"     - Pondération qualité désactivée.")
 
             if data_final_pour_retour is None: raise RuntimeError("data_final_pour_retour est None à la fin de _process_file.")
             if valid_pixel_mask_2d is None: raise RuntimeError("valid_pixel_mask_2d est None à la fin de _process_file.")
@@ -3242,20 +3242,20 @@ class SeestarQueuedStacker:
                 if wcs_final_pour_retour is None: raise RuntimeError(f"Mosaïque AstroPanel '{file_name}', WCS résolu manquant. AlignMethod: {align_method_log_msg}")
 
             # ---- ULTIMATE DEBUG LOG ----
-            print(f"ULTIMATE DEBUG QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: AVANT RETURN pour '{file_name}'.")
+            logger.debug(f"ULTIMATE DEBUG QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: AVANT RETURN pour '{file_name}'.")
             if data_final_pour_retour is not None:
-                print(f"  >>> data_final_pour_retour - Shape: {data_final_pour_retour.shape}, Dtype: {data_final_pour_retour.dtype}, Range: [{np.min(data_final_pour_retour):.6g}, {np.max(data_final_pour_retour):.6g}], Mean: {np.mean(data_final_pour_retour):.6g}")
+                logger.debug(f"  >>> data_final_pour_retour - Shape: {data_final_pour_retour.shape}, Dtype: {data_final_pour_retour.dtype}, Range: [{np.min(data_final_pour_retour):.6g}, {np.max(data_final_pour_retour):.6g}], Mean: {np.mean(data_final_pour_retour):.6g}")
             else:
-                print(f"  >>> data_final_pour_retour est None.")
+                logger.debug(f"  >>> data_final_pour_retour est None.")
             if valid_pixel_mask_2d is not None:
-                print(f"  >>> valid_pixel_mask_2d - Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
+                logger.debug(f"  >>> valid_pixel_mask_2d - Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}")
             else:
-                print(f"  >>> valid_pixel_mask_2d est None.")
-            print(f"  >>> quality_scores: {quality_scores}")
-            if wcs_final_pour_retour is not None: print(f"  >>> wcs_final_pour_retour: Présent")
-            else: print(f"  >>> wcs_final_pour_retour: None")
-            if matrice_M_calculee is not None: print(f"  >>> matrice_M_calculee: Présente")
-            else: print(f"  >>> matrice_M_calculee: None")
+                logger.debug(f"  >>> valid_pixel_mask_2d est None.")
+            logger.debug(f"  >>> quality_scores: {quality_scores}")
+            if wcs_final_pour_retour is not None: logger.debug(f"  >>> wcs_final_pour_retour: Présent")
+            else: logger.debug(f"  >>> wcs_final_pour_retour: None")
+            if matrice_M_calculee is not None: logger.debug(f"  >>> matrice_M_calculee: Présente")
+            else: logger.debug(f"  >>> matrice_M_calculee: None")
             # ---- FIN ULTIMATE DEBUG LOG ----
 
             return (data_final_pour_retour, header_final_pour_retour, quality_scores, 
@@ -3263,14 +3263,14 @@ class SeestarQueuedStacker:
 
         except (ValueError, RuntimeError) as proc_err:
             self.update_progress(f"   ⚠️ Fichier '{file_name}' ignoré dans _process_file: {proc_err}", "WARN")
-            print(f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: (ValueError/RuntimeError) pour '{file_name}': {proc_err}")
+            logger.debug(f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: (ValueError/RuntimeError) pour '{file_name}': {proc_err}")
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"Error_{type(proc_err).__name__}", "Processing file error")
             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) 
             return None, header_final_pour_retour, quality_scores, None, None, None 
         except Exception as e:
             self.update_progress(f"❌ Erreur critique traitement fichier {file_name} dans _process_file: {e}", "ERROR")
-            print(f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: Exception générale pour '{file_name}': {e}"); traceback.print_exc(limit=3)
+            logger.debug(f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: Exception générale pour '{file_name}': {e}"); traceback.print_exc(limit=3)
             header_final_pour_retour = header_final_pour_retour if header_final_pour_retour is not None else fits.Header()
             header_final_pour_retour['_ALIGN_METHOD_LOG'] = (f"CritError_{type(e).__name__}", "Critical processing error")
             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path) 
@@ -3317,14 +3317,14 @@ class SeestarQueuedStacker:
         """
         # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
-        print(f"DEBUG QM [_process_completed_batch]: Début pour lot CLASSIQUE #{current_batch_num} "
+        logger.debug(f"DEBUG QM [_process_completed_batch]: Début pour lot CLASSIQUE #{current_batch_num} "
               f"avec {num_items_in_this_batch} items.")
 
         # Vérification si le lot est vide (ne devrait pas arriver si _worker gère bien)
         if not batch_items_to_stack: # batch_items_to_stack est maintenant un paramètre défini
             self.update_progress(f"⚠️ Tentative de traiter un lot vide (Lot #{current_batch_num}) "
                                  "dans _process_completed_batch. Ignoré.", None)
-            print("DEBUG QM [_process_completed_batch]: Sortie précoce (lot vide reçu).")
+            logger.debug("DEBUG QM [_process_completed_batch]: Sortie précoce (lot vide reçu).")
             return
 
         # Informations pour les messages de progression
@@ -3341,7 +3341,7 @@ class SeestarQueuedStacker:
         # Il retourne :
         #   (stacked_image_np, stack_info_header, batch_coverage_map_2d)
 
-        print(f"DEBUG QM [_process_completed_batch]: Appel à _stack_batch pour lot #{current_batch_num}...")
+        logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _stack_batch pour lot #{current_batch_num}...")
         stacked_batch_data_np, stack_info_header, batch_coverage_map_2d = self._stack_batch(
             batch_items_to_stack, # La liste complète des items pour ce lot
             current_batch_num,
@@ -3351,7 +3351,7 @@ class SeestarQueuedStacker:
         # Vérifier le résultat de _stack_batch
 
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
-            print(
+            logger.debug(
                 f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
                 f"Shape image lot: {stacked_batch_data_np.shape}, "
                 f"Shape carte couverture lot: {batch_coverage_map_2d.shape}"
@@ -3421,7 +3421,7 @@ class SeestarQueuedStacker:
                             "WARN",
                         )
                 except Exception as e_solve_batch:
-                    print(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
+                    logger.debug(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
                     self.update_progress(
                         f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e_solve_batch}",
                         "WARN",
@@ -3498,7 +3498,7 @@ class SeestarQueuedStacker:
                                 "WARN",
                             )
 
-                print(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
+                logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
                 self._combine_batch_result(
                     stacked_batch_data_np,
                     stack_info_header,
@@ -3517,7 +3517,7 @@ class SeestarQueuedStacker:
                         self.intermediate_classic_batch_files.append((sci_p, wht_p_list))
 
                 if not self.drizzle_active_session:
-                    print("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
+                    logger.debug("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
                     self._update_preview_sum_w()
             
         else: # _stack_batch a échoué ou n'a rien retourné de valide
@@ -3526,12 +3526,12 @@ class SeestarQueuedStacker:
             self.failed_stack_count += num_failed_in_stack_batch
             self.update_progress(f"❌ Échec combinaison (dans _stack_batch) du lot {progress_info_log}. "
                                  f"{num_failed_in_stack_batch} images ignorées pour accumulation.", None)
-            print(f"ERREUR QM [_process_completed_batch]: _stack_batch a échoué pour lot #{current_batch_num}.")
+            logger.debug(f"ERREUR QM [_process_completed_batch]: _stack_batch a échoué pour lot #{current_batch_num}.")
 
         # Le nettoyage de current_batch_items_with_masks_for_stack_batch se fait dans _worker
         # après l'appel à cette fonction.
         gc.collect() # Forcer un garbage collect après avoir traité un lot
-        print(f"DEBUG QM [_process_completed_batch]: Fin pour lot CLASSIQUE #{current_batch_num}.")
+        logger.debug(f"DEBUG QM [_process_completed_batch]: Fin pour lot CLASSIQUE #{current_batch_num}.")
 
 
 
@@ -3573,7 +3573,7 @@ class SeestarQueuedStacker:
             data_to_save = np.moveaxis(aligned_data, -1, 0).astype(np.float32) # Doit être ADU ici
 
             # ---- DEBUG: Vérifier le range de ce qui est sauvegardé ----
-            print(f"    DEBUG QM [_save_drizzle_input_temp]: Sauvegarde FITS temp '{temp_filename}'. data_to_save (CxHxW) Range Ch0: [{np.min(data_to_save[0]):.4g}, {np.max(data_to_save[0]):.4g}]")
+            logger.debug(f"    DEBUG QM [_save_drizzle_input_temp]: Sauvegarde FITS temp '{temp_filename}'. data_to_save (CxHxW) Range Ch0: [{np.min(data_to_save[0]):.4g}, {np.max(data_to_save[0]):.4g}]")
             # ---- FIN DEBUG ----
 
             header_to_save = header.copy() if header else fits.Header()
@@ -3627,7 +3627,7 @@ class SeestarQueuedStacker:
         Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full
         """
         num_files_in_batch = len(batch_temp_filepaths_list)
-        print(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers).")
+        logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers).")
 
         if not batch_temp_filepaths_list:
             self.update_progress(f"⚠️ Lot Drizzle Incrémental VRAI #{current_batch_num} vide. Ignoré.")
@@ -3653,7 +3653,7 @@ class SeestarQueuedStacker:
             
             current_filename_for_log = os.path.basename(temp_fits_filepath)
             self.update_progress(f"   -> DrizIncrVrai: Ajout fichier {i_file+1}/{num_files_in_batch} ('{current_filename_for_log}') au Drizzle cumulatif...", None)
-            print(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Fichier '{current_filename_for_log}'")
+            logger.debug(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Fichier '{current_filename_for_log}'")
 
             input_image_cxhxw = None 
             input_header = None      
@@ -3667,12 +3667,12 @@ class SeestarQueuedStacker:
                     
                     data_loaded = hdul[0].data
                     input_header = hdul[0].header
-                    print(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Données chargées depuis FITS temp '{current_filename_for_log}': Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
+                    logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Données chargées depuis FITS temp '{current_filename_for_log}': Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
 
 
                     if data_loaded.ndim == 3 and data_loaded.shape[0] == num_output_channels:
                         input_image_cxhxw = data_loaded.astype(np.float32)
-                        print(f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]")
+                        logger.debug(f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]")
                     else:
                         raise ValueError(f"Shape FITS temp {data_loaded.shape} non CxHxW comme attendu.")
 
@@ -3720,7 +3720,7 @@ class SeestarQueuedStacker:
                 final_x_output_pixels, final_y_output_pixels = self.drizzle_output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
                 
                 if not (np.all(np.isfinite(final_x_output_pixels)) and np.all(np.isfinite(final_y_output_pixels))):
-                    print(f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection. Nettoyage...")
+                    logger.debug(f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection. Nettoyage...")
                     final_x_output_pixels = np.nan_to_num(final_x_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
                     final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
 
@@ -3728,7 +3728,7 @@ class SeestarQueuedStacker:
                     final_x_output_pixels.reshape(input_shape_hw_current_file), 
                     final_y_output_pixels.reshape(input_shape_hw_current_file)
                 )).astype(np.float32)
-                print(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
+                logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
 
                 exptime_for_drizzle_add = 1.0 
                 in_units_for_drizzle_add = 'cps' 
@@ -3738,13 +3738,13 @@ class SeestarQueuedStacker:
                         if original_exptime > 1e-6:
                             exptime_for_drizzle_add = original_exptime
                             in_units_for_drizzle_add = 'counts' 
-                            print(f"        Utilisation EXPTIME={exptime_for_drizzle_add:.2f}s du header original ('{input_header.get('_SRCFILE', 'N/A_SRC')}'), in_units='counts'")
+                            logger.debug(f"        Utilisation EXPTIME={exptime_for_drizzle_add:.2f}s du header original ('{input_header.get('_SRCFILE', 'N/A_SRC')}'), in_units='counts'")
                         else:
-                             print(f"        EXPTIME du header original ({original_exptime:.2f}) trop faible. Utilisation exptime=1.0, in_units='cps'.")
+                             logger.debug(f"        EXPTIME du header original ({original_exptime:.2f}) trop faible. Utilisation exptime=1.0, in_units='cps'.")
                     except (ValueError, TypeError):
-                        print(f"        AVERTISSEMENT: EXPTIME invalide dans header temp ('{input_header.get('EXPTIME')}' pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'). Utilisation exptime=1.0, in_units='cps'.")
+                        logger.debug(f"        AVERTISSEMENT: EXPTIME invalide dans header temp ('{input_header.get('EXPTIME')}' pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'). Utilisation exptime=1.0, in_units='cps'.")
                 else:
-                    print(f"        AVERTISSEMENT: EXPTIME non trouvé dans header temp pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'. Utilisation exptime=1.0, in_units='cps'.")
+                    logger.debug(f"        AVERTISSEMENT: EXPTIME non trouvé dans header temp pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'. Utilisation exptime=1.0, in_units='cps'.")
                 
                 weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
 
@@ -3753,9 +3753,9 @@ class SeestarQueuedStacker:
                     if not np.all(np.isfinite(channel_data_2d)):
                         channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
                     
-                    print(f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}")
+                    logger.debug(f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}")
                     if weight_map_param_for_add is not None:
-                        print(f"                         weight_map range [{np.min(weight_map_param_for_add):.3g}, {np.max(weight_map_param_for_add):.3g}]")
+                        logger.debug(f"                         weight_map range [{np.min(weight_map_param_for_add):.3g}, {np.max(weight_map_param_for_add):.3g}]")
                     
                     self.incremental_drizzle_objects[ch_idx].add_image(
                         data=channel_data_2d, 
@@ -3765,15 +3765,15 @@ class SeestarQueuedStacker:
                         pixfrac=self.drizzle_pixfrac, 
                         weight_map=weight_map_param_for_add 
                     )
-                    print(f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}]")
-                    print(f"                             out_wht range [{np.min(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}]")
+                    logger.debug(f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}]")
+                    logger.debug(f"                             out_wht range [{np.min(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}]")
 
                 files_added_to_drizzle_this_batch += 1
                 self.images_in_cumulative_stack += 1 
 
             except Exception as e_file:
                 self.update_progress(f"      -> ERREUR Drizzle Incr. VRAI sur fichier '{current_filename_for_log}': {e_file}", "WARN")
-                print(f"ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Échec fichier '{current_filename_for_log}': {e_file}"); traceback.print_exc(limit=1)
+                logger.debug(f"ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Échec fichier '{current_filename_for_log}': {e_file}"); traceback.print_exc(limit=1)
             finally:
                 del input_image_cxhxw, input_header, wcs_input_from_file, pixmap_for_this_file
                 if (i_file + 1) % 10 == 0: gc.collect()
@@ -3788,7 +3788,7 @@ class SeestarQueuedStacker:
             self.current_stack_header = fits.Header()
             if self.drizzle_output_wcs:
                  try: self.current_stack_header.update(self.drizzle_output_wcs.to_header(relax=True))
-                 except Exception as e_hdr_wcs: print(f"WARN: Erreur copie WCS au header (DrizIncrVrai): {e_hdr_wcs}")
+                 except Exception as e_hdr_wcs: logger.debug(f"WARN: Erreur copie WCS au header (DrizIncrVrai): {e_hdr_wcs}")
             self.current_stack_header['STACKTYP'] = (f'Drizzle_Incremental_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle')
             self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
             self.current_stack_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle kernel used')
@@ -3825,17 +3825,17 @@ class SeestarQueuedStacker:
                 preview_data_HWC_final = np.clip(preview_data_HWC_norm, 0.0, 1.0).astype(np.float32)
                 self.current_stack_data = preview_data_HWC_final 
                 self._update_preview() 
-                print(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
+                logger.debug(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
             else:
-                print(f"    WARN QM [ProcIncrDrizLoop M81_Scale_2_Full]: Impossible de mettre à jour l'aperçu Driz Incr VRAI.")
+                logger.debug(f"    WARN QM [ProcIncrDrizLoop M81_Scale_2_Full]: Impossible de mettre à jour l'aperçu Driz Incr VRAI.")
         except Exception as e_prev:
-            print(f"    ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}"); traceback.print_exc(limit=1)
+            logger.debug(f"    ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}"); traceback.print_exc(limit=1)
 
         if self.perform_cleanup:
-             print(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Nettoyage fichiers temp lot #{current_batch_num}...")
+             logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Nettoyage fichiers temp lot #{current_batch_num}...")
              self._cleanup_batch_temp_files(batch_temp_filepaths_list)
         
-        print(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Fin traitement lot Driz Incr VRAI #{current_batch_num}.")
+        logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Fin traitement lot Driz Incr VRAI #{current_batch_num}.")
 
 
 
@@ -3902,7 +3902,7 @@ class SeestarQueuedStacker:
                         if output_shape is None: raise ValueError("Shape du premier chunk est None.")
                         numerator_sum = np.zeros(output_shape, dtype=np.float64) # float64 pour somme
                         denominator_sum = np.zeros(output_shape, dtype=np.float64)
-                        print(f"      - Initialisation accumulateurs (Shape: {output_shape})")
+                        logger.debug(f"      - Initialisation accumulateurs (Shape: {output_shape})")
                         first_chunk_processed_successfully = True
 
                     # Vérifier Shapes
@@ -3970,16 +3970,16 @@ class SeestarQueuedStacker:
             batch_coverage_map_2d (np.ndarray): Carte de poids/couverture 2D (HW, float32)
                                                 pour ce lot spécifique.
         """
-        print(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D.")
+        logger.debug(f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D.")
         current_batch_num = self.stacked_batches_count
         if batch_coverage_map_2d is not None:
-            print(
+            logger.debug(
                 f"  -> Reçu de _stack_batch -> batch_coverage_map_2d - Shape: {batch_coverage_map_2d.shape}, "
                 f"Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}], "
                 f"Mean: {np.mean(batch_coverage_map_2d):.2f}"
             )
         else:
-            print(f"  -> Reçu de _stack_batch -> batch_coverage_map_2d est None.")
+            logger.debug(f"  -> Reçu de _stack_batch -> batch_coverage_map_2d est None.")
 
 
         # --- Vérifications initiales ---
@@ -3989,7 +3989,7 @@ class SeestarQueuedStacker:
                 f"⚠️ Accumulation lot #{current_batch_num} ignorée: données ou couverture manquantes.",
                 "WARN",
             )
-            print(
+            logger.debug(
                 "DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (données batch/couverture invalides) "
                 f"stacked_batch_data_np is None? {stacked_batch_data_np is None}, "
                 f"header is None? {stack_info_header is None}, "
@@ -4002,7 +4002,7 @@ class SeestarQueuedStacker:
                  f"❌ Accumulation lot #{current_batch_num} impossible: memmap SUM/WHT non initialisés.",
                  "ERROR",
              )
-             print(
+             logger.debug(
                  f"ERREUR QM [_combine_batch_result SUM/W]: Memmap non initialisé. "
                  f"cumulative_sum_memmap is None? {self.cumulative_sum_memmap is None}, "
                  f"cumulative_wht_memmap is None? {self.cumulative_wht_memmap is None}, "
@@ -4019,16 +4019,16 @@ class SeestarQueuedStacker:
         expected_shape_hw = self.memmap_shape[:2]
 
         try:
-            print(
+            logger.debug(
                 f"DEBUG QM [_combine_batch_result]: stacked_batch_data_np shape={stacked_batch_data_np.shape}, "
                 f"min={np.min(stacked_batch_data_np):.3f}, max={np.max(stacked_batch_data_np):.3f}"
             )
-            print(
+            logger.debug(
                 f"DEBUG QM [_combine_batch_result]: batch_coverage_map_2d shape={batch_coverage_map_2d.shape}, "
                 f"min={np.min(batch_coverage_map_2d):.3f}, max={np.max(batch_coverage_map_2d):.3f}"
             )
         except Exception as dbg_err:
-            print(f"DEBUG QM [_combine_batch_result]: erreur stats initiales: {dbg_err}")
+            logger.debug(f"DEBUG QM [_combine_batch_result]: erreur stats initiales: {dbg_err}")
 
 
         
@@ -4074,13 +4074,13 @@ class SeestarQueuedStacker:
             if batch_coverage_map_2d.shape == expected_shape_hw[::-1]:
                 batch_coverage_map_2d = batch_coverage_map_2d.T
                 handled_cov = True
-                print("DEBUG QM [_combine_batch_result]: transposed coverage map to match memmap_shape")
+                logger.debug("DEBUG QM [_combine_batch_result]: transposed coverage map to match memmap_shape")
             if not handled_cov:
                 self.update_progress(
                     f"❌ Batch #{current_batch_num} ignoré: shape carte couverture {batch_coverage_map_2d.shape} au lieu de {expected_shape_hw}.",
                     "ERROR",
                 )
-                print(
+                logger.debug(
                     f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape carte couverture lot. "
                     f"expected={expected_shape_hw}, got={batch_coverage_map_2d.shape}"
                 )
@@ -4095,17 +4095,17 @@ class SeestarQueuedStacker:
             if stacked_batch_data_np.shape[:2] == self.memmap_shape[:2][::-1]:
                 stacked_batch_data_np = stacked_batch_data_np.transpose(1, 0, 2)
                 handled_img = True
-                print("DEBUG QM [_combine_batch_result]: transposed stacked_batch_data_np from WHC to HWC")
+                logger.debug("DEBUG QM [_combine_batch_result]: transposed stacked_batch_data_np from WHC to HWC")
             elif stacked_batch_data_np.shape[0] == 3 and stacked_batch_data_np.shape[1:] == self.memmap_shape[:2]:
                 stacked_batch_data_np = stacked_batch_data_np.transpose(1, 2, 0)
                 handled_img = True
-                print("DEBUG QM [_combine_batch_result]: rearranged stacked_batch_data_np from CHW to HWC")
+                logger.debug("DEBUG QM [_combine_batch_result]: rearranged stacked_batch_data_np from CHW to HWC")
             if not handled_img:
                 self.update_progress(
                     f"❌ Batch #{current_batch_num} ignoré: image couleur shape {stacked_batch_data_np.shape} au lieu de {self.memmap_shape}.",
                     "ERROR",
                 )
-                print(
+                logger.debug(
                     f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (couleur). "
                     f"expected={self.memmap_shape}, got={stacked_batch_data_np.shape}"
                 )
@@ -4117,13 +4117,13 @@ class SeestarQueuedStacker:
             if stacked_batch_data_np.shape == expected_shape_hw[::-1]:
                 stacked_batch_data_np = stacked_batch_data_np.T
                 handled_gray = True
-                print("DEBUG QM [_combine_batch_result]: transposed gray image to match memmap_shape")
+                logger.debug("DEBUG QM [_combine_batch_result]: transposed gray image to match memmap_shape")
             if not handled_gray:
                 self.update_progress(
                     f"❌ Batch #{current_batch_num} ignoré: image N&B shape {stacked_batch_data_np.shape} au lieu de {expected_shape_hw}.",
                     "ERROR",
                 )
-                print(
+                logger.debug(
                     f"ERREUR QM [_combine_batch_result SUM/W]: Incompatibilité shape image lot (N&B). "
                     f"expected={expected_shape_hw}, got={stacked_batch_data_np.shape}"
                 )
@@ -4135,7 +4135,7 @@ class SeestarQueuedStacker:
                  f"❌ Batch #{current_batch_num} ignoré: dimensions image N&B inattendues {stacked_batch_data_np.shape}.",
                  "ERROR",
              )
-             print(
+             logger.debug(
                  f"ERREUR QM [_combine_batch_result SUM/W]: Shape image lot N&B inattendue - got {stacked_batch_data_np.shape}"
              )
              try: batch_n_error = int(stack_info_header.get('NIMAGES', 1)); self.failed_stack_count += batch_n_error
@@ -4155,7 +4155,7 @@ class SeestarQueuedStacker:
                     f"⚠️ Batch #{current_batch_num} ignoré: somme de couverture quasi nulle ({np.sum(batch_coverage_map_2d):.3e}).",
                     "WARN",
                 )
-                print(
+                logger.debug(
                     f"DEBUG QM [_combine_batch_result SUM/W]: Sortie précoce (somme couverture quasi nulle). "
                     f"sum={np.sum(batch_coverage_map_2d):.3e}"
                 )
@@ -4181,8 +4181,8 @@ class SeestarQueuedStacker:
                 else: # Si l'accumulateur global est N&B (ne devrait pas arriver avec memmap_shape HWC)
                     signal_to_add_to_sum_float64 = stacked_batch_data_np.astype(np.float64) * batch_coverage_map_2d.astype(np.float64)
 
-            print(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation pour {num_physical_images_in_batch} images physiques.")
-            print(
+            logger.debug(f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation pour {num_physical_images_in_batch} images physiques.")
+            logger.debug(
                 f"  -> signal_to_add_to_sum_float64 - Shape: {signal_to_add_to_sum_float64.shape}, "
                 f"Range: [{np.min(signal_to_add_to_sum_float64):.2f} - {np.max(signal_to_add_to_sum_float64):.2f}], "
                 f"Mean: {np.mean(signal_to_add_to_sum_float64):.2f}"
@@ -4222,11 +4222,11 @@ class SeestarQueuedStacker:
                 post_sum_max = float(np.max(self.cumulative_sum_memmap))
                 post_wht_min = float(np.min(self.cumulative_wht_memmap))
                 post_wht_max = float(np.max(self.cumulative_wht_memmap))
-                print(
+                logger.debug(
                     f"DEBUG QM [_combine_batch_result SUM/W]: after += flush -> SUM min={post_sum_min:.3f}, max={post_sum_max:.3f}; "
                     f"WHT min={post_wht_min:.3f}, max={post_wht_max:.3f}"
                 )
-                print(
+                logger.debug(
                     f"DEBUG QM [_combine_batch_result]: memmap change SUM {pre_sum_min:.3f}->{post_sum_min:.3f}, {pre_sum_max:.3f}->{post_sum_max:.3f}; "
                     f"WHT {pre_wht_min:.3f}->{post_wht_min:.3f}, {pre_wht_max:.3f}->{post_wht_max:.3f}"
                 )
@@ -4235,13 +4235,13 @@ class SeestarQueuedStacker:
                         f"⚠️ Batch #{current_batch_num} addition produced no change to cumulative SUM. "
                         "Possible dtype/broadcast issue."
                     )
-                    print(
+                    logger.debug(
                         "WARNING QM [_combine_batch_result]: cumulative SUM memmap unchanged after +=, possible dtype/broadcasting issue"
                     )
                     self.update_progress(warn_msg, "WARN")
             except Exception as dbg_e:
-                print(f"DEBUG QM [_combine_batch_result SUM/W]: erreur stats apres += : {dbg_e}")
-            print("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
+                logger.debug(f"DEBUG QM [_combine_batch_result SUM/W]: erreur stats apres += : {dbg_e}")
+            logger.debug("DEBUG QM [_combine_batch_result SUM/W]: Addition SUM/WHT terminée.")
 
             try:
                 sum_min = float(np.min(self.cumulative_sum_memmap))
@@ -4271,11 +4271,11 @@ class SeestarQueuedStacker:
 
             self.images_in_cumulative_stack += num_physical_images_in_batch # Compte les images physiques
             self.total_exposure_seconds += batch_exposure
-            print(
+            logger.debug(
                 f"DEBUG QM [_combine_batch_result SUM/W]: {num_physical_images_in_batch} images ajoutées -> "
                 f"images_in_cumulative_stack={self.images_in_cumulative_stack}"
             )
-            print(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images_in_cumulative_stack={self.images_in_cumulative_stack}, total_exposure_seconds={self.total_exposure_seconds:.1f}")
+            logger.debug(f"DEBUG QM [_combine_batch_result SUM/W]: Compteurs mis à jour: images_in_cumulative_stack={self.images_in_cumulative_stack}, total_exposure_seconds={self.total_exposure_seconds:.1f}")
             self.update_progress(
                 f"📊 images_in_cumulative_stack={self.images_in_cumulative_stack}",
                 "INFO_DETAIL",
@@ -4306,14 +4306,14 @@ class SeestarQueuedStacker:
             current_total_wht_center = np.max(self.cumulative_wht_memmap) if self.cumulative_wht_memmap.size > 0 else 0.0
             self.current_stack_header['SUMWGHTS'] = (float(current_total_wht_center), 'Approx. max sum of weights in WHT map')
 
-            print("DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée.")
+            logger.debug("DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée.")
 
         except MemoryError as mem_err:
-             print(f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}")
+             logger.debug(f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}")
              self.update_progress(f"❌ ERREUR MÉMOIRE lors de l'accumulation du batch classique.")
              traceback.print_exc(limit=1); self.processing_error = "Erreur Mémoire Accumulation"; self.stop_processing = True
         except Exception as e:
-            print(f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}")
+            logger.debug(f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}")
             self.update_progress(f"❌ Erreur pendant l'accumulation du résultat du batch: {e}")
             traceback.print_exc(limit=3)
             try: batch_n_error_acc = int(stack_info_header.get('NIMAGES', 1)) # Nombre d'images du lot qui a échoué
@@ -4339,7 +4339,7 @@ class SeestarQueuedStacker:
             header_to_save.add_history(f'Intermediate save after combining {self.images_in_cumulative_stack} images')
             save_fits_image(self.current_stack_data, stack_path, header_to_save, overwrite=True)
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=False)
-        except Exception as e: print(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
+        except Exception as e: logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
     def _stack_winsorized_sigma(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05)):
         from scipy.stats.mstats import winsorize
@@ -4401,7 +4401,7 @@ class SeestarQueuedStacker:
         num_physical_images_in_batch_initial = len(batch_items_with_masks)
         progress_info = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
         self.update_progress(f"✨ Combinaison ccdproc du batch {progress_info} ({num_physical_images_in_batch_initial} images physiques initiales)...")
-        print(f"DEBUG QM [_stack_batch]: Début pour lot #{current_batch_num} avec {num_physical_images_in_batch_initial} items.")
+        logger.debug(f"DEBUG QM [_stack_batch]: Début pour lot #{current_batch_num} avec {num_physical_images_in_batch_initial} items.")
 
         # --- 1. Filtrer les items valides et extraire les composants ---
         # Un item est valide si image, header, scores, et valid_pixel_mask sont non None
@@ -4430,7 +4430,7 @@ class SeestarQueuedStacker:
             if ref_shape_check is None:
                 ref_shape_check = img_np.shape
                 is_color_batch = (img_np.ndim == 3 and img_np.shape[2] == 3)
-                print(f"     - Référence shape pour lot: {ref_shape_check}, Couleur: {is_color_batch}")
+                logger.debug(f"     - Référence shape pour lot: {ref_shape_check}, Couleur: {is_color_batch}")
 
             # Vérifier la cohérence des dimensions avec la référence
             is_current_item_valid_shape = False
@@ -4450,7 +4450,7 @@ class SeestarQueuedStacker:
                 self.update_progress(f"   -> Item {idx+1} du lot {current_batch_num} ignoré (shape image {img_np.shape} ou masque {mask_2d.shape} incompatible avec réf {ref_shape_check}).")
 
         num_valid_images_for_processing = len(valid_images_for_ccdproc)
-        print(f"DEBUG QM [_stack_batch]: {num_valid_images_for_processing}/{num_physical_images_in_batch_initial} images valides pour traitement dans ce lot.")
+        logger.debug(f"DEBUG QM [_stack_batch]: {num_valid_images_for_processing}/{num_physical_images_in_batch_initial} images valides pour traitement dans ce lot.")
 
         if num_valid_images_for_processing == 0:
             self.update_progress(f"❌ Aucune image valide trouvée dans le lot {current_batch_num} après filtrage. Lot ignoré.")
@@ -4635,7 +4635,7 @@ class SeestarQueuedStacker:
 
 
         # --- 5. NOUVEAU : Calculer batch_coverage_map_2d (HxW, float32) ---
-        print(f"   -> Calcul de la carte de poids/couverture 2D pour le lot #{current_batch_num}...")
+        logger.debug(f"   -> Calcul de la carte de poids/couverture 2D pour le lot #{current_batch_num}...")
         batch_coverage_map_2d = np.zeros(shape_2d_for_coverage_map, dtype=np.float32)
         
         for i in range(num_valid_images_for_processing):
@@ -4650,7 +4650,7 @@ class SeestarQueuedStacker:
             # valid_pixel_mask_for_img.astype(np.float32) convertit True->1.0, False->0.0
             batch_coverage_map_2d += valid_pixel_mask_for_img.astype(np.float32) * current_image_scalar_weight
         
-        print(f"     - Carte de poids/couverture 2D du lot calculée. Shape: {batch_coverage_map_2d.shape}, Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}]")
+        logger.debug(f"     - Carte de poids/couverture 2D du lot calculée. Shape: {batch_coverage_map_2d.shape}, Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}]")
 
         # --- 6. Mise à jour de l'en-tête d'information ---
         if stack_info_header is None:
@@ -4706,10 +4706,10 @@ class SeestarQueuedStacker:
             return final_sci_image_HWC, final_wht_map_HWC
 
         # --- DEBUG DRIZZLE FINAL 1: Log d'entrée ---
-        print("\n" + "="*70)
-        print(f"DEBUG QM [_combine_intermediate_drizzle_batches V4_CombineFixAPI_DebugDrizzleFinal_1]:")
-        print(f"  Début pour {num_batches_to_combine} lots.")
-        print(f"  Shape Sortie CIBLE: {output_shape_final_target_hw}, Drizzle Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac}")
+        logger.debug("\n" + "="*70)
+        logger.debug(f"DEBUG QM [_combine_intermediate_drizzle_batches V4_CombineFixAPI_DebugDrizzleFinal_1]:")
+        logger.debug(f"  Début pour {num_batches_to_combine} lots.")
+        logger.debug(f"  Shape Sortie CIBLE: {output_shape_final_target_hw}, Drizzle Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac}")
         # --- FIN DEBUG ---
         self.update_progress(f"💧 [CombineBatches V4] Début combinaison {num_batches_to_combine} lots Drizzle...")
 
@@ -4740,7 +4740,7 @@ class SeestarQueuedStacker:
             self.update_progress(f"   [CombineBatches V4] Objets Drizzle finaux initialisés.")
         except Exception as init_err:
             self.update_progress(f"   [CombineBatches V4] ERREUR: Échec init Drizzle final: {init_err}", "ERROR")
-            print(f"ERREUR QM [_combine_intermediate_drizzle_batches]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
+            logger.debug(f"ERREUR QM [_combine_intermediate_drizzle_batches]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
             return None, None
 
         total_contributing_ninputs_for_final_header = 0
@@ -4753,7 +4753,7 @@ class SeestarQueuedStacker:
 
             self.update_progress(f"   [CombineBatches V4] Ajout lot intermédiaire {i_batch_loop+1}/{num_batches_to_combine}: {os.path.basename(sci_fpath)}...")
             # --- DEBUG DRIZZLE FINAL 1: Log chemin lot ---
-            print(f"  Processing batch {i_batch_loop+1}: SCI='{sci_fpath}', WHT0='{wht_fpaths_list_for_batch[0] if wht_fpaths_list_for_batch else 'N/A'}'")
+            logger.debug(f"  Processing batch {i_batch_loop+1}: SCI='{sci_fpath}', WHT0='{wht_fpaths_list_for_batch[0] if wht_fpaths_list_for_batch else 'N/A'}'")
             # --- FIN DEBUG ---
 
             if len(wht_fpaths_list_for_batch) != num_output_channels:
@@ -4774,8 +4774,8 @@ class SeestarQueuedStacker:
                     with fits.open(wht_fpath_ch, memmap=False) as hdul_wht: wht_map_2d_ch = hdul_wht[0].data.astype(np.float32)
                     wht_maps_2d_list_for_lot.append(np.nan_to_num(np.maximum(wht_map_2d_ch, 0.0)))
                 # --- DEBUG DRIZZLE FINAL 1: Log données lot chargées ---
-                print(f"    Lot {i_batch_loop+1} SCI chargé - Shape CxHxW: {sci_data_cxhxw_lot.shape}, Range Ch0: [{np.min(sci_data_cxhxw_lot[0]):.3g}, {np.max(sci_data_cxhxw_lot[0]):.3g}]")
-                print(f"    Lot {i_batch_loop+1} WHT0 chargé - Shape HW: {wht_maps_2d_list_for_lot[0].shape}, Range: [{np.min(wht_maps_2d_list_for_lot[0]):.3g}, {np.max(wht_maps_2d_list_for_lot[0]):.3g}]")
+                logger.debug(f"    Lot {i_batch_loop+1} SCI chargé - Shape CxHxW: {sci_data_cxhxw_lot.shape}, Range Ch0: [{np.min(sci_data_cxhxw_lot[0]):.3g}, {np.max(sci_data_cxhxw_lot[0]):.3g}]")
+                logger.debug(f"    Lot {i_batch_loop+1} WHT0 chargé - Shape HW: {wht_maps_2d_list_for_lot[0].shape}, Range: [{np.min(wht_maps_2d_list_for_lot[0]):.3g}, {np.max(wht_maps_2d_list_for_lot[0]):.3g}]")
                 # --- FIN DEBUG ---
 
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
@@ -4790,7 +4790,7 @@ class SeestarQueuedStacker:
                         data_ch_sci_2d_lot = np.nan_to_num(sci_data_cxhxw_lot[ch_idx_add, :, :])
                         data_ch_wht_2d_lot = wht_maps_2d_list_for_lot[ch_idx_add]
                         # --- DEBUG DRIZZLE FINAL 1: Log avant add_image ---
-                        print(f"      Ch{ch_idx_add} add_image: data SCI min/max [{np.min(data_ch_sci_2d_lot):.3g}, {np.max(data_ch_sci_2d_lot):.3g}], data WHT min/max [{np.min(data_ch_wht_2d_lot):.3g}, {np.max(data_ch_wht_2d_lot):.3g}], pixfrac={self.drizzle_pixfrac}")
+                        logger.debug(f"      Ch{ch_idx_add} add_image: data SCI min/max [{np.min(data_ch_sci_2d_lot):.3g}, {np.max(data_ch_sci_2d_lot):.3g}], data WHT min/max [{np.min(data_ch_wht_2d_lot):.3g}, {np.max(data_ch_wht_2d_lot):.3g}], pixfrac={self.drizzle_pixfrac}")
                         # --- FIN DEBUG ---
                         final_drizzlers[ch_idx_add].add_image(
                             data=data_ch_sci_2d_lot,
@@ -4816,14 +4816,14 @@ class SeestarQueuedStacker:
         for ch_log_idx in range(num_output_channels):
             temp_ch_data = final_output_images_list[ch_log_idx]
             temp_ch_wht = final_output_weights_list[ch_log_idx]
-            print(f"  DEBUG [CombineBatches V4]: DONNÉES ACCUMULÉES BRUTES (avant division/clipping) - Canal {ch_log_idx}:")
+            logger.debug(f"  DEBUG [CombineBatches V4]: DONNÉES ACCUMULÉES BRUTES (avant division/clipping) - Canal {ch_log_idx}:")
             if temp_ch_data is not None and temp_ch_data.size > 0:
-                print(f"    SCI_ACCUM (out_img): Min={np.min(temp_ch_data):.4g}, Max={np.max(temp_ch_data):.4g}, Mean={np.mean(temp_ch_data):.4g}, Std={np.std(temp_ch_data):.4g}")
-                print(f"      Négatifs SCI_ACCUM: {np.sum(temp_ch_data < 0)}")
-            else: print("    SCI_ACCUM: Données vides ou invalides.")
+                logger.debug(f"    SCI_ACCUM (out_img): Min={np.min(temp_ch_data):.4g}, Max={np.max(temp_ch_data):.4g}, Mean={np.mean(temp_ch_data):.4g}, Std={np.std(temp_ch_data):.4g}")
+                logger.debug(f"      Négatifs SCI_ACCUM: {np.sum(temp_ch_data < 0)}")
+            else: logger.debug("    SCI_ACCUM: Données vides ou invalides.")
             if temp_ch_wht is not None and temp_ch_wht.size > 0:
-                print(f"    WHT_ACCUM (out_wht): Min={np.min(temp_ch_wht):.4g}, Max={np.max(temp_ch_wht):.4g}, Mean={np.mean(temp_ch_wht):.4g}")
-            else: print("    WHT_ACCUM: Données vides ou invalides.")
+                logger.debug(f"    WHT_ACCUM (out_wht): Min={np.min(temp_ch_wht):.4g}, Max={np.max(temp_ch_wht):.4g}, Mean={np.mean(temp_ch_wht):.4g}")
+            else: logger.debug("    WHT_ACCUM: Données vides ou invalides.")
         # --- FIN DEBUG ---
 
         try:
@@ -4834,15 +4834,15 @@ class SeestarQueuedStacker:
 
             # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---
             # if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:
-            #     print(f"DEBUG [CombineBatches V4]: CLIPPING LANCZOS TEMPORAIREMENT DÉSACTIVÉ.")
-            #     # print(f"DEBUG [CombineBatches V4]: Application du clipping spécifique pour kernel {self.drizzle_kernel}.")
+            #     logger.debug(f"DEBUG [CombineBatches V4]: CLIPPING LANCZOS TEMPORAIREMENT DÉSACTIVÉ.")
+            #     # logger.debug(f"DEBUG [CombineBatches V4]: Application du clipping spécifique pour kernel {self.drizzle_kernel}.")
             #     # self.update_progress(f"   Appli. clipping spécifique pour Lanczos...", "DEBUG_DETAIL")
             #     # clip_min_lanczos = 0.0
             #     # clip_max_lanczos = 2.0 # Exemple, à ajuster.
-            #     # print(f"  [CombineBatches V4]: Clipping Lanczos: Min={clip_min_lanczos}, Max={clip_max_lanczos}")
-            #     # print(f"    Avant clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            #     # logger.debug(f"  [CombineBatches V4]: Clipping Lanczos: Min={clip_min_lanczos}, Max={clip_max_lanczos}")
+            #     # logger.debug(f"    Avant clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
             #     # final_sci_image_HWC = np.clip(final_sci_image_HWC, clip_min_lanczos, clip_max_lanczos)
-            #     # print(f"    Après clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            #     # logger.debug(f"    Après clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
             # --- FIN SECTION CLIPPING COMMENTÉE ---
 
             # Nettoyage NaN/Inf et s'assurer que les poids sont non-négatifs
@@ -4860,7 +4860,7 @@ class SeestarQueuedStacker:
             del final_drizzlers, final_output_images_list, final_output_weights_list
             gc.collect()
         
-        print("="*70 + "\n")
+        logger.debug("="*70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
     def _run_astap_and_update_header(self, fits_path: str) -> bool:
@@ -5011,13 +5011,13 @@ class SeestarQueuedStacker:
         - La sauvegarde FITS reste basée sur self.raw_adu_data_for_ui_histogram (si float32) ou les données cosmétiques [0,1] (si uint16).
         Version: V_SaveFinal_CorrectedDataFlow_1
         """
-        print("\n" + "=" * 80)
+        logger.debug("\n" + "=" * 80)
         self.update_progress(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
-        print(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
+        logger.debug(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}")
         
         save_as_float32_setting = getattr(self, 'save_final_as_float32', False) 
         self.update_progress(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
-        print(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
+        logger.debug(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
         
         is_reproject_mosaic_mode = (output_filename_suffix == "_mosaic_reproject" and 
                                     drizzle_final_sci_data is not None and 
@@ -5055,8 +5055,8 @@ class SeestarQueuedStacker:
                  is_classic_stacking_mode = True 
 
         self.update_progress(f"  DEBUG QM: Mode d'opération détecté pour sauvegarde: {current_operation_mode_log_desc}")
-        print(f"  DEBUG QM: Mode d'opération détecté pour sauvegarde: {current_operation_mode_log_desc}")
-        print("=" * 80 + "\n")
+        logger.debug(f"  DEBUG QM: Mode d'opération détecté pour sauvegarde: {current_operation_mode_log_desc}")
+        logger.debug("=" * 80 + "\n")
         self.update_progress(f"💾 Préparation sauvegarde finale (Mode: {current_operation_mode_log_desc})...")
 
         final_image_initial_raw = None    # Données "brutes" après combinaison (ADU ou [0,1] si classique déjà normalisé)
@@ -5074,7 +5074,7 @@ class SeestarQueuedStacker:
             # (Je reprends la logique de votre dernier log `taraceback.txt` pour cette partie)
             if is_reproject_mosaic_mode:
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Mosaïque Reproject")
-                print("  DEBUG QM [SaveFinalStack] Mode: Mosaïque Reproject")
+                logger.debug("  DEBUG QM [SaveFinalStack] Mode: Mosaïque Reproject")
                 final_image_initial_raw = drizzle_final_sci_data.astype(np.float32) 
                 if drizzle_final_wht_data.ndim == 3:
                     final_wht_map_for_postproc = np.mean(drizzle_final_wht_data, axis=2).astype(np.float32)
@@ -5083,11 +5083,11 @@ class SeestarQueuedStacker:
                 final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0) 
                 self._close_memmaps()
                 self.update_progress(f"    DEBUG QM: Mosaic Reproject - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
-                print(f"    DEBUG QM: Mosaic Reproject - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+                logger.debug(f"    DEBUG QM: Mosaic Reproject - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
 
             elif is_true_incremental_drizzle_from_objects:
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI")
-                print("  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI")
+                logger.debug("  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI")
                 if not self.incremental_drizzle_sci_arrays or not self.incremental_drizzle_wht_arrays or \
                    len(self.incremental_drizzle_sci_arrays) != 3 or len(self.incremental_drizzle_wht_arrays) != 3:
                     raise ValueError("Donnees Drizzle incremental (sci/wht arrays) invalides ou manquantes.")
@@ -5110,11 +5110,11 @@ class SeestarQueuedStacker:
                 final_wht_map_for_postproc = np.mean(np.stack(processed_wht_channels_list_for_mean, axis=-1), axis=2).astype(np.float32)
                 final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
                 self.update_progress(f"    DEBUG QM: Drizzle Incr VRAI - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
-                print(f"    DEBUG QM: Drizzle Incr VRAI - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+                logger.debug(f"    DEBUG QM: Drizzle Incr VRAI - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
 
             elif is_drizzle_final_mode_with_data: 
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Drizzle Standard Final (depuis données de lot)")
-                print("  DEBUG QM [SaveFinalStack] Mode: Drizzle Standard Final (depuis données de lot)")
+                logger.debug("  DEBUG QM [SaveFinalStack] Mode: Drizzle Standard Final (depuis données de lot)")
                 if drizzle_final_sci_data is None or drizzle_final_wht_data is None: raise ValueError("Donnees de lot Drizzle final (sci/wht) manquantes.")
                 sci_data_float64 = drizzle_final_sci_data.astype(np.float64); wht_data_float64 = drizzle_final_wht_data.astype(np.float64) 
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
@@ -5124,20 +5124,20 @@ class SeestarQueuedStacker:
                 final_image_initial_raw = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
                 self._close_memmaps()
                 self.update_progress(f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
-                print(f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+                logger.debug(f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
             
             else: # SUM/W Classique
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique SUM/W")
-                print("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique SUM/W")
+                logger.debug("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique SUM/W")
                 if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None: raise ValueError("Accumulateurs memmap SUM/WHT non disponibles pour stacking classique.")
                 
                 final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
                 self.update_progress(f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]")
-                print(f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]")
+                logger.debug(f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]")
                 
                 final_wht_map_2d_from_memmap = np.array(self.cumulative_wht_memmap, dtype=np.float32) 
                 self.update_progress(f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]")
-                print(f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]")
+                logger.debug(f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]")
                 
                 self._close_memmaps() 
                 
@@ -5152,7 +5152,7 @@ class SeestarQueuedStacker:
                 final_image_initial_raw = final_image_initial_raw.astype(np.float32)
                 self.update_progress(
                     f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
-                print(
+                logger.debug(
                     f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
 
         except Exception as e_get_raw:
@@ -5165,19 +5165,19 @@ class SeestarQueuedStacker:
         
         # À ce stade, final_image_initial_raw contient les données "ADU-like"
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
-        print(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
+        logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
         final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
         self.update_progress(
             f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
-        print(
+        logger.debug(
             f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
 
         # Appliquer le seuil WHT (si activé) aux données "ADU-like"
         if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
             self.update_progress(
                 f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
-            print(
+            logger.debug(
                 f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
             invalid_wht_pixels = final_wht_map_for_postproc < self.drizzle_wht_threshold
             if final_image_initial_raw.ndim == 3:
@@ -5192,14 +5192,14 @@ class SeestarQueuedStacker:
             self.raw_adu_data_for_ui_histogram = (
                 np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32).copy()
             )
-            print(
+            logger.debug(
                 f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]"
             )
         else:
             self.raw_adu_data_for_ui_histogram = None
 
         # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
-        print(
+        logger.debug(
             f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
         )
         data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
@@ -5227,7 +5227,7 @@ class SeestarQueuedStacker:
             final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
                 wp_val - bp_val
             )
-            print(
+            logger.debug(
                 f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
             )
         else:
@@ -5236,14 +5236,14 @@ class SeestarQueuedStacker:
                 final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
             else:
                 final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
-            print(
+            logger.debug(
                 "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
             )
 
         final_image_normalized_for_cosmetics = np.clip(
             final_image_normalized_for_cosmetics, 0.0, 1.0
         ).astype(np.float32)
-        print(
+        logger.debug(
             f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
         )
 
@@ -5252,18 +5252,18 @@ class SeestarQueuedStacker:
         # data_after_postproc est la version 0-1 qui subira les post-traitements cosmétiques.
         data_after_postproc = final_image_normalized_for_cosmetics.copy()
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
-        print(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
+        logger.debug(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         
         # --- Début du Pipeline de Post-Traitement (identique à votre version précédente) ---
         # ... (BN Globale, Photutils BN, CB, Feathering, Low WHT Mask, SCNR, Crop) ...
         # (Le code pour appliquer ces post-traitements à data_after_postproc reste ici)
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
-        print(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
+        logger.debug(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
 
         # Les données post-traitées 0-1 seront utilisées pour l'aperçu UI
         self.last_saved_data_for_preview = data_after_postproc.copy()
-        print("DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI).")
+        logger.debug("DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI).")
         
         # --- ÉTAPE 4: Préparation du header FITS final et du nom de fichier ---
         # (Logique identique)
@@ -5293,21 +5293,21 @@ class SeestarQueuedStacker:
         data_for_primary_hdu_save = None
         if save_as_float32_setting:
             self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en float32 (brut ADU-like)...") 
-            print("   DEBUG QM: Preparation sauvegarde FITS en float32 (brut ADU-like)...")
+            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en float32 (brut ADU-like)...")
             data_for_primary_hdu_save = self.raw_adu_data_for_ui_histogram # Utilise les données "ADU-like" (non-normalisées 0-1 cosmétiquement)
             self.update_progress(f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]")
-            print(f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]")
+            logger.debug(f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]")
             final_header['BITPIX'] = -32 
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
         else: # Sauvegarde en uint16
             self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...") 
-            print("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
+            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
             # data_after_postproc est l'image [0,1] après tous les post-traitements cosmétiques
             data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16) 
             data_for_primary_hdu_save = data_scaled_uint16 
             self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            print(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
+            logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             final_header['BITPIX'] = 16 
         
         if data_for_primary_hdu_save.ndim == 3 and data_for_primary_hdu_save.shape[2] == 3 : 
@@ -5315,7 +5315,7 @@ class SeestarQueuedStacker:
         else: 
             data_for_primary_hdu_save_cxhxw = data_for_primary_hdu_save
         self.update_progress(f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})")
-        print(f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})")
+        logger.debug(f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})")
 
         # --- ÉTAPE 6: Sauvegarde FITS effective ---
         try: 
@@ -5332,7 +5332,7 @@ class SeestarQueuedStacker:
         # et laisser save_preview_image appliquer son propre stretch par défaut.
         if data_after_postproc is not None: 
             self.update_progress(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
-            print(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
+            logger.debug(f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}")
             try:
                 save_preview_image(data_after_postproc, preview_path, 
                                    enhanced_stretch=False) # ou True si vous préférez le stretch "enhanced" pour le PNG
@@ -5341,7 +5341,7 @@ class SeestarQueuedStacker:
         else: self.update_progress("ⓘ Aucune image a sauvegarder pour preview PNG (data_after_postproc est None)."); 
             
         self.update_progress(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc}).")
-        print("\n" + "=" * 80); print(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."); print("=" * 80 + "\n")
+        logger.debug("\n" + "=" * 80); logger.debug(f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."); logger.debug("=" * 80 + "\n")
 
 
 
@@ -5364,7 +5364,7 @@ class SeestarQueuedStacker:
 
     def _close_memmaps(self):
         """Ferme proprement les objets memmap s'ils existent."""
-        print("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
+        logger.debug("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
         closed_sum = False
         if hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None:
             try:
@@ -5376,9 +5376,9 @@ class SeestarQueuedStacker:
                 del self.cumulative_sum_memmap
                 self.cumulative_sum_memmap = None
                 closed_sum = True
-                print("DEBUG QM [_close_memmaps]: Référence memmap SUM supprimée.")
+                logger.debug("DEBUG QM [_close_memmaps]: Référence memmap SUM supprimée.")
             except Exception as e_close_sum:
-                print(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap SUM: {e_close_sum}")
+                logger.debug(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap SUM: {e_close_sum}")
         
         closed_wht = False
         if hasattr(self, 'cumulative_wht_memmap') and self.cumulative_wht_memmap is not None:
@@ -5388,19 +5388,19 @@ class SeestarQueuedStacker:
                 del self.cumulative_wht_memmap
                 self.cumulative_wht_memmap = None
                 closed_wht = True
-                print("DEBUG QM [_close_memmaps]: Référence memmap WHT supprimée.")
+                logger.debug("DEBUG QM [_close_memmaps]: Référence memmap WHT supprimée.")
             except Exception as e_close_wht:
-                print(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap WHT: {e_close_wht}")
+                logger.debug(f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap WHT: {e_close_wht}")
         
         # Optionnel: Essayer de supprimer les fichiers .npy si le nettoyage est activé
         # Cela devrait être fait dans le bloc finally de _worker après l'appel à _save_final_stack
         # if self.perform_cleanup:
         #      if self.sum_memmap_path and os.path.exists(self.sum_memmap_path):
-        #          try: os.remove(self.sum_memmap_path); print("DEBUG: Fichier SUM.npy supprimé.")
-        #          except Exception as e: print(f"WARN: Erreur suppression SUM.npy: {e}")
+        #          try: os.remove(self.sum_memmap_path); logger.debug("DEBUG: Fichier SUM.npy supprimé.")
+        #          except Exception as e: logger.debug(f"WARN: Erreur suppression SUM.npy: {e}")
         #      if self.wht_memmap_path and os.path.exists(self.wht_memmap_path):
-        #          try: os.remove(self.wht_memmap_path); print("DEBUG: Fichier WHT.npy supprimé.")
-        #          except Exception as e: print(f"WARN: Erreur suppression WHT.npy: {e}")
+        #          try: os.remove(self.wht_memmap_path); logger.debug("DEBUG: Fichier WHT.npy supprimé.")
+        #          except Exception as e: logger.debug(f"WARN: Erreur suppression WHT.npy: {e}")
 
 # --- FIN de _save_final_stack et ajout de _close_memmaps ---
 
@@ -5467,10 +5467,10 @@ class SeestarQueuedStacker:
                 # self.update_progress(f"ⓘ Dossier pour fichiers non alignés existe déjà: {self.unaligned_folder}")
             
             # Log explicite que les fichiers ne sont PAS supprimés par cette fonction
-            print(f"DEBUG QM [cleanup_unaligned_files]: Contenu de '{self.unaligned_folder}' CONSERVÉ (pas de suppression automatique).")
+            logger.debug(f"DEBUG QM [cleanup_unaligned_files]: Contenu de '{self.unaligned_folder}' CONSERVÉ (pas de suppression automatique).")
             # self.update_progress(f"ⓘ Fichiers dans '{os.path.basename(self.unaligned_folder)}' conservés pour analyse.") # Optionnel pour l'UI
         else:
-            print(f"DEBUG QM [cleanup_unaligned_files]: self.unaligned_folder non défini, aucune action de nettoyage/création.")
+            logger.debug(f"DEBUG QM [cleanup_unaligned_files]: self.unaligned_folder non défini, aucune action de nettoyage/création.")
 
 
 
@@ -5482,7 +5482,7 @@ class SeestarQueuedStacker:
 
     def cleanup_temp_reference(self):
         if self.output_folder is None: # <--- AJOUTER CETTE VÉRIFICATION
-            print("WARN QM [cleanup_temp_reference]: self.output_folder non défini, nettoyage référence annulé.")
+            logger.debug("WARN QM [cleanup_temp_reference]: self.output_folder non défini, nettoyage référence annulé.")
             return
         try:
             aligner_temp_folder = os.path.join(self.output_folder, "temp_processing")
@@ -5543,17 +5543,17 @@ class SeestarQueuedStacker:
         try:
             abs_folder_path = os.path.abspath(folder_path)
             # ---> AJOUTER CETTE LIGNE <---
-            print(f"DEBUG [_add_files_to_queue]: Scanning absolute path: '{abs_folder_path}'")
+            logger.debug(f"DEBUG [_add_files_to_queue]: Scanning absolute path: '{abs_folder_path}'")
             # ------------------------------
             self.update_progress(f"🔍 Scan du dossier: {os.path.basename(folder_path)}...")
             files_in_folder = sorted(os.listdir(abs_folder_path))
             # ---> AJOUTER CETTE LIGNE <---
-            print(f"DEBUG [_add_files_to_queue]: os.listdir found: {files_in_folder}")
+            logger.debug(f"DEBUG [_add_files_to_queue]: os.listdir found: {files_in_folder}")
             # ------------------------------
             new_files_found_in_folder = []
             for fname in files_in_folder:
                 # ---> AJOUTER CETTE LIGNE (optionnel mais peut aider) <---
-                print(f"DEBUG [_add_files_to_queue]: Checking file: '{fname}'")
+                logger.debug(f"DEBUG [_add_files_to_queue]: Checking file: '{fname}'")
                 # ---------------------------------------------------------
                 if self.stop_processing: self.update_progress("⛔ Scan interrompu."); break
                 if fname.lower().endswith(('.fit', '.fits')):
@@ -5561,7 +5561,7 @@ class SeestarQueuedStacker:
                     abs_fpath = os.path.abspath(fpath)
                     if abs_fpath not in self.processed_files:
                         # ---> AJOUTER CETTE LIGNE <---
-                        print(f"DEBUG [_add_files_to_queue]: ADDING to queue and processed_files: '{fpath}'")
+                        logger.debug(f"DEBUG [_add_files_to_queue]: ADDING to queue and processed_files: '{fpath}'")
                         # ------------------------------
                         self.queue.put(fpath)
                         self.processed_files.add(abs_fpath)
@@ -5623,8 +5623,8 @@ class SeestarQueuedStacker:
                          save_as_float32=False,
                          reproject_between_batches=False
                          ):
-        print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
-        print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
+        logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
+        logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
@@ -5632,19 +5632,19 @@ class SeestarQueuedStacker:
         Version: V_StartProcessing_SaveDtypeOption_1
         """
 
-        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
+        logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Début tentative démarrage...") # Version Log
         
-        print("  --- BACKEND ARGS REÇUS (depuis GUI/SettingsManager) ---")
-        print(f"    input_dir='{input_dir}', output_dir='{output_dir}'")
-        print(f"    is_mosaic_run (arg de func): {is_mosaic_run}")
-        print(f"    use_drizzle (global arg de func): {use_drizzle}")
+        logger.debug("  --- BACKEND ARGS REÇUS (depuis GUI/SettingsManager) ---")
+        logger.debug(f"    input_dir='{input_dir}', output_dir='{output_dir}'")
+        logger.debug(f"    is_mosaic_run (arg de func): {is_mosaic_run}")
+        logger.debug(f"    use_drizzle (global arg de func): {use_drizzle}")
 
-        print(f"    drizzle_mode (global arg de func): {drizzle_mode}")
-        print(f"    mosaic_settings (dict brut): {mosaic_settings}")
-        print(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
-        print(f"    reproject_between_batches (arg de func): {reproject_between_batches}")
-        print(f"    output_filename (arg de func): {output_filename}")
-        print("  --- FIN BACKEND ARGS REÇUS ---")
+        logger.debug(f"    drizzle_mode (global arg de func): {drizzle_mode}")
+        logger.debug(f"    mosaic_settings (dict brut): {mosaic_settings}")
+        logger.debug(f"    save_as_float32 (arg de func): {save_as_float32}") # Log du nouvel argument
+        logger.debug(f"    reproject_between_batches (arg de func): {reproject_between_batches}")
+        logger.debug(f"    output_filename (arg de func): {output_filename}")
+        logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
 
         if self.processing_active:
@@ -5656,7 +5656,7 @@ class SeestarQueuedStacker:
             self.aligner.stop_processing = False
         else: 
             self.update_progress("❌ Erreur interne critique: Aligner principal non initialisé. Démarrage annulé.")
-            print("ERREUR QM (start_processing): self.aligner non initialisé.")
+            logger.debug("ERREUR QM (start_processing): self.aligner non initialisé.")
             return False
         
         self.current_folder = os.path.abspath(input_dir) if input_dir else None
@@ -5666,7 +5666,7 @@ class SeestarQueuedStacker:
         # =========================================================================================
         # === ÉTAPE 1 : CONFIGURATION DES PARAMÈTRES DE SESSION SUR L'INSTANCE (AVANT TOUT LE RESTE) ===
         # =========================================================================================
-        print("DEBUG QM (start_processing): Étape 1 - Configuration des paramètres de session sur l'instance...")
+        logger.debug("DEBUG QM (start_processing): Étape 1 - Configuration des paramètres de session sur l'instance...")
           
         if not self.current_folder or not os.path.isdir(self.current_folder):
             self.update_progress(f"❌ Dossier d'entrée principal '{input_dir}' invalide ou non défini.", "ERROR")
@@ -5679,7 +5679,7 @@ class SeestarQueuedStacker:
         except OSError as e_mkdir:
             self.update_progress(f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}", "ERROR")
             return False
-        print(f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'")
+        logger.debug(f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'")
 
         self.output_filename = str(output_filename).strip()
         
@@ -5689,24 +5689,24 @@ class SeestarQueuedStacker:
         self.astap_search_radius = float(astap_search_radius) 
         self.local_ansvr_path = str(local_ansvr_path)
         
-        print(f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'")
-        print(f"    [Solver Settings sur self via start_processing args] ASTAP Path: '{self.astap_path}'")
-        print(f"    [Solver Settings sur self via start_processing args] ASTAP Data Dir: '{self.astap_data_dir}'")
-        print(f"    [Solver Settings sur self via start_processing args] ASTAP Search Radius: {self.astap_search_radius}")
-        print(f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Path: '{self.astap_path}'")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Data Dir: '{self.astap_data_dir}'")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Search Radius: {self.astap_search_radius}")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'")
         
         try:
             self.astap_search_radius_config = float(astap_search_radius)
         except (ValueError, TypeError):
-            print(f"  WARN QM (start_processing): Valeur astap_search_radius ('{astap_search_radius}') invalide. Utilisation de 5.0° par défaut.")
+            logger.debug(f"  WARN QM (start_processing): Valeur astap_search_radius ('{astap_search_radius}') invalide. Utilisation de 5.0° par défaut.")
             self.astap_search_radius_config = 5.0 
         
         # self.use_local_solver_priority (attribut de self) n'est plus utilisé, la variable locale de la fonction l'est.
-        # print(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}") 
-        print(f"    [Solver Settings sur self] ASTAP Exe: '{self.astap_path}'")
-        print(f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'")
-        print(f"    [Solver Settings sur self] Ansvr Local: '{self.local_ansvr_path}'")
-        print(f"    [Solver Settings sur self] ASTAP Search Radius Config: {self.astap_search_radius_config}°")
+        # logger.debug(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}") 
+        logger.debug(f"    [Solver Settings sur self] ASTAP Exe: '{self.astap_path}'")
+        logger.debug(f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'")
+        logger.debug(f"    [Solver Settings sur self] Ansvr Local: '{self.local_ansvr_path}'")
+        logger.debug(f"    [Solver Settings sur self] ASTAP Search Radius Config: {self.astap_search_radius_config}°")
 
         self.is_mosaic_run = is_mosaic_run                     
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run   
@@ -5744,14 +5744,14 @@ class SeestarQueuedStacker:
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
 
         self.save_final_as_float32 = bool(save_as_float32)
-        print(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
+        logger.debug(f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})")
         self.reproject_between_batches = bool(reproject_between_batches)
 
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = mosaic_settings if isinstance(mosaic_settings, dict) else {}
         if self.is_mosaic_run:
-            print(f"DEBUG QM (start_processing): Application des paramètres de Mosaïque depuis mosaic_settings_dict: {self.mosaic_settings_dict}")
+            logger.debug(f"DEBUG QM (start_processing): Application des paramètres de Mosaïque depuis mosaic_settings_dict: {self.mosaic_settings_dict}")
             self.mosaic_alignment_mode = self.mosaic_settings_dict.get('alignment_mode', "local_fast_fallback")
             self.fa_orb_features = int(self.mosaic_settings_dict.get('fastalign_orb_features', 5000))
             self.fa_min_abs_matches = int(self.mosaic_settings_dict.get('fastalign_min_abs_matches', 10))
@@ -5767,13 +5767,13 @@ class SeestarQueuedStacker:
             self.mosaic_drizzle_wht_threshold = float(self.mosaic_settings_dict.get('wht_threshold', 0.01))
             # Surcharge du facteur d'échelle global pour la mosaïque
             self.drizzle_scale = float(self.mosaic_settings_dict.get('mosaic_scale_factor', self.drizzle_scale)) 
-            print(f"  -> Mode Mosaïque ACTIF. Align Mode: '{self.mosaic_alignment_mode}', Fallback WCS: {self.use_wcs_fallback_for_mosaic}")
-            print(f"     Mosaic Drizzle: Kernel='{self.mosaic_drizzle_kernel}', Pixfrac={self.mosaic_drizzle_pixfrac:.2f}, Scale(global)={self.drizzle_scale}x")
+            logger.debug(f"  -> Mode Mosaïque ACTIF. Align Mode: '{self.mosaic_alignment_mode}', Fallback WCS: {self.use_wcs_fallback_for_mosaic}")
+            logger.debug(f"     Mosaic Drizzle: Kernel='{self.mosaic_drizzle_kernel}', Pixfrac={self.mosaic_drizzle_pixfrac:.2f}, Scale(global)={self.drizzle_scale}x")
         
         if self.drizzle_active_session and not self.is_mosaic_run:
             self.drizzle_kernel = str(drizzle_kernel)      
             self.drizzle_pixfrac = float(drizzle_pixfrac)  
-            print(f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}")
+            logger.debug(f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}")
         
         requested_batch_size = batch_size 
         if requested_batch_size <= 0:
@@ -5791,13 +5791,13 @@ class SeestarQueuedStacker:
         else: 
             self.batch_size = max(3, int(requested_batch_size)) 
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
-        print("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
+        logger.debug("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
         
 
 
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
-        print("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
+        logger.debug("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
         reference_image_data_for_shape_determination = None 
         reference_header_for_shape_determination = None     
         ref_shape_hwc = None 
@@ -5854,7 +5854,7 @@ class SeestarQueuedStacker:
                 raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée.")
             
             self.reference_header_for_wcs = reference_header_for_shape_determination.copy() 
-            print(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
+            logger.debug(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
 
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
             reference_image_path_for_solving = os.path.join(ref_temp_processing_dir, "reference_image.fit")
@@ -5862,7 +5862,7 @@ class SeestarQueuedStacker:
             self.reference_wcs_object = None 
             
             if self.drizzle_active_session or self.is_mosaic_run or self.reproject_between_batches:
-                print("DEBUG QM (start_processing): Plate-solving de la référence principale requis...")
+                logger.debug("DEBUG QM (start_processing): Plate-solving de la référence principale requis...")
                 
                 if not os.path.exists(reference_image_path_for_solving):
                     raise RuntimeError(f"Fichier de référence '{reference_image_path_for_solving}' non trouvé pour le solving.")
@@ -5899,7 +5899,7 @@ class SeestarQueuedStacker:
                          nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', ref_shape_hwc[1])
                          ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
                          self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
-                         print(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
+                         logger.debug(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
 
                     try:
                         scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
@@ -5908,7 +5908,7 @@ class SeestarQueuedStacker:
                         if avg_scale_deg_per_pix > 1e-9: 
                             self.reference_pixel_scale_arcsec = avg_scale_deg_per_pix * 3600.0
                             self.update_progress(f"   [StartProcRefSolve] Échelle image de référence estimée à: {self.reference_pixel_scale_arcsec:.2f} arcsec/pix.", "INFO")
-                            print(f"DEBUG QM: self.reference_pixel_scale_arcsec mis à jour à {self.reference_pixel_scale_arcsec:.3f} depuis le WCS de référence.")
+                            logger.debug(f"DEBUG QM: self.reference_pixel_scale_arcsec mis à jour à {self.reference_pixel_scale_arcsec:.3f} depuis le WCS de référence.")
                         else:
                             self.update_progress("   [StartProcRefSolve] Avertissement: Échelle calculée depuis WCS de référence trop faible ou invalide.", "WARN")
                     except Exception as e_scale_extract:
@@ -5932,7 +5932,7 @@ class SeestarQueuedStacker:
                         self.update_progress("❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.", "ERROR")
                         return False 
             else:
-                print(
+                logger.debug(
                     "DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique sans reprojection)."
                 )
                 self.reference_wcs_object = None
@@ -5940,31 +5940,31 @@ class SeestarQueuedStacker:
             if reference_image_data_for_shape_determination is not None:
                 del reference_image_data_for_shape_determination
             gc.collect() 
-            print("DEBUG QM (start_processing): Fin Étape 2 - Préparation référence et WCS global.")
+            logger.debug("DEBUG QM (start_processing): Fin Étape 2 - Préparation référence et WCS global.")
 
         except Exception as e_ref_prep: 
             self.update_progress(f"❌ Erreur préparation référence/WCS: {e_ref_prep}", "ERROR")
-            print(f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"); traceback.print_exc(limit=2)
+            logger.debug(f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"); traceback.print_exc(limit=2)
             return False
         
-        print(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
-        print(f"  -> self.is_mosaic_run: {self.is_mosaic_run}")
-        print(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
-        print(f"  -> self.drizzle_mode: {self.drizzle_mode}")
-        print(f"  -> self.reference_wcs_object IS None: {self.reference_wcs_object is None}")
+        logger.debug(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
+        logger.debug(f"  -> self.is_mosaic_run: {self.is_mosaic_run}")
+        logger.debug(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
+        logger.debug(f"  -> self.drizzle_mode: {self.drizzle_mode}")
+        logger.debug(f"  -> self.reference_wcs_object IS None: {self.reference_wcs_object is None}")
         if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial: 
-            print(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}, PixelShape: {self.reference_wcs_object.pixel_shape}")
+            logger.debug(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}, PixelShape: {self.reference_wcs_object.pixel_shape}")
         else:
-            print(f"     WCS Ref non disponible ou non céleste.")
+            logger.debug(f"     WCS Ref non disponible ou non céleste.")
 
-        print(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
+        logger.debug(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
         if not self.initialize(output_dir, ref_shape_hwc): 
             self.processing_active = False 
-            print("ERREUR QM (start_processing): Échec de self.initialize().")
+            logger.debug("ERREUR QM (start_processing): Échec de self.initialize().")
             return False
-        print("DEBUG QM (start_processing): self.initialize() terminé avec succès.")
+        logger.debug("DEBUG QM (start_processing): self.initialize() terminé avec succès.")
 
-        print("DEBUG QM (start_processing): Étape 4 - Remplissage de la file d'attente...")
+        logger.debug("DEBUG QM (start_processing): Étape 4 - Remplissage de la file d'attente...")
         initial_folders_to_add_count = 0
         with self.folders_lock:
             self.additional_folders = [] 
@@ -5986,14 +5986,14 @@ class SeestarQueuedStacker:
         
         self.aligner.reference_image_path = reference_path_ui or None 
 
-        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
+        logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
         self.processing_thread.daemon = True 
         self.processing_thread.start()
         self.processing_active = True 
         
         self.update_progress("🚀 Thread de traitement démarré.")
-        print("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Fin.") # Version Log
+        logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Fin.") # Version Log
         return True
 
 
@@ -6063,7 +6063,7 @@ class SeestarQueuedStacker:
             hdul.writeto(temp_filepath, overwrite=True, checksum=False, output_verify='ignore')
             hdul.close()
 
-            # print(f"   -> Temp Drizzle sauvegardé ({os.path.basename(temp_filepath)}) avec WCS Ref Obj.") # DEBUG
+            # logger.debug(f"   -> Temp Drizzle sauvegardé ({os.path.basename(temp_filepath)}) avec WCS Ref Obj.") # DEBUG
             return temp_filepath
 
         except Exception as e:
@@ -6113,7 +6113,7 @@ class SeestarQueuedStacker:
         """Supprime le dossier temporaire Drizzle et tout son contenu."""
         if self.drizzle_temp_dir is None: # self.drizzle_temp_dir dépend de self.output_folder
             if self.output_folder is None:
-                print("WARN QM [_cleanup_drizzle_temp_files]: self.output_folder non défini, nettoyage Drizzle temp annulé.")
+                logger.debug("WARN QM [_cleanup_drizzle_temp_files]: self.output_folder non défini, nettoyage Drizzle temp annulé.")
                 return
         else:
             self.drizzle_temp_dir = os.path.join(self.output_folder, "drizzle_temp_inputs")
@@ -6156,7 +6156,7 @@ class SeestarQueuedStacker:
             if thread_obj is not None and thread_obj.is_alive():
                 is_thread_alive_and_valid = True
         
-        # print(f"DEBUG QM [is_running]: processing_active={is_processing_flag_active}, thread_exists={thread_exists}, thread_alive={is_thread_alive_and_valid}") # Debug
+        # logger.debug(f"DEBUG QM [is_running]: processing_active={is_processing_flag_active}, thread_exists={thread_exists}, thread_alive={is_thread_alive_and_valid}") # Debug
         return is_processing_flag_active and thread_exists and is_thread_alive_and_valid
 
 
@@ -6177,15 +6177,15 @@ class SeestarQueuedStacker:
         num_files_in_batch = len(batch_temp_filepaths_list)
         self.update_progress(f"💧 Traitement Drizzle du lot #{batch_num} ({num_files_in_batch} images)...")
         batch_start_time = time.time()
-        print(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Lot #{batch_num} avec {num_files_in_batch} images.")
-        print(f"  -> WCS de sortie cible fourni: {'Oui' if output_wcs_target else 'Non'}, Shape de sortie cible: {output_shape_target_hw}")
+        logger.debug(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Lot #{batch_num} avec {num_files_in_batch} images.")
+        logger.debug(f"  -> WCS de sortie cible fourni: {'Oui' if output_wcs_target else 'Non'}, Shape de sortie cible: {output_shape_target_hw}")
 
         if not batch_temp_filepaths_list:
             self.update_progress(f"   - Warning: Lot Drizzle #{batch_num} vide.")
             return None, []
         if output_wcs_target is None or output_shape_target_hw is None:
             self.update_progress(f"   - ERREUR: WCS ou Shape de sortie manquant pour lot Drizzle #{batch_num}. Traitement annulé.", "ERROR")
-            print(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: output_wcs_target ou output_shape_target_hw est None.")
+            logger.debug(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: output_wcs_target ou output_shape_target_hw est None.")
             return None, []
         if not isinstance(output_wcs_target, WCS) or not output_wcs_target.is_celestial:
             self.update_progress(f"   - ERREUR: output_wcs_target invalide pour lot Drizzle #{batch_num}.", "ERROR")
@@ -6198,7 +6198,7 @@ class SeestarQueuedStacker:
         num_output_channels = 3; channel_names = ['R', 'G', 'B']
         drizzlers_batch = []; output_images_batch = []; output_weights_batch = []
         try:
-            print(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Initialisation Drizzle pour lot #{batch_num}. Shape Sortie CIBLE: {output_shape_target_hw}.")
+            logger.debug(f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Initialisation Drizzle pour lot #{batch_num}. Shape Sortie CIBLE: {output_shape_target_hw}.")
             for _ in range(num_output_channels):
                 output_images_batch.append(np.zeros(output_shape_target_hw, dtype=np.float32))
                 output_weights_batch.append(np.zeros(output_shape_target_hw, dtype=np.float32))
@@ -6209,14 +6209,14 @@ class SeestarQueuedStacker:
             self.update_progress(f"   - Objets Drizzle initialisés pour lot #{batch_num}.")
         except Exception as init_err:
             self.update_progress(f"   - ERREUR: Échec init Drizzle pour lot #{batch_num}: {init_err}", "ERROR")
-            print(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
+            logger.debug(f"ERREUR QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Échec init Drizzle: {init_err}"); traceback.print_exc(limit=1)
             return None, []
 
         processed_in_batch_count = 0
         for i_file, temp_fits_filepath_item in enumerate(batch_temp_filepaths_list): 
             if self.stop_processing: break
             current_filename_for_log = os.path.basename(temp_fits_filepath_item)
-            print(f"DEBUG QM [P&SDB_Loop]: Lot #{batch_num}, Fichier {i_file+1}/{num_files_in_batch}: '{current_filename_for_log}'")
+            logger.debug(f"DEBUG QM [P&SDB_Loop]: Lot #{batch_num}, Fichier {i_file+1}/{num_files_in_batch}: '{current_filename_for_log}'")
 
             input_data_HxWxC_orig = None; wcs_input_from_file_header = None
             input_file_header_content = None; pixmap_for_this_file = None
@@ -6238,12 +6238,12 @@ class SeestarQueuedStacker:
                 pixmap_for_this_file = np.dstack((x_output_pixels_flat.reshape(current_input_shape_hw), y_output_pixels_flat.reshape(current_input_shape_hw))).astype(np.float32)
                 
                 if pixmap_for_this_file is not None:
-                    print(f"      DEBUG PIXMAP (P&SDB) Fichier {i_file+1}: Shape={pixmap_for_this_file.shape}")
-                    if np.isnan(pixmap_for_this_file).any(): print(f"      WARN PIXMAP (P&SDB) Fichier {i_file+1}: CONTIENT DES NaN !")
-                    if np.isinf(pixmap_for_this_file).any(): print(f"      WARN PIXMAP (P&SDB) Fichier {i_file+1}: CONTIENT DES INF !")
+                    logger.debug(f"      DEBUG PIXMAP (P&SDB) Fichier {i_file+1}: Shape={pixmap_for_this_file.shape}")
+                    if np.isnan(pixmap_for_this_file).any(): logger.debug(f"      WARN PIXMAP (P&SDB) Fichier {i_file+1}: CONTIENT DES NaN !")
+                    if np.isinf(pixmap_for_this_file).any(): logger.debug(f"      WARN PIXMAP (P&SDB) Fichier {i_file+1}: CONTIENT DES INF !")
             except Exception as load_map_err:
                 self.update_progress(f"      -> ERREUR P&SDB chargement/pixmap '{current_filename_for_log}': {load_map_err}", "WARN")
-                print(f"ERREUR QM [P&SDB_Loop]: Échec chargement/pixmap '{current_filename_for_log}': {load_map_err}"); traceback.print_exc(limit=1)
+                logger.debug(f"ERREUR QM [P&SDB_Loop]: Échec chargement/pixmap '{current_filename_for_log}': {load_map_err}"); traceback.print_exc(limit=1)
                 continue
 
             if pixmap_for_this_file is not None:
@@ -6259,9 +6259,9 @@ class SeestarQueuedStacker:
                     current_max_for_batch_adu = np.nanmax(input_data_HxWxC_adu_scaled)
                     if current_max_for_batch_adu <= 1.0 + 1e-5 and current_max_for_batch_adu > 0:
                         input_data_HxWxC_adu_scaled = input_data_HxWxC_adu_scaled * 65535.0
-                        print(f"      DEBUG: File {i_file+1} FORCED rescaled from [0,1] to [0,65535] for Drizzle input. Range: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
+                        logger.debug(f"      DEBUG: File {i_file+1} FORCED rescaled from [0,1] to [0,65535] for Drizzle input. Range: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
                     else:
-                        print(f"      DEBUG: File {i_file+1} kept original range for Drizzle input: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
+                        logger.debug(f"      DEBUG: File {i_file+1} kept original range for Drizzle input: [{np.min(input_data_HxWxC_adu_scaled):.4g}, {np.max(input_data_HxWxC_adu_scaled):.4g}]")
                     
                     # Clip negative values and handle NaNs/Infs
                     input_data_HxWxC_cleaned = np.nan_to_num(np.clip(input_data_HxWxC_adu_scaled, 0.0, None), nan=0.0, posinf=0.0, neginf=0.0)
@@ -6271,7 +6271,7 @@ class SeestarQueuedStacker:
                     # For _process_and_save_drizzle_batch, the original pixel mask is not readily available from temp file.
                     # So we use a uniform weight map here. This should be improved if possible by saving/loading the mask.
                     effective_weight_map = np.ones(current_input_shape_hw, dtype=np.float32)
-                    print(f"      DEBUG: File {i_file+1}, uniform weight_map used for Drizzle.add_image. Range: [{np.min(effective_weight_map):.3f}, {np.max(effective_weight_map):.3f}]")
+                    logger.debug(f"      DEBUG: File {i_file+1}, uniform weight_map used for Drizzle.add_image. Range: [{np.min(effective_weight_map):.3f}, {np.max(effective_weight_map):.3f}]")
                     # --- END CRITICAL FIX 2 ---
 
                     for ch_index in range(num_output_channels):
@@ -6282,17 +6282,17 @@ class SeestarQueuedStacker:
                     file_successfully_added_to_drizzle = True
                 except Exception as drizzle_add_err:
                     self.update_progress(f"      -> ERREUR P&SDB add_image pour '{current_filename_for_log}': {drizzle_add_err}", "WARN")
-                    print(f"ERREUR QM [P&SDB_Loop]: Échec add_image '{current_filename_for_log}': {drizzle_add_err}"); traceback.print_exc(limit=1)
+                    logger.debug(f"ERREUR QM [P&SDB_Loop]: Échec add_image '{current_filename_for_log}': {drizzle_add_err}"); traceback.print_exc(limit=1)
             
             if file_successfully_added_to_drizzle:
                 processed_in_batch_count += 1
-                print(f"  [P&SDB_Loop]: Fichier '{current_filename_for_log}' AJOUTÉ. processed_in_batch_count = {processed_in_batch_count}")
+                logger.debug(f"  [P&SDB_Loop]: Fichier '{current_filename_for_log}' AJOUTÉ. processed_in_batch_count = {processed_in_batch_count}")
             else:
-                print(f"  [P&SDB_Loop]: Fichier '{current_filename_for_log}' NON ajouté (erreur pixmap ou add_image).")
+                logger.debug(f"  [P&SDB_Loop]: Fichier '{current_filename_for_log}' NON ajouté (erreur pixmap ou add_image).")
             
             del input_data_HxWxC_orig, input_data_HxWxC_adu_scaled, input_data_HxWxC_cleaned, wcs_input_from_file_header, input_file_header_content, pixmap_for_this_file
             gc.collect()
-        print(f"DEBUG QM [P&SDB_Loop]: Fin boucle pour lot #{batch_num}. Total processed_in_batch_count = {processed_in_batch_count}")
+        logger.debug(f"DEBUG QM [P&SDB_Loop]: Fin boucle pour lot #{batch_num}. Total processed_in_batch_count = {processed_in_batch_count}")
         
         if processed_in_batch_count == 0:
             self.update_progress(f"   - Erreur: Aucun fichier du lot Drizzle #{batch_num} n'a pu être traité (processed_in_batch_count est 0).", "ERROR")
@@ -6303,11 +6303,11 @@ class SeestarQueuedStacker:
         base_out_filename = f"batch_{batch_num:04d}_s{self.drizzle_scale:.1f}p{self.drizzle_pixfrac:.1f}{self.drizzle_kernel}"
         out_filepath_sci = os.path.join(batch_output_dir, f"{base_out_filename}_sci.fits"); out_filepaths_wht = []
         
-        print(f"DEBUG QM [P&SDB_Save]: Début sauvegarde pour lot #{batch_num}. SCI path: {out_filepath_sci}")
+        logger.debug(f"DEBUG QM [P&SDB_Save]: Début sauvegarde pour lot #{batch_num}. SCI path: {out_filepath_sci}")
         try:
             final_sci_data_batch_hwc = np.stack(output_images_batch, axis=-1).astype(np.float32)
             final_sci_data_to_save = np.moveaxis(final_sci_data_batch_hwc, -1, 0).astype(np.float32)
-            print(f"  [P&SDB_Save]: Données SCI prêtes pour écriture. Shape CxHxW: {final_sci_data_to_save.shape}")
+            logger.debug(f"  [P&SDB_Save]: Données SCI prêtes pour écriture. Shape CxHxW: {final_sci_data_to_save.shape}")
             final_header_sci = output_wcs_target.to_header(relax=True) 
             final_header_sci['NINPUTS'] = (processed_in_batch_count, f'Valid input images for Drizzle batch {batch_num}')
             final_header_sci['ISCALE'] = (self.drizzle_scale, 'Drizzle scale factor'); final_header_sci['PIXFRAC'] = (self.drizzle_pixfrac, 'Drizzle pixfrac')
@@ -6317,14 +6317,14 @@ class SeestarQueuedStacker:
             final_header_sci['NAXIS3'] = final_sci_data_to_save.shape[0]; final_header_sci['CTYPE3'] = 'CHANNEL'
             try: final_header_sci['CHNAME1'] = 'R'; final_header_sci['CHNAME2'] = 'G'; final_header_sci['CHNAME3'] = 'B'
             except Exception: pass
-            print(f"  [P&SDB_Save]: Header SCI prêt. Tentative d'écriture...")
+            logger.debug(f"  [P&SDB_Save]: Header SCI prêt. Tentative d'écriture...")
             fits.writeto(out_filepath_sci, final_sci_data_to_save, final_header_sci, overwrite=True, checksum=False, output_verify='ignore')
             self.update_progress(f"      -> Science lot #{batch_num} sauvegardé: {os.path.basename(out_filepath_sci)}")
-            print(f"DEBUG QM [P&SDB_Save]: Fichier SCI lot #{batch_num} sauvegardé: {out_filepath_sci}")
+            logger.debug(f"DEBUG QM [P&SDB_Save]: Fichier SCI lot #{batch_num} sauvegardé: {out_filepath_sci}")
             del final_sci_data_batch_hwc, final_sci_data_to_save; gc.collect()
         except Exception as e_save_sci:
             self.update_progress(f"   - ERREUR sauvegarde science lot #{batch_num}: {e_save_sci}", "ERROR")
-            print(f"ERREUR QM [P&SDB_Save]: Échec sauvegarde SCI: {e_save_sci}"); traceback.print_exc(limit=1)
+            logger.debug(f"ERREUR QM [P&SDB_Save]: Échec sauvegarde SCI: {e_save_sci}"); traceback.print_exc(limit=1)
             del drizzlers_batch, output_images_batch, output_weights_batch; gc.collect()
             return None, []
 
@@ -6333,7 +6333,7 @@ class SeestarQueuedStacker:
             out_filepath_wht_ch = os.path.join(batch_output_dir, f"{base_out_filename}_wht_{ch_name}.fits")
             out_filepaths_wht.append(out_filepath_wht_ch)
             try:
-                print(f"  [P&SDB_Save]: Préparation WHT pour canal {ch_name} lot #{batch_num}. Path: {out_filepath_wht_ch}")
+                logger.debug(f"  [P&SDB_Save]: Préparation WHT pour canal {ch_name} lot #{batch_num}. Path: {out_filepath_wht_ch}")
                 wht_data_to_save_ch = output_weights_batch[i_ch_save].astype(np.float32)
                 wht_header_ch = output_wcs_target.to_header(relax=True) 
                 for key_clean in ['NAXIS3','CTYPE3','CRPIX3','CRVAL3','CDELT3','CUNIT3','PC3_1','PC3_2','PC3_3','PC1_3','PC2_3','CHNAME1','CHNAME2','CHNAME3']:
@@ -6342,12 +6342,12 @@ class SeestarQueuedStacker:
                 wht_header_ch['NAXIS2'] = wht_data_to_save_ch.shape[0]
                 wht_header_ch['HISTORY'] = f'Drizzle Weights ({ch_name}) Batch {batch_num}'; wht_header_ch['NINPUTS'] = processed_in_batch_count
                 wht_header_ch['BUNIT'] = 'Weight'
-                print(f"    [P&SDB_Save]: Header WHT {ch_name} prêt. Tentative d'écriture...")
+                logger.debug(f"    [P&SDB_Save]: Header WHT {ch_name} prêt. Tentative d'écriture...")
                 fits.writeto(out_filepath_wht_ch, wht_data_to_save_ch, wht_header_ch, overwrite=True, checksum=False, output_verify='ignore')
-                print(f"  [P&SDB_Save]: Fichier WHT lot ({ch_name}) #{batch_num} sauvegardé.")
+                logger.debug(f"  [P&SDB_Save]: Fichier WHT lot ({ch_name}) #{batch_num} sauvegardé.")
             except Exception as e_save_wht:
                 self.update_progress(f"   - ERREUR sauvegarde poids {ch_name} lot #{batch_num}: {e_save_wht}", "ERROR")
-                print(f"ERREUR QM [P&SDB_Save]: Échec sauvegarde WHT {ch_name}: {e_save_wht}"); traceback.print_exc(limit=1)
+                logger.debug(f"ERREUR QM [P&SDB_Save]: Échec sauvegarde WHT {ch_name}: {e_save_wht}"); traceback.print_exc(limit=1)
                 if os.path.exists(out_filepath_sci):
                     try: os.remove(out_filepath_sci)
                     except Exception: pass
