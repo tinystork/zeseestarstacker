@@ -142,10 +142,21 @@ class SettingsManager:
                      self.window_geometry = current_geo_ui
             
             # --- NOUVEAU : Lecture du setting pour la sauvegarde en float32 ---
-            self.save_final_as_float32 = getattr(gui_instance, 'save_as_float32_var', 
+            self.save_final_as_float32 = getattr(gui_instance, 'save_as_float32_var',
                                                  tk.BooleanVar(value=default_values_from_code.get('save_final_as_float32', False))
                                                 ).get()
             logger.debug(f"DEBUG SM (update_from_ui): self.save_final_as_float32 lu (attribut UI ou défaut): {self.save_final_as_float32}")
+            # --- FIN NOUVEAU ---
+
+            # --- NOUVEAU : Lecture du setting preserve_linear_output ---
+            self.preserve_linear_output = getattr(
+                gui_instance,
+                'preserve_linear_output_var',
+                tk.BooleanVar(value=default_values_from_code.get('preserve_linear_output', False)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): self.preserve_linear_output lu (attribut UI ou défaut): {self.preserve_linear_output}"
+            )
             # --- FIN NOUVEAU ---
 
             self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_values_from_code.get('mosaic_mode_active', False)))
@@ -347,6 +358,13 @@ class SettingsManager:
             getattr(gui_instance, 'save_as_float32_var', tk.BooleanVar()).set(self.save_final_as_float32)
             logger.debug(f"DEBUG (Settings apply_to_ui): save_final_as_float32 appliqué à l'UI (valeur: {self.save_final_as_float32})")
             # --- FIN NOUVEAU ---
+
+            # --- NOUVEAU : Application du setting preserve_linear_output ---
+            getattr(gui_instance, 'preserve_linear_output_var', tk.BooleanVar()).set(self.preserve_linear_output)
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): preserve_linear_output appliqué à l'UI (valeur: {self.preserve_linear_output})"
+            )
+            # --- FIN NOUVEAU ---
             
             getattr(gui_instance, 'preview_stretch_method', tk.StringVar()).set(self.preview_stretch_method)
             getattr(gui_instance, 'preview_black_point', tk.DoubleVar()).set(self.preview_black_point)
@@ -467,13 +485,20 @@ class SettingsManager:
         defaults_dict['photutils_bn_exclude_percentile'] = 95.0 
         defaults_dict['apply_feathering'] = True 
         defaults_dict['feather_blur_px'] = 256   
-        defaults_dict['apply_low_wht_mask'] = False   
-        defaults_dict['low_wht_percentile'] = 5       
-        defaults_dict['low_wht_soften_px'] = 128      
-        
+        defaults_dict['apply_low_wht_mask'] = False
+        defaults_dict['low_wht_percentile'] = 5
+        defaults_dict['low_wht_soften_px'] = 128
+
         # --- NOUVEAU : Paramètre de sauvegarde float32 ---
         defaults_dict['save_final_as_float32'] = False # Défaut à False (donc uint16 après mise à l'échelle par défaut)
         logger.debug(f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}")
+        # --- FIN NOUVEAU ---
+
+        # --- NOUVEAU : Préserver la sortie linéaire ---
+        defaults_dict['preserve_linear_output'] = False
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'preserve_linear_output'={defaults_dict['preserve_linear_output']}"
+        )
         # --- FIN NOUVEAU ---
 
         # --- Paramètres Solveurs Locaux ---
@@ -849,6 +874,20 @@ class SettingsManager:
                 self.save_final_as_float32 = current_save_float32_val
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Validation du setting preserve_linear_output ---
+            logger.debug("    -> Validating Preserve Linear Output...")
+            current_preserve_val = getattr(
+                self, 'preserve_linear_output', defaults_fallback['preserve_linear_output']
+            )
+            if not isinstance(current_preserve_val, bool):
+                messages.append(
+                    f"Option 'Preserve Linear Output' ('{current_preserve_val}') invalide, réinitialisée à {defaults_fallback['preserve_linear_output']}."
+                )
+                self.preserve_linear_output = defaults_fallback['preserve_linear_output']
+            else:
+                self.preserve_linear_output = current_preserve_val
+            # --- FIN NOUVEAU ---
+
             # --- Local Solver Paths and ASTAP Search Radius ---
             # ... (inchangé) ...
             logger.debug("  -> Validating Local Solver Settings...")
@@ -1055,11 +1094,15 @@ class SettingsManager:
             'apply_low_wht_mask': bool(self.apply_low_wht_mask),
             'low_wht_percentile': int(self.low_wht_percentile),
             'low_wht_soften_px': int(self.low_wht_soften_px),
-            
+
             # --- NOUVEAU : Sauvegarde du setting save_final_as_float32 ---
             'save_final_as_float32': bool(getattr(self, 'save_final_as_float32', False)),
             # --- FIN NOUVEAU ---
-            
+
+            # --- NOUVEAU : Sauvegarde du setting preserve_linear_output ---
+            'preserve_linear_output': bool(getattr(self, 'preserve_linear_output', False)),
+            # --- FIN NOUVEAU ---
+
             'local_solver_preference': str(getattr(self, 'local_solver_preference', 'none')),
             'astap_path': str(getattr(self, 'astap_path', "")),
             'astap_data_dir': str(getattr(self, 'astap_data_dir', "")),
