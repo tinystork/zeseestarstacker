@@ -35,6 +35,11 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Star count/sharpness analysis
 *   **Memory Optimization:** Batch processing with auto RAM management
 
+The Expert tab's **Output FITS Format** panel features a checkbox labeled
+**Preserve Linear Output**. Enabling it saves the stacked FITS directly from the
+linear data, skipping the usual percentile scaling step so pixel values are
+written linearly.
+
 **(Français)**
 
 *   **Chargement & Validation FITS :** Charge les fichiers `.fit` et `.fits`, effectue une validation de base et gère les variations courantes du format FITS (ex: ordre des canaux).
@@ -59,6 +64,10 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Pondération par rapport signal/bruit (SNR)
     *   Analyse du nombre/netteté des étoiles
 *   **Optimisation Mémoire :** Traitement par lots avec gestion automatique de la RAM
+
+Dans l'onglet **Expert**, la section **Format de sortie FITS** propose une case
+à cocher **Sortie linéaire préservée**. Une fois activée, la sauvegarde FITS se
+fait sans normalisation par percentiles et les données sont écrites linéairement.
 
 ---
 

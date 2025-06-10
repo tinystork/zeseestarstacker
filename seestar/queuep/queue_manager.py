@@ -1625,9 +1625,16 @@ class SeestarQueuedStacker:
 
 
             # --- 1.A Plate-solving de la référence ---
-            self.update_progress("DEBUG WORKER: Section 1.A - Plate-solving de la référence...")
-            self.reference_wcs_object = None 
-            temp_wcs_ancre = None # Spécifique pour la logique mosaïque locale
+            if self.drizzle_active_session or self.is_mosaic_run or self.reproject_between_batches:
+                self.update_progress(
+                    "DEBUG WORKER: Section 1.A - Plate-solving de la référence..."
+                )
+            else:
+                logger.debug(
+                    "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
+                )
+            self.reference_wcs_object = None
+            temp_wcs_ancre = None  # Spécifique pour la logique mosaïque locale
 
             logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
             logger.debug(f"    self.is_mosaic_run = {self.is_mosaic_run}")
@@ -5006,13 +5013,28 @@ class SeestarQueuedStacker:
 
 
     def _save_final_stack(self, output_filename_suffix: str = "", stopped_early: bool = False,
-                          drizzle_final_sci_data=None, drizzle_final_wht_data=None):
+                          drizzle_final_sci_data=None, drizzle_final_wht_data=None,
+                          preserve_linear_output: bool = False):
         """
         Calcule l'image finale, applique les post-traitements et sauvegarde.
         MODIFIED:
         - self.last_saved_data_for_preview (pour GUI) est maintenant l'image normalisée [0,1] SANS stretch cosmétique du backend.
         - save_preview_image (pour PNG) est appelé avec apply_stretch=True sur ces données [0,1].
         - La sauvegarde FITS reste basée sur self.raw_adu_data_for_ui_histogram (si float32) ou les données cosmétiques [0,1] (si uint16).
+        Parameters
+        ----------
+        output_filename_suffix : str, optional
+            Suffixe ajouté au nom du fichier de sortie.
+        stopped_early : bool, optional
+            Indique si le traitement s'est arrêté prématurément.
+        drizzle_final_sci_data : ndarray, optional
+            Données science fournies pour les modes Drizzle/Mosaïque.
+        drizzle_final_wht_data : ndarray, optional
+            Carte de poids correspondante.
+        preserve_linear_output : bool, optional
+            Si ``True``, saute la normalisation par percentiles et conserve la
+            dynamique linéaire de ``final_image_initial_raw``.
+
         Version: V_SaveFinal_CorrectedDataFlow_1
         """
         logger.debug("\n" + "=" * 80)
@@ -5177,6 +5199,7 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
+
         final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
         self.update_progress(
             f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
@@ -5273,6 +5296,7 @@ class SeestarQueuedStacker:
 
         # data_after_postproc est la version 0-1 qui subira les post-traitements cosmétiques.
         data_after_postproc = final_image_normalized_for_cosmetics.copy()
+
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         logger.debug(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         
@@ -5323,11 +5347,14 @@ class SeestarQueuedStacker:
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
         else: # Sauvegarde en uint16
-            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...") 
+            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
             logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données cosmétiques [0,1] -> 0-65535)...")
-            # data_after_postproc est l'image [0,1] après tous les post-traitements cosmétiques
-            data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16) 
-            data_for_primary_hdu_save = data_scaled_uint16 
+            # data_after_postproc est l'image après tous les post-traitements cosmétiques
+            if preserve_linear_output_flag:
+                data_scaled_uint16 = (data_after_postproc * 65535.0).astype(np.uint16)
+            else:
+                data_scaled_uint16 = (np.clip(data_after_postproc, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            data_for_primary_hdu_save = data_scaled_uint16
             self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données post-traitées [0,1] et scalées à 0-65535. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             final_header['BITPIX'] = 16 
@@ -5773,6 +5800,7 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.preserve_linear_output (attribut d'instance) mis à : {self.preserve_linear_output} (depuis argument {preserve_linear_output})"
         )
         self.reproject_between_batches = bool(reproject_between_batches)
+
 
         # --- FIN NOUVEAU ---
 
