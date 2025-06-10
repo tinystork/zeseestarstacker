@@ -100,9 +100,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             )
         )
 
-        if not self.reproject_batches_var.get() and self._solver_configured():
-            self.reproject_batches_var.set(True)
-
         self.reproject_batches_var.trace_add('write', lambda *args: self._update_warning())
         self.local_solver_choice_var.trace_add('write', lambda *args: self._update_warning())
 
