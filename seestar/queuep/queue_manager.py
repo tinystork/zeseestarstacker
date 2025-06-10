@@ -3727,9 +3727,35 @@ class SeestarQueuedStacker:
                     final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
 
                 pixmap_for_this_file = np.dstack((
-                    final_x_output_pixels.reshape(input_shape_hw_current_file), 
+                    final_x_output_pixels.reshape(input_shape_hw_current_file),
                     final_y_output_pixels.reshape(input_shape_hw_current_file)
                 )).astype(np.float32)
+                # --- Vérification des coordonnées du pixmap par rapport à la grille de sortie ---
+                pix_x = pixmap_for_this_file[..., 0]
+                pix_y = pixmap_for_this_file[..., 1]
+                min_x, max_x = np.nanmin(pix_x), np.nanmax(pix_x)
+                min_y, max_y = np.nanmin(pix_y), np.nanmax(pix_y)
+                height_out, width_out = self.drizzle_output_shape_hw
+                logger.debug(
+                    f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap X range [{min_x:.2f}, {max_x:.2f}] vs [0,{width_out}); "
+                    f"Y range [{min_y:.2f}, {max_y:.2f}] vs [0,{height_out})"
+                )
+                if (min_x < 0 or max_x >= width_out or min_y < 0 or max_y >= height_out):
+                    logger.debug("      WARN [ProcIncrDrizLoop]: Pixmap en dehors de la plage attendue, recalcul avec origin=1.")
+                    final_x_output_pixels, final_y_output_pixels = self.drizzle_output_wcs.all_world2pix(
+                        sky_ra_deg, sky_dec_deg, 1
+                    )
+                    pixmap_for_this_file = np.dstack((
+                        final_x_output_pixels.reshape(input_shape_hw_current_file),
+                        final_y_output_pixels.reshape(input_shape_hw_current_file)
+                    )).astype(np.float32)
+                    pix_x = pixmap_for_this_file[..., 0]
+                    pix_y = pixmap_for_this_file[..., 1]
+                    logger.debug(
+                        f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap recalc (origin=1) X range [{np.nanmin(pix_x):.2f}, {np.nanmax(pix_x):.2f}], "
+                        f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
+                    )
+
                 logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
 
                 exptime_for_drizzle_add = 1.0 
