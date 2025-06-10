@@ -165,7 +165,22 @@ class SeestarStackerGUI:
         self.astrometry_api_key_var = tk.StringVar()
         self.localization = Localization("en")
         self.settings = SettingsManager()
-        self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
+        try:
+            import inspect
+            qs_init_params = inspect.signature(SeestarQueuedStacker.__init__).parameters
+            if 'settings' in qs_init_params:
+                self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
+            else:
+                self.logger.debug("SeestarQueuedStacker.__init__ ne supporte pas le param\u00e8tre 'settings'.")
+                self.queued_stacker = SeestarQueuedStacker()
+                # Tenter d'attacher les settings manuellement
+                if hasattr(self.queued_stacker, 'settings'):
+                    self.queued_stacker.settings = self.settings
+        except Exception as init_err:
+            self.logger.error("Erreur lors de l'initialisation de SeestarQueuedStacker: %s", init_err)
+            self.queued_stacker = SeestarQueuedStacker()
+            if hasattr(self.queued_stacker, 'settings'):
+                self.queued_stacker.settings = self.settings
         self.processing = False
         self.thread = None
         self.current_preview_data = None
