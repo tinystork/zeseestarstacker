@@ -84,3 +84,40 @@ def test_save_final_stack_preserve_linear_uint16(tmp_path):
     assert saved.dtype == np.uint16
     expected = (np.clip(data, 0.0, 1.0) * 65535).astype(np.uint16)
     assert np.array_equal(saved, expected)
+
+
+def test_save_final_stack_incremental_drizzle_objects(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.drizzle_active_session = True
+    obj.drizzle_mode = "Incremental"
+    obj.preserve_linear_output = True
+
+    shape = (2, 2)
+    sci_arrays = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+    wht_arrays = [np.zeros(shape, dtype=np.float32) for _ in range(3)]
+
+    from drizzle.resample import Drizzle
+
+    obj.incremental_drizzle_objects = [
+        Drizzle(out_img=sci_arrays[i], out_wht=wht_arrays[i], out_shape=shape)
+        for i in range(3)
+    ]
+    # Manually fill arrays after initialization to avoid Drizzle checks on exptime
+    sci_arrays[0][:] = 1.0
+    sci_arrays[1][:] = 2.0
+    sci_arrays[2][:] = 3.0
+    for arr in wht_arrays:
+        arr[:] = 1.0
+    obj.incremental_drizzle_sci_arrays = []
+    obj.incremental_drizzle_wht_arrays = []
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_drizzle_incr_true",
+        preserve_linear_output=True,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.dtype.kind == "f"
+    assert saved.shape == (3, 2, 2)
+    assert np.any(saved != 0)
