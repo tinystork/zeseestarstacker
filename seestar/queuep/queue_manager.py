@@ -5169,58 +5169,90 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         print(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
-        final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None) 
-        self.update_progress(f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
-        print(f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
+        final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
+        self.update_progress(
+            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
+        print(
+            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
 
         # Appliquer le seuil WHT (si activé) aux données "ADU-like"
         if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
-            self.update_progress(f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
-            print(f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
-            # Normaliser la carte de poids pour le seuil relatif
-            max_wht_val = np.max(final_wht_map_for_postproc)
-            if max_wht_val > 1e-9:
-                wht_threshold_abs = self.drizzle_wht_threshold * max_wht_val
-                invalid_wht_pixels = final_wht_map_for_postproc < wht_threshold_abs
-                if final_image_initial_raw.ndim == 3: 
-                    final_image_initial_raw[invalid_wht_pixels, :] = 0.0 # Mettre à 0 au lieu de NaN
-                elif final_image_initial_raw.ndim == 2: 
-                    final_image_initial_raw[invalid_wht_pixels] = 0.0
-                self.update_progress(f"    DEBUG QM: Après application du seuil WHT (mis à 0), final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
-                print(f"    DEBUG QM: Après application du seuil WHT (mis à 0), final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]")
-        
-        # Stocker les données "ADU-like" (après WHT threshold) pour l'histogramme de l'UI
-        self.raw_adu_data_for_ui_histogram = final_image_initial_raw.astype(np.float32).copy()
-        self.update_progress(f"  DEBUG QM [SaveFinalStack] self.raw_adu_data_for_ui_histogram (pour UI, après WHT threshold) STOCKE. Range: [{np.min(self.raw_adu_data_for_ui_histogram):.4f}, {np.max(self.raw_adu_data_for_ui_histogram):.4f}], Dtype: {self.raw_adu_data_for_ui_histogram.dtype}")
-        print(f"  DEBUG QM [SaveFinalStack] self.raw_adu_data_for_ui_histogram (pour UI, après WHT threshold) STOCKE. Range: [{np.min(self.raw_adu_data_for_ui_histogram):.4f}, {np.max(self.raw_adu_data_for_ui_histogram):.4f}], Dtype: {self.raw_adu_data_for_ui_histogram.dtype}")
-        
-        # --- ÉTAPE 2: Préparer self.last_saved_data_for_preview (normalisé [0,1] SANS stretch cosmétique backend) ---
-        self.update_progress(f"  DEBUG QM [SaveFinalStack] Normalisation min-max de self.raw_adu_data_for_ui_histogram pour self.last_saved_data_for_preview...")
-        print(f"  DEBUG QM [SaveFinalStack] Normalisation min-max de self.raw_adu_data_for_ui_histogram pour self.last_saved_data_for_preview...")
-        
-        min_val_for_01_norm = np.nanmin(self.raw_adu_data_for_ui_histogram)
-        max_val_for_01_norm = np.nanmax(self.raw_adu_data_for_ui_histogram)
-        range_for_01_norm = max_val_for_01_norm - min_val_for_01_norm
+            self.update_progress(
+                f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
+            print(
+                f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw.")
+            invalid_wht_pixels = final_wht_map_for_postproc < self.drizzle_wht_threshold
+            if final_image_initial_raw.ndim == 3:
+                final_image_initial_raw = np.where(
+                    invalid_wht_pixels[..., np.newaxis], np.nan, final_image_initial_raw
+                )
+            else:
+                final_image_initial_raw = np.where(invalid_wht_pixels, np.nan, final_image_initial_raw)
 
-        data_01_for_gui_preview = self.raw_adu_data_for_ui_histogram.copy()  # Commencer avec une copie
-        if np.isfinite(min_val_for_01_norm) and np.isfinite(max_val_for_01_norm) and range_for_01_norm > 1e-9:
-            data_01_for_gui_preview = (data_01_for_gui_preview - min_val_for_01_norm) / range_for_01_norm
-        elif np.any(np.isfinite(data_01_for_gui_preview)):
-            # Image parfaitement plate : renvoyer du noir pour éviter la sortie grise/blanche
-            data_01_for_gui_preview = np.zeros_like(data_01_for_gui_preview)
-        else:  # Tout NaN/Inf
-            data_01_for_gui_preview = np.zeros_like(data_01_for_gui_preview)
-        
-        data_01_for_gui_preview = np.clip(data_01_for_gui_preview, 0.0, 1.0).astype(np.float32)
-        self.last_saved_data_for_preview = data_01_for_gui_preview
-        
-        self.update_progress(f"    DEBUG QM: self.last_saved_data_for_preview (normalisé 0-1, NON STRETCHÉ) - Range: [{np.nanmin(self.last_saved_data_for_preview):.4f}, {np.nanmax(self.last_saved_data_for_preview):.4f}], Dtype: {self.last_saved_data_for_preview.dtype}")
-        print(f"    DEBUG QM: self.last_saved_data_for_preview (normalisé 0-1, NON STRETCHÉ) - Range: [{np.nanmin(self.last_saved_data_for_preview):.4f}, {np.nanmax(self.last_saved_data_for_preview):.4f}], Dtype: {self.last_saved_data_for_preview.dtype}")
+        # Stocker les données ADU pour histogramme UI uniquement si nécessaire
+        if save_as_float32_setting:
+            self.raw_adu_data_for_ui_histogram = (
+                np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32).copy()
+            )
+            print(
+                f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]"
+            )
+        else:
+            self.raw_adu_data_for_ui_histogram = None
 
-        # --- ÉTAPE 3: Appliquer les post-traitements à la version [0,1] pour la sauvegarde PNG ---
-        #    (et potentiellement pour la sauvegarde FITS si save_as_float32_setting est False)
-        #    Note: data_after_postproc sera toujours dans la plage [0,1] et en float32.
-        data_after_postproc = self.last_saved_data_for_preview.copy() # Partir de l'image [0,1] non stretchée
+        # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
+        print(
+            f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
+        )
+        data_for_percentile_norm = np.nan_to_num(final_image_initial_raw, nan=0.0).astype(np.float32)
+        if data_for_percentile_norm.ndim == 3:
+            luminance = (
+                0.299 * data_for_percentile_norm[..., 0]
+                + 0.587 * data_for_percentile_norm[..., 1]
+                + 0.114 * data_for_percentile_norm[..., 2]
+            )
+        else:
+            luminance = data_for_percentile_norm
+        finite_luminance = luminance[np.isfinite(luminance) & (luminance > 1e-9)]
+
+        if finite_luminance.size > 20:
+            bp_val = np.percentile(finite_luminance, 0.1)
+            wp_val = np.percentile(finite_luminance, 99.9)
+            if wp_val <= bp_val + 1e-7:
+                min_finite, max_finite = np.min(finite_luminance), np.max(finite_luminance)
+                if max_finite > min_finite + 1e-7:
+                    bp_val, wp_val = min_finite, max_finite
+                else:
+                    bp_val, wp_val = 0.0, max(1e-7, max_finite)
+            if wp_val <= bp_val:
+                wp_val = bp_val + 1e-7
+            final_image_normalized_for_cosmetics = (data_for_percentile_norm - bp_val) / (
+                wp_val - bp_val
+            )
+            print(
+                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) basée sur percentiles. BP={bp_val:.4g}, WP={wp_val:.4g}."
+            )
+        else:
+            max_overall = np.nanmax(data_for_percentile_norm)
+            if max_overall > 1e-9:
+                final_image_normalized_for_cosmetics = data_for_percentile_norm / max_overall
+            else:
+                final_image_normalized_for_cosmetics = np.zeros_like(data_for_percentile_norm)
+            print(
+                "  DEBUG QM [_save_final_stack]: Normalisation (0-1) par max (peu de données/dynamique pour percentiles)."
+            )
+
+        final_image_normalized_for_cosmetics = np.clip(
+            final_image_normalized_for_cosmetics, 0.0, 1.0
+        ).astype(np.float32)
+        print(
+            f"    Range après normalisation (0-1): [{np.nanmin(final_image_normalized_for_cosmetics):.3f}, {np.nanmax(final_image_normalized_for_cosmetics):.3f}]"
+        )
+
+        effective_image_count = self.images_in_cumulative_stack
+
+        # data_after_postproc est la version 0-1 qui subira les post-traitements cosmétiques.
+        data_after_postproc = final_image_normalized_for_cosmetics.copy()
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         print(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         
@@ -5230,6 +5262,10 @@ class SeestarQueuedStacker:
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
         print(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
+
+        # Les données post-traitées 0-1 seront utilisées pour l'aperçu UI
+        self.last_saved_data_for_preview = data_after_postproc.copy()
+        print("DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI).")
         
         # --- ÉTAPE 4: Préparation du header FITS final et du nom de fichier ---
         # (Logique identique)
