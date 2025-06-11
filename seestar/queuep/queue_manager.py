@@ -5183,6 +5183,7 @@ class SeestarQueuedStacker:
 
         final_stacked = stacked_np
         final_wht = wht_2d
+        np.nan_to_num(final_wht, copy=False)
 
         if not self.reproject_between_batches:
             # Classic behaviour: solve each batch using ASTAP
@@ -5207,6 +5208,7 @@ class SeestarQueuedStacker:
 
             final_stacked = stacked_np
             final_wht = wht_2d
+            np.nan_to_num(final_wht, copy=False)
 
         # --- Reprojection mode ---
         # When inter-batch reprojection is enabled we already solved the
@@ -5231,6 +5233,7 @@ class SeestarQueuedStacker:
                 wht_2d, _ = reproject_interp(
                     (wht_2d, batch_wcs), tgt_wcs, shape_out=target_shape
                 )
+                np.nan_to_num(wht_2d, copy=False)
                 header.update({k: self.reference_header_for_wcs[k] for k in [
                     "CRPIX1",
                     "CRPIX2",
@@ -5250,6 +5253,7 @@ class SeestarQueuedStacker:
 
             final_stacked = stacked_np
             final_wht = wht_2d
+            np.nan_to_num(final_wht, copy=False)
 
         fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
             sci_fits, overwrite=True
@@ -5291,6 +5295,7 @@ class SeestarQueuedStacker:
 
             try:
                 coverage = fits.getdata(wht_paths[0]).astype(np.float32)
+                np.nan_to_num(coverage, copy=False)
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
