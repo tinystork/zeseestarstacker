@@ -3755,6 +3755,21 @@ class SeestarQueuedStacker:
                         f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap recalc (origin=1) X range [{np.nanmin(pix_x):.2f}, {np.nanmax(pix_x):.2f}], "
                         f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
                     )
+                    # Recompute range after origin=1 and clip if still out of bounds
+                    min_x, max_x = np.nanmin(pix_x), np.nanmax(pix_x)
+                    min_y, max_y = np.nanmin(pix_y), np.nanmax(pix_y)
+                    if (min_x < 0 or max_x >= width_out or min_y < 0 or max_y >= height_out):
+                        logger.warning(
+                            "      WARN [ProcIncrDrizLoop]: Pixmap toujours hors bornes apres origin=1, clipping."
+                        )
+                        pixmap_for_this_file[..., 0] = np.clip(pix_x, 0, width_out - 1)
+                        pixmap_for_this_file[..., 1] = np.clip(pix_y, 0, height_out - 1)
+                        pix_x = pixmap_for_this_file[..., 0]
+                        pix_y = pixmap_for_this_file[..., 1]
+                        logger.debug(
+                            f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap clipped X range [{np.nanmin(pix_x):.2f}, {np.nanmax(pix_x):.2f}], "
+                            f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
+                        )
 
                 logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
 
