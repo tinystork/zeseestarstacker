@@ -5159,31 +5159,7 @@ class SeestarQueuedStacker:
         }
 
         self.update_progress(f"   [ASTAP] Solve {os.path.basename(fits_path)}…")
-        try:
-            from zemosaic import zemosaic_astrometry
-
-            def _pcb(msg, prog=None, lvl=None):
-                self.update_progress(msg, prog)
-
-            wcs = zemosaic_astrometry.solve_with_astap(
-                image_fits_path=fits_path,
-                original_fits_header=header,
-                astap_exe_path=self.astap_path,
-                astap_data_dir=self.astap_data_dir,
-                search_radius_deg=self.astap_search_radius,
-                downsample_factor=self.astap_downsample,
-                sensitivity=self.astap_sensitivity,
-                timeout_sec=getattr(self, "astap_timeout_sec", 120),
-                update_original_header_in_place=True,
-                progress_callback=_pcb,
-            )
-        except Exception:
-            wcs = solve_image_wcs(
-                fits_path,
-                header,
-                solver_settings,
-                update_header_with_solution=True,
-            )
+        wcs = solve_image_wcs(fits_path, header, solver_settings, update_header_with_solution=True)
         if wcs is None:
             self.update_progress("   [ASTAP] Échec résolution", "WARN")
             return False
