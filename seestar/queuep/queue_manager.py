@@ -5306,10 +5306,18 @@ class SeestarQueuedStacker:
                 channel_footprints[ch].append(coverage)
 
         if len(wcs_for_grid) < 2:
+            self.update_progress(
+                f"⚠️ Reprojection ignorée: seulement {len(wcs_for_grid)} WCS valides.",
+                "WARN",
+            )
             return
 
         out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_for_grid)
         if out_wcs is None or out_shape is None:
+            self.update_progress(
+                "⚠️ Reprojection ignorée: échec du calcul de la grille finale.",
+                "WARN",
+            )
             return
 
         final_channels = []
