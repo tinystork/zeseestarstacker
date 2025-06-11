@@ -1239,6 +1239,18 @@ class SeestarQueuedStacker:
         if not valid_wcs_list:
             logger.debug("ERREUR (Backend _calculate_final_mosaic_grid): Aucun WCS d'entrée valide trouvé.")
             return None, None
+
+        if len(valid_wcs_list) == 1:
+            output_wcs = valid_wcs_list[0].deepcopy()
+            out_shape_hw = (output_wcs.pixel_shape[1], output_wcs.pixel_shape[0])
+            if not (getattr(output_wcs.wcs, 'naxis1', 0) > 0):
+                try:
+                    output_wcs.wcs.naxis1 = output_wcs.pixel_shape[0]
+                    output_wcs.wcs.naxis2 = output_wcs.pixel_shape[1]
+                except Exception:
+                    pass
+            logger.debug("   -> Un seul WCS valide, utilisation directe.")
+            return output_wcs, out_shape_hw
         logger.debug(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
 
         try:
