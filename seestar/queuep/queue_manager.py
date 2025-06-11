@@ -639,6 +639,8 @@ class SeestarQueuedStacker:
 
             self.update_progress(f"💧 Initialisation des objets Drizzle persistants pour mode Incrémental (Shape: {current_output_shape_hw_for_accum_or_driz})...")
             self.incremental_drizzle_objects = []
+            self.incremental_drizzle_sci_arrays = []      # ← ajouté
+            self.incremental_drizzle_wht_arrays = []      # ← ajouté
             num_channels_driz = 3
 
             try:
@@ -648,7 +650,10 @@ class SeestarQueuedStacker:
                         kernel=self.drizzle_kernel,
                         fillval=str(getattr(self, "drizzle_fillval", "0.0"))
                     )
+                    self.incremental_drizzle_sci_arrays.append(driz_obj.out_img)
+                    self.incremental_drizzle_wht_arrays.append(driz_obj.out_wht)                    
                     self.incremental_drizzle_objects.append(driz_obj)
+
                 logger.debug(f"  -> {len(self.incremental_drizzle_objects)} objets Drizzle persistants créés pour mode Incrémental.")
             except Exception as e_driz_obj_init:
                 self.update_progress(f"❌ Erreur initialisation objets Drizzle persistants: {e_driz_obj_init}", "ERROR")
