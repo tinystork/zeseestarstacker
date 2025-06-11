@@ -611,6 +611,8 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         astap_radius = self.astap_search_radius_var.get()
         astap_downsample = self.astap_downsample_var.get()
         astap_sensitivity = self.astap_sensitivity_var.get()
+        self.parent_gui.settings.astap_downsample = astap_downsample
+        self.parent_gui.settings.astap_sensitivity = astap_sensitivity
         cluster_threshold = self.cluster_threshold_var.get()
         local_ansvr_path = self.local_ansvr_path_var.get().strip()
         ansvr_host_port = self.ansvr_host_port_var.get().strip()

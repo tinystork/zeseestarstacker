@@ -4318,6 +4318,8 @@ class SeestarStackerGUI:
             "local_ansvr_path": self.settings.local_ansvr_path,
             "local_solver_preference": self.settings.local_solver_preference,
             "astap_search_radius": self.settings.astap_search_radius,
+            "astap_downsample": self.settings.astap_downsample,
+            "astap_sensitivity": self.settings.astap_sensitivity,
             "save_as_float32": self.settings.save_final_as_float32,
             "preserve_linear_output": self.settings.preserve_linear_output,
             "reproject_between_batches": self.settings.reproject_between_batches,

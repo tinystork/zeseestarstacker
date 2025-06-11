@@ -506,6 +506,8 @@ class SettingsManager:
         defaults_dict['astap_path'] = ""
         defaults_dict['astap_data_dir'] = ""
         defaults_dict['astap_search_radius'] = 3.0
+        defaults_dict['astap_downsample'] = 1
+        defaults_dict['astap_sensitivity'] = 100
         defaults_dict['use_radec_hints'] = False
         defaults_dict['local_ansvr_path'] = ""
         defaults_dict['ansvr_host_port'] = '127.0.0.1:8080'
