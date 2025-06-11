@@ -1251,6 +1251,7 @@ class SeestarQueuedStacker:
                     pass
             logger.debug("   -> Un seul WCS valide, utilisation directe.")
             return output_wcs, out_shape_hw
+
         logger.debug(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
 
         try:
@@ -5409,6 +5410,7 @@ class SeestarQueuedStacker:
             wht_paths.append(wht_path)
 
         return sci_fits, wht_paths
+
 
     def _reproject_classic_batches(self, batch_files):
 
