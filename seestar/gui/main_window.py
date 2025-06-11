@@ -3747,6 +3747,17 @@ class SeestarStackerGUI:
 
                     if hasattr(self, 'histogram_widget') and self.histogram_widget:
                         self.histogram_widget.update_histogram(self.current_preview_data)
+                        # Ensure the BP/WP range lines persist on the final histogram
+                        try:
+                            bp_ui = self.preview_black_point.get()
+                            wp_ui = self.preview_white_point.get()
+                        except tk.TclError:
+                            bp_ui = None
+                            wp_ui = None
+                        if bp_ui is not None and wp_ui is not None:
+                            self.histogram_widget.set_range(bp_ui, wp_ui)
+                        # Redraw the preview using existing histogram data
+                        self.refresh_preview(recalculate_histogram=False)
 
                 if self.current_stack_header:
                     self.update_image_info(self.current_stack_header)
