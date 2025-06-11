@@ -151,13 +151,8 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 **Install dependencies**
 
 ```bash
-# main runtime packages
-pip install -r requirements.txt
-
-# packages needed for the unit tests
-pip install pytest numpy astropy reproject
-# or install them using the dedicated file
-pip install -r requirements-test.txt
+# install all runtime and test dependencies
+pip install -r requirements.txt -r requirements-test.txt
 ```
 
 ### Test Dependencies
@@ -168,9 +163,12 @@ The unit tests rely on a few additional packages:
 - `numpy`
 - `astropy`
 - `reproject`
+- `drizzle` *(required for the Drizzle-related tests)*
 - `psutil` *(only required when testing the optional memory usage features)*
 
-They can be installed individually or via the `requirements-test.txt` file.
+Most of these packages are provided in `requirements-test.txt`. The
+`drizzle` package is listed in `requirements.txt` and must be installed
+for the tests that exercise the Drizzle functionality.
 
 **Run the tests**
 
@@ -182,11 +180,10 @@ The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
 
 ## Running Tests
 
-Install the additional packages required for the test suite (the file now includes
-`psutil` for the optional memory-related tests):
+Install all dependencies (including the optional ones used in the tests) with:
 
 ```bash
-pip install -r requirements-test.txt
+pip install -r requirements.txt -r requirements-test.txt
 ```
 
 Then execute the tests with `pytest`:
