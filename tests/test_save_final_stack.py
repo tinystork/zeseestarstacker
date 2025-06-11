@@ -65,6 +65,7 @@ def _make_obj(tmp_path, save_as_float32):
     obj.is_mosaic_run = False
     obj.drizzle_mode = "Final"
     obj.drizzle_output_wcs = None
+    obj.drizzle_fillval = "0.0"
     return obj
 
 

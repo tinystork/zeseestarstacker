@@ -1925,23 +1925,47 @@ class SeestarQueuedStacker:
                         if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
                             self.stacked_batches_count += 1
                             self._send_eta_update()
-                            logger.debug(f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd.")
-                            if self.drizzle_active_session: # Drizzle Standard Final
-                                logger.debug(f"    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final).")
-                                batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
-                                    current_batch_items_with_masks_for_stack_batch, 
-                                    self.drizzle_output_wcs, self.drizzle_output_shape_hw, self.stacked_batches_count
+                            logger.debug(
+                                f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd."
+                            )
+                            if self.drizzle_active_session:
+                                if self.drizzle_mode == "Incremental":
+                                    logger.debug(
+                                        "    DEBUG _worker: Appel _process_incremental_drizzle_batch (mode Incremental)."
+                                    )
+                                    self._process_incremental_drizzle_batch(
+                                        current_batch_items_with_masks_for_stack_batch,
+                                        self.stacked_batches_count,
+                                        self.total_batches_estimated,
+                                    )
+                                elif self.drizzle_mode == "Final":
+                                    logger.debug(
+                                        "    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final)."
+                                    )
+                                    batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
+                                        current_batch_items_with_masks_for_stack_batch,
+                                        self.drizzle_output_wcs,
+                                        self.drizzle_output_shape_hw,
+                                        self.stacked_batches_count,
+                                    )
+                                    if batch_sci_p and batch_wht_p_list:
+                                        self.intermediate_drizzle_batch_files.append(
+                                            (batch_sci_p, batch_wht_p_list)
+                                        )
+                                    else:
+                                        self.failed_stack_count += len(
+                                            current_batch_items_with_masks_for_stack_batch
+                                        )
+                            else:  # Stacking Classique
+                                logger.debug(
+                                    f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W)."
                                 )
-                                if batch_sci_p and batch_wht_p_list: 
-                                    self.intermediate_drizzle_batch_files.append((batch_sci_p, batch_wht_p_list))
-                                else: self.failed_stack_count += len(current_batch_items_with_masks_for_stack_batch)
-                            else: # Stacking Classique
-                                logger.debug(f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W).")
                                 self._process_completed_batch(
-                                    current_batch_items_with_masks_for_stack_batch, 
-                                    self.stacked_batches_count, self.total_batches_estimated
+                                    current_batch_items_with_masks_for_stack_batch,
+                                    self.stacked_batches_count,
+                                    self.total_batches_estimated,
                                 )
-                            current_batch_items_with_masks_for_stack_batch = [] # Vider le lot
+                            current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
 
                     self.queue.task_done()
                 except Empty:
@@ -3878,9 +3902,23 @@ class SeestarQueuedStacker:
                     logger.warning(f"        AVERTISSEMENT: EXPTIME={exptime_for_drizzle_add} non valide. Remplacement par 1.0.")
                     exptime_for_drizzle_add = 1.0
 
-                # Préparation du weight_map pour add_image. (Toujours np.ones() dans ce contexte si pas de override)
-                weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
-                logger.debug(f"        Weight_map pour add_image: Shape={weight_map_param_for_add.shape}, Range=[{np.min(weight_map_param_for_add):.3f}, {np.max(weight_map_param_for_add):.3f}], Sum={np.sum(weight_map_param_for_add):.3f}")
+                # Préparation du weight_map pour add_image. Utilise weight_map_override si fourni
+                if weight_map_override is not None:
+                    weight_map_param_for_add = np.asarray(weight_map_override, dtype=np.float32)
+                    if weight_map_param_for_add.shape != input_shape_hw_current_file:
+                        logger.debug(
+                            "        WARN: weight_map_override shape mismatch; using ones"
+                        )
+                        weight_map_param_for_add = np.ones(
+                            input_shape_hw_current_file, dtype=np.float32
+                        )
+                else:
+                    weight_map_param_for_add = np.ones(
+                        input_shape_hw_current_file, dtype=np.float32
+                    )
+                logger.debug(
+                    f"        Weight_map pour add_image: Shape={weight_map_param_for_add.shape}, Range=[{np.min(weight_map_param_for_add):.3f}, {np.max(weight_map_param_for_add):.3f}], Sum={np.sum(weight_map_param_for_add):.3f}"
+                )
 
                 # Pré-traitement de l'image (nettoyage NaN/Inf et clip > 0) AVANT de la passer à add_image
                 image_hwc_cleaned = np.nan_to_num(np.clip(image_hwc, 0.0, None), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
