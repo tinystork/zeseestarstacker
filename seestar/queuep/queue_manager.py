@@ -375,7 +375,8 @@ class SeestarQueuedStacker:
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
-        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0 
+        self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
+        self.drizzle_fillval = "0.0"  # default fill value for Drizzle
         self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
         
         self.files_in_queue = 0; self.processed_files_count = 0; self.aligned_files_count = 0
@@ -6049,6 +6050,7 @@ class SeestarQueuedStacker:
             self.mosaic_drizzle_kernel = str(self.mosaic_settings_dict.get('kernel', "square"))
             self.mosaic_drizzle_pixfrac = float(self.mosaic_settings_dict.get('pixfrac', 1.0))
             self.mosaic_drizzle_fillval = str(self.mosaic_settings_dict.get('fillval', "0.0"))
+            self.drizzle_fillval = self.mosaic_drizzle_fillval  # override global drizzle fill value
             self.mosaic_drizzle_wht_threshold = float(self.mosaic_settings_dict.get('wht_threshold', 0.01))
             # Surcharge du facteur d'échelle global pour la mosaïque
             self.drizzle_scale = float(self.mosaic_settings_dict.get('mosaic_scale_factor', self.drizzle_scale)) 
