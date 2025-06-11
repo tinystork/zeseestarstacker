@@ -1251,6 +1251,7 @@ class SeestarQueuedStacker:
                     pass
             logger.debug("   -> Un seul WCS valide, utilisation directe.")
             return output_wcs, out_shape_hw
+
         logger.debug(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
 
         try:
@@ -1458,8 +1459,21 @@ class SeestarQueuedStacker:
             from reproject.mosaicking import find_optimal_celestial_wcs
             from shapely.geometry import MultiPoint
         except Exception:
-            return self._calculate_final_mosaic_grid_manual(all_input_wcs_list, all_input_headers_list)
-        return self._calculate_final_mosaic_grid_reproject(all_input_wcs_list, all_input_headers_list)
+            return self._calculate_final_mosaic_grid_manual(
+                all_input_wcs_list, all_input_headers_list
+            )
+
+        try:
+            return self._calculate_final_mosaic_grid_reproject(
+                all_input_wcs_list, all_input_headers_list
+            )
+        except Exception as e:
+            logger.debug(
+                f"   -> Fallback manual grid due to error in find_optimal_celestial_wcs: {e}"
+            )
+            return self._calculate_final_mosaic_grid_manual(
+                all_input_wcs_list, all_input_headers_list
+            )
 ###########################################################################################################################################################
 
     def _recalculate_total_batches(self):
@@ -5372,10 +5386,8 @@ class SeestarQueuedStacker:
                     ]
                     if k in self.reference_header_for_wcs
                 })
-
                 header["NAXIS1"] = stacked_np.shape[1]
                 header["NAXIS2"] = stacked_np.shape[0]
-
             else:
                 os.remove(tmp.name)
                 return None, None
@@ -5398,6 +5410,7 @@ class SeestarQueuedStacker:
             wht_paths.append(wht_path)
 
         return sci_fits, wht_paths
+
 
     def _reproject_classic_batches(self, batch_files):
 
