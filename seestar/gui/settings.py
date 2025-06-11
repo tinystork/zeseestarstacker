@@ -189,6 +189,11 @@ class SettingsManager:
                 tk.BooleanVar(value=default_values_from_code.get('reproject_between_batches', False)),
             ).get()
 
+            # In classic stacking mode this option defaults to disabled unless
+            # the user explicitly checked the box in the Local Solver window.
+            if self.stacking_mode == 'classic':
+                self.reproject_between_batches = bool(self.reproject_between_batches)
+
             self.use_radec_hints = getattr(
                 gui_instance,
                 'use_radec_hints_var',
