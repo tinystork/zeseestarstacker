@@ -1620,6 +1620,7 @@ class SeestarQueuedStacker:
 
         current_batch_items_with_masks_for_stack_batch = []
         self.intermediate_drizzle_batch_files = []
+        solved_items_for_final_reprojection = []
         all_aligned_files_with_info_for_mosaic = []
 
         # --- 0.B Détermination du mode d'opération (basé sur self.xxx settés par start_processing) ---
@@ -2035,27 +2036,45 @@ class SeestarQueuedStacker:
                         )
                         self.processed_files_count += 1 
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
-                           item_result_tuple[0] is not None: 
-                            
-                            self.aligned_files_count += 1
-                            aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple # Déballer les 6
-                            
-                            if self.drizzle_active_session: # Drizzle Standard (non-mosaïque)
-                                logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
-                                temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig) 
-                                if temp_driz_file_path:
-                                    current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
+                           item_result_tuple[0] is not None:
+
+                            if self.reproject_between_batches:
+                                if item_result_tuple[3] is not None:
+                                    cache_p = self._cache_solved_image(
+                                        item_result_tuple[0],
+                                        item_result_tuple[1],
+                                        item_result_tuple[3],
+                                        len(solved_items_for_final_reprojection),
+                                    )
+                                    solved_items_for_final_reprojection.append(
+                                        (cache_p, item_result_tuple[3], item_result_tuple[1])
+                                    )
+                                    self.aligned_files_count += 1
                                 else:
-                                    self.failed_stack_count +=1 # Échec sauvegarde temp, donc échec pour le stack
-                                    logger.debug(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
-                            else: # Stacking Classique (SUM/W)
-                                logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
-                                classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val) # Recréer tuple à 5
-                                current_batch_items_with_masks_for_stack_batch.append(classic_stack_item) 
-                        else: # _process_file a échoué pour le mode classique/drizzle std
+                                    self.failed_align_count += 1
+                                    if hasattr(self, '_move_to_unaligned'):
+                                        self._move_to_unaligned(file_path)
+                            else:
+                                self.aligned_files_count += 1
+                                aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple
+
+                                if self.drizzle_active_session:  # Drizzle Standard (non-mosaïque)
+                                    logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
+                                    temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig)
+                                    if temp_driz_file_path:
+                                        current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
+                                    else:
+                                        self.failed_stack_count += 1
+                                        logger.debug(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
+                                else:  # Stacking Classique (SUM/W)
+                                    logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
+                                    classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val)
+                                    current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
+                        else:  # _process_file a échoué
                             self.failed_align_count += 1
                             logger.debug(f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}")
-                            if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
+                            if hasattr(self, '_move_to_unaligned'):
+                                self._move_to_unaligned(file_path)
                         
                         # --- Gestion des lots pour Stacking Classique ou Drizzle Standard ---
                         if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
@@ -2291,9 +2310,9 @@ class SeestarQueuedStacker:
                         self.stacked_batches_count, self.total_batches_estimated
                     )
                     current_batch_items_with_masks_for_stack_batch = []
-                if self.reproject_between_batches and len(self.intermediate_classic_batch_files) > 1:
-                    self.update_progress("🏁 Reprojection inter-batch (Classic)…")
-                    self._reproject_classic_batches(self.intermediate_classic_batch_files)
+                if self.reproject_between_batches:
+                    self.update_progress("🏁 Reprojection finale (Classic)…")
+                    self._final_reproject_cached_files(solved_items_for_final_reprojection)
                 else:
                     self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
                     if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
@@ -3419,22 +3438,21 @@ class SeestarQueuedStacker:
                         'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
                         'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
                     }
-                    wcs_final_pour_retour = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_file, True)
+                    wcs_final_pour_retour = self.astrometry_solver.solve(
+                        file_path,
+                        header_final_pour_retour,
+                        solver_settings_for_file,
+                        True,
+                    )
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
                         align_method_log_msg = "Astrometry_Single_Success"
-                        matrice_M_calculee = self._calculate_M_from_wcs(
-                            wcs_final_pour_retour,
-                            self.reference_wcs_object,
-                            image_for_alignment_or_drizzle_input.shape[:2],
-                        )
                     else:
                         align_method_log_msg = "Astrometry_Single_Fail"
                         wcs_final_pour_retour = None
-                        matrice_M_calculee = None
                 else:
                     align_method_log_msg = "Astrometry_Single_NoSolver"
                     wcs_final_pour_retour = None
-                    matrice_M_calculee = None
+                matrice_M_calculee = None
                 data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
             else:
                 align_method_log_msg = "Astroalign_Standard_Attempted"
@@ -5333,6 +5351,79 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"   [ASTAP] Erreur écriture header: {e}", "WARN")
         return True
+
+    def _cache_solved_image(self, data, header, wcs_obj, idx):
+        """Cache solved image data to a temporary FITS and return the path."""
+        cache_dir = os.path.join(self.output_folder, "reproj_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"solved_{idx:05d}.fits")
+        hdr = header.copy()
+        if wcs_obj is not None:
+            try:
+                hdr.update(wcs_obj.to_header())
+            except Exception:
+                pass
+        data_to_save = np.moveaxis(data, -1, 0) if data.ndim == 3 else data
+        fits.PrimaryHDU(data=data_to_save.astype(np.float32), header=hdr).writeto(
+            cache_path, overwrite=True
+        )
+        return cache_path
+
+    def _create_sum_wht_memmaps(self, shape_hw):
+        """(Re)create SUM/WHT memmaps for the given output shape."""
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        os.makedirs(memmap_dir, exist_ok=True)
+        self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+        self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+        self.memmap_shape = (shape_hw[0], shape_hw[1], 3)
+        self.cumulative_sum_memmap = np.lib.format.open_memmap(
+            self.sum_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_sum,
+            shape=self.memmap_shape,
+        )
+        self.cumulative_sum_memmap[:] = 0.0
+        self.cumulative_wht_memmap = np.lib.format.open_memmap(
+            self.wht_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_wht,
+            shape=shape_hw,
+        )
+        self.cumulative_wht_memmap[:] = 0.0
+
+    def _final_reproject_cached_files(self, cache_list):
+        """Reproject cached solved images and accumulate them."""
+        if not cache_list:
+            self.update_progress("⚠️ Aucun fichier résolu pour reprojection finale.", "WARN")
+            return
+
+        wcs_list = [w for _, w, _ in cache_list if w is not None]
+        headers = [h for _, _, h in cache_list]
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_list, headers)
+        if out_wcs is None or out_shape is None:
+            self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
+            return
+
+        self.reference_wcs_object = out_wcs
+        self._close_memmaps()
+        self._create_sum_wht_memmaps(out_shape)
+
+        for path, wcs_obj, hdr in cache_list:
+            try:
+                with fits.open(path, memmap=False) as hdul:
+                    dat = hdul[0].data.astype(np.float32)
+                if dat.ndim == 3 and dat.shape[0] in (3, 4):
+                    dat = np.moveaxis(dat, 0, -1)
+                cov = np.ones(dat.shape[:2], dtype=np.float32)
+                reproj_img, cov = self._reproject_to_reference(dat, wcs_obj)
+                self._combine_batch_result(reproj_img, hdr, cov, batch_wcs=None)
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Reprojection finale ignorée pour {os.path.basename(path)}: {e}",
+                    "WARN",
+                )
+
+        self._save_final_stack(output_filename_suffix="_classic_sumw")
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
 
