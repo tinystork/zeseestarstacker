@@ -3506,14 +3506,6 @@ class SeestarQueuedStacker:
             except Exception:
                 batch_wcs = None
 
-            if self.reproject_between_batches and batch_wcs is not None:
-                stacked_batch_data_np, batch_coverage_map_2d = self._reproject_batch_to_reference(
-                    stacked_batch_data_np,
-                    batch_coverage_map_2d,
-                    batch_wcs,
-                )
-                batch_wcs = self.reference_wcs_object
-
             if not self.reproject_between_batches:
                 try:
                     temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
@@ -3624,11 +3616,10 @@ class SeestarQueuedStacker:
                             f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
                             "INFO_DETAIL",
                         )
-                        stacked_batch_data_np, _ = self._reproject_to_reference(
-                            stacked_batch_data_np, batch_wcs
-                        )
-                        batch_coverage_map_2d, _ = self._reproject_to_reference(
-                            batch_coverage_map_2d, batch_wcs
+                        stacked_batch_data_np, batch_coverage_map_2d = self._reproject_batch_to_reference(
+                            stacked_batch_data_np,
+                            batch_coverage_map_2d,
+                            batch_wcs,
                         )
                         batch_wcs = self.reference_wcs_object
                         self.update_progress(
@@ -5275,45 +5266,26 @@ class SeestarQueuedStacker:
             np.nan_to_num(final_wht, copy=False)
 
         # --- Reprojection mode ---
-        # When inter-batch reprojection is enabled we already solved the
-        # reference frame once. Reproject the stacked batch onto the reference
-        # grid and copy its WCS keywords without running ASTAP again.
+        # When inter-batch reprojection is enabled the data passed here is
+        # already aligned to the reference frame. We only need to copy the WCS
+        # keywords from the reference header to ensure saved files carry the
+        # correct coordinate system without running ASTAP again or reprojecting
+        # a second time.
         if self.reference_header_for_wcs is not None:
-            try:
-                from seestar.enhancement.reproject_utils import reproject_interp
-                batch_wcs = WCS(header, naxis=2)
-                tgt_wcs = WCS(self.reference_header_for_wcs, naxis=2)
-                target_shape = (
-                    self.reference_header_for_wcs.get("NAXIS2"),
-                    self.reference_header_for_wcs.get("NAXIS1"),
-                )
-                channels = []
-                for c in range(stacked_np.shape[2]):
-                    reproj, _ = reproject_interp(
-                        (stacked_np[:, :, c], batch_wcs), tgt_wcs, shape_out=target_shape
-                    )
-                    channels.append(reproj)
-                stacked_np = np.stack(channels, axis=2)
-                wht_2d, _ = reproject_interp(
-                    (wht_2d, batch_wcs), tgt_wcs, shape_out=target_shape
-                )
-                np.nan_to_num(wht_2d, copy=False)
-                header.update({k: self.reference_header_for_wcs[k] for k in [
-                    "CRPIX1",
-                    "CRPIX2",
-                    "CDELT1",
-                    "CDELT2",
-                    "CD1_1",
-                    "CD1_2",
-                    "CD2_1",
-                    "CD2_2",
-                    "CTYPE1",
-                    "CTYPE2",
-                    "CRVAL1",
-                    "CRVAL2",
-                ] if k in self.reference_header_for_wcs})
-            except Exception:
-                pass
+            header.update({k: self.reference_header_for_wcs[k] for k in [
+                "CRPIX1",
+                "CRPIX2",
+                "CDELT1",
+                "CDELT2",
+                "CD1_1",
+                "CD1_2",
+                "CD2_1",
+                "CD2_2",
+                "CTYPE1",
+                "CTYPE2",
+                "CRVAL1",
+                "CRVAL2",
+            ] if k in self.reference_header_for_wcs})
 
             final_stacked = stacked_np
             final_wht = wht_2d
