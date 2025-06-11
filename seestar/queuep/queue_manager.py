@@ -5372,8 +5372,10 @@ class SeestarQueuedStacker:
                     ]
                     if k in self.reference_header_for_wcs
                 })
+
                 header["NAXIS1"] = stacked_np.shape[1]
                 header["NAXIS2"] = stacked_np.shape[0]
+
             else:
                 os.remove(tmp.name)
                 return None, None
