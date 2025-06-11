@@ -78,6 +78,35 @@ def test_parse_wcs_with_nonstandard_keywords(tmp_path):
     assert parsed.pixel_shape == (10, 10)
 
 
+def test_parse_astap_wcs_file(tmp_path):
+    solver = AstrometrySolver()
+
+    wcs_header = """
+NAXIS   =                    2
+NAXIS1  =                   10
+NAXIS2  =                   10
+CRPIX1  =                    5
+CRPIX2  =                    5
+CD1_1   =        -1.0E-04
+CD1_2   =         0.0E0
+CD2_1   =         0.0E0
+CD2_2   =         1.0E-04
+CRVAL1  =                10.0
+CRVAL2  =               -10.0
+CTYPE1  = 'RA---TAN'
+CTYPE2  = 'DEC--TAN'
+"""
+
+    wcs_path = tmp_path / "sample_astap.wcs"
+    wcs_path.write_text(wcs_header.strip() + "\n")
+
+    parsed = solver._parse_wcs_file_content(str(wcs_path), (10, 10))
+
+    assert parsed is not None
+    assert parsed.is_celestial
+    assert parsed.pixel_shape == (10, 10)
+
+
 def test_default_radius_used_when_missing(tmp_path, monkeypatch):
     """solve() should fall back to ASTAP_DEFAULT_SEARCH_RADIUS."""
     img = np.ones((10, 10), dtype=np.float32)
