@@ -4824,7 +4824,7 @@ class SeestarQueuedStacker:
         stacked_batch_data_np = None
         stack_info_header = None
 
-        from zemosaic.zemosaic_worker import create_master_tile
+        from seestar.core import create_master_tile_simple as create_master_tile
 
         if all_have_wcs:
             tile_path, _ = create_master_tile(

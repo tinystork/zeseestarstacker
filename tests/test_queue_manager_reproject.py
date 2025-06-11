@@ -223,9 +223,9 @@ def test_stack_batch_uses_master_tile_when_all_have_wcs(tmp_path, monkeypatch):
         fits.writeto(p, data, hdr, overwrite=True)
         return str(p), {}
 
-    import zemosaic.zemosaic_worker as worker
+    import seestar.core as sc
 
-    monkeypatch.setattr(worker, "create_master_tile", fake_create_master_tile)
+    monkeypatch.setattr(sc, "create_master_tile_simple", fake_create_master_tile)
 
     obj = qm.SeestarQueuedStacker()
     obj.update_progress = lambda *a, **k: None

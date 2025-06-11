@@ -17,6 +17,7 @@ from .weights import (
     _calculate_image_weights_noise_variance,
     _calculate_image_weights_noise_fwhm,
 )
+from .simple_stacker import create_master_tile as create_master_tile_simple
 
 # Liste initiale des éléments à exporter
 __all__ = [
@@ -31,7 +32,8 @@ __all__ = [
     'check_cupy_cuda',        # Exposer la fonction de vérification CuPy
     'SeestarAligner',         # L'aligneur astroalign
     '_calculate_image_weights_noise_variance',
-    '_calculate_image_weights_noise_fwhm'
+    '_calculate_image_weights_noise_fwhm',
+    'create_master_tile_simple'
 ]
 
 # Tentative d'importation du nouvel aligneur local
