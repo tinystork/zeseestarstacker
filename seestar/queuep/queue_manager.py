@@ -5173,32 +5173,89 @@ class SeestarQueuedStacker:
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
 
-        """Save a classic batch and solve it with ASTAP."""
+        """Save a classic batch and optionally solve/reproject it."""
         out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
         os.makedirs(out_dir, exist_ok=True)
 
         sci_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}.fits")
         wht_paths: list[str] = []
 
-        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(sci_fits, overwrite=True)
+        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(
+            sci_fits, overwrite=True
+        )
         for ch_i in range(stacked_np.shape[2]):
-            wht_path = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits")
-            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(wht_path, overwrite=True)
+            wht_path = os.path.join(
+                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+            )
+            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(
+                wht_path, overwrite=True
+            )
             wht_paths.append(wht_path)
 
-        luminance = (stacked_np[..., 0] * 0.299 + stacked_np[..., 1] * 0.587 + stacked_np[..., 2] * 0.114).astype(np.float32)
-        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-        tmp.close()
-        fits.PrimaryHDU(data=luminance, header=header).writeto(tmp.name, overwrite=True)
-        solved_ok = self._run_astap_and_update_header(tmp.name)
-        if solved_ok:
-            solved_hdr = fits.getheader(tmp.name)
-            with fits.open(sci_fits, mode="update") as hdul:
-                hdul[0].header.update(solved_hdr)
-                hdul.flush()
-        os.remove(tmp.name)
+        if not self.reproject_between_batches:
+            # Classic behaviour: solve each batch using ASTAP
+            luminance = (
+                stacked_np[..., 0] * 0.299
+                + stacked_np[..., 1] * 0.587
+                + stacked_np[..., 2] * 0.114
+            ).astype(np.float32)
+            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+            tmp.close()
+            fits.PrimaryHDU(data=luminance, header=header).writeto(
+                tmp.name, overwrite=True
+            )
+            solved_ok = self._run_astap_and_update_header(tmp.name)
+            if solved_ok:
+                solved_hdr = fits.getheader(tmp.name)
+                with fits.open(sci_fits, mode="update") as hdul:
+                    hdul[0].header.update(solved_hdr)
+                    hdul.flush()
+            os.remove(tmp.name)
 
-        return (sci_fits, wht_paths) if solved_ok else (None, None)
+            return (sci_fits, wht_paths) if solved_ok else (None, None)
+
+        # --- Reprojection mode ---
+        # When inter-batch reprojection is enabled we already solved the
+        # reference frame once. Reproject the stacked batch onto the reference
+        # grid and copy its WCS keywords without running ASTAP again.
+        if self.reference_header_for_wcs is not None:
+            try:
+                from seestar.enhancement.reproject_utils import reproject_interp
+                batch_wcs = WCS(header, naxis=2)
+                tgt_wcs = WCS(self.reference_header_for_wcs, naxis=2)
+                target_shape = (
+                    self.reference_header_for_wcs.get("NAXIS2"),
+                    self.reference_header_for_wcs.get("NAXIS1"),
+                )
+                channels = []
+                for c in range(stacked_np.shape[2]):
+                    reproj, _ = reproject_interp(
+                        (stacked_np[:, :, c], batch_wcs), tgt_wcs, shape_out=target_shape
+                    )
+                    channels.append(reproj)
+                stacked_np = np.stack(channels, axis=2)
+                header.update({k: self.reference_header_for_wcs[k] for k in [
+                    "CRPIX1",
+                    "CRPIX2",
+                    "CDELT1",
+                    "CDELT2",
+                    "CD1_1",
+                    "CD1_2",
+                    "CD2_1",
+                    "CD2_2",
+                    "CTYPE1",
+                    "CTYPE2",
+                    "CRVAL1",
+                    "CRVAL2",
+                ] if k in self.reference_header_for_wcs})
+            except Exception:
+                pass
+
+        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(
+            sci_fits, overwrite=True
+        )
+
+        return sci_fits, wht_paths
 
     def _reproject_classic_batches(self, batch_files):
 
