@@ -3745,8 +3745,8 @@ class SeestarStackerGUI:
                         total_batches=self.preview_total_batches,
                     )
 
-                if hasattr(self, 'histogram_widget') and self.histogram_widget:
-                    self.histogram_widget.update_histogram(self._temp_data_for_final_histo)
+                    if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                        self.histogram_widget.update_histogram(self.current_preview_data)
 
                 if self.current_stack_header:
                     self.update_image_info(self.current_stack_header)
