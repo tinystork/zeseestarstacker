@@ -67,6 +67,8 @@ def _make_worker(tmp_path):
     obj.update_progress = lambda *a, **k: None
     obj.local_solver_preference = "none"
     obj.astap_search_radius = 1.0
+    obj.astap_downsample = 1
+    obj.astap_sensitivity = 100
     obj.reference_pixel_scale_arcsec = 1.0
     obj.astap_path = ""
     obj.astap_data_dir = ""

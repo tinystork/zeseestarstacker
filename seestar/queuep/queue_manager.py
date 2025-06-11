@@ -1660,6 +1660,8 @@ class SeestarQueuedStacker:
                 'astap_path': self.astap_path,
                 'astap_data_dir': self.astap_data_dir,
                 'astap_search_radius': self.astap_search_radius,
+                'astap_downsample': self.astap_downsample,
+                'astap_sensitivity': self.astap_sensitivity,
                 'local_ansvr_path': self.local_ansvr_path,
                 'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec, # Peut être None au premier passage
                 'scale_tolerance_percent': 20,
@@ -3210,7 +3212,21 @@ class SeestarQueuedStacker:
                 if not fa_success and self.use_wcs_fallback_for_mosaic: 
                     align_method_log_msg += "_Fallback_Attempted" 
                     if self.astrometry_solver:
-                        solver_settings_for_panel_fallback = { 'local_solver_preference': self.local_solver_preference, 'api_key': self.api_key, 'astap_path': self.astap_path, 'astap_data_dir': self.astap_data_dir,'astap_search_radius': self.astap_search_radius,'local_ansvr_path': self.local_ansvr_path,'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,'scale_tolerance_percent': 20, 'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)}
+                        solver_settings_for_panel_fallback = {
+                            'local_solver_preference': self.local_solver_preference,
+                            'api_key': self.api_key,
+                            'astap_path': self.astap_path,
+                            'astap_data_dir': self.astap_data_dir,
+                            'astap_search_radius': self.astap_search_radius,
+                            'astap_downsample': self.astap_downsample,
+                            'astap_sensitivity': self.astap_sensitivity,
+                            'local_ansvr_path': self.local_ansvr_path,
+                            'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,
+                            'scale_tolerance_percent': 20,
+                            'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                            'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                            'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+                        }
                         wcs_panel_solved_by_solver = None
                         try: wcs_panel_solved_by_solver = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_panel_fallback,True)
                         except Exception as e_s: align_method_log_msg += f"_SolveError_{type(e_s).__name__}"
@@ -3228,7 +3244,21 @@ class SeestarQueuedStacker:
             elif solve_astrometry_for_this_file and self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel":
                 align_method_log_msg = "Astrometry_Per_Panel_Attempted"
                 if self.astrometry_solver:
-                    solver_settings_for_this_panel = { 'local_solver_preference': self.local_solver_preference, 'api_key': self.api_key, 'astap_path': self.astap_path, 'astap_data_dir': self.astap_data_dir, 'astap_search_radius': self.astap_search_radius, 'local_ansvr_path': self.local_ansvr_path, 'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,'scale_tolerance_percent': 20, 'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)}
+                    solver_settings_for_this_panel = {
+                        'local_solver_preference': self.local_solver_preference,
+                        'api_key': self.api_key,
+                        'astap_path': self.astap_path,
+                        'astap_data_dir': self.astap_data_dir,
+                        'astap_search_radius': self.astap_search_radius,
+                        'astap_downsample': self.astap_downsample,
+                        'astap_sensitivity': self.astap_sensitivity,
+                        'local_ansvr_path': self.local_ansvr_path,
+                        'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,
+                        'scale_tolerance_percent': 20,
+                        'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                        'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                        'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+                    }
                     wcs_final_pour_retour = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_this_panel, True)
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial: align_method_log_msg = "Astrometry_Per_Panel_Success"; matrice_M_calculee = np.array([[1.,0.,0.],[0.,1.,0.]], dtype=np.float32) 
                     else: align_method_log_msg = "Astrometry_Per_Panel_Fail"; wcs_final_pour_retour = None; matrice_M_calculee = None
@@ -3439,6 +3469,8 @@ class SeestarQueuedStacker:
                         "astap_path": self.astap_path,
                         "astap_data_dir": self.astap_data_dir,
                         "astap_search_radius": self.astap_search_radius,
+                        "astap_downsample": self.astap_downsample,
+                        "astap_sensitivity": self.astap_sensitivity,
                         "local_ansvr_path": self.local_ansvr_path,
                         "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
                         "scale_tolerance_percent": 20,
@@ -5115,6 +5147,8 @@ class SeestarQueuedStacker:
             "astap_path": self.astap_path,
             "astap_data_dir": self.astap_data_dir,
             "astap_search_radius": self.astap_search_radius,
+            "astap_downsample": self.astap_downsample,
+            "astap_sensitivity": self.astap_sensitivity,
             "local_ansvr_path": self.local_ansvr_path,
             "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
             "scale_tolerance_percent": 20,
@@ -5899,6 +5933,9 @@ class SeestarQueuedStacker:
                          local_ansvr_path="",
                          astap_search_radius=3.0,
 
+                         astap_downsample=1,
+                         astap_sensitivity=100,
+
                          local_solver_preference="none",
                          save_as_float32=False,
                          preserve_linear_output=False,
@@ -5967,13 +6004,17 @@ class SeestarQueuedStacker:
         self.local_solver_preference = str(local_solver_preference) 
         self.astap_path = str(astap_path)
         self.astap_data_dir = str(astap_data_dir)
-        self.astap_search_radius = float(astap_search_radius) 
+        self.astap_search_radius = float(astap_search_radius)
+        self.astap_downsample = int(astap_downsample)
+        self.astap_sensitivity = int(astap_sensitivity)
         self.local_ansvr_path = str(local_ansvr_path)
         
         logger.debug(f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'")
         logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Path: '{self.astap_path}'")
         logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Data Dir: '{self.astap_data_dir}'")
         logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Search Radius: {self.astap_search_radius}")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Downsample: {self.astap_downsample}")
+        logger.debug(f"    [Solver Settings sur self via start_processing args] ASTAP Sensitivity: {self.astap_sensitivity}")
         logger.debug(f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'")
         
         try:
@@ -6164,6 +6205,8 @@ class SeestarQueuedStacker:
                     "astap_path": self.astap_path,
                     "astap_data_dir": self.astap_data_dir,
                     "astap_search_radius": self.astap_search_radius,
+                    "astap_downsample": self.astap_downsample,
+                    "astap_sensitivity": self.astap_sensitivity,
                     "local_ansvr_path": self.local_ansvr_path,
                     "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec, 
                     "scale_tolerance_percent": 20, 
