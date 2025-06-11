@@ -203,3 +203,50 @@ def test_save_final_stack_zero_weights_abort(tmp_path):
     )
 
     assert obj.final_stacked_path is None or not Path(obj.final_stacked_path).exists()
+
+
+def test_incremental_drizzle_batch_weight_override(tmp_path):
+    def run_batch(weight=None):
+        obj = _make_obj(tmp_path, True)
+        obj.drizzle_active_session = True
+        obj.drizzle_mode = "Incremental"
+        obj.preserve_linear_output = True
+        obj.stop_processing = False
+        obj.perform_cleanup = False
+        obj.preview_callback = None
+        obj._update_preview_incremental_drizzle = lambda: None
+        obj.reproject_between_batches = False
+        obj.reference_wcs_object = None
+        obj.drizzle_output_shape_hw = (5, 5)
+        obj.drizzle_output_wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
+        obj.drizzle_scale = 1.0
+        obj.drizzle_pixfrac = 1.0
+        obj.drizzle_kernel = "square"
+        obj.images_in_cumulative_stack = 0
+        obj.failed_stack_count = 0
+        obj.current_stack_header = None
+
+        from drizzle.resample import Drizzle
+
+        obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+
+        wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
+        data = np.stack([
+            np.full(obj.drizzle_output_shape_hw, c + 1, dtype=np.float32) for c in range(3)
+        ], axis=0)
+        header = wcs.to_header()
+        header["EXPTIME"] = 1.0
+        suffix = "ovr" if weight is not None else "def"
+        path = tmp_path / f"tmp_{suffix}.fits"
+        fits.writeto(path, data, header, overwrite=True)
+
+        qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
+            obj, [str(path)], current_batch_num=1, total_batches_est=1, weight_map_override=weight
+        )
+        return [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+
+    baseline = run_batch(None)
+    overridden = run_batch(np.full((5, 5), 0.5, dtype=np.float32))
+
+    for b, o in zip(baseline, overridden):
+        assert o < b and np.isclose(o, b * 0.5, rtol=0.1)

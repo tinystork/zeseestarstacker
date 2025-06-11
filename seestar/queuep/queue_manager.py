@@ -3627,11 +3627,19 @@ class SeestarQueuedStacker:
 
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def _process_incremental_drizzle_batch(self, batch_temp_filepaths_list, current_batch_num=0, total_batches_est=0):
+    def _process_incremental_drizzle_batch(
+        self,
+        batch_temp_filepaths_list,
+        current_batch_num=0,
+        total_batches_est=0,
+        weight_map_override=None,
+    ):
         """
         [VRAI DRIZZLE INCRÉMENTAL] Traite un lot de fichiers temporaires en les ajoutant
         aux objets Drizzle persistants. Met à jour l'aperçu après chaque image (ou lot).
         Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full
+        ``weight_map_override`` permet de spécifier la carte de poids transmise à
+        ``add_image``. Si ``None``, une matrice de ``1`` est générée.
         """
         num_files_in_batch = len(batch_temp_filepaths_list)
         logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers).")
@@ -3810,9 +3818,19 @@ class SeestarQueuedStacker:
                     )
                     exptime_for_drizzle_add = 1.0
 
-                weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
-                if np.all(weight_map_param_for_add <= 0):
-                    weight_map_param_for_add[:] = 1.0
+                if weight_map_override is not None:
+                    weight_map_param_for_add = np.asarray(weight_map_override, dtype=np.float32)
+                    if weight_map_param_for_add.shape != input_shape_hw_current_file:
+                        logger.debug(
+                            "        WARN: weight_map_override shape mismatch; using ones"
+                        )
+                        weight_map_param_for_add = np.ones(
+                            input_shape_hw_current_file, dtype=np.float32
+                        )
+                else:
+                    weight_map_param_for_add = np.ones(
+                        input_shape_hw_current_file, dtype=np.float32
+                    )
 
                 for ch_idx in range(num_output_channels):
                     channel_data_2d = image_hwc[:, :, ch_idx].astype(np.float32)
