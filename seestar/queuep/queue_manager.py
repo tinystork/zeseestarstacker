@@ -1239,6 +1239,18 @@ class SeestarQueuedStacker:
         if not valid_wcs_list:
             logger.debug("ERREUR (Backend _calculate_final_mosaic_grid): Aucun WCS d'entrée valide trouvé.")
             return None, None
+
+        if len(valid_wcs_list) == 1:
+            output_wcs = valid_wcs_list[0].deepcopy()
+            out_shape_hw = (output_wcs.pixel_shape[1], output_wcs.pixel_shape[0])
+            if not (getattr(output_wcs.wcs, 'naxis1', 0) > 0):
+                try:
+                    output_wcs.wcs.naxis1 = output_wcs.pixel_shape[0]
+                    output_wcs.wcs.naxis2 = output_wcs.pixel_shape[1]
+                except Exception:
+                    pass
+            logger.debug("   -> Un seul WCS valide, utilisation directe.")
+            return output_wcs, out_shape_hw
         logger.debug(f"   -> {len(valid_wcs_list)} WCS valides retenus pour le calcul.")
 
         try:
@@ -5322,56 +5334,52 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-        if not self.reproject_between_batches:
-            # Classic behaviour: solve each batch using ASTAP
-            luminance = (
-                stacked_np[..., 0] * 0.299
-                + stacked_np[..., 1] * 0.587
-                + stacked_np[..., 2] * 0.114
-            ).astype(np.float32)
-            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-            tmp.close()
-            fits.PrimaryHDU(data=luminance, header=header).writeto(
-                tmp.name, overwrite=True
-            )
-            solved_ok = self._run_astap_and_update_header(tmp.name)
-            if solved_ok:
-                solved_hdr = fits.getheader(tmp.name)
-                header.update(solved_hdr)
-            os.remove(tmp.name)
-
-            if not solved_ok:
+        # Always attempt to solve the intermediate batch with ASTAP so that a
+        # valid WCS is present on each file. This is required for the optional
+        # inter-batch reprojection step. When solving fails we fall back to the
+        # reference header WCS if available.
+        luminance = (
+            stacked_np[..., 0] * 0.299
+            + stacked_np[..., 1] * 0.587
+            + stacked_np[..., 2] * 0.114
+        ).astype(np.float32)
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp.close()
+        fits.PrimaryHDU(data=luminance, header=header).writeto(
+            tmp.name, overwrite=True
+        )
+        solved_ok = self._run_astap_and_update_header(tmp.name)
+        if solved_ok:
+            solved_hdr = fits.getheader(tmp.name)
+            header.update(solved_hdr)
+        else:
+            if self.reference_header_for_wcs is not None:
+                header.update({
+                    k: self.reference_header_for_wcs[k]
+                    for k in [
+                        "CRPIX1",
+                        "CRPIX2",
+                        "CDELT1",
+                        "CDELT2",
+                        "CD1_1",
+                        "CD1_2",
+                        "CD2_1",
+                        "CD2_2",
+                        "CTYPE1",
+                        "CTYPE2",
+                        "CRVAL1",
+                        "CRVAL2",
+                    ]
+                    if k in self.reference_header_for_wcs
+                })
+            else:
+                os.remove(tmp.name)
                 return None, None
+        os.remove(tmp.name)
 
-            final_stacked = stacked_np
-            final_wht = wht_2d
-            np.nan_to_num(final_wht, copy=False)
-
-        # --- Reprojection mode ---
-        # When inter-batch reprojection is enabled the data passed here is
-        # already aligned to the reference frame. We only need to copy the WCS
-        # keywords from the reference header to ensure saved files carry the
-        # correct coordinate system without running ASTAP again or reprojecting
-        # a second time.
-        if self.reference_header_for_wcs is not None:
-            header.update({k: self.reference_header_for_wcs[k] for k in [
-                "CRPIX1",
-                "CRPIX2",
-                "CDELT1",
-                "CDELT2",
-                "CD1_1",
-                "CD1_2",
-                "CD2_1",
-                "CD2_2",
-                "CTYPE1",
-                "CTYPE2",
-                "CRVAL1",
-                "CRVAL2",
-            ] if k in self.reference_header_for_wcs})
-
-            final_stacked = stacked_np
-            final_wht = wht_2d
-            np.nan_to_num(final_wht, copy=False)
+        final_stacked = stacked_np
+        final_wht = wht_2d
+        np.nan_to_num(final_wht, copy=False)
 
         fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
             sci_fits, overwrite=True
