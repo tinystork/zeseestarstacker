@@ -1177,7 +1177,7 @@ class SeestarQueuedStacker:
 
 
 
-    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
+    def _calculate_final_mosaic_grid_manual(self, all_input_wcs_list, all_input_headers_list=None):
         """
         Calcule le WCS et la Shape optimaux pour la mosaïque finale en se basant
         sur l'étendue couverte par tous les WCS d'entrée.
@@ -1366,6 +1366,88 @@ class SeestarQueuedStacker:
 
 
 
+
+    def _calculate_final_mosaic_grid_reproject(self, all_input_wcs_list, all_input_headers_list=None):
+        num_wcs = len(all_input_wcs_list)
+        if num_wcs == 0:
+            return None, None
+        valid_wcs = []
+        valid_headers = []
+        valid_shapes_hw = []
+        for i, wcs_in in enumerate(all_input_wcs_list):
+            if wcs_in is None or not wcs_in.is_celestial:
+                continue
+            header = None
+            if all_input_headers_list and i < len(all_input_headers_list):
+                header = all_input_headers_list[i]
+            if wcs_in.pixel_shape is None and header is not None:
+                n1 = header.get('NAXIS1')
+                n2 = header.get('NAXIS2')
+                if n1 and n2:
+                    try:
+                        wcs_in.pixel_shape = (int(n1), int(n2))
+                        try:
+                            wcs_in._naxis1 = int(n1)
+                            wcs_in._naxis2 = int(n2)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            if wcs_in.pixel_shape is None:
+                continue
+            valid_wcs.append(wcs_in)
+            valid_headers.append(header)
+            valid_shapes_hw.append((wcs_in.pixel_shape[1], wcs_in.pixel_shape[0]))
+        if not valid_wcs:
+            return None, None
+        from astropy.coordinates import Angle
+        from reproject.mosaicking import find_optimal_celestial_wcs
+        import numpy as np
+        from astropy import units as u
+        sum_scales = 0.0
+        count_scales = 0
+        for w in valid_wcs:
+            try:
+                if hasattr(w, 'proj_plane_pixel_scales'):
+                    sc = w.proj_plane_pixel_scales()
+                    val = float(sum(abs(s.to_value(u.deg)) for s in sc)/len(sc))
+                elif hasattr(w, 'pixel_scale_matrix'):
+                    val = (abs(np.linalg.det(w.pixel_scale_matrix))**0.5)
+                else:
+                    continue
+                if np.isfinite(val) and val > 1e-10:
+                    sum_scales += val
+                    count_scales += 1
+            except Exception:
+                pass
+        avg_scale = 2.0/3600.0
+        if count_scales > 0:
+            avg_scale = sum_scales / count_scales
+        target = Angle(avg_scale / self.drizzle_scale, unit=u.deg)
+        inputs = [(sh, w) for sh, w in zip(valid_shapes_hw, valid_wcs)]
+        out_wcs, out_shape = find_optimal_celestial_wcs(inputs, resolution=target, auto_rotate=True, projection='TAN', reference=None, frame='icrs')
+        if out_wcs and out_shape:
+            expected = (out_shape[1], out_shape[0])
+            if out_wcs.pixel_shape is None or out_wcs.pixel_shape != expected:
+                try:
+                    out_wcs.pixel_shape = expected
+                except Exception:
+                    pass
+            if not (getattr(out_wcs.wcs,'naxis1',0)>0 and getattr(out_wcs.wcs,'naxis2',0)>0):
+                try:
+                    out_wcs.wcs.naxis1 = expected[0]
+                    out_wcs.wcs.naxis2 = expected[1]
+                except Exception:
+                    pass
+        return out_wcs, out_shape
+
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
+        try:
+            from reproject.mosaicking import find_optimal_celestial_wcs
+            from shapely.geometry import MultiPoint
+        except Exception:
+            return self._calculate_final_mosaic_grid_manual(all_input_wcs_list, all_input_headers_list)
+        return self._calculate_final_mosaic_grid_reproject(all_input_wcs_list, all_input_headers_list)
 ###########################################################################################################################################################
 
     def _recalculate_total_batches(self):
