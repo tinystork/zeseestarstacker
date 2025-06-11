@@ -29,7 +29,8 @@ class DummyStacker:
         self.reference_wcs_object = make_wcs(shape=self.memmap_shape[:2])
         self.cumulative_sum_memmap = np.zeros(self.memmap_shape, dtype=np.float32)
         self.cumulative_wht_memmap = np.zeros(self.memmap_shape[:2], dtype=np.float32)
-        self.enable_inter_batch_reprojection = True
+        self.reproject_between_batches = True
+        self.images_in_cumulative_stack = 0
 
     def _reproject_batch_to_reference(self, img, wht, wcs_in):
         reproject_interp = reproject_utils.reproject_interp
@@ -49,6 +50,16 @@ class DummyStacker:
         signal = data.astype(np.float64) * coverage.astype(np.float64)[:, :, np.newaxis]
         self.cumulative_sum_memmap += signal.astype(np.float32)
         self.cumulative_wht_memmap += coverage.astype(np.float32)
+        self.images_in_cumulative_stack += 1
+
+
+class DummyStackerWithHeaderCount(DummyStacker):
+    def _combine_batch_result(self, data, header, coverage):
+        count = int(header.get("NIMAGES", 1))
+        signal = data.astype(np.float64) * coverage.astype(np.float64)[:, :, np.newaxis]
+        self.cumulative_sum_memmap += signal.astype(np.float32)
+        self.cumulative_wht_memmap += coverage.astype(np.float32)
+        self.images_in_cumulative_stack += count
 
 
 def test_inter_batch_reprojection_range(tmp_path):
@@ -72,3 +83,31 @@ def test_inter_batch_reprojection_range(tmp_path):
     result = s.cumulative_sum_memmap / s.cumulative_wht_memmap[:, :, np.newaxis]
     assert result.min() >= 0
     assert result.max() <= 1
+
+
+def test_cumulative_stack_counter():
+    s = DummyStacker()
+
+    for _ in range(4):
+        img = np.ones(s.memmap_shape, dtype=np.float32)
+        cov = np.ones(s.memmap_shape[:2], dtype=np.float32)
+        s._combine_batch_result(img, fits.Header(), cov)
+
+    assert s.images_in_cumulative_stack == 4
+
+
+def test_images_in_cumulative_stack_header_count():
+    s = DummyStackerWithHeaderCount()
+
+    hdr1 = fits.Header()
+    hdr1["NIMAGES"] = 2
+    hdr2 = fits.Header()
+    hdr2["NIMAGES"] = 3
+
+    img = np.ones(s.memmap_shape, dtype=np.float32)
+    cov = np.ones(s.memmap_shape[:2], dtype=np.float32)
+
+    s._combine_batch_result(img, hdr1, cov)
+    s._combine_batch_result(img, hdr2, cov)
+
+    assert s.images_in_cumulative_stack == 5

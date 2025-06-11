@@ -160,6 +160,7 @@ FR_TRANSLATIONS = {
     # --- Section Format de Sortie FITS ---
     'output_format_frame_title': "Format FITS de Sortie",
     'save_as_float32_label': "Sauvegarder FITS final en float32 (fichiers +gros, précision max)",
+    'preserve_linear_output_label': "Préserver l'image linéaire (ignorer la normalisation par percentiles)",
 
     
     
@@ -194,6 +195,7 @@ FR_TRANSLATIONS = {
     
     # Tooltips save flaot32
     'tooltip_save_as_float32': "Si coché, le fichier FITS final sera sauvegardé en utilisant des nombres flottants 32 bits, préservant la précision numérique maximale du traitement mais résultant en des fichiers plus volumineux (env. 2x). Si décoché (défaut), le fichier sera sauvegardé en entiers non signés 16 bits (plage 0-65535 après mise à l'échelle depuis 0-1), réduisant significativement la taille du fichier.",
+    'tooltip_preserve_linear_output': "Si activé, la normalisation par percentiles est ignorée avant la sauvegarde. La sortie uint16 sera l'échelle directe des valeurs 0-1 vers 0-65535.",
 
     
     # --- FIN NOUVEAU ---

@@ -165,7 +165,22 @@ class SeestarStackerGUI:
         self.astrometry_api_key_var = tk.StringVar()
         self.localization = Localization("en")
         self.settings = SettingsManager()
-        self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
+        try:
+            import inspect
+            qs_init_params = inspect.signature(SeestarQueuedStacker.__init__).parameters
+            if 'settings' in qs_init_params:
+                self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
+            else:
+                self.logger.debug("SeestarQueuedStacker.__init__ ne supporte pas le param\u00e8tre 'settings'.")
+                self.queued_stacker = SeestarQueuedStacker()
+                # Tenter d'attacher les settings manuellement
+                if hasattr(self.queued_stacker, 'settings'):
+                    self.queued_stacker.settings = self.settings
+        except Exception as init_err:
+            self.logger.error("Erreur lors de l'initialisation de SeestarQueuedStacker: %s", init_err)
+            self.queued_stacker = SeestarQueuedStacker()
+            if hasattr(self.queued_stacker, 'settings'):
+                self.queued_stacker.settings = self.settings
         self.processing = False
         self.thread = None
         self.current_preview_data = None
@@ -435,13 +450,17 @@ class SeestarStackerGUI:
         
         self.apply_low_wht_mask_var = tk.BooleanVar(value=False) 
         self.low_wht_pct_var = tk.IntVar(value=5)                
-        self.low_wht_soften_px_var = tk.IntVar(value=128)        
+        self.low_wht_soften_px_var = tk.IntVar(value=128)
         print("DEBUG (GUI init_variables): Variables Low WHT Mask créées.")
 
         # --- NOUVELLE VARIABLE TKINTER POUR L'OPTION DE SAUVEGARDE ---
         self.save_as_float32_var = tk.BooleanVar(value=False) # Défaut à False (donc uint16)
         print(f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()}).")
-        self.reproject_batches_var = tk.BooleanVar(value=False)
+        self.preserve_linear_output_var = tk.BooleanVar(value=False)
+        print(
+            f"DEBUG (GUI init_variables): Variable preserve_linear_output_var créée (valeur initiale: {self.preserve_linear_output_var.get()})."
+        )
+        self.reproject_between_batches_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value='127.0.0.1:8080')
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
@@ -992,13 +1011,24 @@ class SeestarStackerGUI:
         print("DEBUG (GUI create_layout): Output Format Frame créé.")
 
         self.save_as_float32_check = ttk.Checkbutton(
-            self.output_format_frame, 
-            text=self.tr("save_as_float32_label", default="Save final FITS as float32 (larger files, max precision)"), 
+            self.output_format_frame,
+            text=self.tr("save_as_float32_label", default="Save final FITS as float32 (larger files, max precision)"),
             variable=self.save_as_float32_var # Variable Tkinter créée dans init_variables
         )
         self.save_as_float32_check.pack(anchor=tk.W, padx=5, pady=5)
         # Pas besoin de command ici, la valeur sera lue par SettingsManager.update_from_ui()
         print("DEBUG (GUI create_layout): Checkbutton save_as_float32 créé.")
+
+        self.preserve_linear_output_check = ttk.Checkbutton(
+            self.output_format_frame,
+            text=self.tr(
+                "preserve_linear_output_label",
+                default="Preserve linear output (skip percentile scaling)",
+            ),
+            variable=self.preserve_linear_output_var,
+        )
+        self.preserve_linear_output_check.pack(anchor=tk.W, padx=5, pady=2)
+        print("DEBUG (GUI create_layout): Checkbutton preserve_linear_output créé.")
         # --- FIN NOUVEAU ---
         
         self.reset_expert_button = ttk.Button(expert_content_frame, text=self.tr("reset_expert_button", default="Reset Expert Settings"), command=self._reset_expert_settings)
@@ -1719,7 +1749,7 @@ class SeestarStackerGUI:
     def _store_widget_references(self):
         """
         Stocke les références aux widgets qui nécessitent des mises à jour linguistiques et des infobulles.
-        MODIFIED: Ajout de la référence pour save_as_float32_check.
+        MODIFIED: Ajout des références pour save_as_float32_check et preserve_linear_output_check.
         """
         print("\nDEBUG (GUI _store_widget_references V_SaveAsFloat32_1): Début stockage références widgets...") # Version Log
         notebook_widget = None
@@ -1822,7 +1852,8 @@ class SeestarStackerGUI:
             "cleanup_temp_check_label": 'cleanup_temp_check',
             "chroma_correction_check": 'chroma_correction_check',
             # NOUVEAU : Clé pour le texte de la nouvelle Checkbutton
-            "save_as_float32_label": 'save_as_float32_check'
+            "save_as_float32_label": 'save_as_float32_check',
+            "preserve_linear_output_label": 'preserve_linear_output_check'
         }
         for key, item in labels_and_checks_keys.items():
             if isinstance(item, tk.Widget): self.widgets_to_translate[key] = item
@@ -1887,7 +1918,8 @@ class SeestarStackerGUI:
             ('low_wht_soften_px_label', 'tooltip_low_wht_soften_px'),
             ('low_wht_soften_px_spinbox', 'tooltip_low_wht_soften_px'),
             # NOUVEAU : Tooltip pour la nouvelle Checkbutton
-            ('save_as_float32_check', 'tooltip_save_as_float32')
+            ('save_as_float32_check', 'tooltip_save_as_float32'),
+            ('preserve_linear_output_check', 'tooltip_preserve_linear_output')
         ]
         
         tooltip_created_count = 0
@@ -3669,69 +3701,83 @@ class SeestarStackerGUI:
         # --- Section 4: Mise à jour de l'Aperçu et de l'Histogramme ---
         self.logger.info("  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final...")
         try:
-            data_to_display_in_preview_canvas = None
-            self._temp_data_for_final_histo = None 
+            data_final = None
+            header_final = None
             preview_load_error_msg = None
 
-            # cosmetic_01_data_for_preview_from_backend est la donnée [0,1] NON STRETCHÉE envoyée par le backend
-            if cosmetic_01_data_for_preview_from_backend is not None:
-                data_to_display_in_preview_canvas = cosmetic_01_data_for_preview_from_backend
-                self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1] non-stretché) pour self.current_preview_data.")
-                if save_as_float32_backend_setting and raw_adu_data_for_histo_from_backend is not None:
-                    self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend # ADU-like pour histo
-                    self.logger.info("    [PF_S4] Utilisation 'raw_adu_data_for_ui_histogram' (ADU-like) pour _temp_data_for_final_histo.")
-                else:
-                    self._temp_data_for_final_histo = cosmetic_01_data_for_preview_from_backend # [0,1] pour histo
-                    self.logger.info("    [PF_S4] Utilisation 'last_saved_data_for_preview' ([0,1]) pour _temp_data_for_final_histo.")
-            elif raw_adu_data_for_histo_from_backend is not None: 
-                self.logger.warning("    [PF_S4] 'last_saved_data_for_preview' est None. Fallback.")
-                self._temp_data_for_final_histo = raw_adu_data_for_histo_from_backend
-                # ... (logique de normalisation pour data_to_display_in_preview_canvas si besoin)
+            if final_stack_path and os.path.exists(final_stack_path):
                 try:
-                    temp_min = np.nanmin(raw_adu_data_for_histo_from_backend); temp_max = np.nanmax(raw_adu_data_for_histo_from_backend)
-                    if np.isfinite(temp_min) and np.isfinite(temp_max) and temp_max > temp_min + 1e-7:
-                        data_to_display_in_preview_canvas = (raw_adu_data_for_histo_from_backend - temp_min) / (temp_max - temp_min)
-                        data_to_display_in_preview_canvas = np.clip(data_to_display_in_preview_canvas, 0.0, 1.0)
-                    else: data_to_display_in_preview_canvas = np.zeros_like(raw_adu_data_for_histo_from_backend)
-                except Exception as e_norm: preview_load_error_msg = f"Erreur normalisation ADU pour apercu: {e_norm}"; self.logger.error(f"      [PF_S4] {preview_load_error_msg}")
-
+                    data_final, header_final = load_and_validate_fits(final_stack_path)
+                    self.logger.info(
+                        f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
+                    )
+                except Exception as e_load:
+                    preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
+                    self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
             else:
-                preview_load_error_msg = "Aucune donnee d'apercu final du backend."
+                preview_load_error_msg = "Fichier FITS final introuvable."
                 self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
-            if data_to_display_in_preview_canvas is not None:
-                self.current_preview_data = data_to_display_in_preview_canvas # C'est maintenant [0,1] NON stretché
-                self.current_stack_header = final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
-                
-                # Reset des gains WB et autres ajustements cosmétiques
-                self.preview_r_gain.set(1.0); self.preview_g_gain.set(1.0); self.preview_b_gain.set(1.0)
-                # self.preview_stretch_method.set("Asinh") # Sera réglé par apply_auto_stretch
-                self.preview_gamma.set(1.0)
-                self.preview_brightness.set(1.0); self.preview_contrast.set(1.0); self.preview_saturation.set(1.0)
-                self.logger.info("    [PF_S4] Gains WB, Gamma, BCS remis à leurs valeurs par défaut pour l'aperçu final.")
+            if data_final is not None:
+                self.current_preview_data = data_final
+                self._temp_data_for_final_histo = data_final
+                self.current_stack_header = header_final if header_final else fits.Header()
 
-                # Mettre à jour l'histogramme AVANT d'appeler l'auto-stretch qui va lire ses données.
-                if hasattr(self, 'histogram_widget') and self.histogram_widget and self._temp_data_for_final_histo is not None:
-                    self.logger.info(f"    [PF_S4] Mise à jour de l'histogramme avec _temp_data_for_final_histo (Shape: {self._temp_data_for_final_histo.shape}) AVANT appel apply_auto_stretch.")
-                    self.histogram_widget.update_histogram(self._temp_data_for_final_histo)
-                
-                # Activer temporairement le verrou à False pour permettre à cet auto-stretch final de passer
-                self.logger.info("    [PF_S4] APPEL DIRECT apply_auto_stretch pour le stretch final (verrou sera True après).")
-                self._final_stretch_set_by_processing_finished = False # Permettre à l'appel suivant de passer
-                self.apply_auto_stretch() # Appel direct
-                # Le verrou sera remis à True plus bas.
-                
-                if self.current_stack_header: self.update_image_info(self.current_stack_header)
+                if hasattr(self, 'preview_manager') and self.preview_manager:
+                    linear_params = {
+                        "stretch_method": "Linear",
+                        "black_point": 0.0,
+                        "white_point": 1.0,
+                        "gamma": 1.0,
+                        "r_gain": 1.0,
+                        "g_gain": 1.0,
+                        "b_gain": 1.0,
+                        "brightness": 1.0,
+                        "contrast": 1.0,
+                        "saturation": 1.0,
+                    }
+                    self.preview_manager.update_preview(
+                        self.current_preview_data,
+                        linear_params,
+                        stack_count=images_stacked,
+                        total_images=images_stacked,
+                        current_batch=self.preview_current_batch,
+                        total_batches=self.preview_total_batches,
+                    )
+
+                    if hasattr(self, 'histogram_widget') and self.histogram_widget:
+                        self.histogram_widget.update_histogram(self.current_preview_data)
+                        # Ensure the BP/WP range lines persist on the final histogram
+                        try:
+                            bp_ui = self.preview_black_point.get()
+                            wp_ui = self.preview_white_point.get()
+                        except tk.TclError:
+                            bp_ui = None
+                            wp_ui = None
+                        if bp_ui is not None and wp_ui is not None:
+                            self.histogram_widget.set_range(bp_ui, wp_ui)
+                        # Redraw the preview using existing histogram data
+                        self.refresh_preview(recalculate_histogram=False)
+
+                if self.current_stack_header:
+                    self.update_image_info(self.current_stack_header)
             else:
-                if not preview_load_error_msg: preview_load_error_msg = "Donnees d'apercu final non disponibles."
-                if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(preview_load_error_msg)
-                if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+                if hasattr(self, 'preview_manager'):
+                    self.preview_manager.clear_preview(preview_load_error_msg or "Preview load error")
+                if hasattr(self, 'histogram_widget'):
+                    self.histogram_widget.plot_histogram(None)
 
-            self.logger.info(f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}")
+            self.logger.info(
+                f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+            )
         except Exception as e_s4:
-            self.logger.error(f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}")
-            if hasattr(self, 'preview_manager'): self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
-            if hasattr(self, 'histogram_widget'): self.histogram_widget.plot_histogram(None)
+            self.logger.error(
+                f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
+            )
+            if hasattr(self, 'preview_manager'):
+                self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
+            if hasattr(self, 'histogram_widget'):
+                self.histogram_widget.plot_histogram(None)
             processing_error_details = f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
 
 
@@ -4212,73 +4258,76 @@ class SeestarStackerGUI:
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
-        processing_started = self.queued_stacker.start_processing(
-            input_dir=self.settings.input_folder,
-            output_dir=self.settings.output_folder,
-            output_filename=self.settings.output_filename,
-            reference_path_ui=self.settings.reference_image_path,
-            initial_additional_folders=folders_to_pass_to_backend,
-            stacking_mode=self.settings.stacking_mode,
-            kappa=self.settings.kappa,
-            batch_size=self.settings.batch_size,
-            correct_hot_pixels=self.settings.correct_hot_pixels,
-            hot_pixel_threshold=self.settings.hot_pixel_threshold,
-            neighborhood_size=self.settings.neighborhood_size,
-            bayer_pattern=self.settings.bayer_pattern,
-            perform_cleanup=self.settings.cleanup_temp,
-            use_weighting=self.settings.use_quality_weighting,
-            weight_by_snr=self.settings.weight_by_snr,
-            weight_by_stars=self.settings.weight_by_stars,
-            snr_exp=self.settings.snr_exponent,
-            stars_exp=self.settings.stars_exponent,
-            min_w=self.settings.min_weight,
-            use_drizzle=self.settings.use_drizzle,
-            drizzle_scale=float(self.settings.drizzle_scale), # Assurer float
-            drizzle_wht_threshold=self.settings.drizzle_wht_threshold,
-            drizzle_mode=self.settings.drizzle_mode,
-            drizzle_kernel=self.settings.drizzle_kernel,
-            drizzle_pixfrac=self.settings.drizzle_pixfrac,
-            apply_chroma_correction=self.settings.apply_chroma_correction,
-            apply_final_scnr=self.settings.apply_final_scnr,
-            final_scnr_target_channel=self.settings.final_scnr_target_channel,
-            final_scnr_amount=self.settings.final_scnr_amount,
-            final_scnr_preserve_luminosity=self.settings.final_scnr_preserve_luminosity,
-            bn_grid_size_str=self.settings.bn_grid_size_str,
-            bn_perc_low=self.settings.bn_perc_low,
-            bn_perc_high=self.settings.bn_perc_high,
-            bn_std_factor=self.settings.bn_std_factor,
-            bn_min_gain=self.settings.bn_min_gain,
-            bn_max_gain=self.settings.bn_max_gain,
-            cb_border_size=self.settings.cb_border_size,
-            cb_blur_radius=self.settings.cb_blur_radius,
-            cb_min_b_factor=self.settings.cb_min_b_factor,
-            cb_max_b_factor=self.settings.cb_max_b_factor,
-            final_edge_crop_percent=self.settings.final_edge_crop_percent,
-            apply_photutils_bn=self.settings.apply_photutils_bn,
-            photutils_bn_box_size=self.settings.photutils_bn_box_size,
-            photutils_bn_filter_size=self.settings.photutils_bn_filter_size,
-            photutils_bn_sigma_clip=self.settings.photutils_bn_sigma_clip,
-            photutils_bn_exclude_percentile=self.settings.photutils_bn_exclude_percentile,
-            apply_feathering=self.settings.apply_feathering,
-            feather_blur_px=self.settings.feather_blur_px,
-            apply_low_wht_mask=self.settings.apply_low_wht_mask,
-            low_wht_percentile=self.settings.low_wht_percentile,
-            low_wht_soften_px=self.settings.low_wht_soften_px,
-            is_mosaic_run=self.settings.mosaic_mode_active,
-            api_key=self.settings.astrometry_api_key,
-            mosaic_settings=self.settings.mosaic_settings, 
-            astap_path=self.settings.astap_path,
-            astap_data_dir=self.settings.astap_data_dir,
-            local_ansvr_path=self.settings.local_ansvr_path,
-            local_solver_preference=self.settings.local_solver_preference,
-            astap_search_radius=self.settings.astap_search_radius,
-            save_as_float32=self.settings.save_final_as_float32,
-
-            reproject_between_batches=self.settings.reproject_between_batches
-
-            # Lire depuis self.settings
-            
-        )
+        start_proc_kwargs = {
+            "input_dir": self.settings.input_folder,
+            "output_dir": self.settings.output_folder,
+            "output_filename": self.settings.output_filename,
+            "reference_path_ui": self.settings.reference_image_path,
+            "initial_additional_folders": folders_to_pass_to_backend,
+            "stacking_mode": self.settings.stacking_mode,
+            "kappa": self.settings.kappa,
+            "batch_size": self.settings.batch_size,
+            "correct_hot_pixels": self.settings.correct_hot_pixels,
+            "hot_pixel_threshold": self.settings.hot_pixel_threshold,
+            "neighborhood_size": self.settings.neighborhood_size,
+            "bayer_pattern": self.settings.bayer_pattern,
+            "perform_cleanup": self.settings.cleanup_temp,
+            "use_weighting": self.settings.use_quality_weighting,
+            "weight_by_snr": self.settings.weight_by_snr,
+            "weight_by_stars": self.settings.weight_by_stars,
+            "snr_exp": self.settings.snr_exponent,
+            "stars_exp": self.settings.stars_exponent,
+            "min_w": self.settings.min_weight,
+            "use_drizzle": self.settings.use_drizzle,
+            "drizzle_scale": float(self.settings.drizzle_scale),
+            "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
+            "drizzle_mode": self.settings.drizzle_mode,
+            "drizzle_kernel": self.settings.drizzle_kernel,
+            "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+            "apply_chroma_correction": self.settings.apply_chroma_correction,
+            "apply_final_scnr": self.settings.apply_final_scnr,
+            "final_scnr_target_channel": self.settings.final_scnr_target_channel,
+            "final_scnr_amount": self.settings.final_scnr_amount,
+            "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
+            "bn_grid_size_str": self.settings.bn_grid_size_str,
+            "bn_perc_low": self.settings.bn_perc_low,
+            "bn_perc_high": self.settings.bn_perc_high,
+            "bn_std_factor": self.settings.bn_std_factor,
+            "bn_min_gain": self.settings.bn_min_gain,
+            "bn_max_gain": self.settings.bn_max_gain,
+            "cb_border_size": self.settings.cb_border_size,
+            "cb_blur_radius": self.settings.cb_blur_radius,
+            "cb_min_b_factor": self.settings.cb_min_b_factor,
+            "cb_max_b_factor": self.settings.cb_max_b_factor,
+            "final_edge_crop_percent": self.settings.final_edge_crop_percent,
+            "apply_photutils_bn": self.settings.apply_photutils_bn,
+            "photutils_bn_box_size": self.settings.photutils_bn_box_size,
+            "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
+            "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
+            "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
+            "apply_feathering": self.settings.apply_feathering,
+            "feather_blur_px": self.settings.feather_blur_px,
+            "apply_low_wht_mask": self.settings.apply_low_wht_mask,
+            "low_wht_percentile": self.settings.low_wht_percentile,
+            "low_wht_soften_px": self.settings.low_wht_soften_px,
+            "is_mosaic_run": self.settings.mosaic_mode_active,
+            "api_key": self.settings.astrometry_api_key,
+            "mosaic_settings": self.settings.mosaic_settings,
+            "astap_path": self.settings.astap_path,
+            "astap_data_dir": self.settings.astap_data_dir,
+            "local_ansvr_path": self.settings.local_ansvr_path,
+            "local_solver_preference": self.settings.local_solver_preference,
+            "astap_search_radius": self.settings.astap_search_radius,
+            "save_as_float32": self.settings.save_final_as_float32,
+            "preserve_linear_output": self.settings.preserve_linear_output,
+            "reproject_between_batches": self.settings.reproject_between_batches,
+        }
+        import inspect
+        sig = inspect.signature(self.queued_stacker.start_processing)
+        for k in list(start_proc_kwargs.keys()):
+            if k not in sig.parameters:
+                start_proc_kwargs.pop(k)
+        processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
         self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)") # Optionnel, mais bon pour le log
         self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
         self._final_stretch_set_by_processing_finished = False

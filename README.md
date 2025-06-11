@@ -28,7 +28,17 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Multi-language Support (English, French).
     *   Customizable: Supports custom application icon and preview background image.
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
+*   **Output Format:** Save FITS stacks as float32 or uint16. Enable *Preserve Linear Output* to skip percentile scaling.
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
+*   **Smart Quality Control:**
+    *   SNR-based weighting
+    *   Star count/sharpness analysis
+*   **Memory Optimization:** Batch processing with auto RAM management
+
+The Expert tab's **Output FITS Format** panel features a checkbox labeled
+**Preserve Linear Output**. Enabling it saves the stacked FITS directly from the
+linear data, skipping the usual percentile scaling step so pixel values are
+written linearly.
 
 **(Français)**
 
@@ -48,7 +58,16 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Support Multilingue (Anglais, Français).
     *   Personnalisable : Supporte une icône d'application et une image de fond d'aperçu personnalisées.
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
+*   **Format de Sortie :** Sauvegarde des FITS en float32 ou uint16. Activez *Préserver l'image linéaire* pour éviter la normalisation par percentiles.
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
+*   **Contrôle Qualité Intelligent :**
+    *   Pondération par rapport signal/bruit (SNR)
+    *   Analyse du nombre/netteté des étoiles
+*   **Optimisation Mémoire :** Traitement par lots avec gestion automatique de la RAM
+
+Dans l'onglet **Expert**, la section **Format de sortie FITS** propose une case
+à cocher **Sortie linéaire préservée**. Une fois activée, la sauvegarde FITS se
+fait sans normalisation par percentiles et les données sont écrites linéairement.
 
 ---
 
@@ -61,7 +80,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation.
+    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation. If you plan to run the unit tests that exercise this feature, install it (included in `requirements-test.txt`).
 
 **(Français)**
 
@@ -70,7 +89,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots.
+    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots. Si vous prévoyez d'exécuter les tests unitaires utilisant cette fonctionnalité, installez-le (inclus dans `requirements-test.txt`).
 
 ---
 
@@ -132,13 +151,8 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 **Install dependencies**
 
 ```bash
-# main runtime packages
-pip install -r requirements.txt
-
-# packages needed for the unit tests
-pip install pytest numpy astropy reproject
-# or install them using the dedicated file
-pip install -r requirements-test.txt
+# install all runtime and test dependencies
+pip install -r requirements.txt -r requirements-test.txt
 ```
 
 ### Test Dependencies
@@ -149,8 +163,12 @@ The unit tests rely on a few additional packages:
 - `numpy`
 - `astropy`
 - `reproject`
+- `drizzle` *(required for the Drizzle-related tests)*
+- `psutil` *(only required when testing the optional memory usage features)*
 
-They can be installed individually or via the `requirements-test.txt` file.
+Most of these packages are provided in `requirements-test.txt`. The
+`drizzle` package is listed in `requirements.txt` and must be installed
+for the tests that exercise the Drizzle functionality.
 
 **Run the tests**
 
@@ -162,10 +180,10 @@ The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
 
 ## Running Tests
 
-Install the additional packages required for the test suite:
+Install all dependencies (including the optional ones used in the tests) with:
 
 ```bash
-pip install -r requirements-test.txt
+pip install -r requirements.txt -r requirements-test.txt
 ```
 
 Then execute the tests with `pytest`:
@@ -369,6 +387,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Warning: Low Variance:** Normal for very dark/cloudy frames.
 *   **App Starts with Invalid Paths:** Use "Browse" to select valid paths before starting. The app checks paths on "Start".
 *   **Quality Weighting Issues:** Try lowering exponents (< 1.0) or disabling one metric (SNR/Stars). Ensure Min Weight is low (0.05-0.15).
+*   **Zero Coverage Warning:** If logs show `Cumulative weight map sums to zero`, no pixels were accumulated. Verify all batch images share the expected shape and that reprojection is configured correctly.
 
 **(Français)**
 
@@ -378,6 +397,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Avertissement : Faible Variance :** Normal pour images très sombres/nuageuses.
 *   **L'App Démarre avec des Chemins Invalides :** Utilisez "Parcourir" pour sélectionner des chemins valides avant de démarrer. L'app vérifie les chemins au "Démarrage".
 *   **Problèmes Pondération Qualité :** Essayez de baisser les exposants (< 1.0) ou désactivez une métrique (SNR/Étoiles). Assurez-vous que Poids Min est bas (0.05-0.15).
+*   **Avertissement Couverture Zéro :** Si les logs affichent `Carte de poids cumulée entièrement nulle`, aucune image n'a été ajoutée au stack. Vérifiez la cohérence des dimensions et la configuration de la reprojection.
 
 ---
 

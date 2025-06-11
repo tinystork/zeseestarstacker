@@ -2,7 +2,14 @@
 # zemosaic_worker.py  – imports et configuration
 # ----------------------------------------------------------------------
 import os, sys, logging, importlib.util, shutil, time, traceback, gc, inspect, tempfile
-import psutil
+
+# psutil is optional; wrap import to allow running without it
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
+    PSUTIL_AVAILABLE = False
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np   # tierce partie
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -203,7 +210,7 @@ def _log_and_callback(message_key_or_raw, progress_value=None, level="INFO", cal
 
 def _log_memory_usage(progress_callback: callable, context_message: str = ""): # Fonction helper définie ici ou globalement dans le module
     """Logue l'utilisation actuelle de la mémoire du processus et du système."""
-    if not progress_callback or not callable(progress_callback):
+    if not PSUTIL_AVAILABLE or not progress_callback or not callable(progress_callback):
         return
     try:
         process = psutil.Process(os.getpid())
@@ -1405,8 +1412,8 @@ def run_hierarchical_mosaic(
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils): error_messages_deps.append("zemosaic_utils")
     if not (ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry): error_messages_deps.append("zemosaic_astrometry")
     if not (ZEMOSAIC_ALIGN_STACK_AVAILABLE and zemosaic_align_stack): error_messages_deps.append("zemosaic_align_stack")
-    try: import psutil
-    except ImportError: error_messages_deps.append("psutil")
+    if not PSUTIL_AVAILABLE:
+        error_messages_deps.append("psutil")
     if error_messages_deps:
         pcb("run_error_critical_deps_missing", prog=None, lvl="ERROR", modules=", ".join(error_messages_deps)); return
 
