@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
+from astropy.wcs import WCS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +38,16 @@ qm = importlib.import_module("seestar.queuep.queue_manager")
 
 class Dummy:
     pass
+
+
+def make_wcs(shape=(2, 2)):
+    w = WCS(naxis=2)
+    w.wcs.crpix = [shape[1] / 2, shape[0] / 2]
+    w.wcs.cdelt = np.array([-0.01, 0.01])
+    w.wcs.crval = [0, 0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    w.pixel_shape = (shape[1], shape[0])
+    return w
 
 
 def _make_obj(tmp_path, save_as_float32):
@@ -116,6 +127,59 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
     assert saved.dtype.kind == "f"
     assert saved.shape == (3, 2, 2)
     assert np.any(saved != 0)
+
+
+def test_save_final_stack_incremental_drizzle_batch(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.drizzle_active_session = True
+    obj.drizzle_mode = "Incremental"
+    obj.preserve_linear_output = True
+    obj.stop_processing = False
+    obj.perform_cleanup = False
+    obj.preview_callback = None
+    obj._update_preview_incremental_drizzle = lambda: None
+    obj.reproject_between_batches = False
+    obj.reference_wcs_object = None
+    obj.drizzle_output_shape_hw = (5, 5)
+    obj.drizzle_output_wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
+    obj.drizzle_scale = 1.0
+    obj.drizzle_pixfrac = 1.0
+    obj.drizzle_kernel = "square"
+    obj.images_in_cumulative_stack = 0
+    obj.failed_stack_count = 0
+    obj.current_stack_header = None
+
+    from drizzle.resample import Drizzle
+
+    obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+
+    wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
+    data = np.stack([
+        np.full(obj.drizzle_output_shape_hw, c + 1, dtype=np.float32) for c in range(3)
+    ], axis=0)
+    header = wcs.to_header()
+    header["EXPTIME"] = 1.0
+    path = tmp_path / "tmp.fits"
+    fits.writeto(path, data, header, overwrite=True)
+
+    qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
+        obj, [str(path)], current_batch_num=1, total_batches_est=1
+    )
+
+    for d in obj.incremental_drizzle_objects:
+        assert np.sum(d.out_wht) > 0
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_drizzle_incr_true_batch",
+        preserve_linear_output=True,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.shape == (3, 5, 5)
+    assert saved[0].max() >= 0.9
+    assert saved[1].max() >= 1.9
+    assert saved[2].max() >= 2.9
 
 
 def test_save_final_stack_zero_weights_abort(tmp_path):
