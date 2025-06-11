@@ -5143,8 +5143,18 @@ class SeestarQueuedStacker:
                     raise ValueError("Objets Drizzle incremental invalides ou manquants.")
                 sci_arrays_hw_list = [d.out_img for d in self.incremental_drizzle_objects]
                 wht_arrays_hw_list = [d.out_wht for d in self.incremental_drizzle_objects]
+
+                if not any(np.any(np.asarray(w, dtype=float) != 0) for w in wht_arrays_hw_list):
+                    self.update_progress(
+                        "❌ Drizzle Incremental: all weight maps are zero. Aborting final stack.",
+                        "ERROR",
+                    )
+                    logger.error("ERROR QM [_save_final_stack]: All drizzle weights are zero.")
+                    self.final_stacked_path = None
+                    return
+
                 avg_img_channels_list = []
-                processed_wht_channels_list_for_mean = [] 
+                processed_wht_channels_list_for_mean = []
                 for c in range(3): 
                     sci_ch_accum_float64 = sci_arrays_hw_list[c].astype(np.float64)
                     wht_ch_accum_raw_float64 = wht_arrays_hw_list[c].astype(np.float64)

@@ -116,3 +116,26 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
     assert saved.dtype.kind == "f"
     assert saved.shape == (3, 2, 2)
     assert np.any(saved != 0)
+
+
+def test_save_final_stack_zero_weights_abort(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.drizzle_active_session = True
+    obj.drizzle_mode = "Incremental"
+    obj.preserve_linear_output = True
+
+    shape = (2, 2)
+    from drizzle.resample import Drizzle
+
+    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
+    for idx, d in enumerate(obj.incremental_drizzle_objects):
+        d.out_img[:] = idx + 1.0
+        d.out_wht[:] = 0.0
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_drizzle_incr_true_zero",
+        preserve_linear_output=True,
+    )
+
+    assert obj.final_stacked_path is None or not Path(obj.final_stacked_path).exists()
