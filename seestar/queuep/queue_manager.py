@@ -3264,7 +3264,42 @@ class SeestarQueuedStacker:
                     else: align_method_log_msg = "Astrometry_Per_Panel_Fail"; wcs_final_pour_retour = None; matrice_M_calculee = None
                 else: align_method_log_msg = "Astrometry_Per_Panel_NoSolver"; wcs_final_pour_retour = None; matrice_M_calculee = None
                 # data_final_pour_retour a déjà été mis à image_for_alignment_or_drizzle_input (ADU)
-            else: 
+            elif solve_astrometry_for_this_file and not self.is_mosaic_run:
+                align_method_log_msg = "Astrometry_Single_Attempted"
+                if self.astrometry_solver:
+                    solver_settings_for_file = {
+                        'local_solver_preference': self.local_solver_preference,
+                        'api_key': self.api_key,
+                        'astap_path': self.astap_path,
+                        'astap_data_dir': self.astap_data_dir,
+                        'astap_search_radius': self.astap_search_radius,
+                        'astap_downsample': self.astap_downsample,
+                        'astap_sensitivity': self.astap_sensitivity,
+                        'local_ansvr_path': self.local_ansvr_path,
+                        'scale_est_arcsec_per_pix': self.reference_pixel_scale_arcsec,
+                        'scale_tolerance_percent': 20,
+                        'ansvr_timeout_sec': getattr(self, 'ansvr_timeout_sec', 120),
+                        'astap_timeout_sec': getattr(self, 'astap_timeout_sec', 120),
+                        'astrometry_net_timeout_sec': getattr(self, 'astrometry_net_timeout_sec', 300)
+                    }
+                    wcs_final_pour_retour = self.astrometry_solver.solve(file_path, header_final_pour_retour, solver_settings_for_file, True)
+                    if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
+                        align_method_log_msg = "Astrometry_Single_Success"
+                        matrice_M_calculee = self._calculate_M_from_wcs(
+                            wcs_final_pour_retour,
+                            self.reference_wcs_object,
+                            image_for_alignment_or_drizzle_input.shape[:2],
+                        )
+                    else:
+                        align_method_log_msg = "Astrometry_Single_Fail"
+                        wcs_final_pour_retour = None
+                        matrice_M_calculee = None
+                else:
+                    align_method_log_msg = "Astrometry_Single_NoSolver"
+                    wcs_final_pour_retour = None
+                    matrice_M_calculee = None
+                data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
+            else:
                 align_method_log_msg = "Astroalign_Standard_Attempted"
                 if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
                 

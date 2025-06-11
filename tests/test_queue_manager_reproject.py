@@ -3,6 +3,7 @@ from astropy.wcs import WCS
 from astropy.io import fits
 
 import importlib.util
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,3 +107,140 @@ def test_combine_batch_respects_flag(monkeypatch):
     s.reproject_between_batches = True
     s._combine_batch_result(img, fits.Header(), cov, wcs_in)
     assert calls["n"] == 0
+
+
+def test_process_file_returns_wcs_when_reproject(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    class DummySolver:
+        def solve(self, *a, **k):
+            return make_wcs(shape=(4, 4))
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.correct_hot_pixels = False
+    obj.use_quality_weighting = False
+    obj.is_mosaic_run = False
+    obj.reproject_between_batches = True
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+    obj.reference_pixel_scale_arcsec = 1.0
+    obj.astrometry_solver = DummySolver()
+    obj.local_solver_preference = "none"
+    obj.astap_path = ""
+    obj.astap_data_dir = ""
+    obj.astap_search_radius = 1.0
+    obj.astap_downsample = 1
+    obj.astap_sensitivity = 100
+    obj.local_ansvr_path = ""
+    obj.api_key = None
+    obj.ansvr_timeout_sec = 5
+    obj.astap_timeout_sec = 5
+    obj.astrometry_net_timeout_sec = 5
+
+    data = np.random.random((8, 8, 3)).astype(np.float32)
+    path = tmp_path / "test.fits"
+    fits.writeto(path, data, overwrite=True)
+
+    result = obj._process_file(str(path), data, solve_astrometry_for_this_file=True)
+
+    assert result[3] is not None and isinstance(result[3], WCS)
+
+
+def test_stack_batch_uses_master_tile_when_all_have_wcs(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager2:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager2
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    class DummySM:
+        stack_winsor_limits = "0.1,0.1"
+        stack_norm_method = "none"
+        stack_weight_method = "none"
+        stack_reject_algo = "none"
+        stack_final_combine = "mean"
+        stack_kappa_low = 3.0
+        stack_kappa_high = 3.0
+
+        def load_settings(self):
+            pass
+
+    monkeypatch.setattr(qm, "SettingsManager", DummySM)
+
+    called = {"n": 0}
+
+    def fake_create_master_tile(**kwargs):
+        called["n"] += 1
+        data = np.zeros((3, 2, 2), dtype=np.float32)
+        hdr = fits.Header()
+        p = tmp_path / "tile.fits"
+        fits.writeto(p, data, hdr, overwrite=True)
+        return str(p), {}
+
+    import zemosaic.zemosaic_worker as worker
+
+    monkeypatch.setattr(worker, "create_master_tile", fake_create_master_tile)
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.reproject_between_batches = True
+    obj.reference_wcs_object = make_wcs(shape=(2, 2))
+    obj.memmap_shape = (2, 2, 3)
+
+    img = np.ones(obj.memmap_shape, dtype=np.float32)
+    mask = np.ones(obj.memmap_shape[:2], dtype=bool)
+    wcs = make_wcs(shape=obj.memmap_shape[:2])
+    hdr = fits.Header()
+    item = (img, hdr, {"snr": 1.0, "stars": 1.0}, wcs, mask)
+
+    out_img, out_header, cov = obj._stack_batch([item], current_batch_num=1, total_batches_est=1)
+
+    assert called["n"] == 1
+    assert out_img is not None
+    assert cov is not None
