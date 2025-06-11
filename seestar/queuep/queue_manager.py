@@ -5180,17 +5180,9 @@ class SeestarQueuedStacker:
         sci_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}.fits")
         wht_paths: list[str] = []
 
-        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(
-            sci_fits, overwrite=True
-        )
-        for ch_i in range(stacked_np.shape[2]):
-            wht_path = os.path.join(
-                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
-            )
-            fits.PrimaryHDU(data=wht_2d.astype(np.float32)).writeto(
-                wht_path, overwrite=True
-            )
-            wht_paths.append(wht_path)
+
+        final_stacked = stacked_np
+        final_wht = wht_2d
 
         if not self.reproject_between_batches:
             # Classic behaviour: solve each batch using ASTAP
@@ -5207,12 +5199,14 @@ class SeestarQueuedStacker:
             solved_ok = self._run_astap_and_update_header(tmp.name)
             if solved_ok:
                 solved_hdr = fits.getheader(tmp.name)
-                with fits.open(sci_fits, mode="update") as hdul:
-                    hdul[0].header.update(solved_hdr)
-                    hdul.flush()
+                header.update(solved_hdr)
             os.remove(tmp.name)
 
-            return (sci_fits, wht_paths) if solved_ok else (None, None)
+            if not solved_ok:
+                return None, None
+
+            final_stacked = stacked_np
+            final_wht = wht_2d
 
         # --- Reprojection mode ---
         # When inter-batch reprojection is enabled we already solved the
@@ -5234,6 +5228,9 @@ class SeestarQueuedStacker:
                     )
                     channels.append(reproj)
                 stacked_np = np.stack(channels, axis=2)
+                wht_2d, _ = reproject_interp(
+                    (wht_2d, batch_wcs), tgt_wcs, shape_out=target_shape
+                )
                 header.update({k: self.reference_header_for_wcs[k] for k in [
                     "CRPIX1",
                     "CRPIX2",
@@ -5251,9 +5248,20 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
 
-        fits.PrimaryHDU(data=np.moveaxis(stacked_np, -1, 0), header=header).writeto(
+            final_stacked = stacked_np
+            final_wht = wht_2d
+
+        fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
             sci_fits, overwrite=True
         )
+        for ch_i in range(final_stacked.shape[2]):
+            wht_path = os.path.join(
+                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+            )
+            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                wht_path, overwrite=True
+            )
+            wht_paths.append(wht_path)
 
         return sci_fits, wht_paths
 
