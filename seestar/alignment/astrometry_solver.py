@@ -1072,7 +1072,16 @@ class AstrometrySolver:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", FITSFixedWarning)
                 wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)  # relax=True pour accepter les mots-clés non standards
-            
+
+            if wcs_obj:
+                # Vérifier la présence des mots-clés essentiels et compléter si nécessaire
+                if not wcs_header_from_text.get("CTYPE1") or not wcs_header_from_text.get("CTYPE2"):
+                    wcs_obj.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+                if not wcs_header_from_text.get("CUNIT1") or not wcs_header_from_text.get("CUNIT2"):
+                    wcs_obj.wcs.cunit = ["deg", "deg"]
+                if not (wcs_header_from_text.get("CRVAL1") and wcs_header_from_text.get("CRVAL2")):
+                    self._log("CRVAL manquant dans le fichier WCS.", "WARN")
+
             if wcs_obj and wcs_obj.is_celestial:
                 # Important: définir la taille de l'image à laquelle ce WCS s'applique
                 # wcs_obj.pixel_shape attend (nx, ny) soit (largeur, hauteur)
