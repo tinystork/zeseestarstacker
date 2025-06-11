@@ -3776,6 +3776,16 @@ class SeestarQueuedStacker:
                             f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
                         )
 
+                # Clip once more to guarantee validity
+                pixmap_for_this_file[..., 0] = np.clip(pixmap_for_this_file[..., 0], 0, width_out - 1)
+                pixmap_for_this_file[..., 1] = np.clip(pixmap_for_this_file[..., 1], 0, height_out - 1)
+                assert (
+                    np.nanmin(pixmap_for_this_file[..., 0]) >= 0
+                    and np.nanmax(pixmap_for_this_file[..., 0]) < width_out
+                    and np.nanmin(pixmap_for_this_file[..., 1]) >= 0
+                    and np.nanmax(pixmap_for_this_file[..., 1]) < height_out
+                ), "Pixmap hors bornes apres clipping"
+
                 logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
 
                 exptime_for_drizzle_add = 1.0 
@@ -3794,7 +3804,15 @@ class SeestarQueuedStacker:
                 else:
                     logger.debug(f"        AVERTISSEMENT: EXPTIME non trouvé dans header temp pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'. Utilisation exptime=1.0, in_units='cps'.")
                 
+                if exptime_for_drizzle_add <= 0:
+                    logger.debug(
+                        f"        EXPTIME={exptime_for_drizzle_add} non valide, remplacement par 1.0"
+                    )
+                    exptime_for_drizzle_add = 1.0
+
                 weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
+                if np.all(weight_map_param_for_add <= 0):
+                    weight_map_param_for_add[:] = 1.0
 
                 for ch_idx in range(num_output_channels):
                     channel_data_2d = image_hwc[:, :, ch_idx].astype(np.float32)
@@ -3806,6 +3824,10 @@ class SeestarQueuedStacker:
                         logger.debug(f"                         weight_map range [{np.min(weight_map_param_for_add):.3g}, {np.max(weight_map_param_for_add):.3g}]")
                     
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
+                    wht_sum_before = float(np.sum(driz_obj.out_wht))
+                    logger.debug(
+                        f"        Ch{ch_idx} WHT sum before add_image: {wht_sum_before:.3f}"
+                    )
                     driz_obj.add_image(
                         data=channel_data_2d,
                         pixmap=pixmap_for_this_file,
@@ -3814,6 +3836,11 @@ class SeestarQueuedStacker:
                         pixfrac=self.drizzle_pixfrac,
                         weight_map=weight_map_param_for_add,
                     )
+                    wht_sum_after = float(np.sum(driz_obj.out_wht))
+                    logger.debug(
+                        f"        Ch{ch_idx} WHT sum after add_image: {wht_sum_after:.3f}"
+                    )
+                    assert wht_sum_after >= wht_sum_before
                     logger.debug(
                         f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]"
                     )
