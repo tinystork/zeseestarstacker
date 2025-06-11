@@ -244,3 +244,54 @@ def test_stack_batch_uses_master_tile_when_all_have_wcs(tmp_path, monkeypatch):
     assert called["n"] == 1
     assert out_img is not None
     assert cov is not None
+
+
+def test_calc_grid_uses_header_when_pixel_shape_missing(monkeypatch):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager3:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager3
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.drizzle_scale = 1.0
+
+    w1 = make_wcs(shape=(6, 6))
+    hdr1 = w1.to_header()
+    hdr1["NAXIS1"] = 6
+    hdr1["NAXIS2"] = 6
+    w1.pixel_shape = None
+    w2 = make_wcs(shape=(6, 6))
+    hdr2 = w2.to_header()
+    hdr2["NAXIS1"] = 6
+    hdr2["NAXIS2"] = 6
+    w2.pixel_shape = None
+
+    out_wcs, out_shape = obj._calculate_final_mosaic_grid([w1, w2], [hdr1, hdr2])
+
+    assert out_wcs is not None
+    assert out_shape is not None
+    assert w1.pixel_shape == (hdr1["NAXIS1"], hdr1["NAXIS2"])
+    assert w2.pixel_shape == (hdr2["NAXIS1"], hdr2["NAXIS2"])

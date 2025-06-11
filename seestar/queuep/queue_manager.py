@@ -1177,7 +1177,7 @@ class SeestarQueuedStacker:
 
 
 
-    def _calculate_final_mosaic_grid(self, all_input_wcs_list):
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
         """
         Calcule le WCS et la Shape optimaux pour la mosaïque finale en se basant
         sur l'étendue couverte par tous les WCS d'entrée.
@@ -1204,11 +1204,36 @@ class SeestarQueuedStacker:
             if wcs_in is None or not wcs_in.is_celestial:
                 logger.debug(f"   - WARNING: WCS {i+1} invalide ou non céleste. Ignoré.")
                 continue
+
             if wcs_in.pixel_shape is None:
-                logger.debug(f"   - WARNING: WCS {i+1} n'a pas de pixel_shape défini. Ignoré.")
-                # Tenter de l'ajouter si possible (basé sur NAXIS du header de référence?)
-                # C'est risqué ici, il vaut mieux s'assurer qu'il est défini AVANT
+                header = None
+                if all_input_headers_list and i < len(all_input_headers_list):
+                    header = all_input_headers_list[i]
+                naxis1 = None; naxis2 = None
+                if header is not None:
+                    naxis1 = header.get('NAXIS1')
+                    naxis2 = header.get('NAXIS2')
+                if naxis1 and naxis2:
+                    try:
+                        wcs_in.pixel_shape = (int(naxis1), int(naxis2))
+                        try:
+                            wcs_in._naxis1 = int(naxis1); wcs_in._naxis2 = int(naxis2)
+                        except Exception:
+                            pass
+                        logger.debug(
+                            f"   - WCS {i+1}: pixel_shape déduit du header -> {wcs_in.pixel_shape}."
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            f"   - WARNING: Impossible de définir pixel_shape pour WCS {i+1} depuis le header: {e}. Ignoré."
+                        )
+
+            if wcs_in.pixel_shape is None:
+                logger.debug(
+                    f"   - WARNING: WCS {i+1} n'a pas de pixel_shape défini même après tentative de fallback. Ignoré."
+                )
                 continue
+
             valid_wcs_list.append(wcs_in)
 
         if not valid_wcs_list:
@@ -2802,7 +2827,10 @@ class SeestarQueuedStacker:
             self.final_stacked_path = None
             return
 
-        input_data_for_reproject = []; input_footprints_for_reproject = []; all_wcs_for_grid_calc = []
+        input_data_for_reproject = []
+        input_footprints_for_reproject = []
+        all_wcs_for_grid_calc = []
+        all_headers_for_grid_calc = []
 
         logger.debug(f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd...")
         for i_panel_loop, panel_info_tuple_local in enumerate(aligned_files_info_list):
@@ -2830,13 +2858,14 @@ class SeestarQueuedStacker:
             input_data_for_reproject.append((panel_image_data_HWC_orig, wcs_for_panel_input))
             input_footprints_for_reproject.append(footprint_panel)
             all_wcs_for_grid_calc.append(wcs_for_panel_input)
+            all_headers_for_grid_calc.append(panel_header_orig)
 
         if not input_data_for_reproject:
             self.update_progress("❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.", "ERROR")
             self.final_stacked_path = None; self.processing_error = "Mosaïque: Aucun panneau valide pour reproject"; return
 
         logger.debug("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject...")
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(all_wcs_for_grid_calc)
+        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(all_wcs_for_grid_calc, all_headers_for_grid_calc)
 
         if output_wcs is None or output_shape_hw is None:
             error_msg = "Échec calcul grille de sortie pour la mosaïque avec reproject."
@@ -5316,6 +5345,7 @@ class SeestarQueuedStacker:
         channel_arrays_wcs = [[] for _ in range(3)]
         channel_footprints = [[] for _ in range(3)]
         wcs_for_grid = []
+        headers_for_grid = []
 
         for sci_path, wht_paths in batch_files:
             try:
@@ -5336,6 +5366,7 @@ class SeestarQueuedStacker:
 
             img_hwc = np.moveaxis(data_cxhxw, 0, -1)
             wcs_for_grid.append(batch_wcs)
+            headers_for_grid.append(hdr)
             for ch in range(img_hwc.shape[2]):
                 channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
                 channel_footprints[ch].append(coverage)
@@ -5347,7 +5378,7 @@ class SeestarQueuedStacker:
             )
             return
 
-        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_for_grid)
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_for_grid, headers_for_grid)
         if out_wcs is None or out_shape is None:
             self.update_progress(
                 "⚠️ Reprojection ignorée: échec du calcul de la grille finale.",
