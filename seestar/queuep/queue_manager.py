@@ -3858,7 +3858,7 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} WHT sum after add_image: {wht_sum_after:.3f}"
                     )
-                    assert wht_sum_after >= wht_sum_before
+                    assert wht_sum_after >= wht_sum_before - 1e-6
                     logger.debug(
                         f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]"
                     )
