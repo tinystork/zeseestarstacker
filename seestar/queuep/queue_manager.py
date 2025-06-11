@@ -7,6 +7,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- AJOUTEZ CES DEUX LIGNES POUR LE DEBUG CRITIQUE ---
+import sys
+print(f"DEBUG_CRITICAL: Loading queue_manager.py from: {__file__}")
+if 'seestar.queuep.queue_manager' in sys.modules:
+    print(f"DEBUG_CRITICAL: sys.modules entry: {sys.modules['seestar.queuep.queue_manager'].__file__}")
+else:
+    print("DEBUG_CRITICAL: seestar.queuep.queue_manager not yet in sys.modules.")
+
+
+# --- FIN AJOUT CRITIQUE ---
+
 logger.debug("Début chargement module queue_manager.py")
 
 # --- Standard Library Imports ---
@@ -22,6 +33,7 @@ import traceback
 import warnings
 
 logger.debug("Imports standard OK.")
+
 
 # --- Third-Party Library Imports ---
 from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
@@ -91,7 +103,10 @@ except ImportError as e_cb:
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
 logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
-
+# --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
+# Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
+# Global version string to make sure it's always the same
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "V_DRIZ_INCR_ULTRA_DEBUG_20250611_FINAL_ATTEMPT"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -3625,185 +3640,232 @@ class SeestarQueuedStacker:
 ###########################################################################################################################
 
 
-# --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _process_incremental_drizzle_batch(
         self,
         batch_temp_filepaths_list,
         current_batch_num=0,
         total_batches_est=0,
-        weight_map_override=None,
+        weight_map_override=None, # Not used in this version but kept for signature compatibility
     ):
         """
         [VRAI DRIZZLE INCRÉMENTAL] Traite un lot de fichiers temporaires en les ajoutant
         aux objets Drizzle persistants. Met à jour l'aperçu après chaque image (ou lot).
-        Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full
-        ``weight_map_override`` permet de spécifier la carte de poids transmise à
-        ``add_image``. Si ``None``, une matrice de ``1`` est générée.
+        Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full_EXTENDED_DEBUG_ULTRA
         """
+        # --- LIGNE DE PRINT ULTRA-CRITIQUE ET UNIQUE ---
+        print(f"\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) - Lot #{current_batch_num} - Fichiers: {len(batch_temp_filepaths_list)} ========")
+        # --- FIN LIGNE DE PRINT ULTRA-CRITIQUE ---
+
         num_files_in_batch = len(batch_temp_filepaths_list)
-        logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers).")
+        logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers).")
 
         if not batch_temp_filepaths_list:
             self.update_progress(f"⚠️ Lot Drizzle Incrémental VRAI #{current_batch_num} vide. Ignoré.")
+            logger.debug(f"  Sortie: Lot #{current_batch_num} est vide.")
             return
 
         progress_info = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
         self.update_progress(f"💧 Traitement Drizzle Incrémental VRAI du lot {progress_info}...")
 
+        # --- VÉRIFICATIONS CRITIQUES ---
         if not self.incremental_drizzle_objects or len(self.incremental_drizzle_objects) != 3:
             self.update_progress("❌ Erreur critique: Objets Drizzle persistants non initialisés pour mode Incrémental.", "ERROR")
             self.processing_error = "Objets Drizzle Incr. non initialisés"; self.stop_processing = True
+            logger.debug(f"  Sortie ERREUR: Objets Drizzle non initialisés.")
             return
         if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
             self.update_progress("❌ Erreur critique: Grille de sortie Drizzle (WCS/Shape) non définie pour mode Incrémental VRAI.", "ERROR")
             self.processing_error = "Grille Drizzle non définie (Incr VRAI)"; self.stop_processing = True
+            logger.debug(f"  Sortie ERREUR: Grille de sortie Drizzle (WCS/Shape) non définie.")
             return
+        logger.debug(f"  WCS de sortie cible (self.drizzle_output_wcs) : {self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs and self.drizzle_output_wcs.wcs else 'Non défini'}")
+        logger.debug(f"  Shape de sortie cible (self.drizzle_output_shape_hw) : {self.drizzle_output_shape_hw}")
+        logger.debug(f"  Paramètres Drizzle : Kernel='{self.drizzle_kernel}', Pixfrac={self.drizzle_pixfrac}, Fillval='{self.drizzle_fillval}'")
+        logger.debug(f"  Reprojection entre lots (self.reproject_between_batches) : {self.reproject_between_batches}")
+        logger.debug(f"  WCS de référence (self.reference_wcs_object) : {'Défini' if self.reference_wcs_object else 'Non défini'} (utilisé si reproject_between_batches)")
+
 
         num_output_channels = 3
         files_added_to_drizzle_this_batch = 0
 
         for i_file, temp_fits_filepath in enumerate(batch_temp_filepaths_list):
-            if self.stop_processing: break 
+            if self.stop_processing:
+                logger.debug(f"  Arrêt demandé. Interruption du traitement du lot #{current_batch_num}.")
+                break
             
             current_filename_for_log = os.path.basename(temp_fits_filepath)
             self.update_progress(f"   -> DrizIncrVrai: Ajout fichier {i_file+1}/{num_files_in_batch} ('{current_filename_for_log}') au Drizzle cumulatif...", None)
-            logger.debug(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Fichier '{current_filename_for_log}'")
+            logger.debug(f"\n    === TRAITEMENT FICHIER: '{current_filename_for_log}' (Fichier {i_file+1}/{num_files_in_batch}) ===")
 
             input_image_cxhxw = None 
             input_header = None      
             wcs_input_from_file = None 
-            pixmap_for_this_file = None
+            pixmap_for_this_file = None # Initialisation pour chaque fichier
 
             try:
+                # --- ÉTAPE 1: Chargement et validation du fichier temporaire ---
+                logger.debug(f"      [Step  1] Chargement FITS temporaire: '{current_filename_for_log}'")
                 with fits.open(temp_fits_filepath, memmap=False) as hdul:
                     if not hdul or len(hdul) == 0 or hdul[0].data is None: 
                         raise IOError(f"FITS temp invalide/vide: {temp_fits_filepath}")
                     
                     data_loaded = hdul[0].data
                     input_header = hdul[0].header
-                    logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Données chargées depuis FITS temp '{current_filename_for_log}': Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
-
+                    logger.debug(f"        Données brutes chargées: Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}")
 
                     if data_loaded.ndim == 3 and data_loaded.shape[0] == num_output_channels:
                         input_image_cxhxw = data_loaded.astype(np.float32)
                         logger.debug(f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]")
                     else:
-                        raise ValueError(f"Shape FITS temp {data_loaded.shape} non CxHxW comme attendu.")
+                        raise ValueError(f"Shape FITS temp {data_loaded.shape} non CxHxW comme attendu (attendu {num_output_channels}xHxW).")
 
                     with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
+                        warnings.simplefilter("ignore") # Ignore FITSFixedWarning
                         wcs_input_from_file = WCS(input_header, naxis=2)
                     if not wcs_input_from_file or not wcs_input_from_file.is_celestial:
                         raise ValueError("WCS non céleste ou invalide dans le fichier FITS temporaire.")
+                    logger.debug(f"        WCS du fichier temp (Input WCS): CRVAL={wcs_input_from_file.wcs.crval if wcs_input_from_file.wcs else 'N/A'}, CDELT={wcs_input_from_file.wcs.cdelt if wcs_input_from_file.wcs else 'N/A'}")
 
-                image_hwc = np.moveaxis(input_image_cxhxw, 0, -1)
-                target_shape_hw = self.drizzle_output_shape_hw or self.memmap_shape[:2]
-                wcs_for_pixmap = wcs_input_from_file
-                input_shape_hw_current_file = image_hwc.shape[:2]
-                if self.reproject_between_batches and self.reference_wcs_object:
-                    try:
-                        self.update_progress(
-                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
-                            "INFO_DETAIL",
-                        )
-                        image_hwc = reproject_to_reference_wcs(
-                            image_hwc,
-                            wcs_input_from_file,
-                            self.reference_wcs_object,
-                            target_shape_hw,
-                        )
-                        wcs_for_pixmap = self.reference_wcs_object
-                        input_shape_hw_current_file = target_shape_hw
-                        self.update_progress(
-                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
-                            "INFO_DETAIL",
-                        )
-                    except Exception as e:
-                        self.update_progress(
-                            f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
-                            "WARN",
-                        )
-
-                y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw_current_file).reshape(2, -1)
-                sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
-
+                image_hwc = np.moveaxis(input_image_cxhxw, 0, -1) # Convertir CxHxW en HxWxC
                 
-                if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
-                    raise ValueError("Coordonnées célestes non finies obtenues depuis le WCS du fichier temporaire.")
+                # --- ÉTAPE 2: GESTION DE LA REPROJECTION INTER-BATCH ---
+                target_shape_hw = self.drizzle_output_shape_hw # La forme finale de la sortie Drizzle
+                wcs_for_pixmap = wcs_input_from_file
+                input_shape_hw_current_file = image_hwc.shape[:2] # La forme HxW de l'image ALIGNÉE (ou reprojetée)
 
+                # Assuming reproject_to_reference_wcs is correctly implemented and imported
+                if hasattr(self, 'reproject_between_batches') and self.reproject_between_batches and hasattr(self, 'reference_wcs_object') and self.reference_wcs_object:
+                    # Added a check if reproject_to_reference_wcs is actually callable
+                    from seestar.core.reprojection import reproject_to_reference_wcs as _reproject_func
+                    if _reproject_func:
+                        logger.debug(f"      [Step 2] Reprojection active. Reprojection de l'image vers WCS de référence...")
+                        try:
+                            self.update_progress(
+                                f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
+                                "INFO_DETAIL",
+                            )
+                            # Reprojeter l'image HWC vers le WCS de référence
+                            reprojected_image_hwc = _reproject_func( # Use the imported function
+                                image_hwc,
+                                wcs_input_from_file,
+                                self.reference_wcs_object,
+                                target_shape_hw, # La forme de sortie de la reprojection est la forme cible de Drizzle
+                            )
+                            if reprojected_image_hwc is None:
+                                raise RuntimeError("reproject_to_reference_wcs a retourné None.")
+
+                            image_hwc = reprojected_image_hwc # L'image à traiter par Drizzle est maintenant reprojetée
+                            wcs_for_pixmap = self.reference_wcs_object # Le WCS à utiliser pour le pixmap est celui de la référence
+                            input_shape_hw_current_file = image_hwc.shape[:2] # La forme de l'image (maintenant reprojetée)
+
+                            self.update_progress(
+                                f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
+                                "INFO_DETAIL",
+                            )
+                            logger.debug(f"        Image après reprojection: Shape={image_hwc.shape}, Range=[{np.nanmin(image_hwc):.4g}, {np.nanmax(image_hwc):.4g}]")
+                            logger.debug(f"        WCS utilisé pour pixmap (après reproj.): CRVAL={wcs_for_pixmap.wcs.crval if wcs_for_pixmap.wcs else 'N/A'}")
+                        except Exception as e:
+                            self.update_progress(
+                                f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
+                                "WARN",
+                            )
+                            logger.error(f"ERREUR REPROJECTION: {e}", exc_info=True)
+                            continue # Passe au fichier suivant si reprojection échoue
+                    else:
+                        logger.warning(f"        AVERTISSEMENT: reproject_to_reference_wcs n'est pas importé/disponible. Reprojection ignorée.")
+
+
+                # --- ÉTAPE 3: Calcul du Pixmap (mapping des pixels d'entrée vers la grille de sortie Drizzle) ---
+                logger.debug(f"      [Step 3] Calcul du Pixmap pour mapping WCS...")
+                y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw_current_file).reshape(2, -1)
+                
+                # Convertir les coordonnées pixels de l'image d'entrée en coordonnées célestes
+                sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
+                logger.debug(f"        Coordonnées célestes calculées: RA_range=[{np.nanmin(sky_ra_deg):.4g}, {np.nanmax(sky_ra_deg):.4g}], Dec_range=[{np.nanmin(sky_dec_deg):.4g}, {np.nanmax(sky_dec_deg):.4g}]")
+
+                if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
+                    raise ValueError("Coordonnées célestes non finies obtenues depuis le WCS du fichier temporaire. Pixmap impossible.")
+
+                # Convertir les coordonnées célestes en coordonnées pixels de la grille de sortie Drizzle (initialement avec origin=0)
                 final_x_output_pixels, final_y_output_pixels = self.drizzle_output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
                 
-                if not (np.all(np.isfinite(final_x_output_pixels)) and np.all(np.isfinite(final_y_output_pixels))):
-                    logger.debug(f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection. Nettoyage...")
-                    final_x_output_pixels = np.nan_to_num(final_x_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
-                    final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
-
-                pixmap_for_this_file = np.dstack((
-                    final_x_output_pixels.reshape(input_shape_hw_current_file),
-                    final_y_output_pixels.reshape(input_shape_hw_current_file)
-                )).astype(np.float32)
-                # --- Vérification des coordonnées du pixmap par rapport à la grille de sortie ---
-                pix_x = pixmap_for_this_file[..., 0]
-                pix_y = pixmap_for_this_file[..., 1]
-                min_x, max_x = np.nanmin(pix_x), np.nanmax(pix_x)
-                min_y, max_y = np.nanmin(pix_y), np.nanmax(pix_y)
+                # Dimensions de la grille de sortie Drizzle
                 height_out, width_out = self.drizzle_output_shape_hw
-                logger.debug(
-                    f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap X range [{min_x:.2f}, {max_x:.2f}] vs [0,{width_out}); "
-                    f"Y range [{min_y:.2f}, {max_y:.2f}] vs [0,{height_out})"
-                )
-                if (min_x < 0 or max_x >= width_out or min_y < 0 or max_y >= height_out):
-                    logger.debug("      WARN [ProcIncrDrizLoop]: Pixmap en dehors de la plage attendue, recalcul avec origin=1.")
+                
+                # Diagnostic des bornes du pixmap initial (origin=0)
+                min_x_initial, max_x_initial = np.nanmin(final_x_output_pixels), np.nanmax(final_x_output_pixels)
+                min_y_initial, max_y_initial = np.nanmin(final_y_output_pixels), np.nanmax(final_y_output_pixels)
+                logger.debug(f"        Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})")
+                print(f"ULTRA-DEBUG: Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})")
+
+
+                # RECALCUL AVEC origin=1 SI HORS BORNES (et correction en 0-based)
+                # Cette condition est essentielle pour savoir si l'ajustement -1.0 doit être appliqué.
+                needs_origin1_recalc = (min_x_initial < 0 or max_x_initial >= width_out or min_y_initial < 0 or max_y_initial >= height_out)
+
+                if needs_origin1_recalc:
+                    logger.debug("      WARN [ProcIncrDrizLoop]: Pixmap initial (origin=0) en dehors de la plage attendue. Recalcul avec origin=1.")
+                    print("ULTRA-DEBUG: Pixmap initial (origin=0) is OUT OF BOUNDS. Recalculating with origin=1...")
                     final_x_output_pixels, final_y_output_pixels = self.drizzle_output_wcs.all_world2pix(
-                        sky_ra_deg, sky_dec_deg, 1
+                        sky_ra_deg, sky_dec_deg, 1 # Recalcul avec origin=1
                     )
-                    pixmap_for_this_file = np.dstack((
-                        final_x_output_pixels.reshape(input_shape_hw_current_file),
-                        final_y_output_pixels.reshape(input_shape_hw_current_file)
-                    )).astype(np.float32)
-                    pix_x = pixmap_for_this_file[..., 0]
-                    pix_y = pixmap_for_this_file[..., 1]
-                    logger.debug(
-                        f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap recalc (origin=1) X range [{np.nanmin(pix_x):.2f}, {np.nanmax(pix_x):.2f}], "
-                        f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
-                    )
-                    # Recompute range after origin=1 and clip if still out of bounds
-                    min_x, max_x = np.nanmin(pix_x), np.nanmax(pix_x)
-                    min_y, max_y = np.nanmin(pix_y), np.nanmax(pix_y)
-                    if (min_x < 0 or max_x >= width_out or min_y < 0 or max_y >= height_out):
-                        logger.warning(
-                            "      WARN [ProcIncrDrizLoop]: Pixmap toujours hors bornes apres origin=1, clipping."
-                        )
-                        pixmap_for_this_file[..., 0] = np.clip(pix_x, 0, width_out - 1)
-                        pixmap_for_this_file[..., 1] = np.clip(pix_y, 0, height_out - 1)
-                        pix_x = pixmap_for_this_file[..., 0]
-                        pix_y = pixmap_for_this_file[..., 1]
-                        logger.debug(
-                            f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap clipped X range [{np.nanmin(pix_x):.2f}, {np.nanmax(pix_x):.2f}], "
-                            f"Y range [{np.nanmin(pix_y):.2f}, {np.nanmax(pix_y):.2f}]"
-                        )
+                    # --- FIX CRITIQUE : CONVERSION DE 1-BASED À 0-BASED ---
+                    final_x_output_pixels -= 1.0  # Convertir 1-based en 0-based
+                    final_y_output_pixels -= 1.0  # Convertir 1-based en 0-based
+                    logger.debug(f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap ajusté (1-based vers 0-based) après recalcul avec origin=1.")
+                    print(f"ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x={np.nanmin(final_x_output_pixels):.2f}, min_y={np.nanmin(final_y_output_pixels):.2f}")
+                    # --- FIN FIX CRITIQUE ---
+                
+                # --- Vérification et nettoyage des NaN/Inf après tous les calculs ---
+                if not (np.all(np.isfinite(final_x_output_pixels)) and np.all(np.isfinite(final_y_output_pixels))):
+                    logger.debug(f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection (post-correction). Nettoyage...")
+                    print(f"ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
+                    final_x_output_pixels = np.nan_to_num(final_x_output_pixels, nan=0.0, posinf=0.0, neginf=0.0) # Utilisez 0.0 pour les valeurs numériques
+                    final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Création du pixmap final après tous les ajustements
+                pixmap_for_this_file = np.dstack((
+                    np.clip(final_x_output_pixels.reshape(input_shape_hw_current_file), 0, width_out - 1),
+                    np.clip(final_y_output_pixels.reshape(input_shape_hw_current_file), 0, height_out - 1)
+                )).astype(np.float32)
 
-                # Clip once more to guarantee validity
-                pixmap_for_this_file[..., 0] = np.clip(pixmap_for_this_file[..., 0], 0, width_out - 1)
-                pixmap_for_this_file[..., 1] = np.clip(pixmap_for_this_file[..., 1], 0, height_out - 1)
-                assert (
-                    np.nanmin(pixmap_for_this_file[..., 0]) >= 0
-                    and np.nanmax(pixmap_for_this_file[..., 0]) < width_out
-                    and np.nanmin(pixmap_for_this_file[..., 1]) >= 0
-                    and np.nanmax(pixmap_for_this_file[..., 1]) < height_out
-                ), "Pixmap hors bornes apres clipping"
+                # Diagnostic final du pixmap après clipping
+                pix_x_final = pixmap_for_this_file[..., 0]
+                pix_y_final = pixmap_for_this_file[..., 1]
+                min_x_final, max_x_final = np.nanmin(pix_x_final), np.nanmax(pix_x_final)
+                min_y_final, max_y_final = np.nanmin(pix_y_final), np.nanmax(pix_y_final)
+                logger.debug(f"      Final Pixmap X stats (post-clip): min={min_x_final:.2f}, max={max_x_final:.2f}, mean={np.nanmean(pix_x_final):.2f}, std={np.nanstd(pix_x_final):.2f}")
+                logger.debug(f"      Final Pixmap Y stats (post-clip): min={min_y_final:.2f}, max={max_y_final:.2f}, mean={np.nanmean(pix_y_final):.2f}, std={np.nanstd(pix_y_final):.2f}")
+                logger.debug(f"      Output Grid (width, height) for comparison: ({width_out}, {height_out})")
+                print(f"ULTRA-DEBUG: Final Pixmap X stats (post-clip): min={min_x_final:.2f}, max={max_x_final:.2f}, mean={np.nanmean(pix_x_final):.2f}, std={np.nanstd(pix_x_final):.2f}")
+                print(f"ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min={min_y_final:.2f}, max={max_y_final:.2f}, mean={np.nanmean(pix_y_final):.2f}, std={np.nanstd(pix_y_final):.2f}")
 
-                logger.debug(f"      DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Pixmap calculé pour '{current_filename_for_log}'.")
 
+                # Vérification critique des bornes du pixmap final
+                assert (min_x_final >= 0 and max_x_final < width_out and min_y_final >= 0 and max_y_final < height_out), \
+                       "ERREUR PIXMAP: Pixmap final (post-clipping) hors bornes attendues!"
+                
+                # Détection d'un pixmap "plat" (tous les points mappent au même endroit)
+                if np.allclose(pixmap_for_this_file[...,0], pixmap_for_this_file[0,0,0], atol=1e-3) and \
+                   np.allclose(pixmap_for_this_file[...,1], pixmap_for_this_file[0,0,1], atol=1e-3):
+                    logger.warning("        WARN: All pixmap points map to (or very close to) a single output pixel! This indicates a severe WCS issue or extreme input image data where all points are projected to the same output pixel. No significant image will be drizzled.")
+                    print("ULTRA-DEBUG: WARNING: Pixmap is 'flat' - all points map to a single output pixel!")
+
+
+                logger.debug(f"      [Step 3] Pixmap calculé et validé pour '{current_filename_for_log}'.")
+
+                # --- ÉTAPE 4: Préparation des paramètres pour add_image ---
+                logger.debug(f"      [Step 4] Préparation des paramètres pour add_image...")
                 exptime_for_drizzle_add = 1.0 
-                in_units_for_drizzle_add = 'cps' 
+                in_units_for_drizzle_add = 'cps' # Par défaut
+                
                 if input_header and 'EXPTIME' in input_header:
                     try:
                         original_exptime = float(input_header['EXPTIME'])
                         if original_exptime > 1e-6:
                             exptime_for_drizzle_add = original_exptime
-                            in_units_for_drizzle_add = 'counts' 
+                            in_units_for_drizzle_add = 'counts' # Si EXPTIME valide, on traite en counts
                             logger.debug(f"        Utilisation EXPTIME={exptime_for_drizzle_add:.2f}s du header original ('{input_header.get('_SRCFILE', 'N/A_SRC')}'), in_units='counts'")
                         else:
                              logger.debug(f"        EXPTIME du header original ({original_exptime:.2f}) trop faible. Utilisation exptime=1.0, in_units='cps'.")
@@ -3812,41 +3874,40 @@ class SeestarQueuedStacker:
                 else:
                     logger.debug(f"        AVERTISSEMENT: EXPTIME non trouvé dans header temp pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'. Utilisation exptime=1.0, in_units='cps'.")
                 
-                if exptime_for_drizzle_add <= 0:
-                    logger.debug(
-                        f"        EXPTIME={exptime_for_drizzle_add} non valide, remplacement par 1.0"
-                    )
+                if exptime_for_drizzle_add <= 0: # Double-vérification de l'exptime
+                    logger.warning(f"        AVERTISSEMENT: EXPTIME={exptime_for_drizzle_add} non valide. Remplacement par 1.0.")
                     exptime_for_drizzle_add = 1.0
 
-                if weight_map_override is not None:
-                    weight_map_param_for_add = np.asarray(weight_map_override, dtype=np.float32)
-                    if weight_map_param_for_add.shape != input_shape_hw_current_file:
-                        logger.debug(
-                            "        WARN: weight_map_override shape mismatch; using ones"
-                        )
-                        weight_map_param_for_add = np.ones(
-                            input_shape_hw_current_file, dtype=np.float32
-                        )
-                else:
-                    weight_map_param_for_add = np.ones(
-                        input_shape_hw_current_file, dtype=np.float32
-                    )
+                # Préparation du weight_map pour add_image. (Toujours np.ones() dans ce contexte si pas de override)
+                weight_map_param_for_add = np.ones(input_shape_hw_current_file, dtype=np.float32)
+                logger.debug(f"        Weight_map pour add_image: Shape={weight_map_param_for_add.shape}, Range=[{np.min(weight_map_param_for_add):.3f}, {np.max(weight_map_param_for_add):.3f}], Sum={np.sum(weight_map_param_for_add):.3f}")
 
+                # Pré-traitement de l'image (nettoyage NaN/Inf et clip > 0) AVANT de la passer à add_image
+                image_hwc_cleaned = np.nan_to_num(np.clip(image_hwc, 0.0, None), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+                logger.debug(f"        Image HWC nettoyée (pour add_image): Range=[{np.min(image_hwc_cleaned):.4g}, {np.max(image_hwc_cleaned):.4g}], Mean={np.mean(image_hwc_cleaned):.4g}")
+
+
+                # --- ÉTAPE 5: Appel à add_image pour chaque canal ---
+                logger.debug(f"      [Step 5] Appel driz_obj.add_image pour chaque canal...")
                 for ch_idx in range(num_output_channels):
-                    channel_data_2d = image_hwc[:, :, ch_idx].astype(np.float32)
-                    if not np.all(np.isfinite(channel_data_2d)):
-                        channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
+                    channel_data_2d = image_hwc_cleaned[..., ch_idx]
                     
-                    logger.debug(f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}")
-                    if weight_map_param_for_add is not None:
-                        logger.debug(f"                         weight_map range [{np.min(weight_map_param_for_add):.3g}, {np.max(weight_map_param_for_add):.3g}]")
-                    
+                    # Log des stats spécifiques à ce canal avant add_image
+                    logger.debug(f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], mean={np.mean(channel_data_2d):.3g}")
+                    logger.debug(f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}")
+                    print(f"ULTRA-DEBUG: Ch{ch_idx} CALLING add_image - data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, pixfrac={self.drizzle_pixfrac}, input_shape_hw={input_shape_hw_current_file}")
+
+
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
                     wht_sum_before = float(np.sum(driz_obj.out_wht))
-                    logger.debug(
-                        f"        Ch{ch_idx} WHT sum before add_image: {wht_sum_before:.3f}"
-                    )
-                    driz_obj.add_image(
+                    sci_sum_before = float(np.sum(driz_obj.out_img))
+                    logger.debug(f"        Ch{ch_idx} WHT_SUM BEFORE add_image: {wht_sum_before:.3f}")
+                    logger.debug(f"        Ch{ch_idx} SCI_SUM BEFORE add_image: {sci_sum_before:.3f}")
+                    print(f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state BEFORE add_image: out_wht_sum={wht_sum_before:.3f}, out_img_sum={sci_sum_before:.3f}")
+
+
+                    # L'appel CRITIQUE à add_image
+                    nskip, nmiss = driz_obj.add_image(
                         data=channel_data_2d,
                         pixmap=pixmap_for_this_file,
                         exptime=exptime_for_drizzle_add,
@@ -3854,39 +3915,56 @@ class SeestarQueuedStacker:
                         pixfrac=self.drizzle_pixfrac,
                         weight_map=weight_map_param_for_add,
                     )
+                    logger.debug(f"        Ch{ch_idx} RETURNED from add_image: nskip={nskip}, nmiss={nmiss}") # Log des retours de add_image
+                    print(f"ULTRA-DEBUG: Ch{ch_idx} add_image RETURNED: nskip={nskip}, nmiss={nmiss}") # Print direct pour nskip/nmiss
+
+
                     wht_sum_after = float(np.sum(driz_obj.out_wht))
-                    logger.debug(
-                        f"        Ch{ch_idx} WHT sum after add_image: {wht_sum_after:.3f}"
-                    )
-                    assert wht_sum_after >= wht_sum_before - 1e-6
-                    logger.debug(
-                        f"        Ch{ch_idx} APRÈS add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]"
-                    )
-                    logger.debug(
-                        f"                             out_wht range [{np.min(driz_obj.out_wht):.3g}, {np.max(driz_obj.out_wht):.3g}]"
-                    )
+                    sci_sum_after = float(np.sum(driz_obj.out_img))
+                    logger.debug(f"        Ch{ch_idx} WHT_SUM AFTER add_image: {wht_sum_after:.3f} (Change: {wht_sum_after - wht_sum_before:.3f})")
+                    logger.debug(f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_sum_after:.3f} (Change: {sci_sum_after - sci_sum_before:.3f})")
+                    print(f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state AFTER add_image: out_wht_sum={wht_sum_after:.3f}, out_img_sum={sci_sum_after:.3f}")
+
+                    # Vérification des assertions (maintenues)
+                    assert wht_sum_after >= wht_sum_before - 1e-6, f"WHT sum decreased for Ch{ch_idx}!"
+                    logger.debug(f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]")
+                    logger.debug(f"                             out_wht range [{np.min(driz_obj.out_wht):.3g}, {np.max(driz_obj.out_wht):.3g}]")
 
                 files_added_to_drizzle_this_batch += 1
                 self.images_in_cumulative_stack += 1 
+                logger.debug(f"    === FIN TRAITEMENT FICHIER: '{current_filename_for_log}' (Ajouté. Total files added: {self.images_in_cumulative_stack}) ===")
 
             except Exception as e_file:
                 self.update_progress(f"      -> ERREUR Drizzle Incr. VRAI sur fichier '{current_filename_for_log}': {e_file}", "WARN")
-                logger.debug(f"ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Échec fichier '{current_filename_for_log}': {e_file}"); traceback.print_exc(limit=1)
+                logger.error(f"ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Échec fichier '{current_filename_for_log}': {e_file}", exc_info=True)
+                print(f"ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '{current_filename_for_log}': {e_file}")
+
+
             finally:
+                # Nettoyage des variables locales (essentiel pour la mémoire)
                 del input_image_cxhxw, input_header, wcs_input_from_file, pixmap_for_this_file
+                if 'image_hwc_cleaned' in locals(): del image_hwc_cleaned
+                if 'image_hwc' in locals(): del image_hwc # original HxWxC
+                if 'reprojected_image_hwc' in locals(): del reprojected_image_hwc
+                
+                # Forcer un garbage collect de temps en temps, surtout si les images sont grandes
                 if (i_file + 1) % 10 == 0: gc.collect()
         
+        # --- FIN DE LA BOUCLE DE TRAITEMENT DES FICHIERS ---
         if files_added_to_drizzle_this_batch == 0 and num_files_in_batch > 0:
             self.update_progress(f"   -> ERREUR: Aucun fichier du lot Drizzle Incr. VRAI #{current_batch_num} n'a pu être ajouté.", "ERROR")
             self.failed_stack_count += num_files_in_batch 
+            logger.debug(f"  Sortie: Aucun fichier ajouté au Drizzle cumulatif pour le lot #{current_batch_num}.")
         else:
             self.update_progress(f"   -> {files_added_to_drizzle_this_batch}/{num_files_in_batch} fichiers du lot Drizzle Incr. VRAI #{current_batch_num} ajoutés aux objets Drizzle.")
+            logger.debug(f"  Total fichiers ajoutés au Drizzle cumulatif jusqu'à présent: {self.images_in_cumulative_stack}.")
 
+        # --- MISE À JOUR DU HEADER DU STACK CUMULATIF ---
         if self.current_stack_header is None: 
             self.current_stack_header = fits.Header()
             if self.drizzle_output_wcs:
                  try: self.current_stack_header.update(self.drizzle_output_wcs.to_header(relax=True))
-                 except Exception as e_hdr_wcs: logger.debug(f"WARN: Erreur copie WCS au header (DrizIncrVrai): {e_hdr_wcs}")
+                 except Exception as e_hdr_wcs: logger.warning(f"WARN: Erreur copie WCS au header (DrizIncrVrai init): {e_hdr_wcs}")
             self.current_stack_header['STACKTYP'] = (f'Drizzle_Incremental_True_{self.drizzle_scale:.0f}x', 'True Incremental Drizzle')
             self.current_stack_header['DRZSCALE'] = (self.drizzle_scale, 'Drizzle scale factor')
             self.current_stack_header['DRZKERNEL'] = (self.drizzle_kernel, 'Drizzle kernel used')
@@ -3895,43 +3973,69 @@ class SeestarQueuedStacker:
         
         self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Total images drizzled incrementally')
 
+        # --- MISE À JOUR DE L'APERÇU ---
         self.update_progress(f"   -> Préparation aperçu Drizzle Incrémental VRAI (Lot #{current_batch_num})...")
         try:
             if self.preview_callback and self.incremental_drizzle_objects:
                 avg_img_channels_preview = []
+                # IMPORTANT: driz_obj.out_img contient SCI*WHT, driz_obj.out_wht contient WHT
+                # Pour obtenir l'image moyenne, il faut diviser SCI*WHT par WHT.
                 for c in range(num_output_channels):
                     driz_obj = self.incremental_drizzle_objects[c]
-                    preview_channel_data = driz_obj.out_img.astype(np.float32)
+                    
+                    # Obtenir les données et poids cumulatifs
+                    sci_accum = driz_obj.out_img.astype(np.float32)
+                    wht_accum = driz_obj.out_wht.astype(np.float32)
+
+                    # Éviter la division par zéro
+                    wht_safe = np.maximum(wht_accum, 1e-9)
+                    
+                    # Calculer l'image moyenne pour l'aperçu
+                    preview_channel_data = np.zeros_like(sci_accum)
+                    valid_pixels = wht_safe > 1e-8 # Masque pour les pixels où il y a eu contribution
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        preview_channel_data[valid_pixels] = sci_accum[valid_pixels] / wht_safe[valid_pixels]
+                    
                     avg_img_channels_preview.append(
                         np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0)
                     )
                 
                 preview_data_HWC_raw = np.stack(avg_img_channels_preview, axis=-1)
+                
+                # Normalisation de l'aperçu à [0,1] pour l'affichage (cosmétique)
                 min_p, max_p = np.nanmin(preview_data_HWC_raw), np.nanmax(preview_data_HWC_raw)
                 preview_data_HWC_norm = preview_data_HWC_raw
                 if np.isfinite(min_p) and np.isfinite(max_p) and max_p > min_p + 1e-7: 
                     preview_data_HWC_norm = (preview_data_HWC_raw - min_p) / (max_p - min_p)
-                elif np.any(np.isfinite(preview_data_HWC_raw)):
+                elif np.any(np.isfinite(preview_data_HWC_raw)): # Image constante non nulle
                     preview_data_HWC_norm = np.full_like(preview_data_HWC_raw, 0.5)
-                else:
+                else: # Image vide ou tout NaN/Inf
                     preview_data_HWC_norm = np.zeros_like(preview_data_HWC_raw)
                 
                 preview_data_HWC_final = np.clip(preview_data_HWC_norm, 0.0, 1.0).astype(np.float32)
+                
+                # Stocker l'image de prévisualisation (potentiellement pour usage UI)
                 self.current_stack_data = preview_data_HWC_final
-                self.cumulative_drizzle_data = preview_data_HWC_final
-                self._update_preview_incremental_drizzle()
-                logger.debug(f"    DEBUG QM [ProcIncrDrizLoop M81_Scale_2_Full]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
+                self.cumulative_drizzle_data = preview_data_HWC_final # Pour l'aperçu
+                self._update_preview_incremental_drizzle() # Appelle le callback GUI
+                logger.debug(f"    DEBUG QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
+                print(f"ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]")
             else:
-                logger.debug(f"    WARN QM [ProcIncrDrizLoop M81_Scale_2_Full]: Impossible de mettre à jour l'aperçu Driz Incr VRAI.")
+                logger.debug(f"    WARN QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Impossible de mettre à jour l'aperçu Driz Incr VRAI (callback ou objets Drizzle manquants).")
+                print(f"ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI.")
         except Exception as e_prev:
-            logger.debug(f"    ERREUR QM [ProcIncrDrizLoop M81_Scale_2_Full]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}"); traceback.print_exc(limit=1)
+            logger.error(f"    ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}", exc_info=True)
+            print(f"ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: {e_prev}")
 
+
+        # --- NETTOYAGE DES FICHIERS TEMPORAIRES DU LOT ---
         if self.perform_cleanup:
-             logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Nettoyage fichiers temp lot #{current_batch_num}...")
+             logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Nettoyage fichiers temp lot #{current_batch_num}...")
+             print(f"ULTRA-DEBUG: Nettoyage fichiers temp lot #{current_batch_num}...")
              self._cleanup_batch_temp_files(batch_temp_filepaths_list)
         
-        logger.debug(f"DEBUG QM [_process_incremental_drizzle_batch V_True_Incremental_Driz_DebugM81_Scale_2_Full]: Fin traitement lot Driz Incr VRAI #{current_batch_num}.")
-
+        logger.debug(f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n")
+        print(f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n")
 
 
 
