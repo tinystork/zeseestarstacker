@@ -3789,7 +3789,9 @@ class SeestarQueuedStacker:
                     logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
                     self.update_progress("   -> Initialisation de la grille de reprojection globale...")
 
+
                     if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
+
                         self.update_progress(
                             "   -> ERREUR: WCS de référence globale non disponible pour créer la grille.",
                             "ERROR",
@@ -3799,8 +3801,10 @@ class SeestarQueuedStacker:
                         return
 
                     target_shape_hw = (
+
                         reference_wcs_for_reprojection.pixel_shape[1],
                         reference_wcs_for_reprojection.pixel_shape[0],
+
                     )
 
                     self.master_stack = np.zeros((*target_shape_hw, 3), dtype=np.float32)
@@ -3815,7 +3819,9 @@ class SeestarQueuedStacker:
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
                     batch_wcs,
+
                     reference_wcs_for_reprojection,
+
                 )
 
                 num_images_in_batch = len(batch_items_to_stack)
