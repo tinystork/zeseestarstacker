@@ -2157,7 +2157,7 @@ class SeestarQueuedStacker:
                                     current_batch_items_with_masks_for_stack_batch,
                                     self.stacked_batches_count,
                                     self.total_batches_estimated,
-                                    self.reference_wcs_object,
+                                    self.reference_wcs_object,  # reference WCS
                                 )
 
                             current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
@@ -2348,8 +2348,9 @@ class SeestarQueuedStacker:
 
                     self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch,
-                        self.stacked_batches_count, self.total_batches_estimated,
-                        self.reference_wcs_object
+                        self.stacked_batches_count,
+                        self.total_batches_estimated,
+                        self.reference_wcs_object,  # reference WCS
                     )
 
                     current_batch_items_with_masks_for_stack_batch = []
