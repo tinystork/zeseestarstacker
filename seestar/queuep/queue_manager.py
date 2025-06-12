@@ -1900,9 +1900,9 @@ class SeestarQueuedStacker:
                 self.aligned_files_count += 1; self.processed_files_count += 1
                 logger.debug(f"DEBUG QM [_worker]: Mosaïque Locale: Panneau de référence ajouté à all_aligned_files_with_info_for_mosaic.")
 
-            # --- CAS 2: Mosaïque Astrometry.net par panneau OU Drizzle Standard (pour la référence globale) ---
-            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic: # `use_astrometry_per_panel_mosaic` est True si mode mosaique="astrometry_per_panel"
-                self.update_progress("DEBUG WORKER: Branche Drizzle Std / AstroMosaic pour référence globale...")
+            # --- CAS 2: Mosaïque Astrometry.net par panneau, Drizzle Standard ou Reprojection entre lots ---
+            elif self.drizzle_active_session or use_astrometry_per_panel_mosaic or self.reproject_between_batches:  # `use_astrometry_per_panel_mosaic` est True si mode mosaique="astrometry_per_panel"
+                self.update_progress("DEBUG WORKER: Branche Drizzle Std / AstroMosaic / ReprojectBatches pour référence globale...")
                 if self.astrometry_solver and os.path.exists(reference_image_path_for_solver):
                     self.update_progress("   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve...")
                     self.reference_wcs_object = self.astrometry_solver.solve(
