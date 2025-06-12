@@ -320,7 +320,7 @@ class SeestarQueuedStacker:
         self.intermediate_classic_batch_files = []
 
         # Master arrays when combining batches with incremental reprojection
-        self.master_stack = None
+        self.master_sum = None
         self.master_coverage = None
 
         # Backward compatibility attributes removed in favour of
@@ -708,7 +708,7 @@ class SeestarQueuedStacker:
                 logger.debug("  -> reproject_between_batches=True: Memmaps SUM/WHT non créés (mode incrémental).")
                 self.cumulative_sum_memmap = None
                 self.cumulative_wht_memmap = None
-                self.master_stack = None
+                self.master_sum = None
                 self.master_coverage = None
             else:
                 logger.debug(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
@@ -1102,17 +1102,13 @@ class SeestarQueuedStacker:
         """Update preview when using incremental reprojection."""
         if (
             self.preview_callback is None
-            or self.master_stack is None
+            or self.master_sum is None
             or self.master_coverage is None
         ):
             return
 
         try:
-            wht_safe = np.maximum(self.master_coverage, 1e-9)
-            if self.master_stack.ndim == 3:
-                avg = self.master_stack / wht_safe[..., None]
-            else:
-                avg = self.master_stack / wht_safe
+            avg = self.master_sum / np.maximum(self.master_coverage, 1e-9)[..., None]
             avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
             mn, mx = np.nanmin(avg), np.nanmax(avg)
             if np.isfinite(mn) and np.isfinite(mx) and mx > mn:
@@ -2356,10 +2352,11 @@ class SeestarQueuedStacker:
                     current_batch_items_with_masks_for_stack_batch = []
                 if self.reproject_between_batches:
                     self.update_progress("🏁 Finalisation Stacking Classique…")
-                    if self.master_stack is not None:
+                    if self.master_sum is not None:
+                        final_avg = self.master_sum / np.maximum(self.master_coverage, 1e-9)[..., None]
                         self._save_final_stack(
                             output_filename_suffix="_classic_reproject",
-                            drizzle_final_sci_data=self.master_stack,
+                            drizzle_final_sci_data=final_avg,
                             drizzle_final_wht_data=self.master_coverage,
                         )
                     else:
@@ -3795,7 +3792,7 @@ class SeestarQueuedStacker:
                     )
                     return
 
-                if self.master_stack is None:
+                if self.master_sum is None:
                     logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
                     self.update_progress("   -> Initialisation de la grille de reprojection globale...")
 
@@ -3813,14 +3810,14 @@ class SeestarQueuedStacker:
                         reference_wcs_for_reprojection.pixel_shape[0],
                     )
 
-                    self.master_stack = np.zeros((*target_shape_hw, 3), dtype=np.float32)
+                    self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
                     self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
 
                 logger.debug(
-                    f"   -> Combinaison du lot #{current_batch_num} avec le master_stack."
+                    f"   -> Combinaison du lot #{current_batch_num} avec le master_sum."
                 )
-                self.master_stack, self.master_coverage = reproject_and_combine(
-                    self.master_stack,
+                self.master_sum, self.master_coverage = reproject_and_combine(
+                    self.master_sum,
                     self.master_coverage,
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
