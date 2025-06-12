@@ -520,6 +520,8 @@ class SettingsManager:
         defaults_dict['astrometry_solve_field_dir'] = ""
 
 
+        # When enabled, each batch is solved and reprojected incrementally onto
+        # the reference WCS.
         defaults_dict['reproject_between_batches'] = False
 
         

@@ -51,6 +51,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
 from ..core.reprojection import reproject_to_reference_wcs
+from ..core.incremental_reprojection import initialize_master, reproject_and_combine
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -315,6 +316,10 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
+
+        # Master arrays when combining batches with incremental reprojection
+        self.master_stack = None
+        self.master_coverage = None
 
         # Backward compatibility attributes removed in favour of
         # ``reproject_between_batches``. They may still appear in old settings
@@ -693,32 +698,39 @@ class SeestarQueuedStacker:
                 return False
             # ***** FIN CORRECTION *****
 
-            self.memmap_shape = reference_image_shape_hwc_input 
-            wht_shape_memmap = self.memmap_shape[:2] 
+            self.memmap_shape = reference_image_shape_hwc_input
+            wht_shape_memmap = self.memmap_shape[:2]
             logger.debug(f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}")
 
-            logger.debug(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
-            try:
-                self.cumulative_sum_memmap = np.lib.format.open_memmap(
-                    self.sum_memmap_path, mode='w+', dtype=self.memmap_dtype_sum, shape=self.memmap_shape
-                )
-                self.cumulative_sum_memmap[:] = 0.0
-                logger.debug(f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro.")
+            if self.reproject_between_batches:
+                logger.debug("  -> reproject_between_batches=True: Memmaps SUM/WHT non créés (mode incrémental).")
+                self.cumulative_sum_memmap = None
+                self.cumulative_wht_memmap = None
+                self.master_stack = None
+                self.master_coverage = None
+            else:
+                logger.debug(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
+                try:
+                    self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                        self.sum_memmap_path, mode='w+', dtype=self.memmap_dtype_sum, shape=self.memmap_shape
+                    )
+                    self.cumulative_sum_memmap[:] = 0.0
+                    logger.debug(f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro.")
 
-                self.cumulative_wht_memmap = np.lib.format.open_memmap(
-                    self.wht_memmap_path, mode='w+', dtype=self.memmap_dtype_wht, shape=wht_shape_memmap
-                )
-                self.cumulative_wht_memmap[:] = 0 
-                logger.debug(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
-                
-                self.incremental_drizzle_objects = []
+                    self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                        self.wht_memmap_path, mode='w+', dtype=self.memmap_dtype_wht, shape=wht_shape_memmap
+                    )
+                    self.cumulative_wht_memmap[:] = 0
+                    logger.debug(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
 
-            except (IOError, OSError, ValueError, TypeError) as e_memmap:
-                self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
-                logger.debug(f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"); traceback.print_exc(limit=2)
-                self.cumulative_sum_memmap = None; self.cumulative_wht_memmap = None
-                self.sum_memmap_path = None; self.wht_memmap_path = None
-                return False
+                    self.incremental_drizzle_objects = []
+
+                except (IOError, OSError, ValueError, TypeError) as e_memmap:
+                    self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
+                    logger.debug(f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"); traceback.print_exc(limit=2)
+                    self.cumulative_sum_memmap = None; self.cumulative_wht_memmap = None
+                    self.sum_memmap_path = None; self.wht_memmap_path = None
+                    return False
         
         # --- Réinitialisations Communes ---
         self.warned_unaligned_source_folders.clear()
@@ -1082,6 +1094,34 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.debug(f"Error in _update_preview_incremental_drizzle: {e}")
             traceback.print_exc(limit=2)
+
+
+    def _update_preview_master(self):
+        """Update preview when using incremental reprojection."""
+        if (
+            self.preview_callback is None
+            or self.master_stack is None
+            or self.master_coverage is None
+        ):
+            return
+
+        try:
+            wht_safe = np.maximum(self.master_coverage, 1e-9)
+            if self.master_stack.ndim == 3:
+                avg = self.master_stack / wht_safe[..., None]
+            else:
+                avg = self.master_stack / wht_safe
+            avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
+            mn, mx = np.nanmin(avg), np.nanmax(avg)
+            if np.isfinite(mn) and np.isfinite(mx) and mx > mn:
+                norm = (avg - mn) / (mx - mn)
+            else:
+                norm = np.zeros_like(avg, dtype=np.float32)
+            self.current_stack_data = np.clip(norm, 0.0, 1.0).astype(np.float32)
+            self.current_stack_header = self.current_stack_header or fits.Header()
+            self._update_preview()
+        except Exception as e:
+            logger.debug(f"Error in _update_preview_master: {e}")
 
 
 
@@ -2311,8 +2351,16 @@ class SeestarQueuedStacker:
                     )
                     current_batch_items_with_masks_for_stack_batch = []
                 if self.reproject_between_batches:
-                    self.update_progress("🏁 Reprojection finale (Classic)…")
-                    self._final_reproject_cached_files(solved_items_for_final_reprojection)
+                    self.update_progress("🏁 Finalisation Stacking Classique…")
+                    if self.master_stack is not None:
+                        self._save_final_stack(
+                            output_filename_suffix="_classic_reproject",
+                            drizzle_final_sci_data=self.master_stack,
+                            drizzle_final_wht_data=self.master_coverage,
+                        )
+                    else:
+                        self.update_progress("   Aucune image accumulée pour sauvegarde.")
+                        self.final_stacked_path = None
                 else:
                     self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
                     if self.images_in_cumulative_stack > 0 or (hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None):
@@ -3584,8 +3632,10 @@ class SeestarQueuedStacker:
         """
         # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
-        logger.debug(f"DEBUG QM [_process_completed_batch]: Début pour lot CLASSIQUE #{current_batch_num} "
-              f"avec {num_items_in_this_batch} items.")
+        logger.debug(
+            f"DEBUG QM [_process_completed_batch]: Début pour lot CLASSIQUE #{current_batch_num} "
+            f"avec {num_items_in_this_batch} items."
+        )
 
         # Vérification si le lot est vide (ne devrait pas arriver si _worker gère bien)
         if not batch_items_to_stack: # batch_items_to_stack est maintenant un paramètre défini
@@ -3631,6 +3681,31 @@ class SeestarQueuedStacker:
                     batch_wcs = hdr_wcs
             except Exception:
                 batch_wcs = None
+
+            if self.reproject_between_batches:
+                # Solve the stacked batch to obtain an accurate WCS
+                try:
+                    luminance = (
+                        stacked_batch_data_np[..., 0] * 0.299
+                        + stacked_batch_data_np[..., 1] * 0.587
+                        + stacked_batch_data_np[..., 2] * 0.114
+                    ).astype(np.float32)
+                    tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                    tmp.close()
+                    fits.PrimaryHDU(data=luminance, header=stack_info_header).writeto(tmp.name, overwrite=True)
+                    self._run_astap_and_update_header(tmp.name)
+                    solved_hdr = fits.getheader(tmp.name)
+                    batch_wcs = WCS(solved_hdr, naxis=2)
+                except Exception as e:
+                    self.update_progress(
+                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e}", "WARN"
+                    )
+                    batch_wcs = None
+                finally:
+                    try:
+                        os.remove(tmp.name)
+                    except Exception:
+                        pass
 
             if not self.reproject_between_batches:
                 try:
@@ -3694,91 +3769,37 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
 
-            if self.reproject_between_batches and self.reference_wcs_object:
-                if batch_wcs is None:
-                    try:
-                        hdr_wcs = WCS(stack_info_header, naxis=2)
-                        if hdr_wcs.is_celestial:
-                            M_fallback = self._calculate_M_from_wcs(
-                                self.reference_wcs_object,
-                                hdr_wcs,
-                                stacked_batch_data_np.shape[:2],
-                            )
-                            if M_fallback is not None:
-                                A = np.asarray(M_fallback, dtype=float)[:2, :2]
-                                t = np.asarray(M_fallback, dtype=float)[:2, 2]
-                                approx_wcs = self.reference_wcs_object.deepcopy()
-                                try:
-                                    A_inv = np.linalg.inv(A)
-                                except np.linalg.LinAlgError:
-                                    approx_wcs = None
-                                else:
-                                    if getattr(approx_wcs.wcs, "cd", None) is not None:
-                                        approx_wcs.wcs.cd = approx_wcs.wcs.cd @ A_inv
-                                    elif getattr(approx_wcs.wcs, "pc", None) is not None and getattr(approx_wcs.wcs, "cdelt", None) is not None:
-                                        cd_matrix = approx_wcs.wcs.pc @ np.diag(approx_wcs.wcs.cdelt)
-                                        cd_matrix = cd_matrix @ A_inv
-                                        approx_wcs.wcs.pc = np.identity(2)
-                                        approx_wcs.wcs.cdelt = [cd_matrix[0, 0], cd_matrix[1, 1]]
-                                    approx_wcs.wcs.crpix = A @ approx_wcs.wcs.crpix + t
-                                    approx_wcs.pixel_shape = (
-                                        stacked_batch_data_np.shape[1],
-                                        stacked_batch_data_np.shape[0],
-                                    )
-                                if approx_wcs is not None:
-                                    batch_wcs = approx_wcs
-                                    self.update_progress(
-                                        f"⚠️ [FallbackWCS] WCS approximatif utilisé pour lot {current_batch_num}",
-                                        "WARN",
-                                    )
-                    except Exception as e:
-                        self.update_progress(
-                            f"⚠️ [FallbackWCS] Impossible d'estimer WCS lot {current_batch_num}: {e}",
-                            "WARN",
-                        )
-                if batch_wcs is not None:
-                    try:
-                        self.update_progress(
-                            f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
-                            "INFO_DETAIL",
-                        )
-                        stacked_batch_data_np, batch_coverage_map_2d = self._reproject_batch_to_reference(
-                            stacked_batch_data_np,
-                            batch_coverage_map_2d,
-                            batch_wcs,
-                        )
-                        batch_wcs = self.reference_wcs_object
-                        self.update_progress(
-                            f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {self.memmap_shape[:2]})",
-                            "INFO_DETAIL",
-                        )
-                    except Exception as e:
-                        self.update_progress(
-                            f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
-                            "WARN",
-                        )
-
-            logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
-            self._combine_batch_result(
-                stacked_batch_data_np,
-                stack_info_header,
-                batch_coverage_map_2d,
-                batch_wcs,
-            )
-
-            if self.reproject_between_batches:
-                sci_p, wht_p_list = self._save_and_solve_classic_batch(
+            if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
+                if self.master_stack is None:
+                    self.master_stack, self.master_coverage = initialize_master(
+                        stacked_batch_data_np,
+                        batch_coverage_map_2d,
+                        self.reference_wcs_object,
+                    )
+                else:
+                    self.master_stack, self.master_coverage = reproject_and_combine(
+                        self.master_stack,
+                        self.master_coverage,
+                        stacked_batch_data_np,
+                        batch_coverage_map_2d,
+                        batch_wcs,
+                        self.reference_wcs_object,
+                    )
+                self.images_in_cumulative_stack += batch_size_actual_for_log
+                self.current_stack_header = stack_info_header
+                self._update_preview_master()
+            else:
+                logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
+                self._combine_batch_result(
                     stacked_batch_data_np,
-                    batch_coverage_map_2d,
                     stack_info_header,
-                    current_batch_num,
+                    batch_coverage_map_2d,
+                    batch_wcs,
                 )
-                if sci_p and wht_p_list:
-                    self.intermediate_classic_batch_files.append((sci_p, wht_p_list))
 
-            if not self.drizzle_active_session:
-                logger.debug("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
-                self._update_preview_sum_w()
+                if not self.drizzle_active_session:
+                    logger.debug("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
+                    self._update_preview_sum_w()
             
         else: # _stack_batch a échoué ou n'a rien retourné de valide
             # Le nombre d'images du lot qui a échoué à l'étape _stack_batch

@@ -17,6 +17,10 @@ from .weights import (
     _calculate_image_weights_noise_variance,
     _calculate_image_weights_noise_fwhm,
 )
+from .incremental_reprojection import (
+    initialize_master,
+    reproject_and_combine,
+)
 from .simple_stacker import create_master_tile as create_master_tile_simple
 
 # Liste initiale des éléments à exporter
@@ -33,7 +37,9 @@ __all__ = [
     'SeestarAligner',         # L'aligneur astroalign
     '_calculate_image_weights_noise_variance',
     '_calculate_image_weights_noise_fwhm',
-    'create_master_tile_simple'
+    'create_master_tile_simple',
+    'initialize_master',
+    'reproject_and_combine'
 ]
 
 # Tentative d'importation du nouvel aligneur local
