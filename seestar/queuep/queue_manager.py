@@ -50,8 +50,10 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
+
 from ..core.reprojection import reproject_to_reference_wcs
 from ..core.incremental_reprojection import reproject_and_combine
+
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -2150,12 +2152,14 @@ class SeestarQueuedStacker:
                                 logger.debug(
                                     f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W)."
                                 )
+
                                 self._process_completed_batch(
                                     current_batch_items_with_masks_for_stack_batch,
                                     self.stacked_batches_count,
                                     self.total_batches_estimated,
                                     self.reference_wcs_object,
                                 )
+
                             current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
 
                     self.queue.task_done()
@@ -2341,11 +2345,13 @@ class SeestarQueuedStacker:
                     self.stacked_batches_count += 1
                     self._send_eta_update()
                     self.update_progress(f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)...")
+
                     self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch,
                         self.stacked_batches_count, self.total_batches_estimated,
                         self.reference_wcs_object
                     )
+
                     current_batch_items_with_masks_for_stack_batch = []
                 if self.reproject_between_batches:
                     self.update_progress("🏁 Finalisation Stacking Classique…")
@@ -3611,6 +3617,7 @@ class SeestarQueuedStacker:
 
 
     def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est, reference_wcs_for_reprojection):
+
         """
         [MODE CLASSIQUE - SUM/W] Traite un lot d'images complété pour l'empilement classique.
         Cette méthode est appelée par _worker lorsque current_batch_items_with_masks_for_stack_batch
@@ -3625,8 +3632,10 @@ class SeestarQueuedStacker:
                                          (aligned_data_HWC_or_HW, header_orig, scores_dict,
                                           wcs_generated_obj, valid_pixel_mask_2d_HW_bool).
             current_batch_num (int): Le numéro séquentiel de ce lot.
+
             total_batches_est (int): Le nombre total de lots estimé pour la session.
             reference_wcs_for_reprojection (WCS): Objet WCS global utilisé pour la reprojection.
+
         """
         # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
@@ -3789,9 +3798,7 @@ class SeestarQueuedStacker:
                     logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
                     self.update_progress("   -> Initialisation de la grille de reprojection globale...")
 
-
                     if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
-
                         self.update_progress(
                             "   -> ERREUR: WCS de référence globale non disponible pour créer la grille.",
                             "ERROR",
@@ -3801,10 +3808,8 @@ class SeestarQueuedStacker:
                         return
 
                     target_shape_hw = (
-
                         reference_wcs_for_reprojection.pixel_shape[1],
                         reference_wcs_for_reprojection.pixel_shape[0],
-
                     )
 
                     self.master_stack = np.zeros((*target_shape_hw, 3), dtype=np.float32)
@@ -3819,9 +3824,7 @@ class SeestarQueuedStacker:
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
                     batch_wcs,
-
                     reference_wcs_for_reprojection,
-
                 )
 
                 num_images_in_batch = len(batch_items_to_stack)
@@ -3846,6 +3849,7 @@ class SeestarQueuedStacker:
                         "DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique..."
                     )
                     self._update_preview_sum_w()
+
             
         else: # _stack_batch a échoué ou n'a rien retourné de valide
             # Le nombre d'images du lot qui a échoué à l'étape _stack_batch
