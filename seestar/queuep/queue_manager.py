@@ -5762,19 +5762,40 @@ class SeestarQueuedStacker:
         logger.debug(f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}")
         logger.debug(f"  DEBUG QM: preserve_linear_output active?: {preserve_linear_output_setting}")
         
-        is_reproject_mosaic_mode = (output_filename_suffix == "_mosaic_reproject" and 
-                                    drizzle_final_sci_data is not None and 
-                                    drizzle_final_wht_data is not None)
+        is_reproject_mosaic_mode = (
+            output_filename_suffix == "_mosaic_reproject"
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+        )
         is_drizzle_final_mode_with_data = (
-            self.drizzle_active_session and self.drizzle_mode == "Final" and 
-            not self.is_mosaic_run and drizzle_final_sci_data is not None and
-            drizzle_final_wht_data is not None and not is_reproject_mosaic_mode 
+            self.drizzle_active_session
+            and self.drizzle_mode == "Final"
+            and not self.is_mosaic_run
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+            and not is_reproject_mosaic_mode
         )
         is_true_incremental_drizzle_from_objects = (
-            self.drizzle_active_session and self.drizzle_mode == "Incremental" and 
-            not self.is_mosaic_run and drizzle_final_sci_data is None 
+            self.drizzle_active_session
+            and self.drizzle_mode == "Incremental"
+            and not self.is_mosaic_run
+            and drizzle_final_sci_data is None
         )
-        is_classic_stacking_mode = not (is_reproject_mosaic_mode or is_drizzle_final_mode_with_data or is_true_incremental_drizzle_from_objects)
+        is_classic_reproject_mode = (
+            self.reproject_between_batches
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+        )
+        is_classic_stacking_mode = (
+            self.cumulative_sum_memmap is not None
+            and self.cumulative_wht_memmap is not None
+            and not (
+                is_reproject_mosaic_mode
+                or is_drizzle_final_mode_with_data
+                or is_true_incremental_drizzle_from_objects
+                or is_classic_reproject_mode
+            )
+        )
 
         current_operation_mode_log_desc = "Unknown" 
         current_operation_mode_log_fits = "Unknown" 
@@ -5785,10 +5806,15 @@ class SeestarQueuedStacker:
         elif is_true_incremental_drizzle_from_objects: 
             current_operation_mode_log_desc = "Drizzle Incrémental VRAI (objets Drizzle)"
             current_operation_mode_log_fits = "True Incremental Drizzle (Drizzle objects)"
-        elif is_drizzle_final_mode_with_data: 
-            current_operation_mode_log_desc = f"Drizzle Standard Final (données lot fournies)"
+        elif is_drizzle_final_mode_with_data:
+            current_operation_mode_log_desc = (
+                f"Drizzle Standard Final (données lot fournies)"
+            )
             current_operation_mode_log_fits = "Drizzle Standard Final (from batch data)"
-        elif is_classic_stacking_mode : 
+        elif is_classic_reproject_mode:
+            current_operation_mode_log_desc = "Stacking Classique Reproject"
+            current_operation_mode_log_fits = "Classic Stacking Reproject"
+        elif is_classic_stacking_mode:
             current_operation_mode_log_desc = "Stacking Classique SUM/W (memmaps)"
             current_operation_mode_log_fits = "Classic Stacking SUM/W (memmaps)"
         else: 
@@ -5864,19 +5890,36 @@ class SeestarQueuedStacker:
                 self.update_progress(f"    DEBUG QM: Drizzle Incr VRAI - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
                 logger.debug(f"    DEBUG QM: Drizzle Incr VRAI - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
 
-            elif is_drizzle_final_mode_with_data: 
+            elif is_drizzle_final_mode_with_data:
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Drizzle Standard Final (depuis données de lot)")
                 logger.debug("  DEBUG QM [SaveFinalStack] Mode: Drizzle Standard Final (depuis données de lot)")
                 if drizzle_final_sci_data is None or drizzle_final_wht_data is None: raise ValueError("Donnees de lot Drizzle final (sci/wht) manquantes.")
-                sci_data_float64 = drizzle_final_sci_data.astype(np.float64); wht_data_float64 = drizzle_final_wht_data.astype(np.float64) 
+                sci_data_float64 = drizzle_final_sci_data.astype(np.float64); wht_data_float64 = drizzle_final_wht_data.astype(np.float64)
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
-                final_wht_map_for_postproc = np.mean(wht_data_clipped_positive, axis=2).astype(np.float32) 
-                wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9) 
+                final_wht_map_for_postproc = np.mean(wht_data_clipped_positive, axis=2).astype(np.float32)
+                wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
                 with np.errstate(divide='ignore', invalid='ignore'): final_image_initial_raw = sci_data_float64 / wht_for_div
                 final_image_initial_raw = np.nan_to_num(final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
                 self._close_memmaps()
                 self.update_progress(f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
                 logger.debug(f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]")
+
+            elif is_classic_reproject_mode:
+                self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique Reproject")
+                logger.debug("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique Reproject")
+                final_image_initial_raw = drizzle_final_sci_data.astype(np.float32)
+                if drizzle_final_wht_data.ndim == 3:
+                    final_wht_map_for_postproc = np.mean(drizzle_final_wht_data, axis=2).astype(np.float32)
+                else:
+                    final_wht_map_for_postproc = drizzle_final_wht_data.astype(np.float32)
+                final_wht_map_for_postproc = np.maximum(final_wht_map_for_postproc, 0.0)
+                self._close_memmaps()
+                self.update_progress(
+                    f"    DEBUG QM: Classic Reproject - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
+                )
+                logger.debug(
+                    f"    DEBUG QM: Classic Reproject - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
+                )
             
             else: # SUM/W Classique
                 self.update_progress("  DEBUG QM [SaveFinalStack] Mode: Stacking Classique SUM/W")

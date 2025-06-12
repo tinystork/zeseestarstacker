@@ -66,6 +66,9 @@ def _make_obj(tmp_path, save_as_float32):
     obj.drizzle_mode = "Final"
     obj.drizzle_output_wcs = None
     obj.drizzle_fillval = "0.0"
+    obj.reproject_between_batches = False
+    obj.cumulative_sum_memmap = None
+    obj.cumulative_wht_memmap = None
     return obj
 
 
@@ -308,3 +311,22 @@ def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
     wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
     for b_val, a_val in zip(wht_mid, wht_after):
         assert a_val >= b_val - 1e-6
+
+
+def test_save_final_stack_classic_reproject(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.reproject_between_batches = True
+    obj.preserve_linear_output = True
+    data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_classic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.dtype.kind == "f"
+    assert np.allclose(saved.astype(np.float32), data)

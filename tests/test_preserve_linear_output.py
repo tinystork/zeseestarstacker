@@ -99,6 +99,9 @@ def test_preserve_linear_output(tmp_path, monkeypatch):
         lambda self, filename, **k: None,
     )
     d = Dummy()
+    d.reproject_between_batches = False
+    d.cumulative_sum_memmap = None
+    d.cumulative_wht_memmap = None
     d.output_folder = str(tmp_path)
     d.output_filename = "result.fit"
     d.images_in_cumulative_stack = 1
