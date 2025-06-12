@@ -2154,6 +2154,7 @@ class SeestarQueuedStacker:
                                     current_batch_items_with_masks_for_stack_batch,
                                     self.stacked_batches_count,
                                     self.total_batches_estimated,
+                                    self.reference_wcs_object,
                                 )
                             current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
 
@@ -2341,8 +2342,9 @@ class SeestarQueuedStacker:
                     self._send_eta_update()
                     self.update_progress(f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)...")
                     self._process_completed_batch(
-                        current_batch_items_with_masks_for_stack_batch, 
-                        self.stacked_batches_count, self.total_batches_estimated
+                        current_batch_items_with_masks_for_stack_batch,
+                        self.stacked_batches_count, self.total_batches_estimated,
+                        self.reference_wcs_object
                     )
                     current_batch_items_with_masks_for_stack_batch = []
                 if self.reproject_between_batches:
@@ -3608,7 +3610,7 @@ class SeestarQueuedStacker:
 
 
 
-    def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est):
+    def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est, reference_wcs_for_reprojection):
         """
         [MODE CLASSIQUE - SUM/W] Traite un lot d'images complété pour l'empilement classique.
         Cette méthode est appelée par _worker lorsque current_batch_items_with_masks_for_stack_batch
@@ -3624,6 +3626,7 @@ class SeestarQueuedStacker:
                                           wcs_generated_obj, valid_pixel_mask_2d_HW_bool).
             current_batch_num (int): Le numéro séquentiel de ce lot.
             total_batches_est (int): Le nombre total de lots estimé pour la session.
+            reference_wcs_for_reprojection (WCS): Objet WCS global utilisé pour la reprojection.
         """
         # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
@@ -3786,7 +3789,9 @@ class SeestarQueuedStacker:
                     logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
                     self.update_progress("   -> Initialisation de la grille de reprojection globale...")
 
-                    if self.reference_wcs_object is None or self.reference_wcs_object.pixel_shape is None:
+
+                    if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
+
                         self.update_progress(
                             "   -> ERREUR: WCS de référence globale non disponible pour créer la grille.",
                             "ERROR",
@@ -3796,8 +3801,10 @@ class SeestarQueuedStacker:
                         return
 
                     target_shape_hw = (
-                        self.reference_wcs_object.pixel_shape[1],
-                        self.reference_wcs_object.pixel_shape[0],
+
+                        reference_wcs_for_reprojection.pixel_shape[1],
+                        reference_wcs_for_reprojection.pixel_shape[0],
+
                     )
 
                     self.master_stack = np.zeros((*target_shape_hw, 3), dtype=np.float32)
@@ -3812,7 +3819,9 @@ class SeestarQueuedStacker:
                     stacked_batch_data_np,
                     batch_coverage_map_2d,
                     batch_wcs,
-                    self.reference_wcs_object,
+
+                    reference_wcs_for_reprojection,
+
                 )
 
                 num_images_in_batch = len(batch_items_to_stack)
