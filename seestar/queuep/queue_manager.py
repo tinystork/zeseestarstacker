@@ -2079,21 +2079,16 @@ class SeestarQueuedStacker:
                            item_result_tuple[0] is not None:
 
                             if self.reproject_between_batches:
-                                if item_result_tuple[3] is not None:
-                                    cache_p = self._cache_solved_image(
-                                        item_result_tuple[0],
-                                        item_result_tuple[1],
-                                        item_result_tuple[3],
-                                        len(solved_items_for_final_reprojection),
-                                    )
-                                    solved_items_for_final_reprojection.append(
-                                        (cache_p, item_result_tuple[3], item_result_tuple[1])
-                                    )
-                                    self.aligned_files_count += 1
-                                else:
-                                    self.failed_align_count += 1
-                                    if hasattr(self, '_move_to_unaligned'):
-                                        self._move_to_unaligned(file_path)
+                                self.aligned_files_count += 1
+                                aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple
+                                classic_stack_item = (
+                                    aligned_data,
+                                    header_orig,
+                                    scores_val,
+                                    wcs_gen_val,
+                                    valid_mask_val,
+                                )
+                                current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
                             else:
                                 self.aligned_files_count += 1
                                 aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple
