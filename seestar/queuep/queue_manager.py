@@ -51,7 +51,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
 from ..core.reprojection import reproject_to_reference_wcs
-from ..core.incremental_reprojection import initialize_master, reproject_and_combine
+from ..core.incremental_reprojection import reproject_and_combine
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -2154,6 +2154,7 @@ class SeestarQueuedStacker:
                                     current_batch_items_with_masks_for_stack_batch,
                                     self.stacked_batches_count,
                                     self.total_batches_estimated,
+                                    self.reference_wcs_object,
                                 )
                             current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
 
@@ -2341,8 +2342,9 @@ class SeestarQueuedStacker:
                     self._send_eta_update()
                     self.update_progress(f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)...")
                     self._process_completed_batch(
-                        current_batch_items_with_masks_for_stack_batch, 
-                        self.stacked_batches_count, self.total_batches_estimated
+                        current_batch_items_with_masks_for_stack_batch,
+                        self.stacked_batches_count, self.total_batches_estimated,
+                        self.reference_wcs_object
                     )
                     current_batch_items_with_masks_for_stack_batch = []
                 if self.reproject_between_batches:
@@ -3608,7 +3610,7 @@ class SeestarQueuedStacker:
 
 
 
-    def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est):
+    def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est, reference_wcs_for_reprojection):
         """
         [MODE CLASSIQUE - SUM/W] Traite un lot d'images complété pour l'empilement classique.
         Cette méthode est appelée par _worker lorsque current_batch_items_with_masks_for_stack_batch
@@ -3624,6 +3626,7 @@ class SeestarQueuedStacker:
                                           wcs_generated_obj, valid_pixel_mask_2d_HW_bool).
             current_batch_num (int): Le numéro séquentiel de ce lot.
             total_batches_est (int): Le nombre total de lots estimé pour la session.
+            reference_wcs_for_reprojection (WCS): Objet WCS global utilisé pour la reprojection.
         """
         # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
@@ -3772,51 +3775,55 @@ class SeestarQueuedStacker:
                         pass
 
             if self.reproject_between_batches:
-                if batch_wcs is None:
+                if batch_wcs is None or not batch_wcs.is_celestial:
                     self.update_progress(
-                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}; lot ignoré.",
+                        f"   -> Lot #{current_batch_num} ignoré (pas de WCS valide).",
                         "WARN",
+                    )
+                    logger.warning(
+                        f"Reprojection : WCS manquant pour le lot {current_batch_num}, lot ignoré."
                     )
                     return
 
-                if self.reference_wcs_object and batch_wcs is not None:
-                    if self.master_stack is None:
-                        logger.debug("   -> Initialisation du master_stack avec le premier lot.")
-                        self.master_stack, self.master_coverage = initialize_master(
-                            stacked_batch_data_np,
-                            batch_coverage_map_2d,
-                            self.reference_wcs_object,
-                        )
-                        self.update_progress(
-                            "   -> Reprojection du premier lot sur la grille de référence globale..."
-                        )
-                        self.master_stack, self.master_coverage = reproject_and_combine(
-                            np.zeros_like(self.master_stack),
-                            np.zeros_like(self.master_coverage),
-                            self.master_stack,
-                            self.master_coverage,
-                            batch_wcs,
-                            self.reference_wcs_object,
-                        )
-                    else:
-                        logger.debug(
-                            f"   -> Combinaison du lot #{current_batch_num} avec le master_stack."
-                        )
-                        self.master_stack, self.master_coverage = reproject_and_combine(
-                            self.master_stack,
-                            self.master_coverage,
-                            stacked_batch_data_np,
-                            batch_coverage_map_2d,
-                            batch_wcs,
-                            self.reference_wcs_object,
-                        )
+                if self.master_stack is None:
+                    logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
+                    self.update_progress("   -> Initialisation de la grille de reprojection globale...")
 
-                    num_images_in_batch = len(batch_items_to_stack)
-                    self.images_in_cumulative_stack += num_images_in_batch
-                    self.current_stack_header = stack_info_header
-                    self._update_preview_master()
-                    gc.collect()
-                    return
+                    if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
+                        self.update_progress(
+                            "   -> ERREUR: WCS de référence globale non disponible pour créer la grille.",
+                            "ERROR",
+                        )
+                        self.processing_error = "WCS de référence manquant pour reprojection."
+                        self.stop_processing = True
+                        return
+
+                    target_shape_hw = (
+                        reference_wcs_for_reprojection.pixel_shape[1],
+                        reference_wcs_for_reprojection.pixel_shape[0],
+                    )
+
+                    self.master_stack = np.zeros((*target_shape_hw, 3), dtype=np.float32)
+                    self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
+
+                logger.debug(
+                    f"   -> Combinaison du lot #{current_batch_num} avec le master_stack."
+                )
+                self.master_stack, self.master_coverage = reproject_and_combine(
+                    self.master_stack,
+                    self.master_coverage,
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    batch_wcs,
+                    reference_wcs_for_reprojection,
+                )
+
+                num_images_in_batch = len(batch_items_to_stack)
+                self.images_in_cumulative_stack += num_images_in_batch
+                self.current_stack_header = stack_info_header
+                self._update_preview_master()
+                gc.collect()
+                return
             else:
                 logger.debug(
                     f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}..."
