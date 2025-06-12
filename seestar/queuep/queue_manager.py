@@ -3687,10 +3687,39 @@ class SeestarQueuedStacker:
                     ).astype(np.float32)
                     tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                     tmp.close()
-                    fits.PrimaryHDU(data=luminance, header=stack_info_header).writeto(tmp.name, overwrite=True)
-                    self._run_astap_and_update_header(tmp.name)
-                    solved_hdr = fits.getheader(tmp.name)
-                    batch_wcs = WCS(solved_hdr, naxis=2)
+                    fits.PrimaryHDU(data=luminance, header=stack_info_header).writeto(
+                        tmp.name, overwrite=True
+                    )
+                    solver_settings = {
+                        "local_solver_preference": self.local_solver_preference,
+                        "api_key": self.api_key,
+                        "astap_path": self.astap_path,
+                        "astap_data_dir": self.astap_data_dir,
+                        "astap_search_radius": self.astap_search_radius,
+                        "astap_downsample": 1,
+                        "astap_sensitivity": self.astap_sensitivity,
+                        "local_ansvr_path": self.local_ansvr_path,
+                        "scale_est_arcsec_per_pix": getattr(
+                            self, "reference_pixel_scale_arcsec", None
+                        ),
+                        "scale_tolerance_percent": 20,
+                        "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+                        "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+                        "astrometry_net_timeout_sec": getattr(
+                            self, "astrometry_net_timeout_sec", 300
+                        ),
+                        "use_radec_hints": getattr(self, "use_radec_hints", False),
+                    }
+                    batch_wcs = solve_image_wcs(
+                        tmp.name,
+                        stack_info_header,
+                        solver_settings,
+                        update_header_with_solution=False,
+                    )
+                    if batch_wcs is None:
+                        self.update_progress(
+                            f"⚠️ [Solve] Échec WCS lot {current_batch_num}", "WARN"
+                        )
                 except Exception as e:
                     self.update_progress(
                         f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e}", "WARN"
