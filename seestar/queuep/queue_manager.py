@@ -3644,8 +3644,16 @@ class SeestarQueuedStacker:
         progress_info_log = (f"(Lot {current_batch_num}/"
                              f"{total_batches_est if total_batches_est > 0 else '?'})")
 
-        self.update_progress(f"⚙️ Traitement classique du batch {progress_info_log} "
-                             f"({batch_size_actual_for_log} images)...")
+        if self.reproject_between_batches:
+            self.update_progress(
+                f"⚙️ Traitement reprojection du batch {progress_info_log} "
+                f"({batch_size_actual_for_log} images)..."
+            )
+        else:
+            self.update_progress(
+                f"⚙️ Traitement classique du batch {progress_info_log} "
+                f"({batch_size_actual_for_log} images)..."
+            )
 
         # --- Appel à _stack_batch ---
         # _stack_batch attend :
@@ -3678,8 +3686,27 @@ class SeestarQueuedStacker:
                 batch_wcs = None
 
             if self.reproject_between_batches:
-                batch_wcs = self._solve_stacked_batch(
-                    stacked_batch_data_np, stack_info_header, current_batch_num
+                # --- NEW LOGIC: use the WCS from the first image of the batch ---
+                self.update_progress(
+                    f"🔭 [Solve Batch] Résolution WCS du lot #{current_batch_num} (via première image)..."
+                )
+                if batch_items_to_stack and len(batch_items_to_stack[0]) >= 4:
+                    candidate_wcs = batch_items_to_stack[0][3]
+                    if candidate_wcs and getattr(candidate_wcs, "is_celestial", False):
+                        batch_wcs = candidate_wcs
+
+                if batch_wcs is None:
+                    self.update_progress(
+                        f"   -> Lot #{current_batch_num} ignoré (pas de WCS valide trouvé pour la première image du lot).",
+                        "WARN",
+                    )
+                    logger.warning(
+                        f"Reprojection : WCS manquant pour le lot {current_batch_num}, lot ignoré."
+                    )
+                    return
+
+                self.update_progress(
+                    f"✅ [Solve Batch] WCS du lot #{current_batch_num} obtenu (depuis première image)."
                 )
 
             if not self.reproject_between_batches:
@@ -3751,26 +3778,45 @@ class SeestarQueuedStacker:
                         "WARN",
                     )
                     return
-                else:
-                    if self.reference_wcs_object and batch_wcs is not None:
-                        if self.master_stack is None:
-                            self.master_stack, self.master_coverage = initialize_master(
-                                stacked_batch_data_np,
-                                batch_coverage_map_2d,
-                                self.reference_wcs_object,
-                            )
-                        else:
-                            self.master_stack, self.master_coverage = reproject_and_combine(
-                                self.master_stack,
-                                self.master_coverage,
-                                stacked_batch_data_np,
-                                batch_coverage_map_2d,
-                                batch_wcs,
-                                self.reference_wcs_object,
-                            )
-                        self.images_in_cumulative_stack += batch_size_actual_for_log
-                        self.current_stack_header = stack_info_header
-                        self._update_preview_master()
+
+                if self.reference_wcs_object and batch_wcs is not None:
+                    if self.master_stack is None:
+                        logger.debug("   -> Initialisation du master_stack avec le premier lot.")
+                        self.master_stack, self.master_coverage = initialize_master(
+                            stacked_batch_data_np,
+                            batch_coverage_map_2d,
+                            self.reference_wcs_object,
+                        )
+                        self.update_progress(
+                            "   -> Reprojection du premier lot sur la grille de référence globale..."
+                        )
+                        self.master_stack, self.master_coverage = reproject_and_combine(
+                            np.zeros_like(self.master_stack),
+                            np.zeros_like(self.master_coverage),
+                            self.master_stack,
+                            self.master_coverage,
+                            batch_wcs,
+                            self.reference_wcs_object,
+                        )
+                    else:
+                        logger.debug(
+                            f"   -> Combinaison du lot #{current_batch_num} avec le master_stack."
+                        )
+                        self.master_stack, self.master_coverage = reproject_and_combine(
+                            self.master_stack,
+                            self.master_coverage,
+                            stacked_batch_data_np,
+                            batch_coverage_map_2d,
+                            batch_wcs,
+                            self.reference_wcs_object,
+                        )
+
+                    num_images_in_batch = len(batch_items_to_stack)
+                    self.images_in_cumulative_stack += num_images_in_batch
+                    self.current_stack_header = stack_info_header
+                    self._update_preview_master()
+                    gc.collect()
+                    return
             else:
                 logger.debug(
                     f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}..."
