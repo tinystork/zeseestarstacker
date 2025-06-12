@@ -3764,27 +3764,37 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
 
-            if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
-                if self.master_stack is None:
-                    self.master_stack, self.master_coverage = initialize_master(
-                        stacked_batch_data_np,
-                        batch_coverage_map_2d,
-                        self.reference_wcs_object,
+            if self.reproject_between_batches:
+                if batch_wcs is None:
+                    self.update_progress(
+                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}; lot ignoré.",
+                        "WARN",
                     )
+                    return
                 else:
-                    self.master_stack, self.master_coverage = reproject_and_combine(
-                        self.master_stack,
-                        self.master_coverage,
-                        stacked_batch_data_np,
-                        batch_coverage_map_2d,
-                        batch_wcs,
-                        self.reference_wcs_object,
-                    )
-                self.images_in_cumulative_stack += batch_size_actual_for_log
-                self.current_stack_header = stack_info_header
-                self._update_preview_master()
+                    if self.reference_wcs_object and batch_wcs is not None:
+                        if self.master_stack is None:
+                            self.master_stack, self.master_coverage = initialize_master(
+                                stacked_batch_data_np,
+                                batch_coverage_map_2d,
+                                self.reference_wcs_object,
+                            )
+                        else:
+                            self.master_stack, self.master_coverage = reproject_and_combine(
+                                self.master_stack,
+                                self.master_coverage,
+                                stacked_batch_data_np,
+                                batch_coverage_map_2d,
+                                batch_wcs,
+                                self.reference_wcs_object,
+                            )
+                        self.images_in_cumulative_stack += batch_size_actual_for_log
+                        self.current_stack_header = stack_info_header
+                        self._update_preview_master()
             else:
-                logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}...")
+                logger.debug(
+                    f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}..."
+                )
                 self._combine_batch_result(
                     stacked_batch_data_np,
                     stack_info_header,
@@ -3793,7 +3803,9 @@ class SeestarQueuedStacker:
                 )
 
                 if not self.drizzle_active_session:
-                    logger.debug("DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique...")
+                    logger.debug(
+                        "DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique..."
+                    )
                     self._update_preview_sum_w()
             
         else: # _stack_batch a échoué ou n'a rien retourné de valide
