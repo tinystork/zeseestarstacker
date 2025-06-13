@@ -8,12 +8,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 # --- AJOUTEZ CES DEUX LIGNES POUR LE DEBUG CRITIQUE ---
-import sys
-print(f"DEBUG_CRITICAL: Loading queue_manager.py from: {__file__}")
-if 'seestar.queuep.queue_manager' in sys.modules:
-    print(f"DEBUG_CRITICAL: sys.modules entry: {sys.modules['seestar.queuep.queue_manager'].__file__}")
-else:
-    print("DEBUG_CRITICAL: seestar.queuep.queue_manager not yet in sys.modules.")
 
 
 # --- FIN AJOUT CRITIQUE ---
