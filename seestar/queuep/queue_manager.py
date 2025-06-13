@@ -3496,36 +3496,14 @@ class SeestarQueuedStacker:
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
                         align_method_log_msg = "Astrometry_Single_Success"
                     else:
-                        align_method_log_msg = "Astrometry_Single_Fail"
-                        wcs_final_pour_retour = None
-                        # --- FALLBACK PAR ALIGNEMENT ASTROALIGN SUR LA RÃFÃRENCE ---
+                        align_method_log_msg = "Astrometry_Fail_And_Rejected"
                         self.update_progress(
-                            f"   ⚠️ Ãchec WCS pour '{file_name}'. Tentative de fallback par alignement...",
+                            f"   -> Échec WCS pour '{file_name}'. Image rejetée (mode haute précision).",
                             "WARN",
                         )
-                        align_method_log_msg += "_Fallback_Attempt"
-                        aligned_fallback, fa_success = self.aligner._align_image(
-                            image_for_alignment_or_drizzle_input,
-                            reference_image_data_for_alignment,
-                            file_name,
+                        raise RuntimeError(
+                            f"Échec astrométrie pour '{file_name}' et aucun fallback autorisé en mode reprojection."
                         )
-                        if fa_success and aligned_fallback is not None:
-                            align_method_log_msg = "Astrometry_Fail_Fallback_Align_Success"
-                            data_final_pour_retour = aligned_fallback.astype(np.float32)
-                            wcs_final_pour_retour = self.reference_wcs_object
-                            self.update_progress(
-                                f"   -> Fallback rÃ©ussi pour '{file_name}'. Utilisation du WCS de rÃ©fÃ©rence.",
-                                "INFO",
-                            )
-                        else:
-                            align_method_log_msg = "Astrometry_Fail_Fallback_Align_Fail"
-                            self.update_progress(
-                                f"   -> Ãchec du fallback pour '{file_name}'. Image rejetÃ©e.",
-                                "ERROR",
-                            )
-                            raise RuntimeError(
-                                "Ãchec complet du solving et de l'alignement de fallback."
-                            )
                 else:
                     align_method_log_msg = "Astrometry_Single_NoSolver"
                     wcs_final_pour_retour = None
