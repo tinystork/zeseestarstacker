@@ -5035,200 +5035,52 @@ class SeestarQueuedStacker:
             self.update_progress(f"   -> Pondération Qualité (scalaire) désactivée. Poids uniformes (1.0) seront utilisés par ccdproc.")
             # sum_of_quality_weights_applied reste num_valid_images_for_processing
 
-        # --- 3. Sauvegarde temporaire des images alignées et création des infos pour create_master_tile ---
-        temp_cache_dir = tempfile.mkdtemp(prefix=f"batch_{current_batch_num:03d}_")
-        seestar_stack_group_info = []
-        for i in range(num_valid_images_for_processing):
-            img_np = valid_images_for_ccdproc[i].astype(np.float32)
-            hdr = valid_headers_for_ccdproc[i]
-            wcs_obj = valid_wcs_objs_for_ccdproc[i]
-            cache_path = os.path.join(temp_cache_dir, f"img_{i:03d}.npy")
-            try:
-                np.save(cache_path, img_np)
-            except Exception:
-                self.update_progress(f"❌ Erreur écriture cache pour l'image {i} du lot {current_batch_num}.")
-                traceback.print_exc(limit=1)
-                shutil.rmtree(temp_cache_dir, ignore_errors=True)
-                return None, None, None
-            seestar_stack_group_info.append({'path_raw': hdr.get('_SRCFILE', f'img_{i:03d}'),
-                                            'path_preprocessed_cache': cache_path,
-                                            'header': hdr,
-                                            'wcs': wcs_obj})
-
-        settings = SettingsManager()
         try:
-            settings.load_settings()
-        except Exception:
-            pass
-        winsor_tuple = (0.05, 0.05)
-        try:
-            winsor_tuple = tuple(float(x) for x in str(settings.stack_winsor_limits).split(',')[:2])
-        except Exception:
-            pass
-
-        all_have_wcs = all(info.get('wcs') is not None for info in seestar_stack_group_info)
-
-        stacked_batch_data_np = None
-        stack_info_header = None
-
-        from seestar.core import create_master_tile_simple as create_master_tile
-
-        if all_have_wcs:
-            tile_path, _ = create_master_tile(
-                seestar_stack_group_info=seestar_stack_group_info,
-                tile_id=current_batch_num,
-                output_temp_dir=temp_cache_dir,
-                stack_norm_method=getattr(settings, 'stack_norm_method', 'none'),
-                stack_weight_method=getattr(settings, 'stack_weight_method', 'none'),
-                stack_reject_algo=getattr(settings, 'stack_reject_algo', 'kappa_sigma'),
-                stack_kappa_low=float(getattr(settings, 'stack_kappa_low', 3.0)),
-                stack_kappa_high=float(getattr(settings, 'stack_kappa_high', 3.0)),
-                parsed_winsor_limits=winsor_tuple,
-                stack_final_combine=getattr(settings, 'stack_final_combine', 'mean'),
-                apply_radial_weight=False,
-                radial_feather_fraction=0.8,
-                radial_shape_power=2.0,
-                min_radial_weight_floor=0.0,
-                astap_exe_path_global='',
-                astap_data_dir_global='',
-                astap_search_radius_global=0.0,
-                astap_downsample_global=0,
-                astap_sensitivity_global=0,
-                astap_timeout_seconds_global=0,
-                progress_callback=self.update_progress
-            )
-
-            if tile_path and os.path.exists(tile_path):
-                try:
-                    with fits.open(tile_path, memmap=False) as hdul:
-                        data_cxhxw = hdul[0].data.astype(np.float32)
-                        stack_info_header = hdul[0].header
-                    if data_cxhxw.ndim == 3:
-                        stacked_batch_data_np = np.moveaxis(data_cxhxw, 0, -1)
-                    else:
-                        stacked_batch_data_np = data_cxhxw
-                except Exception:
-                    self.update_progress(f"❌ Erreur lecture FITS empilé pour le lot {current_batch_num}.")
-                    traceback.print_exc(limit=1)
-            else:
-                self.update_progress(f"❌ create_master_tile a échoué pour le lot {current_batch_num}.")
-        else:
-            self.update_progress(f"⚠️ WCS manquant pour certaines images du lot {current_batch_num}. Stacking classique utilisé.")
-            try:
-                weights_for_stack = weight_scalars_for_ccdproc
-                if getattr(settings, 'stack_reject_algo', 'none') == 'winsorized_sigma_clip':
-                    self.update_progress(
-                        f"➡️ [Winsor] Début Winsorized Sigma Clip pour le lot {current_batch_num}",
-                        "INFO_DETAIL",
-                    )
-                    if is_color_batch:
-                        channels = []
-                        rejected_vals = []
-                        for c in range(3):
-                            imgs = [img[..., c] for img in valid_images_for_ccdproc]
-                            res_img, rej_pct = self._stack_winsorized_sigma(
-                                imgs,
-                                weights_for_stack,
-                                kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
-                                winsor_limits=winsor_tuple,
-                            )
-                            channels.append(res_img)
-                            rejected_vals.append(rej_pct)
-                        stacked_batch_data_np = np.stack(channels, axis=-1)
-                        rejected_pct = float(np.mean(rejected_vals))
-                    else:
-                        stacked_batch_data_np, rejected_pct = self._stack_winsorized_sigma(
-                            valid_images_for_ccdproc,
-                            weights_for_stack,
-                            kappa=float(getattr(settings, 'stack_kappa_high', 3.0)),
-                            winsor_limits=winsor_tuple,
-                        )
-                    self.update_progress(
-                        f"✅ [Winsor] Fin Winsorized Sigma Clip pour le lot {current_batch_num}, rej ≈ {rejected_pct:.1f} %",
-                        "INFO_DETAIL",
-                    )
-                else:
-                    method_arr = 'average'
-                    if is_color_batch:
-                        channels = []
-                        for c in range(3):
-                            imgs = [CCDData(img[..., c], unit=u.dimensionless_unscaled)
-                                    for img in valid_images_for_ccdproc]
-                            combined = ccdproc_combine(
-                                imgs, method=method_arr, sigma_clip=False,
-                                weights=weights_for_stack
-                            )
-                            channels.append(np.array(combined, dtype=np.float32))
-                        stacked_batch_data_np = np.stack(channels, axis=-1)
-                    else:
-                        imgs_ccd = [CCDData(img, unit=u.dimensionless_unscaled)
-                                    for img in valid_images_for_ccdproc]
-                        combined = ccdproc_combine(
-                            imgs_ccd, method=method_arr, sigma_clip=False,
-                            weights=weights_for_stack
-                        )
-                        stacked_batch_data_np = np.array(combined, dtype=np.float32)
-                stack_info_header = fits.Header()
-            except Exception:
-                self.update_progress(f"❌ Erreur stacking classique pour le lot {current_batch_num}.")
-                traceback.print_exc(limit=1)
-
-        shutil.rmtree(temp_cache_dir, ignore_errors=True)
-
-        if stacked_batch_data_np is None:
-            return None, None, None
-
-        stacked_batch_data_np = stacked_batch_data_np.astype(np.float32)
-        if self.stacking_mode == "winsorized":
             self.update_progress(
-                f"🎚️  [Stack] Windsorized Sigma Clip appliqué : κ={self.kappa:.2f}, images={num_valid_images_for_processing}, rej ≈ {rejected_pct:.1f} %",
-                "INFO_DETAIL",
+                f"✨ Combinaison NumPy du batch (Lot {current_batch_num}/{total_batches_est}) ({num_valid_images_for_processing} images)..."
             )
 
+            image_data_list = valid_images_for_ccdproc
+            data_stack_for_numpy = np.stack(image_data_list, axis=0)
 
-        # --- 5. NOUVEAU : Calculer batch_coverage_map_2d (HxW, float32) ---
-        logger.debug(f"   -> Calcul de la carte de poids/couverture 2D pour le lot #{current_batch_num}...")
-        batch_coverage_map_2d = np.zeros(shape_2d_for_coverage_map, dtype=np.float32)
-        
-        for i in range(num_valid_images_for_processing):
-            valid_pixel_mask_for_img = valid_pixel_masks_for_coverage[i] # C'est un masque booléen HW
-            
-            # Déterminer le poids scalaire à appliquer à ce masque
-            current_image_scalar_weight = 1.0 # Défaut si pas de pondération
-            if weight_scalars_for_ccdproc is not None: # Si la pondération qualité a été calculée
-                current_image_scalar_weight = weight_scalars_for_ccdproc[i]
-            
-            # Ajouter le masque pondéré à la carte de couverture du lot
-            # valid_pixel_mask_for_img.astype(np.float32) convertit True->1.0, False->0.0
-            batch_coverage_map_2d += valid_pixel_mask_for_img.astype(np.float32) * current_image_scalar_weight
-        
-        logger.debug(f"     - Carte de poids/couverture 2D du lot calculée. Shape: {batch_coverage_map_2d.shape}, Range: [{np.min(batch_coverage_map_2d):.2f}-{np.max(batch_coverage_map_2d):.2f}]")
+            coverage_maps_list = valid_pixel_masks_for_coverage
+            coverage_stack_for_numpy = np.stack(coverage_maps_list, axis=0)
 
-        # --- 6. Mise à jour de l'en-tête d'information ---
-        if stack_info_header is None:
+            quality_weights = weight_scalars_for_ccdproc
+            if quality_weights is None:
+                quality_weights = np.ones(num_valid_images_for_processing, dtype=np.float32)
+
+            weight_shape = (-1,) + (1,) * (data_stack_for_numpy.ndim - 1)
+            quality_weights = quality_weights.reshape(weight_shape)
+
+            coverage_mult = coverage_stack_for_numpy[..., np.newaxis] if data_stack_for_numpy.ndim == 4 else coverage_stack_for_numpy
+
+            weighted_signal = data_stack_for_numpy * coverage_mult * quality_weights
+            total_weights = coverage_mult * quality_weights
+
+            sum_weighted_signal = np.sum(weighted_signal, axis=0)
+            sum_total_weights = np.sum(total_weights, axis=0)
+            sum_total_weights_safe = np.maximum(sum_total_weights, 1e-9)
+
+            stacked_batch_data_np = (sum_weighted_signal / sum_total_weights_safe).astype(np.float32)
+            batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+
             stack_info_header = fits.Header()
-        stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Valid images combined in this batch')  # ASCII
-        
-        stack_info_header['WGHT_APP'] = (quality_weighting_was_effectively_applied, 'Quality weights (scalar) used by ccdproc_combine')
-        if quality_weighting_was_effectively_applied:
-            w_metrics_str_list = []
-            if self.weight_by_snr: w_metrics_str_list.append(f"SNR^{self.snr_exponent:.1f}")
-            if self.weight_by_stars: w_metrics_str_list.append(f"Stars^{self.stars_exponent:.1f}")
-            stack_info_header['WGHT_MET'] = (",".join(w_metrics_str_list) if w_metrics_str_list else "None_Active", 'Metrics configured for scalar weighting')
-            stack_info_header['SUMSCLW'] = (float(sum_of_quality_weights_applied), 'Sum of scalar quality weights in this batch')
-        else:
-            stack_info_header['SUMSCLW'] = (float(num_valid_images_for_processing), 'Effective num images (uniform scalar weight=1)')
-        
-        batch_total_exposure = 0.0
-        for hdr_iter in valid_headers_for_ccdproc: # Utiliser les headers des images valides
-            if hdr_iter and 'EXPTIME' in hdr_iter:
-                try: batch_total_exposure += float(hdr_iter['EXPTIME'])
-                except (ValueError, TypeError): pass
-        stack_info_header['TOTEXP'] = (round(batch_total_exposure, 2), '[s] Sum of exposure times for images in this batch')
+            stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Images in this batch stack')
+            stack_info_header['STK_NOTE'] = 'Stacked with NumPy weighted average'
 
-        self.update_progress(f"✅ Combinaison lot {progress_info} terminée (Shape: {stacked_batch_data_np.shape}).")
-        
-        # Retourner l'image stackée, le header d'info, et la NOUVELLE carte de couverture 2D du lot
+            self.update_progress(
+                f"✅ Combinaison lot (Lot {current_batch_num}/{total_batches_est}) terminée (Shape: {stacked_batch_data_np.shape})"
+            )
+
+        except Exception as e:
+            self.update_progress(
+                f"❌ Erreur lors de la combinaison NumPy du lot #{current_batch_num}: {e}",
+                "ERROR"
+            )
+            logger.error(f"Erreur stacking NumPy batch #{current_batch_num}: {e}")
+            traceback.print_exc(limit=2)
+            return None, None, None
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
 
