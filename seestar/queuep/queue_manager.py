@@ -2758,33 +2758,26 @@ class SeestarQueuedStacker:
 
 
     def _finalize_mosaic_processing(self, aligned_files_info_list):
-        """
-        Effectue la combinaison finale pour le mode mosaïque en utilisant reproject.
-        MODIFIED: Removed 'progress_bar=True' from reproject_and_coadd call to fix TypeError.
-                  TQDM might be used by default by reproject if installed.
-        Version: V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall
-        """
-        num_panels = len(aligned_files_info_list) 
-        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Début finalisation pour {num_panels} panneaux avec reproject.")
-        self.update_progress(f"🖼️ Préparation assemblage mosaïque final ({num_panels} images) avec reproject...")
+        """Effectue la combinaison finale pour le mode mosaïque en utilisant reproject.
+        MODIFIED: Utilisation de reproject_and_coadd pour une meilleure performance et simplicité."""
+        num_panels = len(aligned_files_info_list)
+        logger.debug(
+            f"DEBUG (Backend _finalize_mosaic_processing V_reproject_and_coadd): Début finalisation pour {num_panels} panneaux."
+        )
+        self.update_progress(
+            f"🖼️ Préparation assemblage mosaïque final ({num_panels} images) avec reproject..."
+        )
 
         if num_panels < 1: 
             self.update_progress("⚠️ Moins de 1 panneau aligné disponible pour la mosaïque. Traitement annulé.")
             self.final_stacked_path = None; self.processing_error = "Mosaïque: Moins de 1 panneau aligné"; return
         
-        from seestar.enhancement.reproject_utils import (
-            reproject_and_coadd as _reproject_and_coadd,
-            reproject_interp as _reproject_interp,
-        )
+        # Import tardif pour être sûr d'avoir la bonne version
+        from seestar.enhancement.reproject_utils import reproject_and_coadd
+        _reproject_available = True
         try:
-            from reproject.mosaicking import reproject_and_coadd as _real_reproject_and_coadd
-            from reproject import reproject_interp as _real_reproject_interp
-            reproject_and_coadd = _real_reproject_and_coadd
-            reproject_interp = _real_reproject_interp
-            _reproject_available = True
+            from reproject import reproject_interp  # On a besoin de ça aussi
         except ImportError:
-            reproject_and_coadd = _reproject_and_coadd
-            reproject_interp = _reproject_interp
             _reproject_available = False
 
         if not _reproject_available:
@@ -2794,167 +2787,158 @@ class SeestarQueuedStacker:
             self.final_stacked_path = None
             return
 
+        # Préparation des données pour reproject_and_coadd
         input_data_for_reproject = []
         input_footprints_for_reproject = []
         all_wcs_for_grid_calc = []
         all_headers_for_grid_calc = []
 
-        logger.debug(f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd...")
+        logger.debug(
+            f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd..."
+        )
         for i_panel_loop, panel_info_tuple_local in enumerate(aligned_files_info_list):
             try:
-                panel_image_data_HWC_orig, panel_header_orig, wcs_for_panel_input, _transform_matrix_M_panel, _pixel_mask_2d_bool = panel_info_tuple_local
+                (
+                    panel_image_data_HWC_orig,
+                    panel_header_orig,
+                    wcs_for_panel_input,
+                    _transform_matrix_M_panel,
+                    _pixel_mask_2d_bool,
+                ) = panel_info_tuple_local
             except (TypeError, ValueError) as e_unpack:
-                self.update_progress(f"    -> ERREUR déballage tuple panneau {i_panel_loop+1}: {e_unpack}. Ignoré.", "ERROR")
-                logger.debug(f"ERREUR QM [_finalize_mosaic_processing]: Déballage tuple panneau {i_panel_loop+1}"); continue
+                self.update_progress(
+                    f"    -> ERREUR déballage tuple panneau {i_panel_loop+1}: {e_unpack}. Ignoré.",
+                    "ERROR",
+                )
+                continue
 
-            original_filename_for_log = panel_header_orig.get('_SRCFILE', (f"Panel_{i_panel_loop+1}", ""))[0]
-            logger.debug(f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}")
+            original_filename_for_log = panel_header_orig.get(
+                "_SRCFILE", (f"Panel_{i_panel_loop+1}", "")
+            )[0]
+            logger.debug(
+                f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}"
+            )
 
             if panel_image_data_HWC_orig is None or wcs_for_panel_input is None:
-                self.update_progress(f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.", "WARN"); continue
-            
-            current_panel_shape_hw = panel_image_data_HWC_orig.shape[:2]
-            footprint_panel = None
-            if _pixel_mask_2d_bool is not None and _pixel_mask_2d_bool.shape == current_panel_shape_hw:
-                footprint_panel = np.clip(_pixel_mask_2d_bool.astype(np.float32), 0.0, 1.0) 
-                logger.debug(f"      Panel {i_panel_loop+1}: Using provided pixel mask as footprint. Sum: {np.sum(footprint_panel)}")
-            else:
-                self.update_progress(f"      WARN: Panneau {i_panel_loop+1}, masque de pixels invalide ou manquant. Utilisation d'un footprint complet (np.ones).")
-                footprint_panel = np.ones(current_panel_shape_hw, dtype=np.float32)
-            
-            input_data_for_reproject.append((panel_image_data_HWC_orig, wcs_for_panel_input))
+                self.update_progress(
+                    f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.",
+                    "WARN",
+                )
+                continue
+
+            # La fonction attend des données 2D par canal. On prépare les listes.
+            input_data_for_reproject.append(
+                (panel_image_data_HWC_orig, wcs_for_panel_input)
+            )
+
+            # Le "footprint" est le masque de poids. On utilise le masque de pixels valides.
+            footprint_panel = np.ones(
+                panel_image_data_HWC_orig.shape[:2], dtype=np.float32
+            )
+            if _pixel_mask_2d_bool is not None:
+                footprint_panel = _pixel_mask_2d_bool.astype(np.float32)
             input_footprints_for_reproject.append(footprint_panel)
+
             all_wcs_for_grid_calc.append(wcs_for_panel_input)
             all_headers_for_grid_calc.append(panel_header_orig)
 
         if not input_data_for_reproject:
-            self.update_progress("❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.", "ERROR")
-            self.final_stacked_path = None; self.processing_error = "Mosaïque: Aucun panneau valide pour reproject"; return
+            self.update_progress(
+                "❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.",
+                "ERROR",
+            )
+            return
 
-        logger.debug("DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject...")
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(all_wcs_for_grid_calc, all_headers_for_grid_calc)
+        # Calcul de la grille de sortie (notre nouvelle fonction personnalisée)
+        logger.debug(
+            "DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject..."
+        )
+        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
+            all_wcs_for_grid_calc, all_headers_for_grid_calc
+        )
 
         if output_wcs is None or output_shape_hw is None:
-            error_msg = "Échec calcul grille de sortie pour la mosaïque avec reproject."
-            self.update_progress(f"❌ {error_msg}", "ERROR"); self.processing_error = error_msg; self.final_stacked_path = None; return
-        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing): Grille Mosaïque pour reproject calculée -> Shape={output_shape_hw} (H,W), WCS CRVAL={output_wcs.wcs.crval if output_wcs.wcs else 'N/A'}")
+            error_msg = (
+                "Échec calcul grille de sortie pour la mosaïque avec reproject."
+            )
+            self.update_progress(f"❌ {error_msg}", "ERROR")
+            self.processing_error = error_msg
+            return
 
-        final_mosaic_sci_channels = []; final_mosaic_coverage_channels = [] 
-        num_color_channels_expected = 3 
-
-        logger.debug(f"  -> Exécution de reproject_and_coadd par canal (pour {num_color_channels_expected} canaux)...")
-        total_reproject_time_sec = 0.0
+        # --- Boucle sur les canaux R, G, B ---
+        final_mosaic_sci_channels = []
+        final_mosaic_coverage_channels = []
+        num_color_channels = 3
         
-        progress_base_finalize = 70 
-        progress_range_reproject_step = 25 
+        for i_ch in range(num_color_channels):
+            self.update_progress(
+                f"   Reprojection et combinaison du canal {i_ch+1}/{num_color_channels}..."
+            )
 
-        for i_ch in range(num_color_channels_expected):
-            gui_progress_before_channel = progress_base_finalize + int(progress_range_reproject_step * (i_ch / num_color_channels_expected))
-            self.update_progress(f"   Reprojection et combinaison du canal {i_ch+1}/{num_color_channels_expected}...", gui_progress_before_channel)
-            
-            channel_arrays_wcs_list = []
-            channel_footprints_list = []
-
-            for panel_data_tuple, panel_footprint in zip(input_data_for_reproject, input_footprints_for_reproject):
-                panel_hwc_data, panel_wcs = panel_data_tuple
-                if panel_hwc_data.ndim == 3 and panel_hwc_data.shape[2] == num_color_channels_expected:
-                    channel_arrays_wcs_list.append( (panel_hwc_data[..., i_ch], panel_wcs) )
-                    channel_footprints_list.append(panel_footprint) 
-                elif panel_hwc_data.ndim == 2 and i_ch == 0 : 
-                     channel_arrays_wcs_list.append( (panel_hwc_data, panel_wcs) )
-                     channel_footprints_list.append(panel_footprint)
-                elif panel_hwc_data.ndim == 2 and i_ch > 0: 
-                    continue 
-            
-            if not channel_arrays_wcs_list:
-                self.update_progress(f"    Aucune donnée pour le canal {i_ch+1}. Ce canal sera vide.", "WARN")
-                final_mosaic_sci_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
-                final_mosaic_coverage_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
-                continue
+            # Extraire le canal actuel de chaque panneau
+            channel_arrays_wcs_list = [
+                (panel_data[..., i_ch], wcs)
+                for panel_data, wcs in input_data_for_reproject
+            ]
 
             try:
-                logger.debug(f"    Appel reproject_and_coadd pour canal {i_ch+1}. Nombre d'images pour ce canal: {len(channel_arrays_wcs_list)}")
-                start_time_reproject_ch = time.monotonic()
-                
-                # Removed progress_bar=True from this call
                 mosaic_channel_sci, mosaic_channel_coverage = reproject_and_coadd(
                     channel_arrays_wcs_list,
                     output_projection=output_wcs,
                     shape_out=output_shape_hw,
-                    input_weights=channel_footprints_list, 
-                    reproject_function=reproject_interp, 
-                    combine_function='mean', 
-                    match_background=True, 
-                    block_size=getattr(self, 'reproject_block_size_xy', (256,256))
+                    input_weights=input_footprints_for_reproject,
+                    reproject_function=reproject_interp,  # Utilise l'interpolation rapide
+                    combine_function="mean",
+                    match_background=True,
                 )
-                
-                end_time_reproject_ch = time.monotonic()
-                duration_reproject_ch_sec = end_time_reproject_ch - start_time_reproject_ch
-                total_reproject_time_sec += duration_reproject_ch_sec
 
-                final_mosaic_sci_channels.append(mosaic_channel_sci.astype(np.float32))
-                final_mosaic_coverage_channels.append(mosaic_channel_coverage.astype(np.float32))
-                
-                log_msg_time_console = f"    Canal {i_ch+1} traité en {duration_reproject_ch_sec:.2f} secondes. Shape SCI: {mosaic_channel_sci.shape}, Shape Coverage: {mosaic_channel_coverage.shape}"
-                logger.debug(log_msg_time_console)
-                self.update_progress(f"   Canal {i_ch+1}/{num_color_channels_expected} combiné.")
+                final_mosaic_sci_channels.append(
+                    mosaic_channel_sci.astype(np.float32)
+                )
+                final_mosaic_coverage_channels.append(
+                    mosaic_channel_coverage.astype(np.float32)
+                )
+                self.update_progress(
+                    f"   Canal {i_ch+1}/{num_color_channels} combiné."
+                )
 
             except Exception as e_reproject:
-                error_msg = f"Erreur durant reproject_and_coadd pour canal {i_ch+1}: {e_reproject}"
-                self.update_progress(f"❌ {error_msg}", "ERROR"); traceback.print_exc(limit=3)
-                final_mosaic_sci_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
-                final_mosaic_coverage_channels.append(np.zeros(output_shape_hw, dtype=np.float32))
-        
-        self.update_progress(f"  Temps total pour reproject_and_coadd (tous canaux): {total_reproject_time_sec:.2f}s.", progress_base_finalize + progress_range_reproject_step)
-
-        if not final_mosaic_sci_channels or len(final_mosaic_sci_channels) != num_color_channels_expected:
-             error_msg = "Échec critique: reproject_and_coadd n'a pas produit le nombre attendu de canaux."
-             self.update_progress(f"❌ {error_msg}", "ERROR"); self.processing_error = error_msg; self.final_stacked_path = None; return
+                error_msg = (
+                    f"Erreur durant reproject_and_coadd pour canal {i_ch+1}: {e_reproject}"
+                )
+                self.update_progress(f"❌ {error_msg}", "ERROR")
+                traceback.print_exc(limit=3)
+                return
 
         try:
-            final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1).astype(np.float32)
-            final_coverage_map_2D = final_mosaic_coverage_channels[0] 
-            
-            logger.debug(f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}, Shape Coverage: {final_coverage_map_2D.shape}")
-            logger.debug(f"     Range SCI (après reproject mean): [{np.nanmin(final_sci_image_HWC):.4g}, {np.nanmax(final_sci_image_HWC):.4g}]")
-            logger.debug(f"     Range Coverage (après reproject): [{np.nanmin(final_coverage_map_2D):.4g}, {np.nanmax(final_coverage_map_2D):.4g}]")
+            final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1).astype(
+                np.float32
+            )
+            final_coverage_map_2D = final_mosaic_coverage_channels[0].astype(
+                np.float32
+            )
 
-            self.current_stack_header = fits.Header() 
-            if output_wcs: self.current_stack_header.update(output_wcs.to_header(relax=True))
-            
-            if self.reference_header_for_wcs: 
-                keys_to_copy_ref_hdr = ['INSTRUME', 'TELESCOP', 'OBSERVER', 'OBJECT', 
-                                        'DATE-OBS', 'FILTER', 'BAYERPAT', 'FOCALLEN', 'APERTURE', 
-                                        'XPIXSZ', 'YPIXSZ', 'SITELAT', 'SITELONG']
-                for key_cp in keys_to_copy_ref_hdr:
-                    if key_cp in self.reference_header_for_wcs:
-                        try: self.current_stack_header[key_cp] = (self.reference_header_for_wcs[key_cp], self.reference_header_for_wcs.comments[key_cp])
-                        except KeyError: self.current_stack_header[key_cp] = self.reference_header_for_wcs[key_cp]
-            
-            self.current_stack_header['STACKTYP'] = (f'Mosaic Reproject ({self.drizzle_scale:.0f}x)', 'Mosaic from reproject_and_coadd')
-            self.current_stack_header['NIMAGES'] = (num_panels, 'Number of panels input to reproject') 
-            
-            total_approx_exposure = 0.0 
-            if self.reference_header_for_wcs: 
-                single_exp_ref = float(self.reference_header_for_wcs.get('EXPTIME', 10.0)) 
-                total_approx_exposure = num_panels * single_exp_ref 
-            self.current_stack_header['TOTEXP'] = (round(total_approx_exposure, 2), '[s] Approx total exposure (sum of panels ref exp)')
-            
+            logger.debug(
+                f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}"
+            )
+
+            self.current_stack_header = fits.Header()
+            self.current_stack_header.update(output_wcs.to_header(relax=True))
+
             self._save_final_stack(
-                output_filename_suffix="_mosaic_reproject", 
-                drizzle_final_sci_data=final_sci_image_HWC, 
-                drizzle_final_wht_data=final_coverage_map_2D 
+                output_filename_suffix="_mosaic_reproject",
+                drizzle_final_sci_data=final_sci_image_HWC,
+                drizzle_final_wht_data=final_coverage_map_2D,
             )
 
         except Exception as e_stack_final:
-            error_msg = f"Erreur finalisation/sauvegarde mosaïque avec reproject: {e_stack_final}"
-            self.update_progress(f"❌ {error_msg}", "ERROR"); traceback.print_exc(limit=3); self.processing_error = error_msg; self.final_stacked_path = None
+            error_msg = (
+                f"Erreur finalisation/sauvegarde mosaïque avec reproject: {e_stack_final}"
+            )
+            self.update_progress(f"❌ {error_msg}", "ERROR")
+            traceback.print_exc(limit=3)
         finally:
-            del input_data_for_reproject, input_footprints_for_reproject, all_wcs_for_grid_calc
-            del final_mosaic_sci_channels, final_mosaic_coverage_channels
             gc.collect()
-        
-        logger.debug(f"DEBUG (Backend _finalize_mosaic_processing V_FinalizeMosaic_ReprojectCoadd_4_FixTqdmCall): Fin.")
 
 
 
