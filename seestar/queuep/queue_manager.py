@@ -5189,7 +5189,8 @@ class SeestarQueuedStacker:
         return final_sci_image_HWC, final_wht_map_HWC
 
     def _solve_stacked_batch(self, stacked_np, header, batch_num):
-        """Solve a stacked batch image using the configured ASTAP downsample factor."""
+        """Solve a stacked batch image using the configured ASTAP downsample factor.
+        MODIFIED: Use specific, more sensitive ASTAP settings for clean stacked images."""
         try:
             img_for_solver = stacked_np
             if img_for_solver.ndim == 3:
@@ -5198,11 +5199,14 @@ class SeestarQueuedStacker:
                     + img_for_solver[..., 1] * 0.587
                     + img_for_solver[..., 2] * 0.114
                 ).astype(np.float32)
-            temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-            temp_f.close()
+
+            with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as tmp:
+                temp_fits_path = tmp.name
+
             fits.PrimaryHDU(data=img_for_solver, header=header).writeto(
-                temp_f.name, overwrite=True
+                temp_fits_path, overwrite=True
             )
+
             solver_settings = {
                 "local_solver_preference": self.local_solver_preference,
                 "api_key": self.api_key,
@@ -5223,15 +5227,26 @@ class SeestarQueuedStacker:
                 ),
                 "use_radec_hints": getattr(self, "use_radec_hints", False),
             }
+
+            batch_solve_settings = solver_settings.copy()
+            batch_solve_settings["astap_downsample"] = 0
+            batch_solve_settings["astap_sensitivity"] = 500
+
+            self.update_progress(
+                f"   [Solve] Utilisation de paramètres ASTAP sensibles pour le lot #{batch_num} (downsample=0, sensitivity=500)",
+                "INFO_DETAIL",
+            )
             self.update_progress(
                 f"🔭 [Solve] Résolution WCS du lot {batch_num}", "INFO_DETAIL"
             )
+
             batch_wcs = solve_image_wcs(
-                temp_f.name,
+                temp_fits_path,
                 header,
-                solver_settings,
+                batch_solve_settings,
                 update_header_with_solution=False,
             )
+
             if batch_wcs:
                 self.update_progress(
                     f"✅ [Solve] WCS lot {batch_num} obtenu", "INFO_DETAIL"
@@ -5247,10 +5262,11 @@ class SeestarQueuedStacker:
             )
             return None
         finally:
-            try:
-                os.remove(temp_f.name)
-            except Exception:
-                pass
+            if 'temp_fits_path' in locals() and os.path.exists(temp_fits_path):
+                try:
+                    os.remove(temp_fits_path)
+                except Exception:
+                    pass
 
     def _run_astap_and_update_header(self, fits_path: str) -> bool:
         """Solve the provided FITS with ASTAP and update its header in place."""
