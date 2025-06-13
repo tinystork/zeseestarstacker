@@ -1418,22 +1418,102 @@ class SeestarQueuedStacker:
 
 
 
-    def _calculate_final_mosaic_grid_reproject(self, all_input_wcs_list, all_input_headers_list=None):
+    # def _calculate_final_mosaic_grid_reproject(self, all_input_wcs_list, all_input_headers_list=None):
+    #     """Deprecated: kept for reference only."""
+    #     num_wcs = len(all_input_wcs_list)
+    #     if num_wcs == 0:
+    #         return None, None
+    #     valid_wcs = []
+    #     valid_headers = []
+    #     valid_shapes_hw = []
+    #     for i, wcs_in in enumerate(all_input_wcs_list):
+    #         if wcs_in is None or not wcs_in.is_celestial:
+    #             continue
+    #         header = None
+    #         if all_input_headers_list and i < len(all_input_headers_list):
+    #             header = all_input_headers_list[i]
+    #         if wcs_in.pixel_shape is None and header is not None:
+    #             n1 = header.get('NAXIS1')
+    #             n2 = header.get('NAXIS2')
+    #             if n1 and n2:
+    #                 try:
+    #                     wcs_in.pixel_shape = (int(n1), int(n2))
+    #                     try:
+    #                         wcs_in._naxis1 = int(n1)
+    #                         wcs_in._naxis2 = int(n2)
+    #                     except Exception:
+    #                         pass
+    #                 except Exception:
+    #                     pass
+    #         if wcs_in.pixel_shape is None:
+    #             continue
+    #         valid_wcs.append(wcs_in)
+    #         valid_headers.append(header)
+    #         valid_shapes_hw.append((wcs_in.pixel_shape[1], wcs_in.pixel_shape[0]))
+    #     if not valid_wcs:
+    #         return None, None
+    #     from astropy.coordinates import Angle
+    #     from reproject.mosaicking import find_optimal_celestial_wcs
+    #     import numpy as np
+    #     from astropy import units as u
+    #     sum_scales = 0.0
+    #     count_scales = 0
+    #     for w in valid_wcs:
+    #         try:
+    #             if hasattr(w, 'proj_plane_pixel_scales'):
+    #                 sc = w.proj_plane_pixel_scales()
+    #                 val = float(sum(abs(s.to_value(u.deg)) for s in sc)/len(sc))
+    #             elif hasattr(w, 'pixel_scale_matrix'):
+    #                 val = (abs(np.linalg.det(w.pixel_scale_matrix))**0.5)
+    #             else:
+    #                 continue
+    #             if np.isfinite(val) and val > 1e-10:
+    #                 sum_scales += val
+    #                 count_scales += 1
+    #         except Exception:
+    #             pass
+    #     avg_scale = 2.0/3600.0
+    #     if count_scales > 0:
+    #         avg_scale = sum_scales / count_scales
+    #     target = Angle(avg_scale / self.drizzle_scale, unit=u.deg)
+    #     inputs = [(sh, w) for sh, w in zip(valid_shapes_hw, valid_wcs)]
+    #     out_wcs, out_shape = find_optimal_celestial_wcs(inputs, resolution=target, auto_rotate=False, projection='TAN', reference=None, frame='icrs')
+    #     if out_wcs and out_shape:
+    #         expected = (out_shape[1], out_shape[0])
+    #         if out_wcs.pixel_shape is None or out_wcs.pixel_shape != expected:
+    #             try:
+    #                 out_wcs.pixel_shape = expected
+    #             except Exception:
+    #                 pass
+    #         if not (getattr(out_wcs.wcs,'naxis1',0)>0 and getattr(out_wcs.wcs,'naxis2',0)>0):
+    #             try:
+    #                 out_wcs.wcs.naxis1 = expected[0]
+    #                 out_wcs.wcs.naxis2 = expected[1]
+    #             except Exception:
+    #                 pass
+    #     return out_wcs, out_shape
+
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
+        """Calcule une grille WCS finale optimisée pour un cadre portrait fixe."""
         num_wcs = len(all_input_wcs_list)
+        logger.debug(
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Custom Frame): Appel avec {num_wcs} WCS."
+        )
+        self.update_progress(
+            f"\U0001F4D0 Calcul de la grille de sortie personnalisée ({num_wcs} WCS)..."
+        )
+
         if num_wcs == 0:
             return None, None
-        valid_wcs = []
-        valid_headers = []
-        valid_shapes_hw = []
+
+        all_sky_corners_list = []
         for i, wcs_in in enumerate(all_input_wcs_list):
             if wcs_in is None or not wcs_in.is_celestial:
                 continue
-            header = None
-            if all_input_headers_list and i < len(all_input_headers_list):
-                header = all_input_headers_list[i]
-            if wcs_in.pixel_shape is None and header is not None:
-                n1 = header.get('NAXIS1')
-                n2 = header.get('NAXIS2')
+            if wcs_in.pixel_shape is None and all_input_headers_list and i < len(all_input_headers_list):
+                hdr = all_input_headers_list[i]
+                n1 = hdr.get("NAXIS1") if hdr else None
+                n2 = hdr.get("NAXIS2") if hdr else None
                 if n1 and n2:
                     try:
                         wcs_in.pixel_shape = (int(n1), int(n2))
@@ -1444,74 +1524,66 @@ class SeestarQueuedStacker:
                             pass
                     except Exception:
                         pass
-            if wcs_in.pixel_shape is None:
+            if not wcs_in.pixel_shape:
                 continue
-            valid_wcs.append(wcs_in)
-            valid_headers.append(header)
-            valid_shapes_hw.append((wcs_in.pixel_shape[1], wcs_in.pixel_shape[0]))
-        if not valid_wcs:
+            nx, ny = wcs_in.pixel_shape
+            pixel_corners = np.array(
+                [[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64
+            )
+            sky_corners = wcs_in.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
+            all_sky_corners_list.append(sky_corners)
+
+        if not all_sky_corners_list:
             return None, None
-        from astropy.coordinates import Angle
-        from reproject.mosaicking import find_optimal_celestial_wcs
-        import numpy as np
-        from astropy import units as u
-        sum_scales = 0.0
-        count_scales = 0
-        for w in valid_wcs:
-            try:
-                if hasattr(w, 'proj_plane_pixel_scales'):
-                    sc = w.proj_plane_pixel_scales()
-                    val = float(sum(abs(s.to_value(u.deg)) for s in sc)/len(sc))
-                elif hasattr(w, 'pixel_scale_matrix'):
-                    val = (abs(np.linalg.det(w.pixel_scale_matrix))**0.5)
-                else:
-                    continue
-                if np.isfinite(val) and val > 1e-10:
-                    sum_scales += val
-                    count_scales += 1
-            except Exception:
-                pass
-        avg_scale = 2.0/3600.0
-        if count_scales > 0:
-            avg_scale = sum_scales / count_scales
-        target = Angle(avg_scale / self.drizzle_scale, unit=u.deg)
-        inputs = [(sh, w) for sh, w in zip(valid_shapes_hw, valid_wcs)]
-        out_wcs, out_shape = find_optimal_celestial_wcs(inputs, resolution=target, auto_rotate=False, projection='TAN', reference=None, frame='icrs')
-        if out_wcs and out_shape:
-            expected = (out_shape[1], out_shape[0])
-            if out_wcs.pixel_shape is None or out_wcs.pixel_shape != expected:
-                try:
-                    out_wcs.pixel_shape = expected
-                except Exception:
-                    pass
-            if not (getattr(out_wcs.wcs,'naxis1',0)>0 and getattr(out_wcs.wcs,'naxis2',0)>0):
-                try:
-                    out_wcs.wcs.naxis1 = expected[0]
-                    out_wcs.wcs.naxis2 = expected[1]
-                except Exception:
-                    pass
-        return out_wcs, out_shape
 
-    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
-        try:
-            from reproject.mosaicking import find_optimal_celestial_wcs
-            from shapely.geometry import MultiPoint
-        except Exception:
-            return self._calculate_final_mosaic_grid_manual(
-                all_input_wcs_list, all_input_headers_list
-            )
+        all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
 
+        median_ra = np.median(all_corners_flat_skycoord.ra.wrap_at(180 * u.deg).deg)
+        median_dec = np.median(all_corners_flat_skycoord.dec.deg)
+        tangent_point_sky = SkyCoord(
+            ra=median_ra * u.deg, dec=median_dec * u.deg, frame="icrs"
+        )
+
+        tangent_plane_points = self._project_to_tangent_plane(
+            all_corners_flat_skycoord, tangent_point_sky
+        )
+
+        min_x_arcsec = np.min(tangent_plane_points[:, 0])
+        max_x_arcsec = np.max(tangent_plane_points[:, 0])
+        min_y_arcsec = np.min(tangent_plane_points[:, 1])
+        max_y_arcsec = np.max(tangent_plane_points[:, 1])
+
+        content_width_arcsec = max_x_arcsec - min_x_arcsec
+        content_height_arcsec = max_y_arcsec - min_y_arcsec
+
+        # --- DÉBUT DE LA CORRECTION ---
+        target_shape_hw = (1920, 1080)
+        # --- FIN DE LA CORRECTION ---
+        target_height_px, target_width_px = target_shape_hw
+
+        scale_x_arcsec_per_px = content_width_arcsec / target_width_px
+        scale_y_arcsec_per_px = content_height_arcsec / target_height_px
+
+        final_pixel_scale_arcsec = max(scale_x_arcsec_per_px, scale_y_arcsec_per_px)
+        final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
+
+        output_wcs = WCS(naxis=2)
+        output_wcs.wcs.crval = [tangent_point_sky.ra.deg, tangent_point_sky.dec.deg]
+        output_wcs.wcs.crpix = [target_width_px / 2.0 + 0.5, target_height_px / 2.0 + 0.5]
+        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg])
+        output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+        output_wcs.pixel_shape = (target_width_px, target_height_px)
         try:
-            return self._calculate_final_mosaic_grid_reproject(
-                all_input_wcs_list, all_input_headers_list
-            )
-        except Exception as e:
-            logger.debug(
-                f"   -> Fallback manual grid due to error in find_optimal_celestial_wcs: {e}"
-            )
-            return self._calculate_final_mosaic_grid_manual(
-                all_input_wcs_list, all_input_headers_list
-            )
+            output_wcs._naxis1 = target_width_px
+            output_wcs._naxis2 = target_height_px
+        except AttributeError:
+            pass
+
+        logger.debug(
+            f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix."
+        )
+        return output_wcs, target_shape_hw
 ###########################################################################################################################################################
 
     def _recalculate_total_batches(self):
