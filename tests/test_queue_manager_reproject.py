@@ -241,7 +241,8 @@ def test_stack_batch_uses_master_tile_when_all_have_wcs(tmp_path, monkeypatch):
 
     out_img, out_header, cov = obj._stack_batch([item], current_batch_num=1, total_batches_est=1)
 
-    assert called["n"] == 1
+    # In the simplified stacking logic, create_master_tile_simple should not be called
+    assert called["n"] == 0
     assert out_img is not None
     assert cov is not None
 
