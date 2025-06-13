@@ -301,6 +301,69 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             width=12,
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
+        astap_radius_sub = ttk.Frame(self.astap_frame)
+        astap_radius_sub.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            astap_radius_sub,
+            text=self.tr(
+                "astap_search_radius_label",
+                default="ASTAP Search Radius (deg):",
+            ),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        radius_sb = ttk.Spinbox(
+            astap_radius_sub,
+            from_=0.1,
+            to=90.0,
+            increment=0.5,
+            textvariable=self.astap_search_radius_var,
+            width=6,
+            format="%.1f",
+        )
+        radius_sb.pack(side=tk.LEFT)
+        ToolTip(radius_sb, lambda: self.tr("tooltip_astap_search_radius"))
+
+        astap_down_sub = ttk.Frame(self.astap_frame)
+        astap_down_sub.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            astap_down_sub,
+            text=self.tr(
+                "local_solver_astap_downsample_label",
+                default="Downsample:",
+            ),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            astap_down_sub,
+            from_=1,
+            to=8,
+            increment=1,
+            textvariable=self.astap_downsample_var,
+            width=6,
+        ).pack(side=tk.LEFT)
+
+        astap_sens_sub = ttk.Frame(self.astap_frame)
+        astap_sens_sub.pack(fill=tk.X, pady=(2, 5))
+        ttk.Label(
+            astap_sens_sub,
+            text=self.tr(
+                "local_solver_astap_sens_label",
+                default="Sensitivity:",
+            ),
+            width=35,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Spinbox(
+            astap_sens_sub,
+            from_=10,
+            to=1000,
+            increment=5,
+            textvariable=self.astap_sensitivity_var,
+            width=6,
+        ).pack(side=tk.LEFT)
+
         self.astrometry_frame = ttk.LabelFrame(
             main_frame,
             text=self.tr("solver_astrometry", default="Astrometry.net"),
