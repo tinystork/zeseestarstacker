@@ -3498,11 +3498,40 @@ class SeestarQueuedStacker:
                     else:
                         align_method_log_msg = "Astrometry_Single_Fail"
                         wcs_final_pour_retour = None
+                        # --- FALLBACK PAR ALIGNEMENT ASTROALIGN SUR LA RÃFÃRENCE ---
+                        self.update_progress(
+                            f"   ⚠️ Ãchec WCS pour '{file_name}'. Tentative de fallback par alignement...",
+                            "WARN",
+                        )
+                        align_method_log_msg += "_Fallback_Attempt"
+                        aligned_fallback, fa_success = self.aligner._align_image(
+                            image_for_alignment_or_drizzle_input,
+                            reference_image_data_for_alignment,
+                            file_name,
+                        )
+                        if fa_success and aligned_fallback is not None:
+                            align_method_log_msg = "Astrometry_Fail_Fallback_Align_Success"
+                            data_final_pour_retour = aligned_fallback.astype(np.float32)
+                            wcs_final_pour_retour = self.reference_wcs_object
+                            self.update_progress(
+                                f"   -> Fallback rÃ©ussi pour '{file_name}'. Utilisation du WCS de rÃ©fÃ©rence.",
+                                "INFO",
+                            )
+                        else:
+                            align_method_log_msg = "Astrometry_Fail_Fallback_Align_Fail"
+                            self.update_progress(
+                                f"   -> Ãchec du fallback pour '{file_name}'. Image rejetÃ©e.",
+                                "ERROR",
+                            )
+                            raise RuntimeError(
+                                "Ãchec complet du solving et de l'alignement de fallback."
+                            )
                 else:
                     align_method_log_msg = "Astrometry_Single_NoSolver"
                     wcs_final_pour_retour = None
                 matrice_M_calculee = None
-                data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
+                if data_final_pour_retour is None:
+                    data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(np.float32)
             else:
                 align_method_log_msg = "Astroalign_Standard_Attempted"
                 if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
