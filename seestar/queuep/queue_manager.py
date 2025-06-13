@@ -1476,7 +1476,7 @@ class SeestarQueuedStacker:
             avg_scale = sum_scales / count_scales
         target = Angle(avg_scale / self.drizzle_scale, unit=u.deg)
         inputs = [(sh, w) for sh, w in zip(valid_shapes_hw, valid_wcs)]
-        out_wcs, out_shape = find_optimal_celestial_wcs(inputs, resolution=target, auto_rotate=True, projection='TAN', reference=None, frame='icrs')
+        out_wcs, out_shape = find_optimal_celestial_wcs(inputs, resolution=target, auto_rotate=False, projection='TAN', reference=None, frame='icrs')
         if out_wcs and out_shape:
             expected = (out_shape[1], out_shape[0])
             if out_wcs.pixel_shape is None or out_wcs.pixel_shape != expected:
