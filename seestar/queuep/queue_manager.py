@@ -5246,7 +5246,7 @@ class SeestarQueuedStacker:
         return final_sci_image_HWC, final_wht_map_HWC
 
     def _solve_stacked_batch(self, stacked_np, header, batch_num):
-        """Solve a stacked batch image using ASTAP downsample=1."""
+        """Solve a stacked batch image using the configured ASTAP downsample factor."""
         try:
             img_for_solver = stacked_np
             if img_for_solver.ndim == 3:
@@ -5266,7 +5266,7 @@ class SeestarQueuedStacker:
                 "astap_path": self.astap_path,
                 "astap_data_dir": self.astap_data_dir,
                 "astap_search_radius": self.astap_search_radius,
-                "astap_downsample": 1,
+                "astap_downsample": self.astap_downsample,
                 "astap_sensitivity": self.astap_sensitivity,
                 "local_ansvr_path": self.local_ansvr_path,
                 "scale_est_arcsec_per_pix": getattr(
