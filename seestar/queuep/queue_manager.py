@@ -3725,14 +3725,15 @@ class SeestarQueuedStacker:
                 batch_wcs = None
 
             if self.reproject_between_batches:
-                batch_wcs = self._solve_stacked_batch(
-                    stacked_batch_data_np,
-                    stack_info_header,
-                    current_batch_num,
-                )
-                if batch_wcs is None:
+                batch_wcs = batch_items_to_stack[0][3] if batch_items_to_stack else None
+                if batch_wcs is None or not getattr(batch_wcs, "is_celestial", False):
+                    self.update_progress(
+                        f"   -> Erreur interne : WCS du lot invalide même après vérification dans _stack_batch. Lot #{current_batch_num} ignoré.",
+                        "ERROR",
+                    )
                     return
-            else:
+
+            if not self.reproject_between_batches:
                 try:
                     temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                     temp_f.close()
@@ -5266,84 +5267,69 @@ class SeestarQueuedStacker:
         logger.debug("="*70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
-    def _solve_stacked_batch(self, stacked_batch_data_np, stack_info_header, current_batch_num):
-        """Solve a stacked batch image using dedicated solver settings."""
-        if stacked_batch_data_np is None:
-            return None
-
-        temp_fits_path = None
+    def _solve_stacked_batch(self, stacked_np, header, batch_num):
+        """Solve a stacked batch image using ASTAP downsample=1."""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as temp_f:
-                temp_fits_path = temp_f.name
-
-            if stacked_batch_data_np.ndim == 3:
-                luminance_data = (
-                    stacked_batch_data_np[..., 0].astype(np.float32) * 0.299
-                    + stacked_batch_data_np[..., 1].astype(np.float32) * 0.587
-                    + stacked_batch_data_np[..., 2].astype(np.float32) * 0.114
-                )
-            else:
-                luminance_data = stacked_batch_data_np.astype(np.float32)
-
-            fits.writeto(
-                temp_fits_path,
-                luminance_data,
-                header=stack_info_header,
-                overwrite=True,
-                output_verify="ignore",
+            img_for_solver = stacked_np
+            if img_for_solver.ndim == 3:
+                img_for_solver = (
+                    img_for_solver[..., 0] * 0.299
+                    + img_for_solver[..., 1] * 0.587
+                    + img_for_solver[..., 2] * 0.114
+                ).astype(np.float32)
+            temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+            temp_f.close()
+            fits.PrimaryHDU(data=img_for_solver, header=header).writeto(
+                temp_f.name, overwrite=True
             )
-
-            solver_settings_for_batch = {
+            solver_settings = {
                 "local_solver_preference": self.local_solver_preference,
                 "api_key": self.api_key,
                 "astap_path": self.astap_path,
                 "astap_data_dir": self.astap_data_dir,
                 "astap_search_radius": self.astap_search_radius,
+                "astap_downsample": 1,
+                "astap_sensitivity": self.astap_sensitivity,
                 "local_ansvr_path": self.local_ansvr_path,
-                "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
+                "scale_est_arcsec_per_pix": getattr(
+                    self, "reference_pixel_scale_arcsec", None
+                ),
                 "scale_tolerance_percent": 20,
-                "use_radec_hints": getattr(self, "use_radec_hints", False),
                 "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
                 "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
-                "astap_downsample": 1,
-                "astap_sensitivity": 100,
+                "astrometry_net_timeout_sec": getattr(
+                    self, "astrometry_net_timeout_sec", 300
+                ),
+                "use_radec_hints": getattr(self, "use_radec_hints", False),
             }
-
             self.update_progress(
-                f"🔭 [Solve Batch] Résolution WCS du lot #{current_batch_num} (downsample=1)..."
+                f"🔭 [Solve] Résolution WCS du lot {batch_num}", "INFO_DETAIL"
             )
-            wcs_solution = self.astrometry_solver.solve(
-                temp_fits_path,
-                stack_info_header,
-                solver_settings_for_batch,
+            batch_wcs = solve_image_wcs(
+                temp_f.name,
+                header,
+                solver_settings,
                 update_header_with_solution=False,
             )
-
-            if wcs_solution:
-                self.update_progress(f"✅ [Solve Batch] WCS du lot #{current_batch_num} obtenu.")
+            if batch_wcs:
+                self.update_progress(
+                    f"✅ [Solve] WCS lot {batch_num} obtenu", "INFO_DETAIL"
+                )
             else:
                 self.update_progress(
-                    f"⚠️ [Solve Batch] Échec résolution WCS du lot #{current_batch_num}.",
-                    "WARN",
+                    f"⚠️ [Solve] Échec WCS lot {batch_num}", "WARN"
                 )
-            return wcs_solution
-
-        except Exception as e_solve_batch:
-            logger.error(f"Erreur dans _solve_stacked_batch: {e_solve_batch}", exc_info=True)
+            return batch_wcs
+        except Exception as e:
             self.update_progress(
-                f"❌ Erreur critique lors de la résolution du lot : {e_solve_batch}",
-                "ERROR",
+                f"⚠️ [Solve] Échec WCS lot {batch_num}: {e}", "WARN"
             )
             return None
         finally:
-            if temp_fits_path and os.path.exists(temp_fits_path):
-                try:
-                    os.remove(temp_fits_path)
-                except Exception as e_clean:
-                    logger.warning(
-                        f"Impossible de supprimer le fichier FITS temporaire du lot: {e_clean}"
-                    )
+            try:
+                os.remove(temp_f.name)
+            except Exception:
+                pass
 
     def _run_astap_and_update_header(self, fits_path: str) -> bool:
         """Solve the provided FITS with ASTAP and update its header in place."""
