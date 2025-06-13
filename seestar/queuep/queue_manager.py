@@ -3694,99 +3694,31 @@ class SeestarQueuedStacker:
                 f"Shape carte couverture lot: {batch_coverage_map_2d.shape}"
             )
 
+            # --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
             batch_wcs = None
-            try:
-                hdr_wcs = WCS(stack_info_header, naxis=2)
-                if hdr_wcs.is_celestial:
-                    batch_wcs = hdr_wcs
-            except Exception:
-                batch_wcs = None
 
             if self.reproject_between_batches:
-                batch_wcs = batch_items_to_stack[0][3] if batch_items_to_stack else None
-                if batch_wcs is None or not getattr(batch_wcs, "is_celestial", False):
-                    self.update_progress(
-                        f"   -> Erreur interne : WCS du lot invalide même après vérification dans _stack_batch. Lot #{current_batch_num} ignoré.",
-                        "ERROR",
-                    )
-                    return
+                batch_wcs = self._solve_stacked_batch(
+                    stacked_batch_data_np, stack_info_header, current_batch_num
+                )
 
-            if not self.reproject_between_batches:
-                try:
-                    temp_f = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-                    temp_f.close()
-                    img_for_solver = stacked_batch_data_np
-                    if img_for_solver.ndim == 3:
-                        img_for_solver = img_for_solver[..., 0]
-                    fits.writeto(
-                        temp_f.name,
-                        img_for_solver.astype(np.float32),
-                        header=stack_info_header,
-                        overwrite=True,
-                    )
-                    solver_settings = {
-                        "local_solver_preference": self.local_solver_preference,
-                        "api_key": self.api_key,
-                        "astap_path": self.astap_path,
-                        "astap_data_dir": self.astap_data_dir,
-                        "astap_search_radius": self.astap_search_radius,
-                        "astap_downsample": self.astap_downsample,
-                        "astap_sensitivity": self.astap_sensitivity,
-                        "local_ansvr_path": self.local_ansvr_path,
-                        "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
-                        "scale_tolerance_percent": 20,
-                        "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
-                        "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                        "astrometry_net_timeout_sec": getattr(self, "astrometry_net_timeout_sec", 300),
-                        "use_radec_hints": getattr(self, "use_radec_hints", False),
-                    }
-                    self.update_progress(
-                        f"🔭 [Solve] Résolution WCS du lot {current_batch_num}",
-                        "INFO_DETAIL",
-                    )
-                    batch_wcs = solve_image_wcs(
-                        temp_f.name,
-                        stack_info_header,
-                        solver_settings,
-                        update_header_with_solution=False,
-                    )
-                    if batch_wcs:
-                        self.update_progress(
-                            f"✅ [Solve] WCS lot {current_batch_num} obtenu",
-                            "INFO_DETAIL",
-                        )
-                    else:
-                        self.update_progress(
-                            f"⚠️ [Solve] Échec WCS lot {current_batch_num}",
-                            "WARN",
-                        )
-                except Exception as e_solve_batch:
-                    logger.debug(f"[InterBatchSolve] Solve failed: {e_solve_batch}")
-                    self.update_progress(
-                        f"⚠️ [Solve] Échec WCS lot {current_batch_num}: {e_solve_batch}",
-                        "WARN",
-                    )
-                    batch_wcs = None
-                finally:
-                    try:
-                        os.remove(temp_f.name)
-                    except Exception:
-                        pass
-
-            if self.reproject_between_batches:
                 if batch_wcs is None or not batch_wcs.is_celestial:
                     self.update_progress(
-                        f"   -> Lot #{current_batch_num} ignoré (pas de WCS valide).",
+                        f"   -> Lot #{current_batch_num} ignoré (le WCS du lot empilé n'a pas pu être résolu).",
                         "WARN",
                     )
                     logger.warning(
-                        f"Reprojection : WCS manquant pour le lot {current_batch_num}, lot ignoré."
+                        f"Reprojection : WCS manquant ou invalide pour le lot empilé {current_batch_num}, lot ignoré."
                     )
                     return
 
                 if self.master_sum is None:
-                    logger.debug("   -> Initialisation des canevas maîtres (vides) pour la reprojection.")
-                    self.update_progress("   -> Initialisation de la grille de reprojection globale...")
+                    logger.debug(
+                        "   -> Initialisation des canevas maîtres (vides) pour la reprojection."
+                    )
+                    self.update_progress(
+                        "   -> Initialisation de la grille de reprojection globale..."
+                    )
 
                     if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
                         self.update_progress(
@@ -3823,7 +3755,18 @@ class SeestarQueuedStacker:
                 self._update_preview_master()
                 gc.collect()
                 return
+
             else:
+                try:
+                    batch_wcs = self._solve_stacked_batch(
+                        stacked_batch_data_np, stack_info_header, current_batch_num
+                    )
+                except Exception as e_solve_batch:
+                    logger.debug(
+                        f"[ClassicStackSolve] Le solving du lot a échoué (non bloquant): {e_solve_batch}"
+                    )
+                    batch_wcs = None
+
                 logger.debug(
                     f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}..."
                 )
