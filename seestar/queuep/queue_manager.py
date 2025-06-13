@@ -3622,180 +3622,99 @@ class SeestarQueuedStacker:
 
 
     def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est, reference_wcs_for_reprojection):
+        """Traite un lot d'images complété.
 
+        - Si ``reproject_between_batches`` est vrai, chaque image du lot est
+          re-projetée individuellement vers la grille maître.
+        - Sinon, le lot est empilé classiquement puis combiné aux memmaps.
         """
-        [MODE CLASSIQUE - SUM/W] Traite un lot d'images complété pour l'empilement classique.
-        Cette méthode est appelée par _worker lorsque current_batch_items_with_masks_for_stack_batch
-        atteint la taille self.batch_size (ou pour le dernier lot partiel).
 
-        Elle appelle _stack_batch pour obtenir l'image moyenne du lot et sa carte de couverture,
-        puis appelle _combine_batch_result pour accumuler ces résultats dans les memmaps globaux.
-
-        Args:
-            batch_items_to_stack (list): Liste des items du lot à traiter.
-                                         Chaque item est un tuple:
-                                         (aligned_data_HWC_or_HW, header_orig, scores_dict,
-                                          wcs_generated_obj, valid_pixel_mask_2d_HW_bool).
-            current_batch_num (int): Le numéro séquentiel de ce lot.
-
-            total_batches_est (int): Le nombre total de lots estimé pour la session.
-            reference_wcs_for_reprojection (WCS): Objet WCS global utilisé pour la reprojection.
-
-        """
-        # Log d'entrée de la méthode avec les informations sur le lot
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
         logger.debug(
-            f"DEBUG QM [_process_completed_batch]: Début pour lot CLASSIQUE #{current_batch_num} "
-            f"avec {num_items_in_this_batch} items."
+            f"DEBUG QM [_process_completed_batch]: Début pour lot #{current_batch_num} "
+            f"avec {num_items_in_this_batch} items. Mode Reproject: {self.reproject_between_batches}"
         )
 
-        # Vérification si le lot est vide (ne devrait pas arriver si _worker gère bien)
-        if not batch_items_to_stack: # batch_items_to_stack est maintenant un paramètre défini
-            self.update_progress(f"⚠️ Tentative de traiter un lot vide (Lot #{current_batch_num}) "
-                                 "dans _process_completed_batch. Ignoré.", None)
-            logger.debug("DEBUG QM [_process_completed_batch]: Sortie précoce (lot vide reçu).")
+        if not batch_items_to_stack:
+            self.update_progress(f"⚠️ Tentative de traiter un lot vide (Lot #{current_batch_num}). Ignoré.", None)
             return
 
-        # Informations pour les messages de progression
-        batch_size_actual_for_log = len(batch_items_to_stack)
-        progress_info_log = (f"(Lot {current_batch_num}/"
-                             f"{total_batches_est if total_batches_est > 0 else '?'})")
+        progress_info_log = (f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})")
 
         if self.reproject_between_batches:
             self.update_progress(
-                f"⚙️ Traitement reprojection du batch {progress_info_log} "
-                f"({batch_size_actual_for_log} images)..."
-            )
-        else:
-            self.update_progress(
-                f"⚙️ Traitement classique du batch {progress_info_log} "
-                f"({batch_size_actual_for_log} images)..."
+                f"⚙️ Reprojection du lot {progress_info_log} ({num_items_in_this_batch} images)..."
             )
 
-        # --- Appel à _stack_batch ---
-        # _stack_batch attend :
-        #   (self, batch_items_with_masks, current_batch_num=0, total_batches_est=0)
-        # Il retourne :
-        #   (stacked_image_np, stack_info_header, batch_coverage_map_2d)
-
-        logger.debug(f"DEBUG QM [_process_completed_batch]: Appel à _stack_batch pour lot #{current_batch_num}...")
-        stacked_batch_data_np, stack_info_header, batch_coverage_map_2d = self._stack_batch(
-            batch_items_to_stack, # La liste complète des items pour ce lot
-            current_batch_num,
-            total_batches_est
-        )
-
-        # Vérifier le résultat de _stack_batch
-
-        if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
-            logger.debug(
-                f"DEBUG QM [_process_completed_batch]: _stack_batch pour lot #{current_batch_num} réussi. "
-                f"Shape image lot: {stacked_batch_data_np.shape}, "
-                f"Shape carte couverture lot: {batch_coverage_map_2d.shape}"
-            )
-
-            # --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
-            batch_wcs = None
-
-            if self.reproject_between_batches:
-                batch_wcs = self._solve_stacked_batch(
-                    stacked_batch_data_np, stack_info_header, current_batch_num
-                )
-
-                if batch_wcs is None or not batch_wcs.is_celestial:
-                    self.update_progress(
-                        f"   -> Lot #{current_batch_num} ignoré (le WCS du lot empilé n'a pas pu être résolu).",
-                        "WARN",
-                    )
-                    logger.warning(
-                        f"Reprojection : WCS manquant ou invalide pour le lot empilé {current_batch_num}, lot ignoré."
-                    )
+            if self.master_sum is None:
+                logger.debug("   -> Initialisation des canevas maîtres pour la reprojection.")
+                self.update_progress("   -> Initialisation de la grille de reprojection globale...")
+                if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
+                    self.update_progress("   -> ERREUR: WCS de référence globale manquant.", "ERROR")
+                    self.processing_error = "WCS de référence manquant pour reprojection."
+                    self.stop_processing = True
                     return
-
-                if self.master_sum is None:
-                    logger.debug(
-                        "   -> Initialisation des canevas maîtres (vides) pour la reprojection."
-                    )
-                    self.update_progress(
-                        "   -> Initialisation de la grille de reprojection globale..."
-                    )
-
-                    if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
-                        self.update_progress(
-                            "   -> ERREUR: WCS de référence globale non disponible pour créer la grille.",
-                            "ERROR",
-                        )
-                        self.processing_error = "WCS de référence manquant pour reprojection."
-                        self.stop_processing = True
-                        return
-
-                    target_shape_hw = (
-                        reference_wcs_for_reprojection.pixel_shape[1],
-                        reference_wcs_for_reprojection.pixel_shape[0],
-                    )
-
-                    self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
-                    self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
-
-                logger.debug(
-                    f"   -> Combinaison du lot #{current_batch_num} avec le master_sum."
+                target_shape_hw = (
+                    reference_wcs_for_reprojection.pixel_shape[1],
+                    reference_wcs_for_reprojection.pixel_shape[0],
                 )
+                self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
+                self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
+
+            for item_tuple in batch_items_to_stack:
+                image_data, _header, _scores, image_wcs, _mask = item_tuple
+
+                if image_data is None or image_wcs is None or not image_wcs.is_celestial:
+                    self.update_progress(f"   -> Image du lot ignorée (données ou WCS invalide).", "WARN")
+                    continue
+
+                coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
+
                 self.master_sum, self.master_coverage = reproject_and_combine(
                     self.master_sum,
                     self.master_coverage,
-                    stacked_batch_data_np,
-                    batch_coverage_map_2d,
-                    batch_wcs,
+                    image_data,
+                    coverage_map,
+                    image_wcs,
                     reference_wcs_for_reprojection,
                 )
+                self.images_in_cumulative_stack += 1
 
-                num_images_in_batch = len(batch_items_to_stack)
-                self.images_in_cumulative_stack += num_images_in_batch
-                self.current_stack_header = stack_info_header
-                self._update_preview_master()
-                gc.collect()
-                return
+            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images reprojected')
+            self._update_preview_master()
+            gc.collect()
+            return
 
-            else:
-                try:
-                    batch_wcs = self._solve_stacked_batch(
-                        stacked_batch_data_np, stack_info_header, current_batch_num
-                    )
-                except Exception as e_solve_batch:
-                    logger.debug(
-                        f"[ClassicStackSolve] Le solving du lot a échoué (non bloquant): {e_solve_batch}"
-                    )
-                    batch_wcs = None
+        # --- LOGIQUE EXISTANTE POUR LE MODE CLASSIQUE (NON-REPROJECTION) ---
+        self.update_progress(
+            f"⚙️ Traitement classique du batch {progress_info_log} ({num_items_in_this_batch} images)..."
+        )
+        stacked_batch_data_np, stack_info_header, batch_coverage_map_2d = self._stack_batch(
+            batch_items_to_stack, current_batch_num, total_batches_est
+        )
 
-                logger.debug(
-                    f"DEBUG QM [_process_completed_batch]: Appel à _combine_batch_result pour lot #{current_batch_num}..."
-                )
-                self._combine_batch_result(
-                    stacked_batch_data_np,
-                    stack_info_header,
-                    batch_coverage_map_2d,
-                    batch_wcs,
-                )
+        if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
+            batch_wcs = None
+            try:
+                batch_wcs = WCS(stack_info_header, naxis=2) if stack_info_header else None
+            except Exception:
+                pass
 
-                if not self.drizzle_active_session:
-                    logger.debug(
-                        "DEBUG QM [_process_completed_batch]: Appel à _update_preview_sum_w après accumulation lot classique..."
-                    )
-                    self._update_preview_sum_w()
-
-            
-        else: # _stack_batch a échoué ou n'a rien retourné de valide
-            # Le nombre d'images du lot qui a échoué à l'étape _stack_batch
+            self._combine_batch_result(
+                stacked_batch_data_np, stack_info_header, batch_coverage_map_2d, batch_wcs
+            )
+            if not self.drizzle_active_session:
+                self._update_preview_sum_w()
+        else:
             num_failed_in_stack_batch = len(batch_items_to_stack)
             self.failed_stack_count += num_failed_in_stack_batch
-            self.update_progress(f"❌ Échec combinaison (dans _stack_batch) du lot {progress_info_log}. "
-                                 f"{num_failed_in_stack_batch} images ignorées pour accumulation.", None)
-            logger.debug(f"ERREUR QM [_process_completed_batch]: _stack_batch a échoué pour lot #{current_batch_num}.")
+            self.update_progress(
+                f"❌ Échec combinaison du lot {progress_info_log}. {num_failed_in_stack_batch} images ignorées.",
+                None,
+            )
 
-        # Le nettoyage de current_batch_items_with_masks_for_stack_batch se fait dans _worker
-        # après l'appel à cette fonction.
-        gc.collect() # Forcer un garbage collect après avoir traité un lot
-        logger.debug(f"DEBUG QM [_process_completed_batch]: Fin pour lot CLASSIQUE #{current_batch_num}.")
+        gc.collect()
+        logger.debug(f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}.")
 
 
 
@@ -5188,85 +5107,6 @@ class SeestarQueuedStacker:
         logger.debug("="*70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
-    def _solve_stacked_batch(self, stacked_np, header, batch_num):
-        """Solve a stacked batch image using the configured ASTAP downsample factor.
-        MODIFIED: Use specific, more sensitive ASTAP settings for clean stacked images."""
-        try:
-            img_for_solver = stacked_np
-            if img_for_solver.ndim == 3:
-                img_for_solver = (
-                    img_for_solver[..., 0] * 0.299
-                    + img_for_solver[..., 1] * 0.587
-                    + img_for_solver[..., 2] * 0.114
-                ).astype(np.float32)
-
-            with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as tmp:
-                temp_fits_path = tmp.name
-
-            fits.PrimaryHDU(data=img_for_solver, header=header).writeto(
-                temp_fits_path, overwrite=True
-            )
-
-            solver_settings = {
-                "local_solver_preference": self.local_solver_preference,
-                "api_key": self.api_key,
-                "astap_path": self.astap_path,
-                "astap_data_dir": self.astap_data_dir,
-                "astap_search_radius": self.astap_search_radius,
-                "astap_downsample": self.astap_downsample,
-                "astap_sensitivity": self.astap_sensitivity,
-                "local_ansvr_path": self.local_ansvr_path,
-                "scale_est_arcsec_per_pix": getattr(
-                    self, "reference_pixel_scale_arcsec", None
-                ),
-                "scale_tolerance_percent": 20,
-                "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
-                "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                "astrometry_net_timeout_sec": getattr(
-                    self, "astrometry_net_timeout_sec", 300
-                ),
-                "use_radec_hints": getattr(self, "use_radec_hints", False),
-            }
-
-            batch_solve_settings = solver_settings.copy()
-            batch_solve_settings["astap_downsample"] = 0
-            batch_solve_settings["astap_sensitivity"] = 500
-
-            self.update_progress(
-                f"   [Solve] Utilisation de paramètres ASTAP sensibles pour le lot #{batch_num} (downsample=0, sensitivity=500)",
-                "INFO_DETAIL",
-            )
-            self.update_progress(
-                f"🔭 [Solve] Résolution WCS du lot {batch_num}", "INFO_DETAIL"
-            )
-
-            batch_wcs = solve_image_wcs(
-                temp_fits_path,
-                header,
-                batch_solve_settings,
-                update_header_with_solution=False,
-            )
-
-            if batch_wcs:
-                self.update_progress(
-                    f"✅ [Solve] WCS lot {batch_num} obtenu", "INFO_DETAIL"
-                )
-            else:
-                self.update_progress(
-                    f"⚠️ [Solve] Échec WCS lot {batch_num}", "WARN"
-                )
-            return batch_wcs
-        except Exception as e:
-            self.update_progress(
-                f"⚠️ [Solve] Échec WCS lot {batch_num}: {e}", "WARN"
-            )
-            return None
-        finally:
-            if 'temp_fits_path' in locals() and os.path.exists(temp_fits_path):
-                try:
-                    os.remove(temp_fits_path)
-                except Exception:
-                    pass
 
     def _run_astap_and_update_header(self, fits_path: str) -> bool:
         """Solve the provided FITS with ASTAP and update its header in place."""
