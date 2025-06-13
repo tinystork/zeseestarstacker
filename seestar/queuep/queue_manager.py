@@ -3696,28 +3696,13 @@ class SeestarQueuedStacker:
                 batch_wcs = None
 
             if self.reproject_between_batches:
-                # --- NEW LOGIC: use the WCS from the first image of the batch ---
-                self.update_progress(
-                    f"🔭 [Solve Batch] Résolution WCS du lot #{current_batch_num} (via première image)..."
-                )
-                if batch_items_to_stack and len(batch_items_to_stack[0]) >= 4:
-                    candidate_wcs = batch_items_to_stack[0][3]
-                    if candidate_wcs and getattr(candidate_wcs, "is_celestial", False):
-                        batch_wcs = candidate_wcs
-
-                if batch_wcs is None:
+                batch_wcs = batch_items_to_stack[0][3] if batch_items_to_stack else None
+                if batch_wcs is None or not getattr(batch_wcs, "is_celestial", False):
                     self.update_progress(
-                        f"   -> Lot #{current_batch_num} ignoré (pas de WCS valide trouvé pour la première image du lot).",
-                        "WARN",
-                    )
-                    logger.warning(
-                        f"Reprojection : WCS manquant pour le lot {current_batch_num}, lot ignoré."
+                        f"   -> Erreur interne : WCS du lot invalide même après vérification dans _stack_batch. Lot #{current_batch_num} ignoré.",
+                        "ERROR",
                     )
                     return
-
-                self.update_progress(
-                    f"✅ [Solve Batch] WCS du lot #{current_batch_num} obtenu (depuis première image)."
-                )
 
             if not self.reproject_between_batches:
                 try:
@@ -4927,10 +4912,11 @@ class SeestarQueuedStacker:
         # Un item est valide si image, header, scores, et valid_pixel_mask sont non None
         # et si la shape de l'image est cohérente.
         
-        valid_images_for_ccdproc = [] # Liste des arrays image (HWC ou HW)
+        valid_images_for_ccdproc = []  # Liste des arrays image (HWC ou HW)
         valid_headers_for_ccdproc = []
         valid_scores_for_quality_weights = []
-        valid_pixel_masks_for_coverage = [] # Liste des masques 2D (HW bool)
+        valid_pixel_masks_for_coverage = []  # Liste des masques 2D (HW bool)
+        valid_wcs_objs_for_ccdproc = []
 
         ref_shape_check = None # Shape de la première image valide (HWC ou HW)
         is_color_batch = False # Sera déterminé par la première image valide
@@ -4940,7 +4926,7 @@ class SeestarQueuedStacker:
                 self.update_progress(f"   -> Item {idx+1} du lot {current_batch_num} ignoré (format de tuple incorrect).")
                 continue
 
-            img_np, hdr, score, _wcs_obj, mask_2d = item_tuple # Déballer
+            img_np, hdr, score, _wcs_obj, mask_2d = item_tuple  # Déballer
 
             if img_np is None or hdr is None or score is None or mask_2d is None:
                 self.update_progress(f"   -> Item {idx+1} (img/hdr/score/mask None) du lot {current_batch_num} ignoré.")
@@ -4966,6 +4952,7 @@ class SeestarQueuedStacker:
                 valid_headers_for_ccdproc.append(hdr)
                 valid_scores_for_quality_weights.append(score)
                 valid_pixel_masks_for_coverage.append(mask_2d)
+                valid_wcs_objs_for_ccdproc.append(_wcs_obj)
             else:
                 self.update_progress(f"   -> Item {idx+1} du lot {current_batch_num} ignoré (shape image {img_np.shape} ou masque {mask_2d.shape} incompatible avec réf {ref_shape_check}).")
 
@@ -4975,6 +4962,22 @@ class SeestarQueuedStacker:
         if num_valid_images_for_processing == 0:
             self.update_progress(f"❌ Aucune image valide trouvée dans le lot {current_batch_num} après filtrage. Lot ignoré.")
             return None, None, None
+
+        # --- NOUVELLE VÉRIFICATION STRICTE POUR LA REPROJECTION ---
+        if self.reproject_between_batches:
+            all_have_wcs = all(
+                wcs is not None and getattr(wcs, "is_celestial", False)
+                for wcs in valid_wcs_objs_for_ccdproc
+            )
+            if not all_have_wcs:
+                self.update_progress(
+                    f"❌ Lot #{current_batch_num} annulé : WCS manquant sur au moins une image (requis pour reprojection).",
+                    "ERROR",
+                )
+                logger.error(
+                    f"Stacking Batch (Reproject Mode): Lot #{current_batch_num} a des images sans WCS valide. Annulation du lot."
+                )
+                return None, None, None
         
         # La shape 2D pour la carte de couverture (H, W)
         shape_2d_for_coverage_map = ref_shape_check[:2] if is_color_batch else ref_shape_check
@@ -5009,7 +5012,7 @@ class SeestarQueuedStacker:
         for i in range(num_valid_images_for_processing):
             img_np = valid_images_for_ccdproc[i].astype(np.float32)
             hdr = valid_headers_for_ccdproc[i]
-            wcs_obj = batch_items_with_masks[i][3]
+            wcs_obj = valid_wcs_objs_for_ccdproc[i]
             cache_path = os.path.join(temp_cache_dir, f"img_{i:03d}.npy")
             try:
                 np.save(cache_path, img_np)
