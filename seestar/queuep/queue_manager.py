@@ -1998,7 +1998,22 @@ class SeestarQueuedStacker:
                      nx_ref_hdr = self.reference_header_for_wcs.get('NAXIS1', reference_image_data_for_global_alignment.shape[1])
                      ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', reference_image_data_for_global_alignment.shape[0])
                      self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
-                
+
+                # --- DÉBUT DE LA NOUVELLE SOLUTION ---
+                # Forcer le WCS de référence à ne pas comporter de rotation
+                try:
+                    logger.debug("   [StartProcRefSolve] Forçage de l'alignement Nord/Sud du WCS de référence...")
+                    scales_deg = proj_plane_pixel_scales(self.reference_wcs_object)
+                    avg_scale_deg = np.mean(np.abs(scales_deg))
+                    new_cd = np.array([[-avg_scale_deg, 0.0], [0.0, avg_scale_deg]])
+                    self.reference_wcs_object.wcs.cd = new_cd
+                    self.reference_wcs_object.wcs.pc = np.array([[1.0, 0.0], [0.0, 1.0]])
+                    self.update_progress("   [StartProcRefSolve] WCS de référence aligné sur les axes Nord/Sud.", "INFO")
+                    logger.debug(f"   [StartProcRefSolve] Nouveau WCS de référence 'droit':\n{self.reference_wcs_object.wcs}")
+                except Exception as e_derotate:
+                    self.update_progress(f"   [StartProcRefSolve] Avertissement: Échec de la dé-rotation du WCS de référence: {e_derotate}", "WARN")
+                # --- FIN DE LA NOUVELLE SOLUTION ---
+
                 if hasattr(self.reference_wcs_object, 'pixel_scale_matrix'): # Mettre à jour l'échelle globale
                     try: self.reference_pixel_scale_arcsec = np.sqrt(np.abs(np.linalg.det(self.reference_wcs_object.pixel_scale_matrix))) * 3600.0
                     except: pass
@@ -6466,6 +6481,21 @@ class SeestarQueuedStacker:
                          ny_ref_hdr = self.reference_header_for_wcs.get('NAXIS2', ref_shape_hwc[0])
                          self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
                          logger.debug(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
+
+                    # --- DÉBUT DE LA NOUVELLE SOLUTION ---
+                    # Forcer un WCS de référence sans rotation pour une grille « droite »
+                    try:
+                        logger.debug("   [StartProcRefSolve] Forçage de l'alignement Nord/Sud du WCS de référence...")
+                        scales_deg = proj_plane_pixel_scales(self.reference_wcs_object)
+                        avg_scale_deg = np.mean(np.abs(scales_deg))
+                        new_cd = np.array([[-avg_scale_deg, 0.0], [0.0, avg_scale_deg]])
+                        self.reference_wcs_object.wcs.cd = new_cd
+                        self.reference_wcs_object.wcs.pc = np.array([[1.0, 0.0], [0.0, 1.0]])
+                        self.update_progress("   [StartProcRefSolve] WCS de référence aligné sur les axes Nord/Sud.", "INFO")
+                        logger.debug(f"   [StartProcRefSolve] Nouveau WCS de référence 'droit':\n{self.reference_wcs_object.wcs}")
+                    except Exception as e_derotate:
+                        self.update_progress(f"   [StartProcRefSolve] Avertissement: Échec de la dé-rotation du WCS de référence: {e_derotate}", "WARN")
+                    # --- FIN DE LA NOUVELLE SOLUTION ---
 
                     try:
                         scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
