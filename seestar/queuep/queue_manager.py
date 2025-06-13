@@ -3661,6 +3661,19 @@ class SeestarQueuedStacker:
                 self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
                 self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
 
+                # --- Initialisation du header du stack pour le mode reprojection ---
+                self.current_stack_header = fits.Header()
+                if self.reference_header_for_wcs:
+                    keys_to_copy = ["OBJECT", "INSTRUME", "TELESCOP", "DATE-OBS", "FILTER"]
+                    for key in keys_to_copy:
+                        if key in self.reference_header_for_wcs:
+                            self.current_stack_header[key] = self.reference_header_for_wcs[key]
+                self.current_stack_header["STACKTYP"] = (
+                    "Classic Reproject",
+                    "Incremental Reprojection Stacking",
+                )
+                self.current_stack_header["HISTORY"] = "Reprojection stack initialized"
+
             for item_tuple in batch_items_to_stack:
                 image_data, _header, _scores, image_wcs, _mask = item_tuple
 
