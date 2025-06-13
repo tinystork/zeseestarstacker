@@ -227,6 +227,7 @@ class SeestarStackerGUI:
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
+        self.initial_auto_stretch_done = False
 
         if stack_immediately_from and isinstance(stack_immediately_from, str) and os.path.isdir(stack_immediately_from):
             self.logger.info(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}")
@@ -2320,141 +2321,50 @@ class SeestarStackerGUI:
     # DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py
 
     def update_preview_from_stacker(self, stack_data, stack_header, stack_name, img_count, total_imgs, current_batch, total_batches):
+        """Callback function triggered by the backend worker.
+        MODIFIED: Performs auto-stretch/WB ONLY ONCE at the beginning of a session.
         """
-        Callback function triggered by the backend worker.
-        MODIFIED: Ajout de la vérification du verrou _final_stretch_set_by_processing_finished au début
-                pour empêcher la planification de nouveaux auto-ajustements si le traitement est en finalisation.
-        Version: V_CheckLock_Early_1
-        """
-        self.logger.debug(f"[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Called.")
+        self.logger.debug("[DEBUG-GUI] update_preview_from_stacker: Called.")
 
-        # --- AJOUT : Vérifier le verrou TÔT ---
-        # Si _processing_finished a déjà activé son verrou, cela signifie que le traitement est en train de se terminer
-        # ou est terminé. Dans ce cas, update_preview_from_stacker (appelé par le backend qui finit ses tâches)
-        # doit seulement mettre à jour les données et rafraîchir, SANS replanifier d'auto-stretch/WB qui
-        # écraseraient l'état final mis en place par _processing_finished.
-        if hasattr(self, '_final_stretch_set_by_processing_finished') and self._final_stretch_set_by_processing_finished:
-            self.logger.info("  [PF_StackerCB V_CheckLock_Early_1] VERROU FINAL ACTIF. update_preview_from_stacker va seulement mettre à jour les données et rafraîchir l'aperçu sans planifier d'auto-ajustements.")
-            
+        if self._final_stretch_set_by_processing_finished:
+            self.logger.info("  [update_preview] Verrou final actif. Mise à jour des données uniquement.")
             if stack_data is not None:
-                # Mettre à jour les données de l'aperçu
                 self.current_preview_data = stack_data.copy()
                 self.current_stack_header = stack_header.copy() if stack_header else None
-                self.preview_img_count = img_count
-                self.preview_total_imgs = total_imgs
-                self.preview_current_batch = current_batch
-                self.preview_total_batches = total_batches
-                
-                self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Données mises à jour. Appel refresh_preview (recalculate_histogram=True).")
-                # On peut recalculer l'histogramme ici car c'est une mise à jour PENDANT les dernières étapes
-                # et _processing_finished refera un refresh final avec son propre calcul d'histogramme.
-                self.refresh_preview(recalculate_histogram=True) 
-                
-                if self.current_stack_header:
-                    try:
-                        self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
-                    except tk.TclError: 
-                        self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de update_image_info (fenêtre possiblement détruite).")
-            else:
-                self.logger.info("  [PF_StackerCB V_CheckLock_Early_1] Reçu stack_data None alors que le verrou final est actif. Pas de mise à jour de l'aperçu.")
-            
-            self.logger.debug("[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Sortie anticipée car verrou final actif.")
-            return # NE PAS planifier de nouveaux after si le verrou final est posé
-        # --- FIN AJOUT ---
-
-        # Si on arrive ici, c'est que _final_stretch_set_by_processing_finished est False (traitement en cours normalement)
-        if stack_data is None:
-            self.logger.info("[DEBUG-GUI] update_preview_from_stacker: Received None stack_data (et verrou final non actif). Skipping visual update.")
-            if stack_header and hasattr(self, 'current_stack_header'):
-                self.current_stack_header = stack_header.copy()
-                try:
-                    self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
-                except tk.TclError: pass
+                self.preview_img_count = img_count; self.preview_total_imgs = total_imgs
+                self.preview_current_batch = current_batch; self.preview_total_batches = total_batches
+                self.refresh_preview(recalculate_histogram=True)
             return
 
-        # Mise à jour des données de l'aperçu
+        if stack_data is None:
+            self.logger.info("[DEBUG-GUI] update_preview_from_stacker: Received None stack_data. Skipping visual update.")
+            return
+
         self.current_preview_data = stack_data.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
-        self.preview_img_count = img_count
-        self.preview_total_imgs = total_imgs
-        self.preview_current_batch = current_batch
-        self.preview_total_batches = total_batches
+        self.preview_img_count = img_count; self.preview_total_imgs = total_imgs
+        self.preview_current_batch = current_batch; self.preview_total_batches = total_batches
 
-        try:
-            bp_auto, wp_auto = calculate_auto_stretch(self.current_preview_data)
-            self.preview_black_point.set(round(float(bp_auto), 4))
-            self.preview_white_point.set(round(float(wp_auto), 4))
-            self.preview_stretch_method.set("Asinh")
-        except Exception as e_auto:
-            self.logger.error(f"Auto-stretch calculation failed: {e_auto}")
-        
-        trigger_auto_adjust = False
-        # Vérifier si le worker est toujours considéré comme actif par le QueuedStacker
-        # et si l'UI pense que le traitement est en cours (self.processing)
-        is_worker_actually_running = hasattr(self, 'queued_stacker') and self.queued_stacker and self.queued_stacker.is_running()
-
-        if self.processing and is_worker_actually_running:
-            self.batches_processed_for_preview_refresh += 1
-            self.logger.debug(f"  [PF_StackerCB V_CheckLock_Early_1] Processing ACTIVE & Worker RUNNING. Preview refresh counter: {self.batches_processed_for_preview_refresh}/{self.preview_auto_refresh_batch_interval}")
-            
-            if self.batches_processed_for_preview_refresh >= self.preview_auto_refresh_batch_interval:
-                trigger_auto_adjust = True
-                self.batches_processed_for_preview_refresh = 0 
-        else:
-            self.logger.info(f"  [PF_StackerCB V_CheckLock_Early_1] Processing INACTIVE or Worker STOPPED (avant application verrou final). Auto-adjust SKIPPED. self.processing={self.processing}, worker_running={is_worker_actually_running}")
-        
-        if trigger_auto_adjust:
-            self.logger.info(f"  [PF_StackerCB V_CheckLock_Early_1] Seuil de {self.preview_auto_refresh_batch_interval} lots atteint. Déclenchement Auto WB & Auto Stretch.")
-            self.update_progress_gui("ⓘ Auto-ajustement de l'apercu...", None)
-            
-            # Annuler les appels 'after' précédents pour auto_wb avant d'en planifier de nouveaux
-            if hasattr(self, '_auto_wb_after_id') and self._auto_wb_after_id:
-                try: 
-                    self.root.after_cancel(self._auto_wb_after_id)
-                    self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Appel _auto_wb_after_id précédent annulé.")
-                except tk.TclError: 
-                    self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError annulation _auto_wb_after_id (déjà exécuté/invalide?).")
-                except Exception as e_cancel_wb_upd:
-                    self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] Erreur inattendue annulation _auto_wb_after_id: {e_cancel_wb_upd}")
-                self._auto_wb_after_id = None # Réinitialiser
-            
-            # Planifier apply_auto_white_balance
+        if not self.initial_auto_stretch_done:
+            self.logger.info("  [update_preview] Première mise à jour de l'aperçu : déclenchement de l'auto-ajustement initial.")
+            self.update_progress_gui("ⓘ Ajustement automatique initial de l'aperçu...", None)
             try:
-                self._auto_wb_after_id = self.root.after(50, self.apply_auto_white_balance)
-                self.logger.debug(f"    [PF_StackerCB V_CheckLock_Early_1] Nouvel appel apply_auto_white_balance planifié avec ID: {self._auto_wb_after_id}")
-            except tk.TclError as e_after_wb: # Si la fenêtre est en train de se fermer
-                self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de apply_auto_white_balance: {e_after_wb}")
-                self._auto_wb_after_id = None
-
-            # Annuler les appels 'after' précédents pour auto_stretch avant d'en planifier de nouveaux
-            if hasattr(self, '_auto_stretch_after_id') and self._auto_stretch_after_id:
-                try: 
-                    self.root.after_cancel(self._auto_stretch_after_id)
-                    self.logger.debug("    [PF_StackerCB V_CheckLock_Early_1] Appel _auto_stretch_after_id précédent annulé.")
-                except tk.TclError: 
-                    self.logger.warning("    [PF_StackerCB V_CheckLock_Early_1] TclError annulation _auto_stretch_after_id (déjà exécuté/invalide?).")
-                except Exception as e_cancel_stretch_upd:
-                    self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] Erreur inattendue annulation _auto_stretch_after_id: {e_cancel_stretch_upd}")
-                self._auto_stretch_after_id = None # Réinitialiser
-            
-            # Planifier apply_auto_stretch
-            try:
-                self._auto_stretch_after_id = self.root.after(300, self.apply_auto_stretch) # Délai plus long
-                self.logger.debug(f"    [PF_StackerCB V_CheckLock_Early_1] Nouvel appel apply_auto_stretch planifié avec ID: {self._auto_stretch_after_id}")
-            except tk.TclError as e_after_stretch: # Si la fenêtre est en train de se fermer
-                self.logger.error(f"    [PF_StackerCB V_CheckLock_Early_1] TclError lors de la planification de apply_auto_stretch: {e_after_stretch}")
-                self._auto_stretch_after_id = None
+                self.apply_auto_white_balance()
+                self.apply_auto_stretch()
+                self.initial_auto_stretch_done = True
+                self.logger.info("  [update_preview] Flag initial_auto_stretch_done mis à True.")
+            except Exception as e:
+                self.logger.error(f"  [update_preview] Échec lors de l'auto-ajustement initial : {e}")
         else:
-            # Si pas d'auto-ajustement ce coup-ci, rafraîchir simplement l'aperçu
-            self.logger.debug("  [PF_StackerCB V_CheckLock_Early_1] -> Appel direct refresh_preview (pas d'auto-adjust ce coup-ci).")
-            self.refresh_preview(recalculate_histogram=True) # Recalculer l'histogramme est généralement souhaité ici
+            self.logger.debug("  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement.")
+            self.refresh_preview()
 
         if self.current_stack_header:
             try:
                 self.root.after_idle(lambda h=self.current_stack_header: self.update_image_info(h) if h else None)
-            except tk.TclError: pass
-        
-        self.logger.debug("[DEBUG-GUI] update_preview_from_stacker V_CheckLock_Early_1: Exiting.")
+            except tk.TclError:
+                pass
+
 
 
 
@@ -4169,6 +4079,7 @@ class SeestarStackerGUI:
         # --- 3. Initialisation de l'état de traitement du GUI ---
         print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI...")
         self.processing = True
+        self.initial_auto_stretch_done = False
         self.time_per_image = 0
         self.global_start_time = time.monotonic()
         self.batches_processed_for_preview_refresh = 0
