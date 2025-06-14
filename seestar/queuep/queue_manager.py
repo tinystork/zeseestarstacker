@@ -6270,6 +6270,8 @@ class SeestarQueuedStacker:
                     self.fixed_output_wcs, self.fixed_output_shape = compute_final_output_grid(
                         header_infos, scale=self.drizzle_scale
                     )
+
+
                     self.reference_shape = self.fixed_output_shape
                     self.update_progress(
                         f"🗺️ Grille fixe calculée {self.fixed_output_shape} px.",
