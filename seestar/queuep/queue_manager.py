@@ -1,7 +1,7 @@
 """
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
-(Version Révisée 11: Finalisation cadrage portrait avec reproject_and_coadd)
+(Version Révisée 12: Correction finale du cadrage avec pré-scan global du WCS)
 """
 import logging
 
@@ -1302,16 +1302,19 @@ class SeestarQueuedStacker:
 
     def _prepare_global_reprojection_grid(self):
         """Scan all FITS once, compute global WCS & shape."""
-        wcs_list = []
+        self.update_progress("🔍 Pré-scan de tous les fichiers pour WCS...")
+        wcs_list, header_list = [], []
         for fpath in self.all_input_filepaths:
             try:
                 hdr = fits.getheader(fpath, memmap=False)
                 wcs_obj = WCS(hdr, naxis=2)
-                if wcs_obj.is_celestial and wcs_obj.pixel_shape is not None:
+                if wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
+                    header_list.append(hdr)
             except Exception as e:
                 self.update_progress(
-                    f"⚠️ [Pre‑scan] bad WCS in {os.path.basename(fpath)}: {e}", "WARN"
+                    f"⚠️ [Pré-scan] WCS invalide dans {os.path.basename(fpath)}: {e}",
+                    "WARN",
                 )
 
         if not wcs_list:
@@ -1338,7 +1341,7 @@ class SeestarQueuedStacker:
             ref_wcs = wcs_list[0]
             ref_shape = ref_wcs.pixel_shape
         else:
-            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list)
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list, header_list)
             if ref_wcs is None:
                 self.update_progress("Global WCS grid failed – abort.", "ERROR")
                 return False
@@ -1814,7 +1817,6 @@ class SeestarQueuedStacker:
             self.update_progress("⭐ Référence(s) prête(s).", 5)
             self._recalculate_total_batches()
 
-            self.update_progress("🔍 Pre-scan FITS headers…")
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
                 self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
