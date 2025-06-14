@@ -1865,11 +1865,13 @@ class SeestarQueuedStacker:
             self.update_progress("⭐ Référence(s) prête(s).", 5)
             self._recalculate_total_batches()
 
-            ok_grid = self._prepare_global_reprojection_grid()
-            if not ok_grid:
-                self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
-                self.stop_processing = True
-                return
+            ok_grid = True
+            if self.reproject_between_batches:
+                ok_grid = self._prepare_global_reprojection_grid()
+                if not ok_grid:
+                    self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
+                    self.stop_processing = True
+                    return
 
             self.update_progress(
                 f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})..."
@@ -1974,29 +1976,63 @@ class SeestarQueuedStacker:
                             logger.debug(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
-                    else: # Stacking Classique ou Drizzle Standard (non-mosaïque)
-                        logger.debug(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
+                    else:  # Stacking Classique ou Drizzle Standard (non-mosaïque)
+                        logger.debug(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.")
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,
                             solve_astrometry_for_this_file=self.reproject_between_batches
                         )
-                        self.processed_files_count += 1 
-                        if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
-                           item_result_tuple[0] is not None:
+                        self.processed_files_count += 1
+                        if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and item_result_tuple[0] is not None:
 
                             if self.reproject_between_batches:
+                                # --- MODE REPROJECTION INCREMENTALE ---
                                 self.aligned_files_count += 1
-                                aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple
-                                classic_stack_item = (
-                                    aligned_data,
-                                    header_orig,
-                                    scores_val,
-                                    wcs_gen_val,
-                                    valid_mask_val,
-                                )
-                                current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
+                                current_batch_items_with_masks_for_stack_batch.append(item_result_tuple)
+
+                                if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
+                                    self.stacked_batches_count += 1
+                                    self._send_eta_update()
+                                    num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
+                                    progress_info_reproj = f"(Lot Reproj. {self.stacked_batches_count}/{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})"
+                                    self.update_progress(f"⚙️ Reprojection du lot {progress_info_reproj} ({num_in_batch} images)...")
+
+                                    if self.master_sum is None:
+                                        self.update_progress("   -> Initialisation de la grille de reprojection globale...")
+                                        if self.reference_wcs_object is None or self.reference_shape is None:
+                                            raise RuntimeError("WCS/Shape de référence manquant pour reprojection incrémentale.")
+                                        self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
+                                        self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
+                                        self.current_stack_header = fits.Header()
+                                        if self.reference_header_for_wcs:
+                                            keys_to_copy = ["OBJECT", "INSTRUME", "TELESCOP", "DATE-OBS", "FILTER"]
+                                            for key in keys_to_copy:
+                                                if key in self.reference_header_for_wcs:
+                                                    self.current_stack_header[key] = self.reference_header_for_wcs[key]
+                                        self.current_stack_header["STACKTYP"] = ("Incremental Reprojection", "Stacking Method")
+                                        self.current_stack_header.add_history("Incremental reprojection stack initialized.")
+
+                                    for item_in_batch_tuple in current_batch_items_with_masks_for_stack_batch:
+                                        image_data, _header, _scores, image_wcs, _matrix_unused, _mask = item_in_batch_tuple
+                                        if image_data is None or image_wcs is None or not image_wcs.is_celestial:
+                                            self.update_progress("   -> Image du lot ignorée (données ou WCS invalide).", "WARN")
+                                            continue
+
+                                        coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
+                                        self.master_sum, self.master_coverage = reproject_and_combine(
+                                            self.master_sum, self.master_coverage,
+                                            image_data, coverage_map, image_wcs, self.reference_wcs_object
+                                        )
+                                        self.images_in_cumulative_stack += 1
+
+                                    self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images reprojected')
+                                    self._update_preview_master()
+                                    current_batch_items_with_masks_for_stack_batch = []
+                                    gc.collect()
+
                             else:
+                                # --- MODE CLASSIQUE OU DRIZZLE ---
                                 self.aligned_files_count += 1
                                 aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple
 
@@ -2012,60 +2048,42 @@ class SeestarQueuedStacker:
                                     logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
                                     classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val)
                                     current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
+
+                                if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
+                                    self.stacked_batches_count += 1
+                                    self._send_eta_update()
+                                    if self.drizzle_active_session:
+                                        if self.drizzle_mode == "Incremental":
+                                            self._process_incremental_drizzle_batch(
+                                                current_batch_items_with_masks_for_stack_batch,
+                                                self.stacked_batches_count,
+                                                self.total_batches_estimated,
+                                            )
+                                        elif self.drizzle_mode == "Final":
+                                            batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
+                                                current_batch_items_with_masks_for_stack_batch,
+                                                self.drizzle_output_wcs,
+                                                self.drizzle_output_shape_hw,
+                                                self.stacked_batches_count,
+                                            )
+                                            if batch_sci_p and batch_wht_p_list:
+                                                self.intermediate_drizzle_batch_files.append((batch_sci_p, batch_wht_p_list))
+                                            else:
+                                                self.failed_stack_count += len(current_batch_items_with_masks_for_stack_batch)
+                                    else:  # Stacking Classique SUM/W
+                                        self._process_completed_batch(
+                                            current_batch_items_with_masks_for_stack_batch,
+                                            self.stacked_batches_count,
+                                            self.total_batches_estimated,
+                                            self.reference_wcs_object
+                                        )
+                                    current_batch_items_with_masks_for_stack_batch = []
+
                         else:  # _process_file a échoué
                             self.failed_align_count += 1
                             logger.debug(f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'):
                                 self._move_to_unaligned(file_path)
-                        
-                        # --- Gestion des lots pour Stacking Classique ou Drizzle Standard ---
-                        if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size and self.batch_size > 0:
-                            self.stacked_batches_count += 1
-                            self._send_eta_update()
-                            logger.debug(
-                                f"  DEBUG _worker (iter {iteration_count}): Lot complet ({len(current_batch_items_with_masks_for_stack_batch)} images) pour Classique/DrizStd."
-                            )
-                            if self.drizzle_active_session:
-                                if self.drizzle_mode == "Incremental":
-                                    logger.debug(
-                                        "    DEBUG _worker: Appel _process_incremental_drizzle_batch (mode Incremental)."
-                                    )
-                                    self._process_incremental_drizzle_batch(
-                                        current_batch_items_with_masks_for_stack_batch,
-                                        self.stacked_batches_count,
-                                        self.total_batches_estimated,
-                                    )
-                                elif self.drizzle_mode == "Final":
-                                    logger.debug(
-                                        "    DEBUG _worker: Appel _process_and_save_drizzle_batch (mode Final)."
-                                    )
-                                    batch_sci_p, batch_wht_p_list = self._process_and_save_drizzle_batch(
-                                        current_batch_items_with_masks_for_stack_batch,
-                                        self.drizzle_output_wcs,
-                                        self.drizzle_output_shape_hw,
-                                        self.stacked_batches_count,
-                                    )
-                                    if batch_sci_p and batch_wht_p_list:
-                                        self.intermediate_drizzle_batch_files.append(
-                                            (batch_sci_p, batch_wht_p_list)
-                                        )
-                                    else:
-                                        self.failed_stack_count += len(
-                                            current_batch_items_with_masks_for_stack_batch
-                                        )
-                            else:  # Stacking Classique
-                                logger.debug(
-                                    f"    DEBUG _worker: Appel _process_completed_batch (mode Classique SUM/W)."
-                                )
-
-                                self._process_completed_batch(
-                                    current_batch_items_with_masks_for_stack_batch,
-                                    self.stacked_batches_count,
-                                    self.total_batches_estimated,
-                                    self.reference_wcs_object,  # reference WCS (argument obligatoire)
-                                )
-
-                            current_batch_items_with_masks_for_stack_batch = []  # Vider le lot
 
                     self.queue.task_done()
                 except Empty:
@@ -2243,24 +2261,46 @@ class SeestarQueuedStacker:
                             self.processing_error = "Échec combinaison Drizzle Final"; self.final_stacked_path = None
             
             # --- MODE STACKING CLASSIQUE (NON-MOSAÏQUE, NON-DRIZZLE) ---
-            elif not self.is_mosaic_run and not self.drizzle_active_session: 
-                # ... (logique inchangée pour stacking classique) ...
-                logger.debug("DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** ENTRÉE DANS 'elif not self.is_mosaic_run and not self.drizzle_active_session:' (CLASSIQUE) ***")
-                if current_batch_items_with_masks_for_stack_batch:
+            elif not self.is_mosaic_run and not self.drizzle_active_session:
+                logger.debug("DEBUG QM [_worker Finalize]: Finalisation Stacking Classique (ou Reprojection).")
+
+                if self.reproject_between_batches and current_batch_items_with_masks_for_stack_batch:
+                    self.stacked_batches_count += 1
+                    self._send_eta_update()
+                    num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
+                    self.update_progress(f"⚙️ Reprojection du dernier lot partiel ({num_in_batch} images)...")
+
+                    if self.master_sum is None:
+                        self.update_progress("   -> Initialisation de la grille de reprojection globale (dernier lot)...")
+                        if self.reference_wcs_object is None or self.reference_shape is None:
+                            raise RuntimeError("WCS/Shape de référence manquant pour reprojection finale.")
+                        self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
+                        self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
+
+                    for item_in_batch_tuple in current_batch_items_with_masks_for_stack_batch:
+                        image_data, _h, _s, image_wcs, _matrix_unused, _m = item_in_batch_tuple
+                        if image_data is not None and image_wcs is not None:
+                            coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
+                            self.master_sum, self.master_coverage = reproject_and_combine(
+                                self.master_sum, self.master_coverage, image_data, coverage_map, image_wcs, self.reference_wcs_object
+                            )
+                            self.images_in_cumulative_stack += 1
+                    self._update_preview_master()
+                    current_batch_items_with_masks_for_stack_batch = []
+                    gc.collect()
+
+                elif not self.reproject_between_batches and current_batch_items_with_masks_for_stack_batch:
                     self.stacked_batches_count += 1
                     self._send_eta_update()
                     self.update_progress(f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)...")
-
                     self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch,
-                        self.stacked_batches_count,
-                        self.total_batches_estimated,
-                        self.reference_wcs_object,  # reference WCS (argument obligatoire)
+                        self.stacked_batches_count, self.total_batches_estimated, self.reference_wcs_object
                     )
-
                     current_batch_items_with_masks_for_stack_batch = []
+
                 if self.reproject_between_batches:
-                    self.update_progress("🏁 Finalisation Stacking Classique…")
+                    self.update_progress("🏁 Finalisation Stacking (Reprojection)...")
                     if self.master_sum is not None:
                         final_avg = self.master_sum / np.maximum(self.master_coverage, 1e-9)[..., None]
                         self._save_final_stack(
@@ -3454,17 +3494,16 @@ class SeestarQueuedStacker:
 
 
     def _process_completed_batch(self, batch_items_to_stack, current_batch_num, total_batches_est, reference_wcs_for_reprojection):
-        """Traite un lot d'images complété.
+        """Traite un lot d'images complété en mode classique SUM/W.
 
-        - Si ``reproject_between_batches`` est vrai, chaque image du lot est
-          re-projetée individuellement vers la grille maître.
-        - Sinon, le lot est empilé classiquement puis combiné aux memmaps.
+        La logique de reprojection est maintenant gérée directement dans
+        ``_worker`` et n'est plus traitée ici.
         """
 
         num_items_in_this_batch = len(batch_items_to_stack) if batch_items_to_stack else 0
         logger.debug(
-            f"DEBUG QM [_process_completed_batch]: Début pour lot #{current_batch_num} "
-            f"avec {num_items_in_this_batch} items. Mode Reproject: {self.reproject_between_batches}"
+            f"DEBUG QM [_process_completed_batch (Classic SUM/W only)]: Début pour lot #{current_batch_num} "
+            f"avec {num_items_in_this_batch} items."
         )
 
         if not batch_items_to_stack:
@@ -3473,65 +3512,6 @@ class SeestarQueuedStacker:
 
         progress_info_log = (f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})")
 
-        if self.reproject_between_batches:
-            self.update_progress(
-                f"⚙️ Reprojection du lot {progress_info_log} ({num_items_in_this_batch} images)..."
-            )
-
-            if self.master_sum is None:
-                logger.debug("   -> Initialisation des canevas maîtres pour la reprojection.")
-                self.update_progress("   -> Initialisation de la grille de reprojection globale...")
-                if reference_wcs_for_reprojection is None or reference_wcs_for_reprojection.pixel_shape is None:
-                    self.update_progress("   -> ERREUR: WCS de référence globale manquant.", "ERROR")
-                    self.processing_error = "WCS de référence manquant pour reprojection."
-                    self.stop_processing = True
-                    return
-                if self.reference_shape is not None:
-                    target_shape_hw = self.reference_shape
-                else:
-                    target_shape_hw = (
-                        reference_wcs_for_reprojection.pixel_shape[1],
-                        reference_wcs_for_reprojection.pixel_shape[0],
-                    )
-                self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
-                self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
-
-                # --- Initialisation du header du stack pour le mode reprojection ---
-                self.current_stack_header = fits.Header()
-                if self.reference_header_for_wcs:
-                    keys_to_copy = ["OBJECT", "INSTRUME", "TELESCOP", "DATE-OBS", "FILTER"]
-                    for key in keys_to_copy:
-                        if key in self.reference_header_for_wcs:
-                            self.current_stack_header[key] = self.reference_header_for_wcs[key]
-                self.current_stack_header["STACKTYP"] = (
-                    "Classic Reproject",
-                    "Incremental Reprojection Stacking",
-                )
-                self.current_stack_header["HISTORY"] = "Reprojection stack initialized"
-
-            for item_tuple in batch_items_to_stack:
-                image_data, _header, _scores, image_wcs, _mask = item_tuple
-
-                if image_data is None or image_wcs is None or not image_wcs.is_celestial:
-                    self.update_progress(f"   -> Image du lot ignorée (données ou WCS invalide).", "WARN")
-                    continue
-
-                coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
-
-                self.master_sum, self.master_coverage = reproject_and_combine(
-                    self.master_sum,
-                    self.master_coverage,
-                    image_data,
-                    coverage_map,
-                    image_wcs,
-                    reference_wcs_for_reprojection,
-                )
-                self.images_in_cumulative_stack += 1
-
-            self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images reprojected')
-            self._update_preview_master()
-            gc.collect()
-            return
 
         # --- LOGIQUE EXISTANTE POUR LE MODE CLASSIQUE (NON-REPROJECTION) ---
         self.update_progress(
