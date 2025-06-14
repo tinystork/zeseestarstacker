@@ -5597,6 +5597,35 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
+        if is_classic_reproject_mode and final_wht_map_for_postproc is not None:
+            rows, cols = np.where(final_wht_map_for_postproc > 0)
+            if rows.size and cols.size:
+                y0, y1 = rows.min(), rows.max() + 1
+                x0, x1 = cols.min(), cols.max() + 1
+                if final_image_initial_raw.ndim == 3:
+                    final_image_initial_raw = final_image_initial_raw[y0:y1, x0:x1, :]
+                else:
+                    final_image_initial_raw = final_image_initial_raw[y0:y1, x0:x1]
+                final_wht_map_for_postproc = final_wht_map_for_postproc[y0:y1, x0:x1]
+                if self.current_stack_header:
+                    if "CRPIX1" in self.current_stack_header:
+                        self.current_stack_header["CRPIX1"] -= x0
+                    if "CRPIX2" in self.current_stack_header:
+                        self.current_stack_header["CRPIX2"] -= y0
+                if self.drizzle_output_wcs is not None:
+                    try:
+                        self.drizzle_output_wcs.wcs.crpix = [
+                            self.drizzle_output_wcs.wcs.crpix[0] - x0,
+                            self.drizzle_output_wcs.wcs.crpix[1] - y0,
+                        ]
+                        new_w = x1 - x0
+                        new_h = y1 - y0
+                        self.drizzle_output_wcs.pixel_shape = (new_w, new_h)
+                        self.drizzle_output_wcs._naxis1 = new_w
+                        self.drizzle_output_wcs._naxis2 = new_h
+                    except Exception:
+                        pass
+
 
         final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
         self.update_progress(

@@ -330,3 +330,38 @@ def test_save_final_stack_classic_reproject(tmp_path):
     saved = fits.getdata(obj.final_stacked_path)
     assert saved.dtype.kind == "f"
     assert np.allclose(saved.astype(np.float32), data)
+
+
+def test_save_final_stack_classic_reproject_crop(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.reproject_between_batches = True
+    obj.preserve_linear_output = True
+
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    wht = np.array(
+        [
+            [0, 0, 0, 0],
+            [0, 1, 1, 0],
+            [0, 1, 1, 0],
+            [0, 0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+
+    obj.current_stack_header["CRPIX1"] = 2.0
+    obj.current_stack_header["CRPIX2"] = 2.0
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_classic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
+
+    assert saved.shape == (2, 2)
+    assert np.array_equal(saved.astype(np.float32), data[1:3, 1:3])
+    assert header["CRPIX1"] == 1.0
+    assert header["CRPIX2"] == 1.0
