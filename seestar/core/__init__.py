@@ -19,6 +19,7 @@ from .weights import (
 )
 from .incremental_reprojection import reproject_and_combine
 from .reprojection import resolve_all_wcs
+from .reprojection_utils import collect_headers, compute_final_output_grid
 from .simple_stacker import create_master_tile as create_master_tile_simple
 
 # Liste initiale des éléments à exporter
@@ -37,7 +38,9 @@ __all__ = [
     '_calculate_image_weights_noise_fwhm',
     'create_master_tile_simple',
     'reproject_and_combine',
-    'resolve_all_wcs'
+    'resolve_all_wcs',
+    'collect_headers',
+    'compute_final_output_grid'
 ]
 
 # Tentative d'importation du nouvel aligneur local
