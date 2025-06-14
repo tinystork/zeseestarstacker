@@ -1385,7 +1385,17 @@ class SeestarQueuedStacker:
             )
             return False
 
-        if len(wcs_list) == 1:
+        if (
+            len(wcs_list) == 1
+            and self.reproject_between_batches
+            and not self.is_mosaic_run
+        ):
+            # When doing classic stacking with reprojection of a single
+            # file, use the dynamic bounding-box logic to avoid cropping.
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                wcs_list, header_list
+            )
+        elif len(wcs_list) == 1:
             ref_wcs = wcs_list[0]
             ref_shape = ref_wcs.pixel_shape
         else:
