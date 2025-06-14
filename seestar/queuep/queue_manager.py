@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 logger.debug("Début chargement module queue_manager.py")
 
 # --- Standard Library Imports ---
-import gc
+from astropy.io import fits
+from astropy.wcs import WCS
+import glob, os, gc
 import math
-import os
 from queue import Queue, Empty # Essentiel pour la classe
 import shutil
 import tempfile
@@ -36,8 +37,7 @@ import cv2
 import numpy as np
 from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate
 from astropy import units as u
-from astropy.io import fits
-from astropy.wcs import WCS, FITSFixedWarning
+from astropy.wcs import FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
 from astropy.nddata import CCDData
 from ..enhancement.stack_enhancement import apply_edge_crop
@@ -357,6 +357,9 @@ class SeestarQueuedStacker:
         self.cumulative_drizzle_data = None
         self.total_exposure_seconds = 0.0
         self.intermediate_drizzle_batch_files = []
+
+        self.all_input_filepaths = []
+        self.reference_shape = None
         
         self.incremental_drizzle_objects = []
         logger.debug("  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide.")
@@ -1281,6 +1284,35 @@ class SeestarQueuedStacker:
         )
         return output_wcs, target_shape_hw
 ###########################################################################################################################################################
+
+    def _prepare_global_reprojection_grid(self):
+        """Scan all FITS once, compute global WCS & shape."""
+        wcs_list = []
+        for fpath in self.all_input_filepaths:
+            try:
+                hdr = fits.getheader(fpath, memmap=False)
+                wcs_obj = WCS(hdr, naxis=2)
+                if wcs_obj.is_celestial and wcs_obj.pixel_shape is not None:
+                    wcs_list.append(wcs_obj)
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ [Pre‑scan] bad WCS in {os.path.basename(fpath)}: {e}", "WARN"
+                )
+
+        ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list)
+        if ref_wcs is None:
+            raise RuntimeError("Global WCS grid failed – abort.")
+
+        self.reference_wcs_object = ref_wcs
+        self.reference_shape = ref_shape
+        self.reference_header_for_wcs = ref_wcs.to_header()
+        self.reproject_between_batches = True
+
+        crval = ", ".join(f"{x:.5f}" for x in ref_wcs.wcs.crval)
+        self.update_progress(
+            f"🗺️ Global grid ready – centre={crval}, shape={ref_shape}", "INFO"
+        )
+
 
     def _recalculate_total_batches(self):
         """Estimates the total number of batches based on files_in_queue."""
@@ -6163,9 +6195,33 @@ class SeestarQueuedStacker:
                     abs_folder = os.path.abspath(str(folder_iter)) 
                     if os.path.isdir(abs_folder) and abs_folder not in self.additional_folders:
                         self.additional_folders.append(abs_folder); initial_folders_to_add_count += 1
-        if initial_folders_to_add_count > 0: 
+        if initial_folders_to_add_count > 0:
             self.update_progress(f"ⓘ {initial_folders_to_add_count} dossier(s) pré-ajouté(s) en attente.")
-        self.update_progress(f"folder_count_update:{len(self.additional_folders)}") 
+        self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
+
+        # Build the list of all FITS filepaths for global reprojection grid
+        self.all_input_filepaths = []
+        folders_for_scan = []
+        if self.current_folder:
+            folders_for_scan.append(self.current_folder)
+        folders_for_scan.extend(self.additional_folders)
+        for folder_iter in folders_for_scan:
+            if folder_iter and os.path.isdir(folder_iter):
+                try:
+                    for fname in sorted(os.listdir(folder_iter)):
+                        if fname.lower().endswith((".fit", ".fits")):
+                            self.all_input_filepaths.append(os.path.join(folder_iter, fname))
+                except Exception as e_scan:
+                    self.update_progress(
+                        f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
+                    )
+
+        self.update_progress("🔍 Pre-scan FITS headers…")
+        try:
+            self._prepare_global_reprojection_grid()
+        except Exception as e_grid:
+            self.update_progress(f"❌ {e_grid}", "ERROR")
+            return False
 
         initial_files_added = self._add_files_to_queue(self.current_folder) 
         if initial_files_added > 0: 
