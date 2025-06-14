@@ -1299,6 +1299,7 @@ class SeestarQueuedStacker:
                     f"⚠️ [Pre‑scan] bad WCS in {os.path.basename(fpath)}: {e}", "WARN"
                 )
 
+
         if not wcs_list:
             if self.reference_wcs_object and self.reference_wcs_object.pixel_shape:
                 self.update_progress("No valid WCS found – using fallback", "WARN")
@@ -1328,6 +1329,7 @@ class SeestarQueuedStacker:
                 self.update_progress("Global WCS grid failed – abort.", "ERROR")
                 return False
 
+
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
         self.reference_header_for_wcs = ref_wcs.to_header()
@@ -1337,7 +1339,9 @@ class SeestarQueuedStacker:
         self.update_progress(
             f"🗺️ Global grid ready – centre={crval}, shape={ref_shape}", "INFO"
         )
+
         return True
+
 
 
     def _recalculate_total_batches(self):
@@ -6249,6 +6253,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
                     )
+
 
 
         initial_files_added = self._add_files_to_queue(self.current_folder) 
