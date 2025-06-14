@@ -43,7 +43,8 @@ class SeestarAligner:
         self.stop_processing = False
         self.progress_callback = None
         self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
-        self.move_to_unaligned_callback = move_to_unaligned_callback 
+        self.move_to_unaligned_callback = move_to_unaligned_callback
+        self.use_cuda = False
     
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
@@ -64,6 +65,51 @@ class SeestarAligner:
                 print(f"[{int(progress)}%] {message}")
             else:
                 print(message)
+
+    def _align_cpu(self, img: np.ndarray, M: np.ndarray, dsize: tuple[int, int]) -> np.ndarray:
+        """Apply affine transform using CPU."""
+        if img.ndim == 3:
+            result = np.zeros((dsize[1], dsize[0], img.shape[2]), dtype=img.dtype)
+            for i in range(img.shape[2]):
+                result[:, :, i] = cv2.warpAffine(
+                    img[:, :, i], M, dsize,
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=np.nan,
+                )
+            return result
+        return cv2.warpAffine(
+            img, M, dsize,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=np.nan,
+        )
+
+    def _align_cuda(self, img: np.ndarray, M: np.ndarray, dsize: tuple[int, int]) -> np.ndarray:
+        """Apply affine transform using CUDA if available."""
+        M3 = np.vstack([M, [0, 0, 1]]).astype(np.float32)
+        if img.ndim == 3:
+            chans = []
+            for i in range(img.shape[2]):
+                g = cv2.cuda_GpuMat()
+                g.upload(img[:, :, i])
+                warped = cv2.cuda.warpPerspective(
+                    g, M3, dsize,
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+                chans.append(warped.download())
+            return np.stack(chans, axis=2)
+        g = cv2.cuda_GpuMat()
+        g.upload(img)
+        warped = cv2.cuda.warpPerspective(
+            g, M3, dsize,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return warped.download()
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 
 
@@ -166,18 +212,16 @@ class SeestarAligner:
             cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
             dsize_cv2 = (new_w, new_h)
 
-            if img_to_align_for_transform_application.ndim == 3:
-                aligned_img_final = np.zeros_like(img_to_align_for_transform_application)
-                for i_ch in range(img_to_align_for_transform_application.shape[2]):
-                    aligned_img_final[:, :, i_ch] = cv2.warpAffine(
-                        img_to_align_for_transform_application[:, :, i_ch], cv2_M_final, dsize_cv2,
-                        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
-                    )
-            else:
-                aligned_img_final = cv2.warpAffine(
-                    img_to_align_for_transform_application, cv2_M_final, dsize_cv2,
-                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
-                )
+            align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
+            try:
+                aligned_img_final = align(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+            except Exception as cuda_err:
+                if getattr(self, "use_cuda", False):
+                    self.use_cuda = False
+                    self.update_progress("⚠️ CUDA align failed, falling back to CPU", None)
+                    aligned_img_final = self._align_cpu(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+                else:
+                    raise
             
             print(f"    APRÈS cv2.warpAffine: aligned_img_final - Range: [{np.nanmin(aligned_img_final):.4g}, {np.nanmax(aligned_img_final):.4g}]")
 
