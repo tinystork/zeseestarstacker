@@ -799,35 +799,47 @@ class SeestarQueuedStacker:
             wht_shape_memmap = self.memmap_shape[:2]
             logger.debug(f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}")
 
-            if self.reproject_between_batches:
-                logger.debug("  -> reproject_between_batches=True: Memmaps SUM/WHT non créés (mode incrémental).")
+            logger.debug(
+                "  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')..."
+            )
+            try:
+                self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                    self.sum_memmap_path,
+                    mode='w+',
+                    dtype=self.memmap_dtype_sum,
+                    shape=self.memmap_shape,
+                )
+                self.cumulative_sum_memmap[:] = 0.0
+                logger.debug(
+                    f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro."
+                )
+
+                self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                    self.wht_memmap_path,
+                    mode='w+',
+                    dtype=self.memmap_dtype_wht,
+                    shape=wht_shape_memmap,
+                )
+                self.cumulative_wht_memmap[:] = 0
+                logger.debug(
+                    f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro."
+                )
+
+                self.incremental_drizzle_objects = []
+
+            except (IOError, OSError, ValueError, TypeError) as e_memmap:
+                self.update_progress(
+                    f"❌ Erreur création/initialisation fichier memmap: {e_memmap}"
+                )
+                logger.debug(
+                    f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"
+                )
+                traceback.print_exc(limit=2)
                 self.cumulative_sum_memmap = None
                 self.cumulative_wht_memmap = None
-                self.master_sum = None
-                self.master_coverage = None
-            else:
-                logger.debug(f"  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')...")
-                try:
-                    self.cumulative_sum_memmap = np.lib.format.open_memmap(
-                        self.sum_memmap_path, mode='w+', dtype=self.memmap_dtype_sum, shape=self.memmap_shape
-                    )
-                    self.cumulative_sum_memmap[:] = 0.0
-                    logger.debug(f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro.")
-
-                    self.cumulative_wht_memmap = np.lib.format.open_memmap(
-                        self.wht_memmap_path, mode='w+', dtype=self.memmap_dtype_wht, shape=wht_shape_memmap
-                    )
-                    self.cumulative_wht_memmap[:] = 0
-                    logger.debug(f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro.")
-
-                    self.incremental_drizzle_objects = []
-
-                except (IOError, OSError, ValueError, TypeError) as e_memmap:
-                    self.update_progress(f"❌ Erreur création/initialisation fichier memmap: {e_memmap}")
-                    logger.debug(f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"); traceback.print_exc(limit=2)
-                    self.cumulative_sum_memmap = None; self.cumulative_wht_memmap = None
-                    self.sum_memmap_path = None; self.wht_memmap_path = None
-                    return False
+                self.sum_memmap_path = None
+                self.wht_memmap_path = None
+                return False
         
         # --- Réinitialisations Communes ---
         self.warned_unaligned_source_folders.clear()
@@ -1973,7 +1985,7 @@ class SeestarQueuedStacker:
             self._recalculate_total_batches()
 
             ok_grid = True
-            if self.reproject_between_batches:
+            if self.reproject_between_batches and self.fixed_output_wcs is None:
                 ok_grid = self._prepare_global_reprojection_grid()
                 if not ok_grid:
                     self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
@@ -6227,7 +6239,38 @@ class SeestarQueuedStacker:
             self.batch_size = max(3, int(requested_batch_size)) 
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
         logger.debug("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
-        
+
+        # --- NEW STEP: Pre-scan headers to compute a fixed output grid ---
+        if self.reproject_between_batches:
+            all_paths = []
+            if self.current_folder and os.path.isdir(self.current_folder):
+                for fn in sorted(os.listdir(self.current_folder)):
+                    if fn.lower().endswith((".fit", ".fits")):
+                        all_paths.append(os.path.join(self.current_folder, fn))
+            if initial_additional_folders:
+                for f in initial_additional_folders:
+                    abs_f = os.path.abspath(str(f))
+                    if os.path.isdir(abs_f):
+                        for fn in sorted(os.listdir(abs_f)):
+                            if fn.lower().endswith((".fit", ".fits")):
+                                all_paths.append(os.path.join(abs_f, fn))
+            from ..core.reprojection_utils import collect_headers, compute_final_output_grid
+            header_infos = collect_headers(all_paths)
+            if header_infos:
+                try:
+                    self.fixed_output_wcs, self.fixed_output_shape = compute_final_output_grid(
+                        header_infos, scale=self.drizzle_scale
+                    )
+                    self.reference_wcs_object = self.fixed_output_wcs
+                    self.reference_shape = self.fixed_output_shape
+                    self.update_progress(
+                        f"🗺️ Grille fixe calculée {self.fixed_output_shape} px.",
+                        None,
+                    )
+                except Exception as e_grid:
+                    self.update_progress(f"⚠️ Erreur calcul grille fixe: {e_grid}", "WARN")
+            self.all_input_filepaths = all_paths
+
 
 
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
@@ -6403,6 +6446,7 @@ class SeestarQueuedStacker:
                 )
                 self.drizzle_output_wcs = self.fixed_output_wcs
                 self.drizzle_output_shape_hw = self.fixed_output_shape
+                self.reference_shape = self.fixed_output_shape
             except Exception as e_fix:
                 logger.debug(f"WARN start_processing: erreur creation grille fixe: {e_fix}")
 
