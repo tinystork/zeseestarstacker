@@ -2727,19 +2727,23 @@ class SeestarQueuedStacker:
             x_min_final = np.min(projected_x_pixels); x_max_final = np.max(projected_x_pixels)
             y_min_final = np.min(projected_y_pixels); y_max_final = np.max(projected_y_pixels)
 
-            final_output_width_px = int(np.ceil(x_max_final - x_min_final + 1.0))
-            final_output_height_px = int(np.ceil(y_max_final - y_min_final + 1.0))
-            final_output_width_px = max(10, final_output_width_px)    
-            final_output_height_px = max(10, final_output_height_px)  
+            final_output_width_px = int(np.ceil(x_max_final - x_min_final))
+            final_output_height_px = int(np.ceil(y_max_final - y_min_final))
+            final_output_width_px = max(10, final_output_width_px)
+            final_output_height_px = max(10, final_output_height_px)
             output_shape_final_hw = (final_output_height_px, final_output_width_px)
-            
-            crval_x_abs_pix, crval_y_abs_pix = output_wcs.all_world2pix(output_wcs.wcs.crval[0], output_wcs.wcs.crval[1], 0)
-            final_crpix1 = crval_x_abs_pix - x_min_final + 1.0
-            final_crpix2 = crval_y_abs_pix - y_min_final + 1.0
-            
+
+            crval_x_abs_pix, crval_y_abs_pix = output_wcs.all_world2pix(
+                output_wcs.wcs.crval[0], output_wcs.wcs.crval[1], 0
+            )
+            final_crpix1 = crval_x_abs_pix - x_min_final
+            final_crpix2 = crval_y_abs_pix - y_min_final
+
             output_wcs.wcs.crpix = [final_crpix1, final_crpix2]
             output_wcs.pixel_shape = (final_output_width_px, final_output_height_px)
-            try: output_wcs._naxis1 = final_output_width_px; output_wcs._naxis2 = final_output_height_px
+            try:
+                output_wcs._naxis1 = final_output_width_px
+                output_wcs._naxis2 = final_output_height_px
             except AttributeError: pass
 
             logger.debug(f"DEBUG QM: WCS Mosaïque Finale (SnapToAxes) OK: CRPIX={output_wcs.wcs.crpix}, PixelShape={output_wcs.pixel_shape}")
