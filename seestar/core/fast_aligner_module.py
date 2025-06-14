@@ -325,29 +325,29 @@ class FastAligner:
         if self.debug: self._log(f"  EstimateTransform: Matrice M finale (DAO+ORB V3):\n{M}")
         return M
 
-    # warp_image reste inchangé
-    def warp_image(self, img_to_warp: np.ndarray, M: np.ndarray, output_shape_wh: tuple, 
-                   border_mode=cv2.BORDER_CONSTANT, border_value=(0,0,0,0)):
-        if M is None: self._log("Warp: Matrice M est None.", "ERROR"); return img_to_warp 
+    def warp_image(self, img_to_warp: np.ndarray, M: np.ndarray,
+                   border_mode=cv2.BORDER_CONSTANT, border_value=(0, 0, 0, 0)):
+        """Warp an image with a dynamic canvas computed from ``M``."""
+        if M is None:
+            self._log("Warp: Matrice M est None.", "ERROR")
+            return img_to_warp
         try:
-            return cv2.warpAffine(img_to_warp, M, dsize=output_shape_wh, flags=cv2.INTER_LINEAR, 
-                                  borderMode=border_mode, borderValue=border_value)
-        except Exception as e_warp: 
-            self._log(f"Erreur cv2.warpAffine: {e_warp}", "ERROR"); return img_to_warp
-        
+            h, w = img_to_warp.shape[:2]
+            src_corners = np.array([[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]], dtype=np.float32)
+            transformed_corners = cv2.transform(np.array([src_corners]), M)[0]
+            min_x, min_y = transformed_corners.min(axis=0)
+            max_x, max_y = transformed_corners.max(axis=0)
+            new_w = int(np.ceil(max_x - min_x))
+            new_h = int(np.ceil(max_y - min_y))
+            shift_M = np.array([[1, 0, -min_x], [0, 1, -min_y], [0, 0, 1]], dtype=np.float32)
+            M_3x3 = np.vstack([M, [0, 0, 1]]).astype(np.float32)
+            M_final = (shift_M @ M_3x3)[:2, :]
+            dsize_cv2 = (new_w, new_h)
+            return cv2.warpAffine(img_to_warp, M_final, dsize_cv2, flags=cv2.INTER_LINEAR, borderMode=border_mode, borderValue=border_value)
+        except Exception as e_warp:
+            self._log(f"Erreur cv2.warpAffine: {e_warp}", "ERROR")
+            return img_to_warp
 
-#########################################################################################################################################################
-
-
-    def warp_image(self, img_to_warp: np.ndarray, M: np.ndarray, output_shape_wh: tuple, 
-                   border_mode=cv2.BORDER_CONSTANT, border_value=(0,0,0,0)):
-        if M is None: self._log("Warp: Matrice M est None.", "ERROR"); return img_to_warp 
-        # self._log(f"Phase 3: Warp. Shape out (W,H): {output_shape_wh}", "DEBUG") # Peut être verbeux
-        try:
-            return cv2.warpAffine(img_to_warp, M, dsize=output_shape_wh, flags=cv2.INTER_LINEAR, 
-                                  borderMode=border_mode, borderValue=border_value)
-        except Exception as e_warp: 
-            self._log(f"Erreur cv2.warpAffine: {e_warp}", "ERROR"); return img_to_warp
 
 # =============================================================================
 #  FastSeestarAligner (Adaptateur)                                              ==========================================================================
@@ -447,18 +447,15 @@ class FastSeestarAligner:
             return None, None, False # Retourner None pour l'image et la matrice, et False pour succès
         
         # --- 4. Appliquer la transformation (Warp) à l'image source ORIGINALE (qui peut être couleur) ---
-        output_h, output_w = ref_f32.shape[:2] # La transformation est vers l'espace de l'image de référence
-        output_shape_wh_cv = (output_w, output_h) # OpenCV attend (W, H)
-        
         aligned_image_result = None
-        if src_f32.ndim == 2: # Si l'image source originale était N&B
-            aligned_image_result = self._fa.warp_image(src_f32, M_transform_matrix, output_shape_wh_cv)
-        elif src_f32.ndim == 3 and src_f32.shape[2] in [3, 4]: # Si l'image source originale était Couleur (RGB ou RGBA)
+        if src_f32.ndim == 2:  # Si l'image source originale était N&B
+            aligned_image_result = self._fa.warp_image(src_f32, M_transform_matrix)
+        elif src_f32.ndim == 3 and src_f32.shape[2] in [3, 4]:  # Si l'image source originale était Couleur (RGB ou RGBA)
             # Warper chaque canal séparément
             channels = cv2.split(src_f32)
             warped_channels = []
             for i_ch in range(src_f32.shape[2]): # 3 pour RGB, 4 pour RGBA
-                warped_channel = self._fa.warp_image(channels[i_ch], M_transform_matrix, output_shape_wh_cv)
+                warped_channel = self._fa.warp_image(channels[i_ch], M_transform_matrix)
                 if warped_channel is channels[i_ch]: # Si warp_image a retourné l'original (erreur)
                     self._fa._log(f"FastSeestarAligner: Échec du warp pour canal {i_ch} de '{tag}'.", level="ERROR")
                     return None, M_transform_matrix, False # Échec partiel du warp
