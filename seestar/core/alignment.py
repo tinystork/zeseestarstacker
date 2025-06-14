@@ -144,18 +144,38 @@ class SeestarAligner:
             # --- FIN CORRECTION ---
             
             h_ref, w_ref = reference_image_float.shape[:2]
-            dsize_cv2 = (w_ref, h_ref)
+
+            h_src, w_src = img_to_align_for_transform_application.shape[:2]
+            src_corners = np.array([
+                [0, 0],
+                [w_src - 1, 0],
+                [0, h_src - 1],
+                [w_src - 1, h_src - 1]
+            ], dtype=np.float32)
+            transformed_corners = cv2.transform(np.array([src_corners]), cv2_M)[0]
+            min_x, min_y = transformed_corners.min(axis=0)
+            max_x, max_y = transformed_corners.max(axis=0)
+
+            new_w = int(np.ceil(max_x - min_x))
+            new_h = int(np.ceil(max_y - min_y))
+
+            shift_M = np.array([[1, 0, -min_x],
+                                [0, 1, -min_y],
+                                [0, 0, 1]], dtype=np.float32)
+            cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
+            cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
+            dsize_cv2 = (new_w, new_h)
 
             if img_to_align_for_transform_application.ndim == 3:
                 aligned_img_final = np.zeros_like(img_to_align_for_transform_application)
                 for i_ch in range(img_to_align_for_transform_application.shape[2]):
-                    aligned_img_final[:,:,i_ch] = cv2.warpAffine(
-                        img_to_align_for_transform_application[:,:,i_ch], cv2_M, dsize_cv2,
+                    aligned_img_final[:, :, i_ch] = cv2.warpAffine(
+                        img_to_align_for_transform_application[:, :, i_ch], cv2_M_final, dsize_cv2,
                         flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
                     )
             else:
                 aligned_img_final = cv2.warpAffine(
-                    img_to_align_for_transform_application, cv2_M, dsize_cv2,
+                    img_to_align_for_transform_application, cv2_M_final, dsize_cv2,
                     flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
                 )
             
