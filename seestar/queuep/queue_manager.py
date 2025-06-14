@@ -331,6 +331,7 @@ class SeestarQueuedStacker:
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
+        self.fixed_output_wcs = None; self.fixed_output_shape = None
         
         self.sum_memmap_path = None 
         self.wht_memmap_path = None 
@@ -1148,56 +1149,44 @@ class SeestarQueuedStacker:
         if len(ref_shape_2d) != 2:
             raise ValueError(f"Référence shape 2D (H,W) attendu, reçu {ref_shape_2d}")
 
+        if self.fixed_output_wcs is not None and self.fixed_output_shape is not None:
+            return self.fixed_output_wcs, self.fixed_output_shape
+
         # ------------------ 1. Dimensions de sortie ------------------
-        h_in,  w_in  = ref_shape_2d          # entrée (H,W)
+        h_in, w_in = ref_shape_2d
         out_h = int(round(h_in * scale_factor))
         out_w = int(round(w_in * scale_factor))
-        out_h = max(1, out_h); out_w = max(1, out_w)  # sécurité
-        out_shape_hw = (out_h, out_w)        # (H,W) pour NumPy
+        out_h = max(1, out_h)
+        out_w = max(1, out_w)
+        out_shape_hw = (out_h, out_w)
 
         logger.debug(f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}")
 
-        # ------------------ 2. Copier le WCS ------------------
-        out_wcs = ref_wcs.deepcopy()
+        # ------------------ 2. Construction d'un WCS sans rotation ------------------
+        out_wcs = WCS(naxis=2)
+        out_wcs.wcs.crval = list(ref_wcs.wcs.crval)
+        out_wcs.wcs.crpix = (np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor).tolist()
 
-        # ------------------ 3. Ajuster l'échelle pixel ------------------
-        scale_done = False
+        ref_scale_arcsec = self.reference_pixel_scale_arcsec
+        if ref_scale_arcsec is None:
+            try:
+                ref_scale_deg = np.mean(np.abs(proj_plane_pixel_scales(ref_wcs)))
+                ref_scale_arcsec = ref_scale_deg * 3600.0
+            except Exception:
+                ref_scale_arcsec = 1.0
+
+        final_scale_deg = (ref_scale_arcsec / scale_factor) / 3600.0
+        out_wcs.wcs.cd = np.array([[-final_scale_deg, 0.0], [0.0, final_scale_deg]])
+        out_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        out_wcs.pixel_shape = (out_w, out_h)
         try:
-            # a) Matrice CD prioritaire
-            if hasattr(out_wcs.wcs, 'cd') and out_wcs.wcs.cd is not None and np.any(out_wcs.wcs.cd):
-                out_wcs.wcs.cd = ref_wcs.wcs.cd / scale_factor
-                scale_done = True
-                logger.debug("[DrizzleWCS] CD matrix divisée par", scale_factor)
-            # b) Sinon CDELT (+ PC identité si absent)
-            elif hasattr(out_wcs.wcs, 'cdelt') and out_wcs.wcs.cdelt is not None and np.any(out_wcs.wcs.cdelt):
-                out_wcs.wcs.cdelt = ref_wcs.wcs.cdelt / scale_factor
-                if not getattr(out_wcs.wcs, 'pc', None) is not None:
-                    out_wcs.wcs.pc = np.identity(2)
-                scale_done = True
-                logger.debug("[DrizzleWCS] CDELT vector divisé par", scale_factor)
-            else:
-                raise ValueError("Input WCS lacks valid CD matrix and CDELT vector.")
-        except Exception as e:
-            raise ValueError(f"Failed to adjust pixel scale in output WCS: {e}")
-
-        if not scale_done:
-            raise ValueError("Could not adjust WCS scale.")
-
-        # ------------------ 4. Recaler CRPIX ------------------
-        # → garder le même point du ciel au même pixel relatif :
-        #    CRPIX_out = CRPIX_in * scale_factor  (1‑based convention FITS)
-        new_crpix = np.round(np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor, 6)
-        out_wcs.wcs.crpix = new_crpix.tolist()
-        logger.debug(f"[DrizzleWCS] CRPIX in={ref_wcs.wcs.crpix}  ->  out={out_wcs.wcs.crpix}")
-
-        # ------------------ 5. Mettre à jour la taille interne ------------------
-        out_wcs.pixel_shape = (out_w, out_h)   # (W,H) pour Astropy
-        try:                                   # certains attributs privés selon versions
             out_wcs._naxis1 = out_w
             out_wcs._naxis2 = out_h
         except AttributeError:
             pass
 
+        self.fixed_output_wcs = out_wcs
+        self.fixed_output_shape = out_shape_hw
         logger.debug(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
         return out_wcs, out_shape_hw
 
@@ -6142,10 +6131,21 @@ class SeestarQueuedStacker:
         logger.debug(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
         logger.debug(f"  -> self.drizzle_mode: {self.drizzle_mode}")
         logger.debug(f"  -> self.reference_wcs_object IS None: {self.reference_wcs_object is None}")
-        if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial: 
+        if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial:
             logger.debug(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}, PixelShape: {self.reference_wcs_object.pixel_shape}")
         else:
             logger.debug(f"     WCS Ref non disponible ou non céleste.")
+
+        if self.reference_wcs_object and self.fixed_output_wcs is None:
+            try:
+                ref_hw = ref_shape_hwc[:2]
+                self.fixed_output_wcs, self.fixed_output_shape = self._create_drizzle_output_wcs(
+                    self.reference_wcs_object, ref_hw, self.drizzle_scale
+                )
+                self.drizzle_output_wcs = self.fixed_output_wcs
+                self.drizzle_output_shape_hw = self.fixed_output_shape
+            except Exception as e_fix:
+                logger.debug(f"WARN start_processing: erreur creation grille fixe: {e_fix}")
 
         logger.debug(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
         if not self.initialize(output_dir, ref_shape_hwc): 
