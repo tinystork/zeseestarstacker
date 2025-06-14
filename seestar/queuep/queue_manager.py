@@ -1209,7 +1209,7 @@ class SeestarQueuedStacker:
             f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS."
         )
         self.update_progress(
-            f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)..."
+            f"📐 Calcul de la grille de sortie dynamique ({num_wcs} WCS)..."
         )
         if num_wcs == 0:
             return None, None
@@ -1344,6 +1344,16 @@ class SeestarQueuedStacker:
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
         self.reference_header_for_wcs = ref_wcs.to_header()
+        try:
+            self.reference_wcs_object.pixel_shape = (
+                self.reference_shape[1],
+                self.reference_shape[0],
+            )
+            self.reference_wcs_object._naxis1 = self.reference_shape[1]
+            self.reference_wcs_object._naxis2 = self.reference_shape[0]
+        except Exception:
+            pass
+
         self.reproject_between_batches = True
 
         crval = ", ".join(f"{x:.5f}" for x in ref_wcs.wcs.crval)
@@ -3419,10 +3429,13 @@ class SeestarQueuedStacker:
                     self.processing_error = "WCS de référence manquant pour reprojection."
                     self.stop_processing = True
                     return
-                target_shape_hw = (
-                    reference_wcs_for_reprojection.pixel_shape[1],
-                    reference_wcs_for_reprojection.pixel_shape[0],
-                )
+                if self.reference_shape is not None:
+                    target_shape_hw = self.reference_shape
+                else:
+                    target_shape_hw = (
+                        reference_wcs_for_reprojection.pixel_shape[1],
+                        reference_wcs_for_reprojection.pixel_shape[0],
+                    )
                 self.master_sum = np.zeros((*target_shape_hw, 3), dtype=np.float32)
                 self.master_coverage = np.zeros(target_shape_hw, dtype=np.float32)
 
