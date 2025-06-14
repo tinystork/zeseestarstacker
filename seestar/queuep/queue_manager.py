@@ -1301,41 +1301,68 @@ class SeestarQueuedStacker:
 ###########################################################################################################################################################
 
     def _prepare_global_reprojection_grid(self):
-        """Scan all FITS once, compute global WCS & shape."""
-        self.update_progress("🔍 Pré-scan de tous les fichiers pour WCS...")
-        wcs_list, header_list = [], []
-        for fpath in self.all_input_filepaths:
+        """Solve all FITS files and compute the final mosaic grid."""
+        self.update_progress("🔍 Pré-scan et résolution astrométrique de tous les fichiers...", 5)
+        if not self.all_input_filepaths:
+            try:
+                self.all_input_filepaths = list(self.queue.queue)
+            except Exception:
+                self.all_input_filepaths = []
+
+        wcs_list: list[WCS] = []
+        header_list: list[fits.Header] = []
+
+        solver_settings = {
+            "local_solver_preference": self.local_solver_preference,
+            "api_key": self.api_key,
+            "astap_path": self.astap_path,
+            "astap_data_dir": self.astap_data_dir,
+            "astap_search_radius": self.astap_search_radius,
+            "astap_downsample": self.astap_downsample,
+            "astap_sensitivity": self.astap_sensitivity,
+            "local_ansvr_path": self.local_ansvr_path,
+            "scale_est_arcsec_per_pix": getattr(self, "reference_pixel_scale_arcsec", None),
+            "use_radec_hints": False,
+        }
+
+        total = len(self.all_input_filepaths)
+        for idx, fpath in enumerate(self.all_input_filepaths):
+            if self.stop_processing:
+                return False
+            self.update_progress(
+                f"   Solving {idx + 1}/{total}: {os.path.basename(fpath)}",
+                5 + int(35 * (idx / max(total, 1))),
+            )
             try:
                 hdr = fits.getheader(fpath, memmap=False)
-                wcs_obj = WCS(hdr, naxis=2)
-                if wcs_obj.is_celestial:
+                if self.astrometry_solver:
+                    wcs_obj = self.astrometry_solver.solve(
+                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    )
+                else:
+                    wcs_obj = solve_image_wcs(
+                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    )
+                if wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
+                else:
+                    self.update_progress(
+                        f"⚠️ [Pré-scan] Échec résolution pour {os.path.basename(fpath)}",
+                        "WARN",
+                    )
             except Exception as e:
                 self.update_progress(
-                    f"⚠️ [Pré-scan] WCS invalide dans {os.path.basename(fpath)}: {e}",
+                    f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {e}",
                     "WARN",
                 )
 
         if not wcs_list:
-            if self.reference_wcs_object and self.reference_wcs_object.pixel_shape:
-                self.update_progress("No valid WCS found – using fallback", "WARN")
-                wcs_list.append(self.reference_wcs_object)
-            else:
-                self.update_progress("Reference WCS not yet available", "WARN")
-                hdr0 = fits.getheader(self.all_input_filepaths[0], memmap=False)
-                dummy = WCS(naxis=2)
-                dummy.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-                dummy.wcs.crval = [float(hdr0.get("OBJCTRA", 0)), float(hdr0.get("OBJCTDEC", 0))]
-                dummy.wcs.crpix = [hdr0.get("NAXIS1", 1024) / 2, hdr0.get("NAXIS2", 1024) / 2]
-                dummy.wcs.cdelt = [-1 / 3600, 1 / 3600]
-                dummy.pixel_shape = (
-                    hdr0.get("NAXIS1", 1024),
-                    hdr0.get("NAXIS2", 1024),
-                )
-                wcs_list.append(dummy)
-                self.update_progress("No valid WCS found – using fallback", "WARN")
-                self.update_progress("Global WCS grid initialised from fallback", "WARN")
+            self.update_progress(
+                "❌ Échec de la préparation de la grille : aucun WCS valide trouvé après résolution.",
+                "ERROR",
+            )
+            return False
 
         if len(wcs_list) == 1:
             ref_wcs = wcs_list[0]
@@ -1343,13 +1370,12 @@ class SeestarQueuedStacker:
         else:
             ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list, header_list)
             if ref_wcs is None:
-                self.update_progress("Global WCS grid failed – abort.", "ERROR")
+                self.update_progress("❌ Échec du calcul de la grille de sortie globale.", "ERROR")
                 return False
-
 
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
-        self.reference_header_for_wcs = ref_wcs.to_header()
+        self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
         try:
             self.reference_wcs_object.pixel_shape = (
                 self.reference_shape[1],
@@ -1362,9 +1388,10 @@ class SeestarQueuedStacker:
 
         self.reproject_between_batches = True
 
-        crval = ", ".join(f"{x:.5f}" for x in ref_wcs.wcs.crval)
+        crval_str = ", ".join(f"{x:.5f}" for x in self.reference_wcs_object.wcs.crval)
         self.update_progress(
-            f"🗺️ Global grid ready – centre={crval}, shape={ref_shape}", "INFO"
+            f"🗺️ Grille globale finale prête – Centre={crval_str}, Shape={self.reference_shape}",
+            "INFO",
         )
 
         return True
