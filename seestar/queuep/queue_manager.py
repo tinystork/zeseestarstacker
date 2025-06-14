@@ -1,7 +1,7 @@
 """
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
-(Version Révisée 9: Imports strictement nécessaires au niveau module)
+(Version Révisée 11: Finalisation cadrage portrait avec reproject_and_coadd)
 """
 import logging
 
@@ -331,6 +331,7 @@ class SeestarQueuedStacker:
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
+        self.fixed_output_wcs = None; self.fixed_output_shape = None
         
         self.sum_memmap_path = None 
         self.wht_memmap_path = None 
@@ -1148,56 +1149,44 @@ class SeestarQueuedStacker:
         if len(ref_shape_2d) != 2:
             raise ValueError(f"Référence shape 2D (H,W) attendu, reçu {ref_shape_2d}")
 
+        if self.fixed_output_wcs is not None and self.fixed_output_shape is not None:
+            return self.fixed_output_wcs, self.fixed_output_shape
+
         # ------------------ 1. Dimensions de sortie ------------------
-        h_in,  w_in  = ref_shape_2d          # entrée (H,W)
+        h_in, w_in = ref_shape_2d
         out_h = int(round(h_in * scale_factor))
         out_w = int(round(w_in * scale_factor))
-        out_h = max(1, out_h); out_w = max(1, out_w)  # sécurité
-        out_shape_hw = (out_h, out_w)        # (H,W) pour NumPy
+        out_h = max(1, out_h)
+        out_w = max(1, out_w)
+        out_shape_hw = (out_h, out_w)
 
         logger.debug(f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}")
 
-        # ------------------ 2. Copier le WCS ------------------
-        out_wcs = ref_wcs.deepcopy()
+        # ------------------ 2. Construction d'un WCS sans rotation ------------------
+        out_wcs = WCS(naxis=2)
+        out_wcs.wcs.crval = list(ref_wcs.wcs.crval)
+        out_wcs.wcs.crpix = (np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor).tolist()
 
-        # ------------------ 3. Ajuster l'échelle pixel ------------------
-        scale_done = False
+        ref_scale_arcsec = self.reference_pixel_scale_arcsec
+        if ref_scale_arcsec is None:
+            try:
+                ref_scale_deg = np.mean(np.abs(proj_plane_pixel_scales(ref_wcs)))
+                ref_scale_arcsec = ref_scale_deg * 3600.0
+            except Exception:
+                ref_scale_arcsec = 1.0
+
+        final_scale_deg = (ref_scale_arcsec / scale_factor) / 3600.0
+        out_wcs.wcs.cd = np.array([[-final_scale_deg, 0.0], [0.0, final_scale_deg]])
+        out_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        out_wcs.pixel_shape = (out_w, out_h)
         try:
-            # a) Matrice CD prioritaire
-            if hasattr(out_wcs.wcs, 'cd') and out_wcs.wcs.cd is not None and np.any(out_wcs.wcs.cd):
-                out_wcs.wcs.cd = ref_wcs.wcs.cd / scale_factor
-                scale_done = True
-                logger.debug("[DrizzleWCS] CD matrix divisée par", scale_factor)
-            # b) Sinon CDELT (+ PC identité si absent)
-            elif hasattr(out_wcs.wcs, 'cdelt') and out_wcs.wcs.cdelt is not None and np.any(out_wcs.wcs.cdelt):
-                out_wcs.wcs.cdelt = ref_wcs.wcs.cdelt / scale_factor
-                if not getattr(out_wcs.wcs, 'pc', None) is not None:
-                    out_wcs.wcs.pc = np.identity(2)
-                scale_done = True
-                logger.debug("[DrizzleWCS] CDELT vector divisé par", scale_factor)
-            else:
-                raise ValueError("Input WCS lacks valid CD matrix and CDELT vector.")
-        except Exception as e:
-            raise ValueError(f"Failed to adjust pixel scale in output WCS: {e}")
-
-        if not scale_done:
-            raise ValueError("Could not adjust WCS scale.")
-
-        # ------------------ 4. Recaler CRPIX ------------------
-        # → garder le même point du ciel au même pixel relatif :
-        #    CRPIX_out = CRPIX_in * scale_factor  (1‑based convention FITS)
-        new_crpix = np.round(np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor, 6)
-        out_wcs.wcs.crpix = new_crpix.tolist()
-        logger.debug(f"[DrizzleWCS] CRPIX in={ref_wcs.wcs.crpix}  ->  out={out_wcs.wcs.crpix}")
-
-        # ------------------ 5. Mettre à jour la taille interne ------------------
-        out_wcs.pixel_shape = (out_w, out_h)   # (W,H) pour Astropy
-        try:                                   # certains attributs privés selon versions
             out_wcs._naxis1 = out_w
             out_wcs._naxis2 = out_h
         except AttributeError:
             pass
 
+        self.fixed_output_wcs = out_wcs
+        self.fixed_output_shape = out_shape_hw
         logger.debug(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
         return out_wcs, out_shape_hw
 
@@ -1211,69 +1200,85 @@ class SeestarQueuedStacker:
 
 
     def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
-        """
-        Calcule un WCS et une shape de sortie optimaux pour un empilement,
-        en forçant un cadre portrait de 1080x1920 et en ajustant l'échelle de pixel.
-        """
+        """Calcule un WCS de sortie portrait fixe 1080x1920 sans rotation."""
         num_wcs = len(all_input_wcs_list)
-        logger.debug(f"DEBUG (Backend _calculate_final_mosaic_grid - Portrait Frame): Appel avec {num_wcs} WCS.")
-        self.update_progress(f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)...")
+        logger.debug(
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Portrait Frame): Appel avec {num_wcs} WCS."
+        )
+        self.update_progress(
+            f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)..."
+        )
         if num_wcs == 0:
             return None, None
-        # --- 1. Calcul du footprint céleste global ---
+
         all_sky_corners_list = []
         for i, wcs_in in enumerate(all_input_wcs_list):
             if wcs_in is None or not wcs_in.is_celestial:
                 continue
-            if wcs_in.pixel_shape is None and all_input_headers_list and i < len(all_input_headers_list):
+            if (
+                wcs_in.pixel_shape is None
+                and all_input_headers_list
+                and i < len(all_input_headers_list)
+            ):
                 hdr = all_input_headers_list[i]
-                n1 = hdr.get("NAXIS1") if hdr else None
-                n2 = hdr.get("NAXIS2") if hdr else None
+                n1 = hdr.get("NAXIS1")
+                n2 = hdr.get("NAXIS2")
                 if n1 and n2:
-                    try:
-                        wcs_in.pixel_shape = (int(n1), int(n2))
-                    except Exception:
-                        pass
+                    wcs_in.pixel_shape = (int(n1), int(n2))
             if wcs_in.pixel_shape is None:
                 continue
             nx, ny = wcs_in.pixel_shape
-            pixel_corners = np.array([[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64)
+            pixel_corners = np.array(
+                [[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64
+            )
             sky_corners = wcs_in.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
             all_sky_corners_list.append(sky_corners)
+
         if not all_sky_corners_list:
             return None, None
+
         all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
-        # --- 2. Projection sur plan tangent et calcul de l'étendue angulaire ---
+
         median_ra = np.median(all_corners_flat_skycoord.ra.wrap_at(180 * u.deg).deg)
         median_dec = np.median(all_corners_flat_skycoord.dec.deg)
         tangent_point_sky = SkyCoord(ra=median_ra * u.deg, dec=median_dec * u.deg, frame="icrs")
         tangent_plane_points = self._project_to_tangent_plane(all_corners_flat_skycoord, tangent_point_sky)
-        min_x_arcsec = np.min(tangent_plane_points[:, 0]); max_x_arcsec = np.max(tangent_plane_points[:, 0])
-        min_y_arcsec = np.min(tangent_plane_points[:, 1]); max_y_arcsec = np.max(tangent_plane_points[:, 1])
+
+        min_x_arcsec = np.min(tangent_plane_points[:, 0])
+        max_x_arcsec = np.max(tangent_plane_points[:, 0])
+        min_y_arcsec = np.min(tangent_plane_points[:, 1])
+        max_y_arcsec = np.max(tangent_plane_points[:, 1])
+
         content_width_arcsec = max_x_arcsec - min_x_arcsec
         content_height_arcsec = max_y_arcsec - min_y_arcsec
-        # --- 3. Calcul de l'échelle optimale pour un cadre 1080x1920 ---
-        target_shape_hw = (1920, 1080)  # H, W
-        target_height_px, target_width_px = target_shape_hw
+
         if content_width_arcsec <= 1e-6 or content_height_arcsec <= 1e-6:
-             logger.warning("L'étendue angulaire du contenu est nulle ou négative. Impossible de calculer l'échelle.")
-             return None, None
+            logger.warning(
+                "L'étendue angulaire du contenu est nulle ou négative. Impossible de calculer l'échelle."
+            )
+            return None, None
+
+        target_shape_hw = (1920, 1080)
+        target_height_px, target_width_px = target_shape_hw
         scale_x_arcsec_per_px = content_width_arcsec / target_width_px
         scale_y_arcsec_per_px = content_height_arcsec / target_height_px
         final_pixel_scale_arcsec = max(scale_x_arcsec_per_px, scale_y_arcsec_per_px)
-        if final_pixel_scale_arcsec <= 0: return None, None
+
+        if final_pixel_scale_arcsec <= 1e-9:
+            return None, None
+
         final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
-        # --- 4. Construction du WCS de sortie ---
+
         output_wcs = WCS(naxis=2)
         output_wcs.wcs.crval = [tangent_point_sky.ra.deg, tangent_point_sky.dec.deg]
         output_wcs.wcs.crpix = [target_width_px / 2.0 + 0.5, target_height_px / 2.0 + 0.5]
-        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg]) # Nord en haut
+        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg])
         output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
         output_wcs.pixel_shape = (target_width_px, target_height_px)
-        try:
-            output_wcs._naxis1 = target_width_px; output_wcs._naxis2 = target_height_px
-        except AttributeError: pass
-        logger.debug(f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix.")
+
+        logger.debug(
+            f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix."
+        )
         return output_wcs, target_shape_hw
 ###########################################################################################################################################################
 
@@ -2727,185 +2732,120 @@ class SeestarQueuedStacker:
 
 
     def _finalize_mosaic_processing(self, aligned_files_info_list):
-        """Effectue la combinaison finale pour le mode mosaïque en utilisant reproject.
-        MODIFIED: Utilisation de reproject_and_coadd pour une meilleure performance et simplicité."""
+        """Effectue la combinaison finale pour le mode mosaïque en utilisant reproject."""
         num_panels = len(aligned_files_info_list)
         logger.debug(
-            f"DEBUG (Backend _finalize_mosaic_processing V_reproject_and_coadd): Début finalisation pour {num_panels} panneaux."
+            f"DEBUG (Backend _finalize_mosaic_processing): Début finalisation pour {num_panels} panneaux."
         )
         self.update_progress(
             f"🖼️ Préparation assemblage mosaïque final ({num_panels} images) avec reproject..."
         )
 
-        if num_panels < 1: 
-            self.update_progress("⚠️ Moins de 1 panneau aligné disponible pour la mosaïque. Traitement annulé.")
-            self.final_stacked_path = None; self.processing_error = "Mosaïque: Moins de 1 panneau aligné"; return
-        
-        # Import tardif pour être sûr d'avoir la bonne version
-        from seestar.enhancement.reproject_utils import reproject_and_coadd
-        _reproject_available = True
-        try:
-            from reproject import reproject_interp  # On a besoin de ça aussi
-        except ImportError:
-            _reproject_available = False
+        if num_panels < 1:
+            self.update_progress(
+                "⚠️ Moins de 1 panneau aligné disponible pour la mosaïque. Traitement annulé."
+            )
+            self.final_stacked_path = None
+            self.processing_error = "Mosaïque: Moins de 1 panneau aligné"
+            return
 
-        if not _reproject_available:
-            error_msg = "Bibliothèque reproject non disponible pour l'assemblage mosaïque."
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            self.processing_error = error_msg
+        try:
+            from seestar.enhancement.reproject_utils import reproject_and_coadd, reproject_interp
+        except ImportError:
+            self.update_progress(
+                "❌ Bibliothèque reproject non disponible pour l'assemblage mosaïque.",
+                "ERROR",
+            )
+            self.processing_error = "reproject non disponible"
             self.final_stacked_path = None
             return
 
-        # Préparation des données pour reproject_and_coadd
         input_data_for_reproject = []
         input_footprints_for_reproject = []
         all_wcs_for_grid_calc = []
         all_headers_for_grid_calc = []
 
-        logger.debug(
-            f"  -> Préparation des {num_panels} panneaux pour reproject_and_coadd..."
-        )
-        for i_panel_loop, panel_info_tuple_local in enumerate(aligned_files_info_list):
+        for panel_info_tuple in aligned_files_info_list:
             try:
-                (
-                    panel_image_data_HWC_orig,
-                    panel_header_orig,
-                    wcs_for_panel_input,
-                    _transform_matrix_M_panel,
-                    _pixel_mask_2d_bool,
-                ) = panel_info_tuple_local
-            except (TypeError, ValueError) as e_unpack:
+                panel_image_data, panel_header, wcs_for_panel, _, pixel_mask = panel_info_tuple
+                if panel_image_data is None or wcs_for_panel is None:
+                    continue
+                input_data_for_reproject.append((panel_image_data, wcs_for_panel))
+                if pixel_mask is not None:
+                    input_footprints_for_reproject.append(pixel_mask.astype(np.float32))
+                else:
+                    input_footprints_for_reproject.append(
+                        np.ones(panel_image_data.shape[:2], dtype=np.float32)
+                    )
+                all_wcs_for_grid_calc.append(wcs_for_panel)
+                all_headers_for_grid_calc.append(panel_header)
+            except Exception as e_unpack:
                 self.update_progress(
-                    f"    -> ERREUR déballage tuple panneau {i_panel_loop+1}: {e_unpack}. Ignoré.",
+                    f"    -> ERREUR déballage tuple panneau: {e_unpack}. Ignoré.",
                     "ERROR",
                 )
-                continue
-
-            original_filename_for_log = panel_header_orig.get(
-                "_SRCFILE", (f"Panel_{i_panel_loop+1}", "")
-            )[0]
-            logger.debug(
-                f"    Processing panel {i_panel_loop+1}/{num_panels}: {original_filename_for_log}"
-            )
-
-            if panel_image_data_HWC_orig is None or wcs_for_panel_input is None:
-                self.update_progress(
-                    f"    -> Panneau {i_panel_loop+1} ('{original_filename_for_log}'): Données ou WCS manquantes. Ignoré.",
-                    "WARN",
-                )
-                continue
-
-            # La fonction attend des données 2D par canal. On prépare les listes.
-            input_data_for_reproject.append(
-                (panel_image_data_HWC_orig, wcs_for_panel_input)
-            )
-
-            # Le "footprint" est le masque de poids. On utilise le masque de pixels valides.
-            footprint_panel = np.ones(
-                panel_image_data_HWC_orig.shape[:2], dtype=np.float32
-            )
-            if _pixel_mask_2d_bool is not None:
-                footprint_panel = _pixel_mask_2d_bool.astype(np.float32)
-            input_footprints_for_reproject.append(footprint_panel)
-
-            all_wcs_for_grid_calc.append(wcs_for_panel_input)
-            all_headers_for_grid_calc.append(panel_header_orig)
 
         if not input_data_for_reproject:
             self.update_progress(
-                "❌ Mosaïque: Aucun panneau valide à traiter avec reproject. Traitement annulé.",
+                "❌ Mosaïque: Aucun panneau valide à traiter. Traitement annulé.",
                 "ERROR",
             )
             return
 
-        # Calcul de la grille de sortie (notre nouvelle fonction personnalisée)
-        logger.debug(
-            "DEBUG (Backend _finalize_mosaic_processing): Appel _calculate_final_mosaic_grid pour reproject..."
-        )
         output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
             all_wcs_for_grid_calc, all_headers_for_grid_calc
         )
 
         if output_wcs is None or output_shape_hw is None:
-            error_msg = (
-                "Échec calcul grille de sortie pour la mosaïque avec reproject."
+            self.update_progress(
+                "❌ Échec calcul grille de sortie pour la mosaïque.",
+                "ERROR",
             )
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            self.processing_error = error_msg
             return
 
-        # --- Boucle sur les canaux R, G, B ---
         final_mosaic_sci_channels = []
         final_mosaic_coverage_channels = []
-        num_color_channels = 3
-        
-        for i_ch in range(num_color_channels):
+        for i_ch in range(3):
             self.update_progress(
-                f"   Reprojection et combinaison du canal {i_ch+1}/{num_color_channels}..."
+                f"   Reprojection et combinaison du canal {i_ch+1}/3..."
             )
-
-            # Extraire le canal actuel de chaque panneau
             channel_arrays_wcs_list = [
-                (panel_data[..., i_ch], wcs)
-                for panel_data, wcs in input_data_for_reproject
+                (panel_data[..., i_ch], wcs) for panel_data, wcs in input_data_for_reproject
             ]
-
             try:
-                mosaic_channel_sci, mosaic_channel_coverage = reproject_and_coadd(
+                sci, cov = reproject_and_coadd(
                     channel_arrays_wcs_list,
                     output_projection=output_wcs,
                     shape_out=output_shape_hw,
                     input_weights=input_footprints_for_reproject,
-                    reproject_function=reproject_interp,  # Utilise l'interpolation rapide
+                    reproject_function=reproject_interp,
                     combine_function="mean",
                     match_background=True,
                 )
-
-                final_mosaic_sci_channels.append(
-                    mosaic_channel_sci.astype(np.float32)
-                )
-                final_mosaic_coverage_channels.append(
-                    mosaic_channel_coverage.astype(np.float32)
-                )
-                self.update_progress(
-                    f"   Canal {i_ch+1}/{num_color_channels} combiné."
-                )
-
+                final_mosaic_sci_channels.append(sci.astype(np.float32))
+                final_mosaic_coverage_channels.append(cov.astype(np.float32))
             except Exception as e_reproject:
-                error_msg = (
-                    f"Erreur durant reproject_and_coadd pour canal {i_ch+1}: {e_reproject}"
+                self.update_progress(
+                    f"❌ Erreur durant reproject_and_coadd pour canal {i_ch+1}: {e_reproject}",
+                    "ERROR",
                 )
-                self.update_progress(f"❌ {error_msg}", "ERROR")
-                traceback.print_exc(limit=3)
                 return
 
         try:
-            final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1).astype(
-                np.float32
-            )
-            final_coverage_map_2D = final_mosaic_coverage_channels[0].astype(
-                np.float32
-            )
-
-            logger.debug(
-                f"  -> Mosaïque combinée avec reproject. Shape SCI: {final_sci_image_HWC.shape}"
-            )
-
+            final_sci_image_HWC = np.stack(final_mosaic_sci_channels, axis=-1)
+            final_coverage_map_2D = final_mosaic_coverage_channels[0]
             self.current_stack_header = fits.Header()
             self.current_stack_header.update(output_wcs.to_header(relax=True))
-
             self._save_final_stack(
                 output_filename_suffix="_mosaic_reproject",
                 drizzle_final_sci_data=final_sci_image_HWC,
                 drizzle_final_wht_data=final_coverage_map_2D,
             )
-
         except Exception as e_stack_final:
-            error_msg = (
-                f"Erreur finalisation/sauvegarde mosaïque avec reproject: {e_stack_final}"
+            self.update_progress(
+                f"❌ Erreur finalisation/sauvegarde mosaïque: {e_stack_final}",
+                "ERROR",
             )
-            self.update_progress(f"❌ {error_msg}", "ERROR")
-            traceback.print_exc(limit=3)
         finally:
             gc.collect()
 
@@ -6191,10 +6131,21 @@ class SeestarQueuedStacker:
         logger.debug(f"  -> self.drizzle_active_session: {self.drizzle_active_session}")
         logger.debug(f"  -> self.drizzle_mode: {self.drizzle_mode}")
         logger.debug(f"  -> self.reference_wcs_object IS None: {self.reference_wcs_object is None}")
-        if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial: 
+        if self.reference_wcs_object and hasattr(self.reference_wcs_object, 'is_celestial') and self.reference_wcs_object.is_celestial:
             logger.debug(f"     WCS Ref CTYPE: {self.reference_wcs_object.wcs.ctype if hasattr(self.reference_wcs_object, 'wcs') else 'N/A'}, PixelShape: {self.reference_wcs_object.pixel_shape}")
         else:
             logger.debug(f"     WCS Ref non disponible ou non céleste.")
+
+        if self.reference_wcs_object and self.fixed_output_wcs is None:
+            try:
+                ref_hw = ref_shape_hwc[:2]
+                self.fixed_output_wcs, self.fixed_output_shape = self._create_drizzle_output_wcs(
+                    self.reference_wcs_object, ref_hw, self.drizzle_scale
+                )
+                self.drizzle_output_wcs = self.fixed_output_wcs
+                self.drizzle_output_shape_hw = self.fixed_output_shape
+            except Exception as e_fix:
+                logger.debug(f"WARN start_processing: erreur creation grille fixe: {e_fix}")
 
         logger.debug(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
         if not self.initialize(output_dir, ref_shape_hwc): 
