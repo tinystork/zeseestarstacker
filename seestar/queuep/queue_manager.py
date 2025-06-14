@@ -1211,18 +1211,16 @@ class SeestarQueuedStacker:
 
 
     def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
-        """Calcule une grille WCS finale optimisée pour un cadre portrait fixe."""
+        """
+        Calcule un WCS et une shape de sortie optimaux pour un empilement,
+        en forçant un cadre portrait de 1080x1920 et en ajustant l'échelle de pixel.
+        """
         num_wcs = len(all_input_wcs_list)
-        logger.debug(
-            f"DEBUG (Backend _calculate_final_mosaic_grid - Custom Frame): Appel avec {num_wcs} WCS."
-        )
-        self.update_progress(
-            f"\U0001F4D0 Calcul de la grille de sortie personnalisée ({num_wcs} WCS)..."
-        )
-
+        logger.debug(f"DEBUG (Backend _calculate_final_mosaic_grid - Portrait Frame): Appel avec {num_wcs} WCS.")
+        self.update_progress(f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)...")
         if num_wcs == 0:
             return None, None
-
+        # --- 1. Calcul du footprint céleste global ---
         all_sky_corners_list = []
         for i, wcs_in in enumerate(all_input_wcs_list):
             if wcs_in is None or not wcs_in.is_celestial:
@@ -1234,72 +1232,48 @@ class SeestarQueuedStacker:
                 if n1 and n2:
                     try:
                         wcs_in.pixel_shape = (int(n1), int(n2))
-                        try:
-                            wcs_in._naxis1 = int(n1)
-                            wcs_in._naxis2 = int(n2)
-                        except Exception:
-                            pass
                     except Exception:
                         pass
-            if not wcs_in.pixel_shape:
+            if wcs_in.pixel_shape is None:
                 continue
             nx, ny = wcs_in.pixel_shape
-            pixel_corners = np.array(
-                [[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64
-            )
+            pixel_corners = np.array([[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64)
             sky_corners = wcs_in.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
             all_sky_corners_list.append(sky_corners)
-
         if not all_sky_corners_list:
             return None, None
-
         all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
-
+        # --- 2. Projection sur plan tangent et calcul de l'étendue angulaire ---
         median_ra = np.median(all_corners_flat_skycoord.ra.wrap_at(180 * u.deg).deg)
         median_dec = np.median(all_corners_flat_skycoord.dec.deg)
-        tangent_point_sky = SkyCoord(
-            ra=median_ra * u.deg, dec=median_dec * u.deg, frame="icrs"
-        )
-
-        tangent_plane_points = self._project_to_tangent_plane(
-            all_corners_flat_skycoord, tangent_point_sky
-        )
-
-        min_x_arcsec = np.min(tangent_plane_points[:, 0])
-        max_x_arcsec = np.max(tangent_plane_points[:, 0])
-        min_y_arcsec = np.min(tangent_plane_points[:, 1])
-        max_y_arcsec = np.max(tangent_plane_points[:, 1])
-
+        tangent_point_sky = SkyCoord(ra=median_ra * u.deg, dec=median_dec * u.deg, frame="icrs")
+        tangent_plane_points = self._project_to_tangent_plane(all_corners_flat_skycoord, tangent_point_sky)
+        min_x_arcsec = np.min(tangent_plane_points[:, 0]); max_x_arcsec = np.max(tangent_plane_points[:, 0])
+        min_y_arcsec = np.min(tangent_plane_points[:, 1]); max_y_arcsec = np.max(tangent_plane_points[:, 1])
         content_width_arcsec = max_x_arcsec - min_x_arcsec
         content_height_arcsec = max_y_arcsec - min_y_arcsec
-
-        # --- DÉBUT DE LA CORRECTION ---
-        target_shape_hw = (1920, 1080)
-        # --- FIN DE LA CORRECTION ---
+        # --- 3. Calcul de l'échelle optimale pour un cadre 1080x1920 ---
+        target_shape_hw = (1920, 1080)  # H, W
         target_height_px, target_width_px = target_shape_hw
-
+        if content_width_arcsec <= 1e-6 or content_height_arcsec <= 1e-6:
+             logger.warning("L'étendue angulaire du contenu est nulle ou négative. Impossible de calculer l'échelle.")
+             return None, None
         scale_x_arcsec_per_px = content_width_arcsec / target_width_px
         scale_y_arcsec_per_px = content_height_arcsec / target_height_px
-
         final_pixel_scale_arcsec = max(scale_x_arcsec_per_px, scale_y_arcsec_per_px)
+        if final_pixel_scale_arcsec <= 0: return None, None
         final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
-
+        # --- 4. Construction du WCS de sortie ---
         output_wcs = WCS(naxis=2)
         output_wcs.wcs.crval = [tangent_point_sky.ra.deg, tangent_point_sky.dec.deg]
         output_wcs.wcs.crpix = [target_width_px / 2.0 + 0.5, target_height_px / 2.0 + 0.5]
-        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg])
+        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg]) # Nord en haut
         output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-
         output_wcs.pixel_shape = (target_width_px, target_height_px)
         try:
-            output_wcs._naxis1 = target_width_px
-            output_wcs._naxis2 = target_height_px
-        except AttributeError:
-            pass
-
-        logger.debug(
-            f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix."
-        )
+            output_wcs._naxis1 = target_width_px; output_wcs._naxis2 = target_height_px
+        except AttributeError: pass
+        logger.debug(f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix.")
         return output_wcs, target_shape_hw
 ###########################################################################################################################################################
 
@@ -1428,13 +1402,8 @@ class SeestarQueuedStacker:
     def _worker(self):
         """
         Thread principal pour le traitement des images.
-        Version: V5.3.2_AstroPerPanelFix (Correction appel _process_file pour Astrometry par panneau)
         """
-        # ================================================================================
-        # === SECTION 0 : INITIALISATION DU WORKER ET CONFIGURATION DE SESSION ===
-        # ================================================================================
-        logger.debug("\n" + "=" * 10 + f" DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Initialisation du worker " + "=" * 10)
-
+        logger.debug("\n" + "=" * 10 + f" DEBUG QM [_worker V_NoDerotation]: Initialisation du worker " + "=" * 10)
         self.processing_active = True
         self.processing_error = None
         # start_time_session = time.monotonic() # Décommenter si besoin
@@ -1466,7 +1435,7 @@ class SeestarQueuedStacker:
             self.mosaic_alignment_mode == "astrometry_per_panel"
         )
 
-        logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Configuration de la session:")
+        logger.debug(f"DEBUG QM [_worker V_NoDerotation]: Configuration de la session:")
         logger.debug(f"  - is_mosaic_run: {self.is_mosaic_run}")
         if self.is_mosaic_run:
             logger.debug(f"    - mosaic_alignment_mode: '{self.mosaic_alignment_mode}'")
@@ -2173,16 +2142,16 @@ class SeestarQueuedStacker:
         # --- FIN DU BLOC TRY PRINCIPAL DU WORKER ---
         except RuntimeError as rte: 
             self.update_progress(f"❌ ERREUR CRITIQUE (RuntimeError) dans le worker: {rte}", "ERROR") # S'assurer que "ERROR" est passé pour le log GUI
-            logger.debug(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: RuntimeError: {rte}"); traceback.print_exc(limit=3)
+            logger.debug(f"ERREUR QM [_worker V_NoDerotation]: RuntimeError: {rte}"); traceback.print_exc(limit=3)
             self.processing_error = f"RuntimeError: {rte}"
             self.stop_processing = True # Provoquer l'arrêt propre du thread
         except Exception as e_global_worker: 
             self.update_progress(f"❌ ERREUR INATTENDUE GLOBALE dans le worker: {e_global_worker}", "ERROR")
-            logger.debug(f"ERREUR QM [_worker V5.3.2_AstroPerPanelFix]: Exception Globale: {e_global_worker}"); traceback.print_exc(limit=3)
+            logger.debug(f"ERREUR QM [_worker V_NoDerotation]: Exception Globale: {e_global_worker}"); traceback.print_exc(limit=3)
             self.processing_error = f"Erreur Globale: {e_global_worker}"
             self.stop_processing = True # Provoquer l'arrêt propre du thread
         finally:
-            logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Entrée dans le bloc FINALLY principal du worker.")
+            logger.debug(f"DEBUG QM [_worker V_NoDerotation]: Entrée dans le bloc FINALLY principal du worker.")
             if hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None \
                or hasattr(self, 'cumulative_wht_memmap') and self.cumulative_wht_memmap is not None:
                 self._close_memmaps()
@@ -2197,7 +2166,7 @@ class SeestarQueuedStacker:
             self.processing_active = False
             self.stop_processing_flag_for_gui = self.stop_processing # Transmettre l'état d'arrêt à l'UI
             gc.collect()
-            logger.debug(f"DEBUG QM [_worker V5.3.2_AstroPerPanelFix]: Fin du bloc FINALLY principal. Flag processing_active mis à False.")
+            logger.debug(f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False.")
             self.update_progress("🚪 Thread de traitement principal terminé.")
 
 
@@ -6170,20 +6139,6 @@ class SeestarQueuedStacker:
                          self.reference_wcs_object.pixel_shape = (int(nx_ref_hdr), int(ny_ref_hdr))
                          logger.debug(f"    [StartProcRefSolve] pixel_shape ajouté/vérifié sur WCS réf: {self.reference_wcs_object.pixel_shape}")
 
-                    # --- DÉBUT DE LA NOUVELLE SOLUTION ---
-                    # Forcer un WCS de référence sans rotation pour une grille « droite »
-                    try:
-                        logger.debug("   [StartProcRefSolve] Forçage de l'alignement Nord/Sud du WCS de référence...")
-                        scales_deg = proj_plane_pixel_scales(self.reference_wcs_object)
-                        avg_scale_deg = np.mean(np.abs(scales_deg))
-                        new_cd = np.array([[-avg_scale_deg, 0.0], [0.0, avg_scale_deg]])
-                        self.reference_wcs_object.wcs.cd = new_cd
-                        self.reference_wcs_object.wcs.pc = np.array([[1.0, 0.0], [0.0, 1.0]])
-                        self.update_progress("   [StartProcRefSolve] WCS de référence aligné sur les axes Nord/Sud.", "INFO")
-                        logger.debug(f"   [StartProcRefSolve] Nouveau WCS de référence 'droit':\n{self.reference_wcs_object.wcs}")
-                    except Exception as e_derotate:
-                        self.update_progress(f"   [StartProcRefSolve] Avertissement: Échec de la dé-rotation du WCS de référence: {e_derotate}", "WARN")
-                    # --- FIN DE LA NOUVELLE SOLUTION ---
 
                     try:
                         scales_deg_per_pix = proj_plane_pixel_scales(self.reference_wcs_object)
@@ -6649,4 +6604,3 @@ class SeestarQueuedStacker:
 
 
 ######################################################################################################################################################
-
