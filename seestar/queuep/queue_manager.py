@@ -1209,7 +1209,7 @@ class SeestarQueuedStacker:
             f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS."
         )
         self.update_progress(
-            f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)..."
+            f"📐 Calcul de la grille de sortie dynamique ({num_wcs} WCS)..."
         )
         if num_wcs == 0:
             return None, None
