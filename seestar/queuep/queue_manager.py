@@ -2119,7 +2119,7 @@ class SeestarQueuedStacker:
 
                                     if self.master_sum is None:
                                         self.update_progress("   -> Initialisation de la grille de reprojection globale...")
-                                        if self.reference_wcs_object is None or self.reference_shape is None:
+                                        if self.fixed_output_wcs is None or self.reference_shape is None:
                                             raise RuntimeError("WCS/Shape de référence manquant pour reprojection incrémentale.")
                                         self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
                                         self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
@@ -2140,8 +2140,12 @@ class SeestarQueuedStacker:
 
                                         coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
                                         self.master_sum, self.master_coverage = reproject_and_combine(
-                                            self.master_sum, self.master_coverage,
-                                            image_data, coverage_map, image_wcs, self.reference_wcs_object
+                                            self.master_sum,
+                                            self.master_coverage,
+                                            image_data,
+                                            coverage_map,
+                                            image_wcs,
+                                            self.fixed_output_wcs or self.reference_wcs_object,
                                         )
                                         self.images_in_cumulative_stack += 1
 
@@ -2391,7 +2395,7 @@ class SeestarQueuedStacker:
 
                     if self.master_sum is None:
                         self.update_progress("   -> Initialisation de la grille de reprojection globale (dernier lot)...")
-                        if self.reference_wcs_object is None or self.reference_shape is None:
+                        if self.fixed_output_wcs is None or self.reference_shape is None:
                             raise RuntimeError("WCS/Shape de référence manquant pour reprojection finale.")
                         self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
                         self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
@@ -2401,7 +2405,12 @@ class SeestarQueuedStacker:
                         if image_data is not None and image_wcs is not None:
                             coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
                             self.master_sum, self.master_coverage = reproject_and_combine(
-                                self.master_sum, self.master_coverage, image_data, coverage_map, image_wcs, self.reference_wcs_object
+                                self.master_sum,
+                                self.master_coverage,
+                                image_data,
+                                coverage_map,
+                                image_wcs,
+                                self.fixed_output_wcs or self.reference_wcs_object,
                             )
                             self.images_in_cumulative_stack += 1
                     self._update_preview_master()
@@ -6261,7 +6270,8 @@ class SeestarQueuedStacker:
                     self.fixed_output_wcs, self.fixed_output_shape = compute_final_output_grid(
                         header_infos, scale=self.drizzle_scale
                     )
-                    self.reference_wcs_object = self.fixed_output_wcs
+
+
                     self.reference_shape = self.fixed_output_shape
                     self.update_progress(
                         f"🗺️ Grille fixe calculée {self.fixed_output_shape} px.",
@@ -6450,8 +6460,18 @@ class SeestarQueuedStacker:
             except Exception as e_fix:
                 logger.debug(f"WARN start_processing: erreur creation grille fixe: {e_fix}")
 
-        logger.debug(f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={ref_shape_hwc}...")
-        if not self.initialize(output_dir, ref_shape_hwc): 
+        init_shape_hwc = ref_shape_hwc
+        if self.reproject_between_batches and self.fixed_output_shape is not None:
+            init_shape_hwc = (
+                self.fixed_output_shape[0],
+                self.fixed_output_shape[1],
+                3,
+            )
+
+        logger.debug(
+            f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={init_shape_hwc}..."
+        )
+        if not self.initialize(output_dir, init_shape_hwc):
             self.processing_active = False 
             logger.debug("ERREUR QM (start_processing): Échec de self.initialize().")
             return False
