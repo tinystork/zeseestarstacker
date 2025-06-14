@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 # --- FIN AJOUT CRITIQUE ---
 
-logger.debug("Début chargement module queue_manager.py")
 
 # --- Standard Library Imports ---
 from astropy.io import fits
@@ -25,7 +24,8 @@ import tempfile
 import threading              # Essentiel pour la classe (Lock)
 import time
 import traceback
-import threadpoolctl
+
+
 import sys
 import asyncio
 import concurrent.futures
@@ -277,9 +277,16 @@ class SeestarQueuedStacker:
         ]:
             os.environ[var] = str(nthreads)
         try:
-            threadpoolctl.threadpool_limits(nthreads)
+
+            from threadpoolctl import threadpool_limits
         except Exception:
-            pass
+            threadpool_limits = None
+        if threadpool_limits:
+            try:
+                threadpool_limits(nthreads)
+            except Exception:
+                pass
+
         if "mkl" in sys.modules:
             try:
                 sys.modules["mkl"].set_num_threads(nthreads)
@@ -295,10 +302,15 @@ class SeestarQueuedStacker:
 
     def _process_batch_parallel(self, filepaths: list[str]):
         start = time.monotonic()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as ex:
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.num_threads
+        ) as ex:
             results = list(ex.map(self._process_file, filepaths))
         duration = time.monotonic() - start
-        self.update_progress(f"Processed {len(filepaths)} images in {duration:.2f} s")
+        msg = f"Processed {len(filepaths)} images in {duration:.2f} s"
+        self.update_progress(msg)
+
         if duration / max(len(filepaths), 1) > 0.01 and self.batch_size > 1:
             self.batch_size = max(1, self.batch_size // 2)
             self.update_progress(f"Batch size reduced to {self.batch_size}")
@@ -317,10 +329,17 @@ class SeestarQueuedStacker:
 
         def _run(files):
             async def _prefetch_async():
-                await asyncio.gather(*(asyncio.to_thread(_read_one, fp) for fp in files))
+
+                tasks = [asyncio.to_thread(_read_one, fp) for fp in files]
+                await asyncio.gather(*tasks)
             asyncio.run(_prefetch_async())
 
-        threading.Thread(target=_run, args=(list(file_paths),), daemon=True).start()
+        threading.Thread(
+            target=_run,
+            args=(list(file_paths),),
+            daemon=True,
+        ).start()
+
 
 
 
