@@ -24,6 +24,8 @@ import tempfile
 import threading              # Essentiel pour la classe (Lock)
 import time
 import traceback
+
+
 import sys
 import asyncio
 import concurrent.futures
@@ -275,6 +277,7 @@ class SeestarQueuedStacker:
         ]:
             os.environ[var] = str(nthreads)
         try:
+
             from threadpoolctl import threadpool_limits
         except Exception:
             threadpool_limits = None
@@ -283,6 +286,7 @@ class SeestarQueuedStacker:
                 threadpool_limits(nthreads)
             except Exception:
                 pass
+
         if "mkl" in sys.modules:
             try:
                 sys.modules["mkl"].set_num_threads(nthreads)
@@ -298,6 +302,7 @@ class SeestarQueuedStacker:
 
     def _process_batch_parallel(self, filepaths: list[str]):
         start = time.monotonic()
+
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.num_threads
         ) as ex:
@@ -305,6 +310,7 @@ class SeestarQueuedStacker:
         duration = time.monotonic() - start
         msg = f"Processed {len(filepaths)} images in {duration:.2f} s"
         self.update_progress(msg)
+
         if duration / max(len(filepaths), 1) > 0.01 and self.batch_size > 1:
             self.batch_size = max(1, self.batch_size // 2)
             self.update_progress(f"Batch size reduced to {self.batch_size}")
@@ -323,6 +329,7 @@ class SeestarQueuedStacker:
 
         def _run(files):
             async def _prefetch_async():
+
                 tasks = [asyncio.to_thread(_read_one, fp) for fp in files]
                 await asyncio.gather(*tasks)
             asyncio.run(_prefetch_async())
@@ -332,6 +339,7 @@ class SeestarQueuedStacker:
             args=(list(file_paths),),
             daemon=True,
         ).start()
+
 
 
 
