@@ -1,7 +1,7 @@
 """
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
-(Version Révisée 12: Correction finale du cadrage avec pré-scan global du WCS)
+(Version Révisée 13: Correction finale avec pré-solving global et aperçu dynamique)
 """
 import logging
 
@@ -1097,7 +1097,11 @@ class SeestarQueuedStacker:
 
 
     def _update_preview_master(self):
-        """Update preview when using incremental reprojection."""
+        """Update preview when using incremental reprojection.
+
+        This version dynamically crops the preview to the region that actually
+        contains stacked data to avoid showing large empty borders.
+        """
         if (
             self.preview_callback is None
             or self.master_sum is None
@@ -1106,13 +1110,30 @@ class SeestarQueuedStacker:
             return
 
         try:
-            avg = self.master_sum / np.maximum(self.master_coverage, 1e-9)[..., None]
+            # Compute mean stack while protecting against divide by zero
+            wht_safe = np.maximum(self.master_coverage, 1e-9)
+            avg = self.master_sum / wht_safe[..., None]
             avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
-            mn, mx = np.nanmin(avg), np.nanmax(avg)
-            if np.isfinite(mn) and np.isfinite(mx) and mx > mn:
-                norm = (avg - mn) / (mx - mn)
+
+            # --- Dynamic cropping to area with data ---
+            rows, cols = np.where(self.master_coverage > 0)
+            if rows.size > 0:
+                top, bottom = np.min(rows), np.max(rows)
+                left, right = np.min(cols), np.max(cols)
+                if top < bottom and left < right:
+                    avg_cropped = avg[top : bottom + 1, left : right + 1]
+                else:
+                    avg_cropped = avg
             else:
-                norm = np.zeros_like(avg, dtype=np.float32)
+                avg_cropped = avg
+
+            # Normalise for display
+            mn, mx = np.nanmin(avg_cropped), np.nanmax(avg_cropped)
+            if np.isfinite(mn) and np.isfinite(mx) and mx > mn:
+                norm = (avg_cropped - mn) / (mx - mn)
+            else:
+                norm = np.zeros_like(avg_cropped, dtype=np.float32)
+
             self.current_stack_data = np.clip(norm, 0.0, 1.0).astype(np.float32)
             self.current_stack_header = self.current_stack_header or fits.Header()
             self._update_preview()
