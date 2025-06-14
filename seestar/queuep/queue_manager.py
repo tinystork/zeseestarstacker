@@ -4199,7 +4199,11 @@ class SeestarQueuedStacker:
             )
             return
 
-        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None or self.memmap_shape is None:
+        if (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.memmap_shape is None
+        ):
              self.update_progress(
                  f"❌ Accumulation lot #{current_batch_num} impossible: memmap SUM/WHT non initialisés.",
                  "ERROR",
@@ -4213,6 +4217,23 @@ class SeestarQueuedStacker:
              self.processing_error = "Memmap non initialisé"; self.stop_processing = True
              return
 
+
+        # --- Ajustement dynamique de la taille des memmaps si nécessaire ---
+        incoming_shape_hw = (
+            stacked_batch_data_np.shape[:2]
+            if stacked_batch_data_np.ndim >= 2
+            else self.memmap_shape[:2]
+        )
+        current_shape_hw = self.memmap_shape[:2]
+        if (
+            incoming_shape_hw[0] > current_shape_hw[0]
+            or incoming_shape_hw[1] > current_shape_hw[1]
+        ):
+            logger.debug(
+                "DEBUG QM [_combine_batch_result]: incoming image larger than memmap, reallocating"
+            )
+            self._close_memmaps()
+            self._create_sum_wht_memmaps(incoming_shape_hw)
 
         # Vérifier la cohérence des shapes
         # stacked_batch_data_np peut être HWC ou HW. memmap_shape est HWC.
