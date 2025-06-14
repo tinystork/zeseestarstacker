@@ -1281,7 +1281,10 @@ class SeestarQueuedStacker:
         output_wcs = WCS(naxis=2)
         output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
         output_wcs.wcs.crval = [center_ra, center_dec]
-        output_wcs.wcs.crpix = [nw / 2.0, nh / 2.0]
+        # Center the mosaic so that the lower-left corner of the bounding box
+        # maps to pixel (1, 1). This avoids negative pixel coordinates once
+        # images are reprojected onto the final canvas.
+        output_wcs.wcs.crpix = [-minx + 1.0, -miny + 1.0]
         cos_t = np.cos(np.deg2rad(theta))
         sin_t = np.sin(np.deg2rad(theta))
         output_wcs.wcs.cd = final_pixel_scale_deg * np.array([[-cos_t, sin_t], [sin_t, cos_t]])
