@@ -1299,9 +1299,36 @@ class SeestarQueuedStacker:
                     f"⚠️ [Pre‑scan] bad WCS in {os.path.basename(fpath)}: {e}", "WARN"
                 )
 
-        ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list)
-        if ref_wcs is None:
-            raise RuntimeError("Global WCS grid failed – abort.")
+
+        if not wcs_list:
+            if self.reference_wcs_object and self.reference_wcs_object.pixel_shape:
+                self.update_progress("No valid WCS found – using fallback", "WARN")
+                wcs_list.append(self.reference_wcs_object)
+            else:
+                self.update_progress("Reference WCS not yet available", "WARN")
+                hdr0 = fits.getheader(self.all_input_filepaths[0], memmap=False)
+                dummy = WCS(naxis=2)
+                dummy.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+                dummy.wcs.crval = [float(hdr0.get("OBJCTRA", 0)), float(hdr0.get("OBJCTDEC", 0))]
+                dummy.wcs.crpix = [hdr0.get("NAXIS1", 1024) / 2, hdr0.get("NAXIS2", 1024) / 2]
+                dummy.wcs.cdelt = [-1 / 3600, 1 / 3600]
+                dummy.pixel_shape = (
+                    hdr0.get("NAXIS1", 1024),
+                    hdr0.get("NAXIS2", 1024),
+                )
+                wcs_list.append(dummy)
+                self.update_progress("No valid WCS found – using fallback", "WARN")
+                self.update_progress("Global WCS grid initialised from fallback", "WARN")
+
+        if len(wcs_list) == 1:
+            ref_wcs = wcs_list[0]
+            ref_shape = ref_wcs.pixel_shape
+        else:
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list)
+            if ref_wcs is None:
+                self.update_progress("Global WCS grid failed – abort.", "ERROR")
+                return False
+
 
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
@@ -1312,6 +1339,9 @@ class SeestarQueuedStacker:
         self.update_progress(
             f"🗺️ Global grid ready – centre={crval}, shape={ref_shape}", "INFO"
         )
+
+        return True
+
 
 
     def _recalculate_total_batches(self):
@@ -1757,11 +1787,19 @@ class SeestarQueuedStacker:
             logger.debug(f"!!!! DEBUG _worker POST SECTION 1 (après init grille Drizzle si applicable) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
             
             self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
-            self.update_progress("⭐ Référence(s) prête(s).", 5); self._recalculate_total_batches()
-            
+            self.update_progress("⭐ Référence(s) prête(s).", 5)
+            self._recalculate_total_batches()
 
+            self.update_progress("🔍 Pre-scan FITS headers…")
+            ok_grid = self._prepare_global_reprojection_grid()
+            if not ok_grid:
+                self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
+                self.stop_processing = True
+                return
 
-            self.update_progress(f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})...")
+            self.update_progress(
+                f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})..."
+            )
 
             # ============================================================
             # === SECTION 2 : BOUCLE PRINCIPALE DE TRAITEMENT DES IMAGES ===
@@ -6216,12 +6254,7 @@ class SeestarQueuedStacker:
                         f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
                     )
 
-        self.update_progress("🔍 Pre-scan FITS headers…")
-        try:
-            self._prepare_global_reprojection_grid()
-        except Exception as e_grid:
-            self.update_progress(f"❌ {e_grid}", "ERROR")
-            return False
+
 
         initial_files_added = self._add_files_to_queue(self.current_folder) 
         if initial_files_added > 0: 
