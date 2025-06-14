@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 # --- FIN AJOUT CRITIQUE ---
 
-logger.debug("Début chargement module queue_manager.py")
 
 # --- Standard Library Imports ---
 from astropy.io import fits
@@ -25,6 +24,9 @@ import tempfile
 import threading              # Essentiel pour la classe (Lock)
 import time
 import traceback
+import sys
+import asyncio
+import concurrent.futures
 import warnings
 
 logger.debug("Imports standard OK.")
@@ -262,13 +264,99 @@ class SeestarQueuedStacker:
     """
     logger.debug("Lecture de la définition de la classe SeestarQueuedStacker...")
 
+    def _configure_global_threads(self, fraction: float) -> None:
+        nthreads = max(1, math.floor(os.cpu_count() * fraction))
+        for var in [
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        ]:
+            os.environ[var] = str(nthreads)
+        try:
+            from threadpoolctl import threadpool_limits
+        except Exception:
+            threadpool_limits = None
+        if threadpool_limits:
+            try:
+                threadpool_limits(nthreads)
+            except Exception:
+                pass
+        if "mkl" in sys.modules:
+            try:
+                sys.modules["mkl"].set_num_threads(nthreads)
+            except Exception:
+                pass
+        try:
+            cv2.setNumThreads(nthreads)
+        except Exception:
+            pass
+        self.num_threads = nthreads
+        if hasattr(self, "update_progress"):
+            self.update_progress(f"Threads limited to {nthreads}")
+
+    def _process_batch_parallel(self, filepaths: list[str]):
+        start = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.num_threads
+        ) as ex:
+            results = list(ex.map(self._process_file, filepaths))
+        duration = time.monotonic() - start
+        msg = f"Processed {len(filepaths)} images in {duration:.2f} s"
+        self.update_progress(msg)
+        if duration / max(len(filepaths), 1) > 0.01 and self.batch_size > 1:
+            self.batch_size = max(1, self.batch_size // 2)
+            self.update_progress(f"Batch size reduced to {self.batch_size}")
+        return results
+
+    def _prefetch(self, file_paths):
+        if self.io_profile != "usb":
+            return
+
+        def _read_one(p):
+            try:
+                with open(p, "rb") as f:
+                    f.read(1024)
+            except Exception:
+                pass
+
+        def _run(files):
+            async def _prefetch_async():
+                tasks = [asyncio.to_thread(_read_one, fp) for fp in files]
+                await asyncio.gather(*tasks)
+            asyncio.run(_prefetch_async())
+
+        threading.Thread(
+            target=_run,
+            args=(list(file_paths),),
+            daemon=True,
+        ).start()
+
 
 
 
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def __init__(self, settings: SettingsManager | None = None):
-        logger.debug("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====") 
+    def __init__(
+        self,
+        gpu: bool = False,
+        io_profile: str = "ssd",
+        thread_fraction: float = 0.5,
+        batch_size: int | None = None,
+        settings: SettingsManager | None = None,
+        *args,
+        **kwargs,
+    ):
+        self.progress_callback = None
+        self._configure_global_threads(thread_fraction)
+        self.io_profile = io_profile
+        self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
+        if batch_size is None:
+            self.batch_size = min(4, self.num_threads) if io_profile == "usb" else self.num_threads * 2
+        else:
+            self.batch_size = int(batch_size)
+        logger.debug("\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ====")
         
         # --- 1. Attributs Critiques et Simples ---
         logger.debug("  -> Initialisation attributs simples et flags...")
@@ -413,7 +501,8 @@ class SeestarQueuedStacker:
 
         try:
             logger.debug("  -> Instanciation SeestarAligner (pour alignement général astroalign)...")
-            self.aligner = SeestarAligner() 
+            self.aligner = SeestarAligner()
+            self.aligner.use_cuda = self.use_cuda
             logger.debug("     ✓ SeestarAligner (astroalign) OK.")
         except Exception as e_align: 
             logger.debug(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
