@@ -3,6 +3,8 @@
 from seestar.enhancement.reproject_utils import reproject_interp
 import numpy as np
 from astropy.wcs import WCS
+import os
+from multiprocessing import Pool
 
 
 def reproject_to_reference_wcs(image_data, input_wcs, target_wcs, target_shape_hw):
@@ -56,3 +58,25 @@ def reproject_to_reference_wcs(image_data, input_wcs, target_wcs, target_shape_h
 
     except Exception as exc:
         raise RuntimeError(f"Reprojection failed: {exc}")
+
+
+# ----------------------------------------------------------------------
+# Parallel WCS Reprojection Helper and Dispatcher
+# ----------------------------------------------------------------------
+
+def _reproject_single(args):
+    """Helper for multiprocessing Pool: reproject a single image."""
+    image, wcs_out, kwargs = args
+    return reproject_interp(image, wcs_out, **kwargs)
+
+
+def resolve_all_wcs(images, wcs_out, **kwargs):
+    """Reproject a list of images onto ``wcs_out`` using multiple processes."""
+
+    n_proc = max(1, os.cpu_count() // 2)
+    tasks = [(img, wcs_out, kwargs) for img in images]
+
+    with Pool(processes=n_proc) as pool:
+        results = pool.map(_reproject_single, tasks)
+
+    return results
