@@ -1203,10 +1203,10 @@ class SeestarQueuedStacker:
 
 
     def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
-        """Calcule un WCS de sortie portrait fixe 1080x1920 sans rotation."""
+        """Compute a global WCS using a dynamic bounding box with optional rotation."""
         num_wcs = len(all_input_wcs_list)
         logger.debug(
-            f"DEBUG (Backend _calculate_final_mosaic_grid - Portrait Frame): Appel avec {num_wcs} WCS."
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS."
         )
         self.update_progress(
             f"📐 Calcul de la grille de sortie portrait ({num_wcs} WCS)..."
@@ -1242,47 +1242,59 @@ class SeestarQueuedStacker:
 
         all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
 
-        median_ra = np.median(all_corners_flat_skycoord.ra.wrap_at(180 * u.deg).deg)
-        median_dec = np.median(all_corners_flat_skycoord.dec.deg)
-        tangent_point_sky = SkyCoord(ra=median_ra * u.deg, dec=median_dec * u.deg, frame="icrs")
-        tangent_plane_points = self._project_to_tangent_plane(all_corners_flat_skycoord, tangent_point_sky)
+        center_ra = np.median([w.wcs.crval[0] for w in all_input_wcs_list])
+        center_dec = np.median([w.wcs.crval[1] for w in all_input_wcs_list])
 
-        min_x_arcsec = np.min(tangent_plane_points[:, 0])
-        max_x_arcsec = np.max(tangent_plane_points[:, 0])
-        min_y_arcsec = np.min(tangent_plane_points[:, 1])
-        max_y_arcsec = np.max(tangent_plane_points[:, 1])
+        local_tan = WCS(naxis=2)
+        local_tan.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        local_tan.wcs.crval = [center_ra, center_dec]
+        local_tan.wcs.crpix = [0.0, 0.0]
+        local_tan.wcs.cd = np.eye(2)
 
-        content_width_arcsec = max_x_arcsec - min_x_arcsec
-        content_height_arcsec = max_y_arcsec - min_y_arcsec
+        xy = np.vstack(local_tan.world_to_pixel(all_corners_flat_skycoord)).T
+        eigvals, eigvecs = np.linalg.eig(np.cov(xy, rowvar=False))
+        theta = np.arctan2(eigvecs[1, 0], eigvecs[0, 0]) * 180 / np.pi
 
-        if content_width_arcsec <= 1e-6 or content_height_arcsec <= 1e-6:
-            logger.warning(
-                "L'étendue angulaire du contenu est nulle ou négative. Impossible de calculer l'échelle."
-            )
-            return None, None
+        rot = np.array([
+            [np.cos(np.deg2rad(-theta)), -np.sin(np.deg2rad(-theta))],
+            [np.sin(np.deg2rad(-theta)), np.cos(np.deg2rad(-theta))],
+        ])
+        xy_rot = xy @ rot.T
+        minx, miny = xy_rot.min(axis=0)
+        maxx, maxy = xy_rot.max(axis=0)
 
-        target_shape_hw = (1920, 1080)
-        target_height_px, target_width_px = target_shape_hw
-        scale_x_arcsec_per_px = content_width_arcsec / target_width_px
-        scale_y_arcsec_per_px = content_height_arcsec / target_height_px
-        final_pixel_scale_arcsec = max(scale_x_arcsec_per_px, scale_y_arcsec_per_px)
-
-        if final_pixel_scale_arcsec <= 1e-9:
-            return None, None
-
+        scales_arcsec = []
+        for w in all_input_wcs_list:
+            try:
+                scales_arcsec.append(np.mean(np.abs(proj_plane_pixel_scales(w))) * 3600.0)
+            except Exception:
+                pass
+        final_pixel_scale_arcsec = float(np.median(scales_arcsec)) if scales_arcsec else 1.0
         final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
 
-        output_wcs = WCS(naxis=2)
-        output_wcs.wcs.crval = [tangent_point_sky.ra.deg, tangent_point_sky.dec.deg]
-        output_wcs.wcs.crpix = [target_width_px / 2.0 + 0.5, target_height_px / 2.0 + 0.5]
-        output_wcs.wcs.cdelt = np.array([-final_pixel_scale_deg, final_pixel_scale_deg])
-        output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-        output_wcs.pixel_shape = (target_width_px, target_height_px)
+        content_width_deg = maxx - minx
+        content_height_deg = maxy - miny
 
-        logger.debug(
-            f"DEBUG (Backend Grid Calc): Grille personnalisée {target_width_px}x{target_height_px} créée. Échelle: {final_pixel_scale_arcsec:.3f} arcsec/pix."
+        nw = int(np.ceil(content_width_deg / final_pixel_scale_deg)) + 4
+        nh = int(np.ceil(content_height_deg / final_pixel_scale_deg)) + 4
+
+        output_wcs = WCS(naxis=2)
+        output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        output_wcs.wcs.crval = [center_ra, center_dec]
+        output_wcs.wcs.crpix = [nw / 2.0, nh / 2.0]
+        cos_t = np.cos(np.deg2rad(theta))
+        sin_t = np.sin(np.deg2rad(theta))
+        output_wcs.wcs.cd = final_pixel_scale_deg * np.array([[-cos_t, sin_t], [sin_t, cos_t]])
+        output_wcs.pixel_shape = (nw, nh)
+
+        self.update_progress(
+            f"🗺️ Global grid : dynamic box {(nh, nw)} px, theta={theta:.2f}°",
+            "INFO",
         )
-        return output_wcs, target_shape_hw
+        logger.debug(
+            f"DEBUG (Backend Grid Calc): dynamic grid {nw}x{nh}  scale={final_pixel_scale_arcsec:.3f} arcsec/pix  theta={theta:.2f}"
+        )
+        return output_wcs, (nh, nw)
 ###########################################################################################################################################################
 
     def _prepare_global_reprojection_grid(self):
@@ -1298,7 +1310,6 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     f"⚠️ [Pre‑scan] bad WCS in {os.path.basename(fpath)}: {e}", "WARN"
                 )
-
 
         if not wcs_list:
             if self.reference_wcs_object and self.reference_wcs_object.pixel_shape:
