@@ -6446,6 +6446,7 @@ class SeestarQueuedStacker:
                 )
                 self.drizzle_output_wcs = self.fixed_output_wcs
                 self.drizzle_output_shape_hw = self.fixed_output_shape
+                self.reference_shape = self.fixed_output_shape
             except Exception as e_fix:
                 logger.debug(f"WARN start_processing: erreur creation grille fixe: {e_fix}")
 
