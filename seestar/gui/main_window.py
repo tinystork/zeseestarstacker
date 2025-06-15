@@ -3184,23 +3184,25 @@ class SeestarStackerGUI:
             # started from another directory by using the project root as cwd
             project_root = Path(__file__).resolve().parents[2]
             env = os.environ.copy()
-            if getattr(self.settings, "astap_path", ""):
-                env["ZEMOSAIC_ASTAP_PATH"] = str(self.settings.astap_path)
-            if getattr(self.settings, "astap_data_dir", ""):
-                env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
-            if getattr(self.settings, "local_ansvr_path", ""):
-                env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
-            if getattr(self.settings, "astrometry_api_key", ""):
-                env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
-            if getattr(self.settings, "astrometry_solve_field_dir", ""):
-                env["ZEMOSAIC_ASTROMETRY_DIR"] = str(self.settings.astrometry_solve_field_dir)
-            if getattr(self.settings, "local_solver_preference", ""):
-                env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
-            try:
-                radius_val = float(getattr(self.settings, "astap_search_radius", 0))
-                env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)
-            except Exception:
-                pass
+            if self.settings.use_third_party_solver:
+                if getattr(self.settings, "astap_path", ""):
+                    env["ZEMOSAIC_ASTAP_PATH"] = str(self.settings.astap_path)
+                if getattr(self.settings, "astap_data_dir", ""):
+                    env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
+                if getattr(self.settings, "local_ansvr_path", ""):
+                    env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
+                if getattr(self.settings, "astrometry_api_key", ""):
+                    env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
+                if getattr(self.settings, "astrometry_solve_field_dir", ""):
+                    env["ZEMOSAIC_ASTROMETRY_DIR"] = str(self.settings.astrometry_solve_field_dir)
+                if getattr(self.settings, "local_solver_preference", ""):
+                    env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
+            if self.settings.use_third_party_solver:
+                try:
+                    radius_val = float(getattr(self.settings, "astap_search_radius", 0))
+                    env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)
+                except Exception:
+                    pass
 
             # Directly execute the run_zemosaic.py script located in the
             # ``zemosaic`` directory of the project. Using the explicit file
@@ -4174,6 +4176,12 @@ class SeestarStackerGUI:
         if not self.settings.use_third_party_solver:
             self.settings.local_solver_preference = "none"
             self.settings.reproject_between_batches = False
+            # Clear solver-specific settings to ensure no external solver is used
+            self.settings.astrometry_api_key = ""
+            self.settings.local_ansvr_path = ""
+            self.settings.astap_path = ""
+            self.settings.astap_data_dir = ""
+            self.settings.astrometry_solve_field_dir = ""
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
