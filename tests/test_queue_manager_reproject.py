@@ -405,3 +405,63 @@ def test_calc_grid_uses_header_when_pixel_shape_missing(monkeypatch):
     assert out_shape is not None
     assert w1.pixel_shape == (hdr1["NAXIS1"], hdr1["NAXIS2"])
     assert w2.pixel_shape == (hdr2["NAXIS1"], hdr2["NAXIS2"])
+
+
+def test_drizzle_scale_applied_interbatch(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager3:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager3
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    p1 = tmp_path / "a.fits"
+    p2 = tmp_path / "b.fits"
+    fits.writeto(p1, data, hdr, overwrite=True)
+    fits.writeto(p2, data, hdr, overwrite=True)
+
+    def run(drizzle):
+        obj = qm.SeestarQueuedStacker()
+        obj.update_progress = lambda *a, **k: None
+        obj.output_folder = str(tmp_path)
+        obj.reproject_between_batches = True
+        obj.drizzle_active_session = drizzle
+        obj.drizzle_scale = 2.0
+        captured = {}
+        monkeypatch.setattr(obj, "_close_memmaps", lambda: None)
+        monkeypatch.setattr(obj, "_create_sum_wht_memmaps", lambda s: captured.update({"shape": s}))
+        monkeypatch.setattr(obj, "_reproject_to_reference", lambda d, w: (d, np.ones(d.shape[:2], dtype=np.float32)))
+        monkeypatch.setattr(obj, "_combine_batch_result", lambda *a, **k: None)
+        monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+        obj._final_reproject_cached_files([(str(p1), wcs, hdr), (str(p2), wcs, hdr)])
+        return captured.get("shape")
+
+    shape_off = run(False)
+    shape_on = run(True)
+
+    assert shape_off == (8, 8)
+    assert shape_on == (12, 12)
+
