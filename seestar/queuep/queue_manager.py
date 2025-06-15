@@ -4696,7 +4696,7 @@ class SeestarQueuedStacker:
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=False)
         except Exception as e: logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
-    def _stack_winsorized_sigma(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05)):
+    def _stack_winsorized_sigma(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
         from scipy.stats.mstats import winsorize
         from astropy.stats import sigma_clipped_stats
         arr = np.stack([im for im in images], axis=0).astype(np.float32)
@@ -4708,7 +4708,10 @@ class SeestarQueuedStacker:
         low = med - kappa * std
         high = med + kappa * std
         mask = (arr >= low) & (arr <= high)
-        arr_clip = np.where(mask, arr, np.nan)
+        if apply_rewinsor:
+            arr_clip = np.where(mask, arr, arr_w)
+        else:
+            arr_clip = np.where(mask, arr, np.nan)
         if weights is not None:
             w = np.asarray(weights)[:, None, None]
             if arr.ndim == 4:

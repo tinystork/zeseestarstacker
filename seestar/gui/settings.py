@@ -159,6 +159,7 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+
             self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_values_from_code.get('mosaic_mode_active', False)))
             logger.debug(f"DEBUG SM (update_from_ui): self.mosaic_mode_active (lu depuis gui_instance ou défaut): {self.mosaic_mode_active}")
 
@@ -896,6 +897,7 @@ class SettingsManager:
             else:
                 self.preserve_linear_output = current_preserve_val
             # --- FIN NOUVEAU ---
+
 
             # --- Local Solver Paths and ASTAP Search Radius ---
             # ... (inchangé) ...
