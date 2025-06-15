@@ -233,14 +233,7 @@ except ImportError as e:
     apply_scnr = None  # Fonction factice
     logger.warning("Échec import apply_scnr: %s", e)
 
-_CROP_AVAILABLE = False  # Rognage Final
-try:
-    from ..enhancement.stack_enhancement import apply_edge_crop
-    _CROP_AVAILABLE = True
-    logger.debug("Import apply_edge_crop OK.")
-except ImportError as e:
-    apply_edge_crop = None  # Fonction factice
-    logger.warning("Échec import apply_edge_crop: %s", e)
+from ..enhancement.stack_enhancement import apply_edge_crop
 
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS ---
 # Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
@@ -5738,6 +5731,13 @@ class SeestarQueuedStacker:
         # --- Début du Pipeline de Post-Traitement (identique à votre version précédente) ---
         # ... (BN Globale, Photutils BN, CB, Feathering, Low WHT Mask, SCNR, Crop) ...
         # (Le code pour appliquer ces post-traitements à data_after_postproc reste ici)
+        crop_percent = getattr(self, "final_edge_crop_percent_decimal", 0.0)
+        if crop_percent > 0:
+            data_after_postproc = apply_edge_crop(
+                data_after_postproc,
+                crop_percent,
+            )
+            self.crop_applied_in_session = True
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}")
