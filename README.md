@@ -17,6 +17,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Hot Pixel Correction:** Detects and corrects hot pixels based on local statistics (median/std dev).
 *   **Image Alignment:** Automatically finds a suitable reference frame (or uses a user-provided one) and aligns subsequent images using star patterns via `astroalign`.
 *   **Stacking Methods:** Offers several stacking algorithms: Mean, Median, Kappa-Sigma Clipping, Winsorized Sigma Clipping.
+*   **Winsorized Sigma Clip:** Rejected pixels are automatically replaced with the winsorized limits.
 *   **Quality Weighting (Optional but Recommended):** Analyzes each aligned frame based on Signal-to-Noise Ratio (SNR) and Star Count/Sharpness, assigns weights, and allows tuning via exponents and minimum weight.
 *   **Asynchronous Processing:** Performs alignment and stacking in a background thread, keeping the GUI responsive.
 *   **Batch Processing:** Processes images in memory-efficient batches.
@@ -47,6 +48,7 @@ written linearly.
 *   **Correction Pixels Chauds :** Détecte et corrige les pixels chauds en se basant sur les statistiques locales (médiane/écart-type).
 *   **Alignement d'Images :** Trouve automatiquement une image de référence appropriée (ou utilise celle fournie par l'utilisateur) et aligne les images suivantes en utilisant les motifs d'étoiles via `astroalign`.
 *   **Méthodes d'Empilement :** Offre plusieurs algorithmes : Moyenne, Médiane, Kappa-Sigma Clipping, Winsorized Sigma Clipping.
+*   **Winsorized Sigma Clip :** Les pixels rejetés sont automatiquement remplacés par les limites winsorisées.
 *   **Pondération par Qualité (Optionnel mais recommandé) :** Analyse chaque image alignée selon le Rapport Signal/Bruit (SNR) et le Nombre/Netteté des Étoiles, assigne des poids et permet l'ajustement via des exposants et un poids minimum.
 *   **Traitement Asynchrone :** Effectue l'alignement et l'empilement dans un thread d'arrière-plan, gardant l'interface graphique réactive.
 *   **Traitement par Lots :** Traite les images par lots efficaces en mémoire.
