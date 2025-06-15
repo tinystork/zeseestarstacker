@@ -39,7 +39,11 @@ from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _
 import astroalign as aa
 import cv2
 import numpy as np
-from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate
+from astropy.coordinates import (
+    SkyCoord,
+    concatenate as skycoord_concatenate,
+    Angle,
+)
 from astropy import units as u
 from astropy.wcs import FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
@@ -64,6 +68,16 @@ except ImportError as e_driz_cls:
     _OO_DRIZZLE_AVAILABLE = False
     Drizzle = None  # Définir comme None si indisponible
     logger.error("Échec import drizzle.resample.Drizzle: %s", e_driz_cls)
+
+try:
+    from reproject.mosaicking import find_optimal_celestial_wcs as _focw
+    _REPROJECT_FIND_OPTIMAL_AVAILABLE = True
+    find_optimal_celestial_wcs = _focw
+    logger.debug("Import find_optimal_celestial_wcs OK.")
+except Exception as e_focw:
+    _REPROJECT_FIND_OPTIMAL_AVAILABLE = False
+    find_optimal_celestial_wcs = None
+    logger.error("Échec import find_optimal_celestial_wcs: %s", e_focw)
 
 
 # --- Core/Internal Imports (Needed for __init__ or core logic) ---
@@ -1352,101 +1366,119 @@ class SeestarQueuedStacker:
         """
         num_wcs = len(all_input_wcs_list)
         logger.debug(
-            f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS (scale={scale_factor})."
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Optimal WCS): Appel avec {num_wcs} WCS (scale={scale_factor})."
         )
         self.update_progress(
             f"📐 Calcul de la grille de sortie dynamique ({num_wcs} WCS)..."
         )
+
         if num_wcs == 0:
             return None, None
 
-        all_sky_corners_list = []
-        for i, wcs_in in enumerate(all_input_wcs_list):
-            if wcs_in is None or not wcs_in.is_celestial:
+        if not (_REPROJECT_FIND_OPTIMAL_AVAILABLE and find_optimal_celestial_wcs):
+            self.update_progress("⚠️ Reproject non disponible pour le calcul de grille.", "WARN")
+            return None, None
+
+        valid_wcs = []
+        valid_shapes_hw = []
+        for idx, wcs_in in enumerate(all_input_wcs_list):
+            if not (isinstance(wcs_in, WCS) and wcs_in.is_celestial):
                 continue
             if (
                 wcs_in.pixel_shape is None
                 and all_input_headers_list
-                and i < len(all_input_headers_list)
+                and idx < len(all_input_headers_list)
             ):
-                hdr = all_input_headers_list[i]
+                hdr = all_input_headers_list[idx]
                 n1 = hdr.get("NAXIS1")
                 n2 = hdr.get("NAXIS2")
                 if n1 and n2:
                     wcs_in.pixel_shape = (int(n1), int(n2))
-            if wcs_in.pixel_shape is None:
+            if not wcs_in.pixel_shape:
                 continue
-            nx, ny = wcs_in.pixel_shape
-            pixel_corners = np.array(
-                [[0, 0], [nx - 1, 0], [nx - 1, ny - 1], [0, ny - 1]], dtype=np.float64
-            )
-            sky_corners = wcs_in.pixel_to_world(pixel_corners[:, 0], pixel_corners[:, 1])
-            all_sky_corners_list.append(sky_corners)
+            shape_hw = (int(wcs_in.pixel_shape[1]), int(wcs_in.pixel_shape[0]))
+            valid_wcs.append(wcs_in)
+            valid_shapes_hw.append(shape_hw)
 
-        if not all_sky_corners_list:
+        if not valid_wcs:
             return None, None
 
-        all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
+        inputs_for_optimal = []
+        for wcs_in, shape_hw in zip(valid_wcs, valid_shapes_hw):
+            expected_wh = (shape_hw[1], shape_hw[0])
+            if wcs_in.pixel_shape is None or wcs_in.pixel_shape != expected_wh:
+                try:
+                    wcs_in.pixel_shape = expected_wh
+                except Exception:
+                    pass
+            inputs_for_optimal.append((shape_hw, wcs_in))
 
-        center_ra = np.median([w.wcs.crval[0] for w in all_input_wcs_list])
-        center_dec = np.median([w.wcs.crval[1] for w in all_input_wcs_list])
-
-        local_tan = WCS(naxis=2)
-        local_tan.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-        local_tan.wcs.crval = [center_ra, center_dec]
-        local_tan.wcs.crpix = [0.0, 0.0]
-        local_tan.wcs.cd = np.eye(2)
-
-        xy = np.vstack(local_tan.world_to_pixel(all_corners_flat_skycoord)).T
-        eigvals, eigvecs = np.linalg.eig(np.cov(xy, rowvar=False))
-        theta = np.arctan2(eigvecs[1, 0], eigvecs[0, 0]) * 180 / np.pi
-
-        rot = np.array([
-            [np.cos(np.deg2rad(-theta)), -np.sin(np.deg2rad(-theta))],
-            [np.sin(np.deg2rad(-theta)), np.cos(np.deg2rad(-theta))],
-        ])
-        xy_rot = xy @ rot.T
-        minx, miny = xy_rot.min(axis=0)
-        maxx, maxy = xy_rot.max(axis=0)
-
-        scales_arcsec = []
-        for w in all_input_wcs_list:
+        scales = []
+        for wcs_obj in valid_wcs:
             try:
-                scales_arcsec.append(np.mean(np.abs(proj_plane_pixel_scales(w))) * 3600.0)
+                scales.append(np.mean(np.abs(proj_plane_pixel_scales(wcs_obj))))
             except Exception:
                 pass
-        final_pixel_scale_arcsec = float(np.median(scales_arcsec)) if scales_arcsec else 1.0
-        final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
-        # Apply drizzle scale factor if requested
-        if scale_factor and scale_factor != 1.0:
-            final_pixel_scale_deg /= float(scale_factor)
 
-        content_width_deg = maxx - minx
-        content_height_deg = maxy - miny
+        avg_scale_deg = 2.0 / 3600.0
+        if scales:
+            avg_scale_deg = float(np.mean(scales))
 
-        nw = int(np.ceil(content_width_deg / final_pixel_scale_deg)) + 4
-        nh = int(np.ceil(content_height_deg / final_pixel_scale_deg)) + 4
+        target_res_deg = avg_scale_deg / float(scale_factor)
+        target_angle = Angle(target_res_deg, unit=u.deg)
 
-        output_wcs = WCS(naxis=2)
-        output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-        output_wcs.wcs.crval = [center_ra, center_dec]
-        # Center the mosaic so that the lower-left corner of the bounding box
-        # maps to pixel (1, 1). This avoids negative pixel coordinates once
-        # images are reprojected onto the final canvas.
-        output_wcs.wcs.crpix = [-minx + 1.0, -miny + 1.0]
-        cos_t = np.cos(np.deg2rad(theta))
-        sin_t = np.sin(np.deg2rad(theta))
-        output_wcs.wcs.cd = final_pixel_scale_deg * np.array([[-cos_t, sin_t], [sin_t, cos_t]])
-        output_wcs.pixel_shape = (nw, nh)
+        try:
+            out_wcs, out_shape_hw = find_optimal_celestial_wcs(
+                inputs_for_optimal,
+                resolution=target_angle,
+                auto_rotate=True,
+                projection="TAN",
+                reference=None,
+                frame="icrs",
+            )
+        except Exception as e:
+            logger.error("Erreur find_optimal_celestial_wcs: %s", e, exc_info=True)
+            self.update_progress("⚠️ Erreur lors du calcul de la grille finale.", "WARN")
+            return None, None
+
+        if out_wcs and out_shape_hw:
+            expected_wh = (out_shape_hw[1], out_shape_hw[0])
+            if out_wcs.pixel_shape is None or out_wcs.pixel_shape != expected_wh:
+                try:
+                    out_wcs.pixel_shape = expected_wh
+                except Exception:
+                    pass
+            if not (
+                hasattr(out_wcs.wcs, "naxis1")
+                and hasattr(out_wcs.wcs, "naxis2")
+                and out_wcs.wcs.naxis1 > 0
+                and out_wcs.wcs.naxis2 > 0
+            ):
+                try:
+                    out_wcs.wcs.naxis1 = expected_wh[0]
+                    out_wcs.wcs.naxis2 = expected_wh[1]
+                except Exception:
+                    pass
+            pad = 4
+            out_shape_hw = (out_shape_hw[0] + pad, out_shape_hw[1] + pad)
+            out_wcs.wcs.crpix[0] += pad / 2.0
+            out_wcs.wcs.crpix[1] += pad / 2.0
+            out_wcs.pixel_shape = (out_shape_hw[1], out_shape_hw[0])
+            try:
+                out_wcs.wcs.naxis1 = out_shape_hw[1]
+                out_wcs.wcs.naxis2 = out_shape_hw[0]
+            except Exception:
+                pass
 
         self.update_progress(
-            f"🗺️ Global grid : dynamic box {(nh, nw)} px, theta={theta:.2f}°",
+            f"🗺️ Global grid : optimal box {out_shape_hw} px",
             "INFO",
         )
         logger.debug(
-            f"DEBUG (Backend Grid Calc): dynamic grid {nw}x{nh}  scale={final_pixel_scale_arcsec:.3f} arcsec/pix  theta={theta:.2f}  factor={scale_factor}"
+            f"DEBUG (Backend Grid Calc): optimal grid {out_shape_hw[1]}x{out_shape_hw[0]}  scale={target_res_deg*3600:.3f} arcsec/pix"
         )
-        return output_wcs, (nh, nw)
+
+        return out_wcs, out_shape_hw
 ###########################################################################################################################################################
 
     def _prepare_global_reprojection_grid(self):
