@@ -4177,6 +4177,14 @@ class SeestarStackerGUI:
             "initial_additional_folders": folders_to_pass_to_backend,
             "stacking_mode": self.settings.stacking_mode,
             "kappa": self.settings.kappa,
+            "stack_kappa_low": self.settings.stack_kappa_low,
+            "stack_kappa_high": self.settings.stack_kappa_high,
+            "winsor_limits": tuple(
+                float(x.strip())
+                for x in str(self.settings.stack_winsor_limits).split(",")
+            )
+            if isinstance(self.settings.stack_winsor_limits, str)
+            else (0.05, 0.05),
             "batch_size": self.settings.batch_size,
             "correct_hot_pixels": self.settings.correct_hot_pixels,
             "hot_pixel_threshold": self.settings.hot_pixel_threshold,
