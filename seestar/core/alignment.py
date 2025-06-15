@@ -8,6 +8,7 @@ from astropy.io import fits
 import cv2
 import astroalign as aa
 import warnings
+import logging
 import gc
 import shutil
 import concurrent.futures
@@ -24,6 +25,7 @@ from .image_processing import (
 from .hot_pixels import detect_and_correct_hot_pixels
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+logger = logging.getLogger(__name__)
 
 class SeestarAligner:
     """
@@ -117,15 +119,19 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name):
+    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True):
         """
         Aligns a single image to the reference.
-        1. Finds transform using astroalign.find_transform on potentially normalized versions.
-        2. Extracts matrix from skimage transform object.
-        3. Applies transform to the original 'img_to_align' using cv2.warpAffine.
-        Version: AlignFix_M81_Range_7_SkimageMatrixExtract
+
+        If ``force_same_shape_as_ref`` is True the returned image has exactly the
+        same dimensions as ``reference_image``.  This is required for classic
+        stacking where all aligned images of a batch must share the same shape.
+        When False the output canvas is expanded so that no pixels are cropped.
+
+        Version: AlignFix_ClassicStackingRegression_1
         """
-        print(f"  DEBUG ALIGNER (_align_image V_AlignFix_M81_Range_7) pour '{file_name}':") # Version Log
+        logger.debug(f"  DEBUG ALIGNER (_align_image V_ClassicStackingRegression_1) pour '{file_name}':")
+        logger.debug(f"    force_same_shape_as_ref = {force_same_shape_as_ref}")
         # ... (début de la méthode jusqu'à find_transform inchangé) ...
         if img_to_align is None:
             print(f"    Input img_to_align: None. Retour échec.")
@@ -191,26 +197,22 @@ class SeestarAligner:
             
             h_ref, w_ref = reference_image_float.shape[:2]
 
-            h_src, w_src = img_to_align_for_transform_application.shape[:2]
-            src_corners = np.array([
-                [0, 0],
-                [w_src - 1, 0],
-                [0, h_src - 1],
-                [w_src - 1, h_src - 1]
-            ], dtype=np.float32)
-            transformed_corners = cv2.transform(np.array([src_corners]), cv2_M)[0]
-            min_x, min_y = transformed_corners.min(axis=0)
-            max_x, max_y = transformed_corners.max(axis=0)
+            if force_same_shape_as_ref:
+                dsize_cv2 = (w_ref, h_ref)
+                cv2_M_final = cv2_M
+            else:
+                h_src, w_src = img_to_align_for_transform_application.shape[:2]
+                corners = np.array([[0, 0], [w_src, 0], [w_src, h_src], [0, h_src]], dtype=np.float32).reshape(-1, 1, 2)
+                transformed_corners = cv2.transform(corners, cv2_M)
+                x_min, y_min = np.min(transformed_corners, axis=0)[0]
+                x_max, y_max = np.max(transformed_corners, axis=0)[0]
+                w_out = int(np.ceil(x_max - x_min))
+                h_out = int(np.ceil(y_max - y_min))
 
-            new_w = int(np.ceil(max_x - min_x))
-            new_h = int(np.ceil(max_y - min_y))
-
-            shift_M = np.array([[1, 0, -min_x],
-                                [0, 1, -min_y],
-                                [0, 0, 1]], dtype=np.float32)
-            cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
-            cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
-            dsize_cv2 = (new_w, new_h)
+                shift_M = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]], dtype=np.float32)
+                cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
+                cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
+                dsize_cv2 = (w_out, h_out)
 
             align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
             try:
