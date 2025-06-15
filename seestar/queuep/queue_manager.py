@@ -1336,11 +1336,23 @@ class SeestarQueuedStacker:
 
 
 
-    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None):
-        """Compute a global WCS using a dynamic bounding box with optional rotation."""
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None, scale_factor: float = 1.0):
+        """Compute a global WCS using a dynamic bounding box with optional rotation.
+
+        Parameters
+        ----------
+        all_input_wcs_list : list
+            List of input :class:`~astropy.wcs.WCS` objects.
+        all_input_headers_list : list, optional
+            Optional list of FITS headers matching ``all_input_wcs_list`` used to
+            recover missing ``pixel_shape`` information.
+        scale_factor : float, optional
+            Drizzle scale factor to apply to the output grid. The final pixel
+            scale of the mosaic is divided by this factor. Defaults to ``1.0``.
+        """
         num_wcs = len(all_input_wcs_list)
         logger.debug(
-            f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS."
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Dynamic Box): Appel avec {num_wcs} WCS (scale={scale_factor})."
         )
         self.update_progress(
             f"📐 Calcul de la grille de sortie dynamique ({num_wcs} WCS)..."
@@ -1405,6 +1417,9 @@ class SeestarQueuedStacker:
                 pass
         final_pixel_scale_arcsec = float(np.median(scales_arcsec)) if scales_arcsec else 1.0
         final_pixel_scale_deg = final_pixel_scale_arcsec / 3600.0
+        # Apply drizzle scale factor if requested
+        if scale_factor and scale_factor != 1.0:
+            final_pixel_scale_deg /= float(scale_factor)
 
         content_width_deg = maxx - minx
         content_height_deg = maxy - miny
@@ -1429,7 +1444,7 @@ class SeestarQueuedStacker:
             "INFO",
         )
         logger.debug(
-            f"DEBUG (Backend Grid Calc): dynamic grid {nw}x{nh}  scale={final_pixel_scale_arcsec:.3f} arcsec/pix  theta={theta:.2f}"
+            f"DEBUG (Backend Grid Calc): dynamic grid {nw}x{nh}  scale={final_pixel_scale_arcsec:.3f} arcsec/pix  theta={theta:.2f}  factor={scale_factor}"
         )
         return output_wcs, (nh, nw)
 ###########################################################################################################################################################
@@ -1506,13 +1521,19 @@ class SeestarQueuedStacker:
             # When doing classic stacking with reprojection of a single
             # file, use the dynamic bounding-box logic to avoid cropping.
             ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
-                wcs_list, header_list
+                wcs_list,
+                header_list,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
             )
         elif len(wcs_list) == 1:
             ref_wcs = wcs_list[0]
             ref_shape = ref_wcs.pixel_shape
         else:
-            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(wcs_list, header_list)
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                wcs_list,
+                header_list,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
             if ref_wcs is None:
                 self.update_progress("❌ Échec du calcul de la grille de sortie globale.", "ERROR")
                 return False
@@ -3113,7 +3134,9 @@ class SeestarQueuedStacker:
             return
 
         output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
-            all_wcs_for_grid_calc, all_headers_for_grid_calc
+            all_wcs_for_grid_calc,
+            all_headers_for_grid_calc,
+            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
         )
 
         if output_wcs is None or output_shape_hw is None:
@@ -5211,7 +5234,11 @@ class SeestarQueuedStacker:
 
         wcs_list = [w for _, w, _ in cache_list if w is not None]
         headers = [h for _, _, h in cache_list]
-        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_list, headers)
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(
+            wcs_list,
+            headers,
+            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+        )
         if out_wcs is None or out_shape is None:
             self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
             return
@@ -5360,7 +5387,11 @@ class SeestarQueuedStacker:
             )
             return
 
-        out_wcs, out_shape = self._calculate_final_mosaic_grid(wcs_for_grid, headers_for_grid)
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(
+            wcs_for_grid,
+            headers_for_grid,
+            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+        )
         if out_wcs is None or out_shape is None:
             self.update_progress(
                 "⚠️ Reprojection ignorée: échec du calcul de la grille finale.",
