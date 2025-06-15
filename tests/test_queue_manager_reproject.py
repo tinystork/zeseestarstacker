@@ -171,6 +171,58 @@ def test_process_file_returns_wcs_when_reproject(tmp_path, monkeypatch):
     assert result[3] is not None and isinstance(result[3], WCS)
 
 
+def test_process_file_skips_solver_when_disabled(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    calls = {"n": 0}
+
+    class DummySolver:
+        def solve(self, *a, **k):
+            calls["n"] += 1
+            return make_wcs(shape=(4, 4))
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.reproject_between_batches = False
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+    obj.reference_pixel_scale_arcsec = 1.0
+    obj.astrometry_solver = DummySolver()
+    obj.local_solver_preference = "none"
+
+    data = np.random.random((8, 8, 3)).astype(np.float32)
+    path = tmp_path / "test.fits"
+    fits.writeto(path, data, overwrite=True)
+
+    obj._process_file(str(path), data, solve_astrometry_for_this_file=False)
+
+    assert calls["n"] == 0
+
+
 def test_stack_batch_uses_master_tile_when_all_have_wcs(tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT))
     import importlib
