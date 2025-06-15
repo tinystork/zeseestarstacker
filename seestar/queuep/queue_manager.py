@@ -50,7 +50,10 @@ from scipy.spatial import ConvexHull
 from seestar.gui.settings import SettingsManager
 
 from ..core.reprojection import reproject_to_reference_wcs
-from ..core.incremental_reprojection import reproject_and_combine
+from ..core.incremental_reprojection import (
+    reproject_and_combine,
+    reproject_and_coadd_batch,
+)
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
@@ -2266,43 +2269,48 @@ class SeestarQueuedStacker:
                                     self.stacked_batches_count += 1
                                     self._send_eta_update()
                                     num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
-                                    progress_info_reproj = f"(Lot Reproj. {self.stacked_batches_count}/{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})"
-                                    self.update_progress(f"⚙️ Reprojection du lot {progress_info_reproj} ({num_in_batch} images)...")
+                                    progress_info_reproj = (
+                                        f"(Lot Reproj. {self.stacked_batches_count}/"
+                                        f"{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})"
+                                    )
+                                    self.update_progress(
+                                        f"⚙️ Reprojection du lot {progress_info_reproj} ({num_in_batch} images)..."
+                                    )
 
-                                    if self.master_sum is None:
-                                        self.update_progress("   -> Initialisation de la grille de reprojection globale...")
-                                        if self.fixed_output_wcs is None or self.reference_shape is None:
-                                            raise RuntimeError("WCS/Shape de référence manquant pour reprojection incrémentale.")
-                                        self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
-                                        self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
-                                        self.current_stack_header = fits.Header()
-                                        if self.reference_header_for_wcs:
-                                            keys_to_copy = ["OBJECT", "INSTRUME", "TELESCOP", "DATE-OBS", "FILTER"]
-                                            for key in keys_to_copy:
-                                                if key in self.reference_header_for_wcs:
-                                                    self.current_stack_header[key] = self.reference_header_for_wcs[key]
-                                        self.current_stack_header["STACKTYP"] = ("Incremental Reprojection", "Stacking Method")
-                                        self.current_stack_header.add_history("Incremental reprojection stack initialized.")
+                                    imgs = [it[0] for it in current_batch_items_with_masks_for_stack_batch]
+                                    hdrs = [it[1] for it in current_batch_items_with_masks_for_stack_batch]
+                                    reproj_img, reproj_cov = reproject_and_coadd_batch(
+                                        imgs,
+                                        hdrs,
+                                        self.fixed_output_wcs or self.reference_wcs_object,
+                                        self.reference_shape,
+                                        combine_function="mean",
+                                    )
 
-                                    for item_in_batch_tuple in current_batch_items_with_masks_for_stack_batch:
-                                        image_data, _header, _scores, image_wcs, _matrix_unused, _mask = item_in_batch_tuple
-                                        if image_data is None or image_wcs is None or not image_wcs.is_celestial:
-                                            self.update_progress("   -> Image du lot ignorée (données ou WCS invalide).", "WARN")
-                                            continue
-
-                                        coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
-                                        self.master_sum, self.master_coverage = reproject_and_combine(
-                                            self.master_sum,
-                                            self.master_coverage,
-                                            image_data,
-                                            coverage_map,
-                                            image_wcs,
-                                            self.fixed_output_wcs or self.reference_wcs_object,
+                                    if reproj_img is not None and reproj_cov is not None:
+                                        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                                        fits.PrimaryHDU(data=np.moveaxis(reproj_img, -1, 0)).writeto(
+                                            tmp.name, overwrite=True
                                         )
-                                        self.images_in_cumulative_stack += 1
+                                        self.intermediate_classic_batch_files.append(tmp.name)
+                                        self.update_progress(
+                                            f"   -> {num_in_batch} images reprojetées, "
+                                            f"résultat {reproj_img.shape} -> {os.path.basename(tmp.name)}"
+                                        )
+                                        header_tmp = fits.Header()
+                                        header_tmp["NIMAGES"] = num_in_batch
+                                        self._combine_batch_result(
+                                            reproj_img,
+                                            header_tmp,
+                                            reproj_cov,
+                                            batch_wcs=self.fixed_output_wcs or self.reference_wcs_object,
+                                        )
+                                        self._update_preview_sum_w()
+                                    else:
+                                        self.update_progress(
+                                            "   -> Échec reproject_and_coadd_batch", "ERROR"
+                                        )
 
-                                    self.current_stack_header['NIMAGES'] = (self.images_in_cumulative_stack, 'Images reprojected')
-                                    self._update_preview_master()
                                     current_batch_items_with_masks_for_stack_batch = []
                                     gc.collect()
 
@@ -2545,27 +2553,37 @@ class SeestarQueuedStacker:
                     num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
                     self.update_progress(f"⚙️ Reprojection du dernier lot partiel ({num_in_batch} images)...")
 
-                    if self.master_sum is None:
-                        self.update_progress("   -> Initialisation de la grille de reprojection globale (dernier lot)...")
-                        if self.fixed_output_wcs is None or self.reference_shape is None:
-                            raise RuntimeError("WCS/Shape de référence manquant pour reprojection finale.")
-                        self.master_sum = np.zeros((*self.reference_shape, 3), dtype=np.float32)
-                        self.master_coverage = np.zeros(self.reference_shape, dtype=np.float32)
+                    imgs = [it[0] for it in current_batch_items_with_masks_for_stack_batch]
+                    hdrs = [it[1] for it in current_batch_items_with_masks_for_stack_batch]
+                    reproj_img, reproj_cov = reproject_and_coadd_batch(
+                        imgs,
+                        hdrs,
+                        self.fixed_output_wcs or self.reference_wcs_object,
+                        self.reference_shape,
+                        combine_function="mean",
+                    )
 
-                    for item_in_batch_tuple in current_batch_items_with_masks_for_stack_batch:
-                        image_data, _h, _s, image_wcs, _matrix_unused, _m = item_in_batch_tuple
-                        if image_data is not None and image_wcs is not None:
-                            coverage_map = np.ones(image_data.shape[:2], dtype=np.float32)
-                            self.master_sum, self.master_coverage = reproject_and_combine(
-                                self.master_sum,
-                                self.master_coverage,
-                                image_data,
-                                coverage_map,
-                                image_wcs,
-                                self.fixed_output_wcs or self.reference_wcs_object,
-                            )
-                            self.images_in_cumulative_stack += 1
-                    self._update_preview_master()
+                    if reproj_img is not None and reproj_cov is not None:
+                        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                        fits.PrimaryHDU(data=np.moveaxis(reproj_img, -1, 0)).writeto(
+                            tmp.name, overwrite=True
+                        )
+                        self.intermediate_classic_batch_files.append(tmp.name)
+                        self.update_progress(
+                            f"   -> {num_in_batch} images reprojetées, résultat {reproj_img.shape} -> {os.path.basename(tmp.name)}"
+                        )
+                        hdr_tmp = fits.Header()
+                        hdr_tmp["NIMAGES"] = num_in_batch
+                        self._combine_batch_result(
+                            reproj_img,
+                            hdr_tmp,
+                            reproj_cov,
+                            batch_wcs=self.fixed_output_wcs or self.reference_wcs_object,
+                        )
+                        self._update_preview_sum_w()
+                    else:
+                        self.update_progress("   -> Échec reproject_and_coadd_batch", "ERROR")
+
                     current_batch_items_with_masks_for_stack_batch = []
                     gc.collect()
 
@@ -2581,13 +2599,10 @@ class SeestarQueuedStacker:
 
                 if self.reproject_between_batches:
                     self.update_progress("🏁 Finalisation Stacking (Reprojection)...")
-                    if self.master_sum is not None:
-                        final_avg = self.master_sum / np.maximum(self.master_coverage, 1e-9)[..., None]
-                        self._save_final_stack(
-                            output_filename_suffix="_classic_reproject",
-                            drizzle_final_sci_data=final_avg,
-                            drizzle_final_wht_data=self.master_coverage,
-                        )
+                    if self.images_in_cumulative_stack > 0 or (
+                        hasattr(self, 'cumulative_sum_memmap') and self.cumulative_sum_memmap is not None
+                    ):
+                        self._save_final_stack(output_filename_suffix="_classic_reproject")
                     else:
                         self.update_progress("   Aucune image accumulée pour sauvegarde.")
                         self.final_stacked_path = None
