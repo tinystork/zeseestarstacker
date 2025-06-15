@@ -8,6 +8,7 @@ from astropy.io import fits
 import cv2
 import astroalign as aa
 import warnings
+import logging
 import gc
 import shutil
 import concurrent.futures
@@ -24,6 +25,7 @@ from .image_processing import (
 from .hot_pixels import detect_and_correct_hot_pixels
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+logger = logging.getLogger(__name__)
 
 class SeestarAligner:
     """
@@ -43,7 +45,8 @@ class SeestarAligner:
         self.stop_processing = False
         self.progress_callback = None
         self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
-        self.move_to_unaligned_callback = move_to_unaligned_callback 
+        self.move_to_unaligned_callback = move_to_unaligned_callback
+        self.use_cuda = False
     
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
@@ -64,6 +67,51 @@ class SeestarAligner:
                 print(f"[{int(progress)}%] {message}")
             else:
                 print(message)
+
+    def _align_cpu(self, img: np.ndarray, M: np.ndarray, dsize: tuple[int, int]) -> np.ndarray:
+        """Apply affine transform using CPU."""
+        if img.ndim == 3:
+            result = np.zeros((dsize[1], dsize[0], img.shape[2]), dtype=img.dtype)
+            for i in range(img.shape[2]):
+                result[:, :, i] = cv2.warpAffine(
+                    img[:, :, i], M, dsize,
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=np.nan,
+                )
+            return result
+        return cv2.warpAffine(
+            img, M, dsize,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=np.nan,
+        )
+
+    def _align_cuda(self, img: np.ndarray, M: np.ndarray, dsize: tuple[int, int]) -> np.ndarray:
+        """Apply affine transform using CUDA if available."""
+        M3 = np.vstack([M, [0, 0, 1]]).astype(np.float32)
+        if img.ndim == 3:
+            chans = []
+            for i in range(img.shape[2]):
+                g = cv2.cuda_GpuMat()
+                g.upload(img[:, :, i])
+                warped = cv2.cuda.warpPerspective(
+                    g, M3, dsize,
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+                chans.append(warped.download())
+            return np.stack(chans, axis=2)
+        g = cv2.cuda_GpuMat()
+        g.upload(img)
+        warped = cv2.cuda.warpPerspective(
+            g, M3, dsize,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return warped.download()
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 
 
@@ -71,15 +119,19 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name):
+    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True):
         """
         Aligns a single image to the reference.
-        1. Finds transform using astroalign.find_transform on potentially normalized versions.
-        2. Extracts matrix from skimage transform object.
-        3. Applies transform to the original 'img_to_align' using cv2.warpAffine.
-        Version: AlignFix_M81_Range_7_SkimageMatrixExtract
+
+        If ``force_same_shape_as_ref`` is True the returned image has exactly the
+        same dimensions as ``reference_image``.  This is required for classic
+        stacking where all aligned images of a batch must share the same shape.
+        When False the output canvas is expanded so that no pixels are cropped.
+
+        Version: AlignFix_ClassicStackingRegression_1
         """
-        print(f"  DEBUG ALIGNER (_align_image V_AlignFix_M81_Range_7) pour '{file_name}':") # Version Log
+        logger.debug(f"  DEBUG ALIGNER (_align_image V_ClassicStackingRegression_1) pour '{file_name}':")
+        logger.debug(f"    force_same_shape_as_ref = {force_same_shape_as_ref}")
         # ... (début de la méthode jusqu'à find_transform inchangé) ...
         if img_to_align is None:
             print(f"    Input img_to_align: None. Retour échec.")
@@ -144,20 +196,34 @@ class SeestarAligner:
             # --- FIN CORRECTION ---
             
             h_ref, w_ref = reference_image_float.shape[:2]
-            dsize_cv2 = (w_ref, h_ref)
 
-            if img_to_align_for_transform_application.ndim == 3:
-                aligned_img_final = np.zeros_like(img_to_align_for_transform_application)
-                for i_ch in range(img_to_align_for_transform_application.shape[2]):
-                    aligned_img_final[:,:,i_ch] = cv2.warpAffine(
-                        img_to_align_for_transform_application[:,:,i_ch], cv2_M, dsize_cv2,
-                        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
-                    )
+            if force_same_shape_as_ref:
+                dsize_cv2 = (w_ref, h_ref)
+                cv2_M_final = cv2_M
             else:
-                aligned_img_final = cv2.warpAffine(
-                    img_to_align_for_transform_application, cv2_M, dsize_cv2,
-                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan
-                )
+                h_src, w_src = img_to_align_for_transform_application.shape[:2]
+                corners = np.array([[0, 0], [w_src, 0], [w_src, h_src], [0, h_src]], dtype=np.float32).reshape(-1, 1, 2)
+                transformed_corners = cv2.transform(corners, cv2_M)
+                x_min, y_min = np.min(transformed_corners, axis=0)[0]
+                x_max, y_max = np.max(transformed_corners, axis=0)[0]
+                w_out = int(np.ceil(x_max - x_min))
+                h_out = int(np.ceil(y_max - y_min))
+
+                shift_M = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]], dtype=np.float32)
+                cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
+                cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
+                dsize_cv2 = (w_out, h_out)
+
+            align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
+            try:
+                aligned_img_final = align(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+            except Exception as cuda_err:
+                if getattr(self, "use_cuda", False):
+                    self.use_cuda = False
+                    self.update_progress("⚠️ CUDA align failed, falling back to CPU", None)
+                    aligned_img_final = self._align_cpu(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+                else:
+                    raise
             
             print(f"    APRÈS cv2.warpAffine: aligned_img_final - Range: [{np.nanmin(aligned_img_final):.4g}, {np.nanmax(aligned_img_final):.4g}]")
 

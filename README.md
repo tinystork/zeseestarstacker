@@ -17,6 +17,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Hot Pixel Correction:** Detects and corrects hot pixels based on local statistics (median/std dev).
 *   **Image Alignment:** Automatically finds a suitable reference frame (or uses a user-provided one) and aligns subsequent images using star patterns via `astroalign`.
 *   **Stacking Methods:** Offers several stacking algorithms: Mean, Median, Kappa-Sigma Clipping, Winsorized Sigma Clipping.
+*   **Winsorized Sigma Clip:** Rejected pixels are automatically replaced with the winsorized limits.
 *   **Quality Weighting (Optional but Recommended):** Analyzes each aligned frame based on Signal-to-Noise Ratio (SNR) and Star Count/Sharpness, assigns weights, and allows tuning via exponents and minimum weight.
 *   **Asynchronous Processing:** Performs alignment and stacking in a background thread, keeping the GUI responsive.
 *   **Batch Processing:** Processes images in memory-efficient batches.
@@ -28,7 +29,17 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Multi-language Support (English, French).
     *   Customizable: Supports custom application icon and preview background image.
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
+*   **Output Format:** Save FITS stacks as float32 or uint16. Enable *Preserve Linear Output* to skip percentile scaling.
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
+*   **Smart Quality Control:**
+    *   SNR-based weighting
+    *   Star count/sharpness analysis
+*   **Memory Optimization:** Batch processing with auto RAM management
+
+The Expert tab's **Output FITS Format** panel features a checkbox labeled
+**Preserve Linear Output**. Enabling it saves the stacked FITS directly from the
+linear data, skipping the usual percentile scaling step so pixel values are
+written linearly.
 
 **(Français)**
 
@@ -37,6 +48,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Correction Pixels Chauds :** Détecte et corrige les pixels chauds en se basant sur les statistiques locales (médiane/écart-type).
 *   **Alignement d'Images :** Trouve automatiquement une image de référence appropriée (ou utilise celle fournie par l'utilisateur) et aligne les images suivantes en utilisant les motifs d'étoiles via `astroalign`.
 *   **Méthodes d'Empilement :** Offre plusieurs algorithmes : Moyenne, Médiane, Kappa-Sigma Clipping, Winsorized Sigma Clipping.
+*   **Winsorized Sigma Clip :** Les pixels rejetés sont automatiquement remplacés par les limites winsorisées.
 *   **Pondération par Qualité (Optionnel mais recommandé) :** Analyse chaque image alignée selon le Rapport Signal/Bruit (SNR) et le Nombre/Netteté des Étoiles, assigne des poids et permet l'ajustement via des exposants et un poids minimum.
 *   **Traitement Asynchrone :** Effectue l'alignement et l'empilement dans un thread d'arrière-plan, gardant l'interface graphique réactive.
 *   **Traitement par Lots :** Traite les images par lots efficaces en mémoire.
@@ -48,7 +60,16 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   Support Multilingue (Anglais, Français).
     *   Personnalisable : Supporte une icône d'application et une image de fond d'aperçu personnalisées.
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
+*   **Format de Sortie :** Sauvegarde des FITS en float32 ou uint16. Activez *Préserver l'image linéaire* pour éviter la normalisation par percentiles.
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
+*   **Contrôle Qualité Intelligent :**
+    *   Pondération par rapport signal/bruit (SNR)
+    *   Analyse du nombre/netteté des étoiles
+*   **Optimisation Mémoire :** Traitement par lots avec gestion automatique de la RAM
+
+Dans l'onglet **Expert**, la section **Format de sortie FITS** propose une case
+à cocher **Sortie linéaire préservée**. Une fois activée, la sauvegarde FITS se
+fait sans normalisation par percentiles et les données sont écrites linéairement.
 
 ---
 
@@ -61,7 +82,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation.
+    *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation. If you plan to run the unit tests that exercise this feature, install it (included in `requirements-test.txt`).
 
 **(Français)**
 
@@ -70,7 +91,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     ```bash
     pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
     ```
-    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots.
+    *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots. Si vous prévoyez d'exécuter les tests unitaires utilisant cette fonctionnalité, installez-le (inclus dans `requirements-test.txt`).
 
 ---
 
@@ -132,13 +153,8 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 **Install dependencies**
 
 ```bash
-# main runtime packages
-pip install -r requirements.txt
-
-# packages needed for the unit tests
-pip install pytest numpy astropy reproject
-# or install them using the dedicated file
-pip install -r requirements-test.txt
+# install all runtime and test dependencies
+pip install -r requirements.txt -r requirements-test.txt
 ```
 
 ### Test Dependencies
@@ -149,8 +165,12 @@ The unit tests rely on a few additional packages:
 - `numpy`
 - `astropy`
 - `reproject`
+- `drizzle` *(required for the Drizzle-related tests)*
+- `psutil` *(only required when testing the optional memory usage features)*
 
-They can be installed individually or via the `requirements-test.txt` file.
+Most of these packages are provided in `requirements-test.txt`. The
+`drizzle` package is listed in `requirements.txt` and must be installed
+for the tests that exercise the Drizzle functionality.
 
 **Run the tests**
 
@@ -159,6 +179,20 @@ SEESTAR_VERBOSE=1 pytest -q
 ```
 
 The `SEESTAR_VERBOSE` variable is optional and simply enables more verbose logs.
+
+## Running Tests
+
+Install all dependencies (including the optional ones used in the tests) with:
+
+```bash
+pip install -r requirements.txt -r requirements-test.txt
+```
+
+Then execute the tests with `pytest`:
+
+```bash
+pytest -q
+```
 
 
 ---
@@ -310,8 +344,14 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `astap_sensitivity`: detection sensitivity percentage for ASTAP
 - `use_radec_hints`: include FITS RA/DEC as hints when solving with ASTAP *(defaults to false; enable only if your FITS headers contain reliable coordinates)*
 - `local_ansvr_path`: path to a local `ansvr.cfg`
+- `ansvr_host_port`: host and port for a running ansvr instance (default `127.0.0.1:8080`)
+- `astrometry_solve_field_dir`: directory containing the `solve-field` executable
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
+
+- `reproject_between_batches`: when true, each stacked batch is plate-solved and
+  immediately reprojected onto the reference WCS. The master stack is updated
+  incrementally so no final reprojection step is required.
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
@@ -351,6 +391,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Warning: Low Variance:** Normal for very dark/cloudy frames.
 *   **App Starts with Invalid Paths:** Use "Browse" to select valid paths before starting. The app checks paths on "Start".
 *   **Quality Weighting Issues:** Try lowering exponents (< 1.0) or disabling one metric (SNR/Stars). Ensure Min Weight is low (0.05-0.15).
+*   **Zero Coverage Warning:** If logs show `Cumulative weight map sums to zero`, no pixels were accumulated. Verify all batch images share the expected shape and that reprojection is configured correctly.
 
 **(Français)**
 
@@ -360,6 +401,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 *   **Avertissement : Faible Variance :** Normal pour images très sombres/nuageuses.
 *   **L'App Démarre avec des Chemins Invalides :** Utilisez "Parcourir" pour sélectionner des chemins valides avant de démarrer. L'app vérifie les chemins au "Démarrage".
 *   **Problèmes Pondération Qualité :** Essayez de baisser les exposants (< 1.0) ou désactivez une métrique (SNR/Étoiles). Assurez-vous que Poids Min est bas (0.05-0.15).
+*   **Avertissement Couverture Zéro :** Si les logs affichent `Carte de poids cumulée entièrement nulle`, aucune image n'a été ajoutée au stack. Vérifiez la cohérence des dimensions et la configuration de la reprojection.
 
 ---
 

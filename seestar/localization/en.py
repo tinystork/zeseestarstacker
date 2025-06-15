@@ -128,6 +128,7 @@ EN_TRANSLATIONS = {
     # --- Output Format Section ---
     'output_format_frame_title': "Output FITS Format",
     'save_as_float32_label': "Save final FITS as float32 (larger files, max precision)",
+    'preserve_linear_output_label': "Preserve linear output (skip percentile scaling)",
 
     ### NEW: Tooltips for Expert Tab ###
     'tooltip_bn_grid_size': "BN: RxC grid for background analysis. More zones (32x32) = finer local analysis, noise sensitive. Fewer (8x8) = robust stats, worse for complex gradients. Default: 16x16.",
@@ -158,6 +159,7 @@ EN_TRANSLATIONS = {
     'tooltip_low_wht_soften_px': "Soften Low WHT Mask (px): Radius of Gaussian blur applied to the binary mask of low-weight areas. Allows for a smoother transition of the correction. Range: 32-512. Default: 128.",
     # Tooltips save_as_float32
     'tooltip_save_as_float32': "If checked, the final FITS file will be saved using 32-bit floating-point numbers, preserving the maximum numerical precision from processing but resulting in larger files (approx. 2x). If unchecked (default), the file will be saved as 16-bit unsigned integers (0-65535 range after scaling from 0-1), significantly reducing file size.",
+    'tooltip_preserve_linear_output': "If enabled, skips percentile-based normalization before saving. The uint16 output will scale the raw 0-1 values directly to 0-65535.",
 
     # ... end expert tab ...
     
@@ -194,6 +196,9 @@ EN_TRANSLATIONS = {
     # --- Preview Area (Right Panel) ---
     'preview': "Preview",
     'histogram': "Histogram",
+    'zoom_histo_button': "Zoom Histogram",
+    'reset_histo_button': "Reset Histogram",
+    'auto_zoom_histo_check': "Auto zoom histogram",
 
     # --- Control Buttons ---
     'start': "Start",
@@ -353,6 +358,23 @@ EN_TRANSLATIONS = {
     'invalid_astap_radius_range': "ASTAP Search Radius must be between 0.1 and 90.0 degrees.",
     'invalid_astap_radius_value': "Invalid value for ASTAP Search Radius. Please enter a number.",
     'settings_save_failed_on_ok': "Settings were updated in memory, but failed to save to file from this window. They will be saved when the main application closes if not overwritten.",
+
+    # --- New Local Solver GUI strings ---
+    'solver_config_title': "Local Astrometry Solvers Configuration",
+    'use_third_party_solver_label': "Use third-party solver",
+    'solver_label': "Solver",
+    'solver_astap': "ASTAP",
+    'solver_astrometry': "Astrometry.net",
+    'solver_ansvr': "Ansvr",
+    'astap_exe_label': "Executable:",
+    'astap_data_label': "Data Dir:",
+    'astrometry_api_key_label': "API Key:",
+    'astrometry_dir_label': "solve-field Dir:",
+    'ansvr_hostport_label': "Host:Port:",
+    'enable_batch_reproject': "Enable inter-batch reprojection (requires WCS)",
+    'ok_button': "OK",
+    'cancel_button': "Cancel",
+    'tooltip_enable_batch_reproject': "Requires a working solver (ASTAP, Astrometry.net, or Ansvr)",
     
     # final log popup 
     'Post-Processing Applied': "Post-Processing Applied",

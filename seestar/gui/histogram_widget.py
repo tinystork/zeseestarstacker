@@ -29,7 +29,9 @@ class HistogramWidget(ttk.Frame):
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(fill=tk.BOTH, expand=True)
 
-        self._current_hist_data_details = None 
+        self._current_hist_data_details = None
+        self._current_data = None
+        self.auto_zoom_enabled = False
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -69,6 +71,7 @@ class HistogramWidget(ttk.Frame):
             print(f"  -> data_for_analysis - Shape: {data_for_analysis.shape}, Dtype: {data_for_analysis.dtype}, Range: [{np.nanmin(data_for_analysis):.4g} - {np.nanmax(data_for_analysis):.4g}]")
         else:
             print(f"  -> data_for_analysis est None.")
+        self._current_data = data_for_analysis
         self._current_hist_data_details = self._calculate_hist_data(data_for_analysis)
         self.plot_histogram(self._current_hist_data_details)
 
@@ -251,6 +254,11 @@ class HistogramWidget(ttk.Frame):
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
             
             self.canvas.draw_idle()
+            if self.auto_zoom_enabled:
+                try:
+                    self.zoom_histogram()
+                except Exception as auto_e:
+                    print(f"ERREUR HistoWidget.auto_zoom: {auto_e}")
         except Exception as e:
             print(f"ERREUR HistoWidget.plot_histogram: {e}"); traceback.print_exc(limit=2)
             try: 
@@ -406,6 +414,28 @@ class HistogramWidget(ttk.Frame):
             self.canvas.draw_idle(); return
         if abs(new_min_zoomed - current_xlim_scroll[0]) > 1e-9 or abs(new_max_zoomed - current_xlim_scroll[1]) > 1e-9:
             self.ax.set_xlim(new_min_zoomed, new_max_zoomed); self.canvas.draw_idle()
+
+    def zoom_histogram(self, percentile_max=99.5):
+        try:
+            if self._current_data is None:
+                return
+            data_flat = self._current_data[np.isfinite(self._current_data)].ravel()
+            if data_flat.size == 0:
+                return
+            x_max = np.percentile(data_flat, percentile_max)
+            if not np.isfinite(x_max):
+                return
+            self.ax.set_xlim(0.0, max(0.02, float(x_max)))
+            self.canvas.draw()
+        except Exception as e:
+            print(f"ERREUR HistoWidget.zoom_histogram: {e}")
+
+    def reset_histogram_view(self):
+        try:
+            self.ax.set_xlim(0.0, 1.0)
+            self.canvas.draw()
+        except Exception as e:
+            print(f"ERREUR HistoWidget.reset_histogram_view: {e}")
 
 
 
