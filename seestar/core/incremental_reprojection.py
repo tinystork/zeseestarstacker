@@ -42,12 +42,22 @@ def reproject_and_combine(
 ):
     """Reproject ``batch_img`` to ``ref_wcs`` and accumulate its weighted signal."""
 
-    if batch_wcs is None or ref_wcs is None or ref_wcs.pixel_shape is None:
+    if batch_wcs is None or ref_wcs is None:
         return master_sum, master_cov
 
-    target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
+    # Use the existing master array dimensions to avoid orientation issues
+    target_shape = master_sum.shape[:2]
+    if ref_wcs.pixel_shape is not None:
+        target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
+
     reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
     reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
+
+    if reproj_img.shape[:2] != target_shape:
+        # Fallback in case pixel_shape orientation was wrong
+        target_shape = target_shape[::-1]
+        reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
+        reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
 
     master_sum = master_sum.astype(np.float32, copy=False)
     master_cov = master_cov.astype(np.float32, copy=False)
