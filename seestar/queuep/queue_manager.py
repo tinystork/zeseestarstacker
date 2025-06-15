@@ -3515,7 +3515,11 @@ class SeestarQueuedStacker:
                 if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
                 
                 aligned_img_astroalign, align_success_astroalign = self.aligner._align_image(
-                    image_for_alignment_or_drizzle_input, reference_image_data_for_alignment, file_name)
+                    image_for_alignment_or_drizzle_input,
+                    reference_image_data_for_alignment,
+                    file_name,
+                    force_same_shape_as_ref=True,
+                )
                 
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
