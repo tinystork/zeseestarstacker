@@ -3387,9 +3387,12 @@ class SeestarQueuedStacker:
             
             is_drizzle_or_mosaic_mode = (self.drizzle_active_session or self.is_mosaic_run)
             logger.debug(f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}")
-            
+
             image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
             logger.debug(f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+
+            if reference_image_data_for_alignment is not None:
+                self.aligner.ref_h, self.aligner.ref_w = reference_image_data_for_alignment.shape[:2]
 
             current_max_val = np.nanmax(image_for_alignment_or_drizzle_input)
             if is_drizzle_or_mosaic_mode:
@@ -3515,7 +3518,11 @@ class SeestarQueuedStacker:
                 if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
                 
                 aligned_img_astroalign, align_success_astroalign = self.aligner._align_image(
-                    image_for_alignment_or_drizzle_input, reference_image_data_for_alignment, file_name)
+                    image_for_alignment_or_drizzle_input,
+                    reference_image_data_for_alignment,
+                    file_name,
+                    classic_mode=not is_drizzle_or_mosaic_mode,
+                )
                 
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
