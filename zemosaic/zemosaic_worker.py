@@ -1679,15 +1679,116 @@ def run_hierarchical_mosaic(
     base_progress_phase4 = current_global_progress
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
+    wcs_list_for_final_grid = []
+    shapes_list_for_final_grid_hw = []
+    for mt_path_iter, mt_wcs_iter in master_tiles_results_list:
+        if not (
+            mt_path_iter
+            and os.path.exists(mt_path_iter)
+            and mt_wcs_iter
+            and mt_wcs_iter.is_celestial
+        ):
+            pcb(
+                "run_warn_phase4_invalid_master_tile_for_grid",
+                prog=None,
+                lvl="WARN",
+                path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path"),
+            )
+            continue
+        try:
+            h_mt_loc, w_mt_loc = 0, 0
+            if (
+                mt_wcs_iter.pixel_shape
+                and mt_wcs_iter.pixel_shape[0] > 0
+                and mt_wcs_iter.pixel_shape[1] > 0
+            ):
+                h_mt_loc, w_mt_loc = (
+                    mt_wcs_iter.pixel_shape[1],
+                    mt_wcs_iter.pixel_shape[0],
+                )
+            else:
+                with fits.open(
+                    mt_path_iter, memmap=True, do_not_scale_image_data=True
+                ) as hdul_mt_s:
+                    if hdul_mt_s[0].data is None:
+                        pcb(
+                            "run_warn_phase4_no_data_in_tile_fits",
+                            prog=None,
+                            lvl="WARN",
+                            path=os.path.basename(mt_path_iter),
+                        )
+                        continue
+                    data_shape = hdul_mt_s[0].shape
+                    if len(data_shape) == 3:
+                        h_mt_loc, w_mt_loc = data_shape[1], data_shape[2]
+                    elif len(data_shape) == 2:
+                        h_mt_loc, w_mt_loc = data_shape[0], data_shape[1]
+                    else:
+                        pcb(
+                            "run_warn_phase4_unhandled_tile_shape",
+                            prog=None,
+                            lvl="WARN",
+                            path=os.path.basename(mt_path_iter),
+                            shape=data_shape,
+                        )
+                        continue
+                    if (
+                        mt_wcs_iter
+                        and mt_wcs_iter.is_celestial
+                        and mt_wcs_iter.pixel_shape is None
+                    ):
+                        try:
+                            mt_wcs_iter.pixel_shape = (w_mt_loc, h_mt_loc)
+                        except Exception as e_set_ps:
+                            pcb(
+                                "run_warn_phase4_failed_set_pixel_shape",
+                                prog=None,
+                                lvl="WARN",
+                                path=os.path.basename(mt_path_iter),
+                                error=str(e_set_ps),
+                            )
+            if h_mt_loc > 0 and w_mt_loc > 0:
+                shapes_list_for_final_grid_hw.append((int(h_mt_loc), int(w_mt_loc)))
+                wcs_list_for_final_grid.append(mt_wcs_iter)
+            else:
+                pcb(
+                    "run_warn_phase4_zero_dimensions_tile",
+                    prog=None,
+                    lvl="WARN",
+                    path=os.path.basename(mt_path_iter),
+                )
+        except Exception as e_read_tile_shape:
+            pcb(
+                "run_error_phase4_reading_tile_shape",
+                prog=None,
+                lvl="ERROR",
+                path=os.path.basename(mt_path_iter),
+                error=str(e_read_tile_shape),
+            )
+            logger.error(
+                f"Erreur lecture shape tuile {os.path.basename(mt_path_iter)}:",
+                exc_info=True,
+            )
+            continue
+
+    if (
+        not wcs_list_for_final_grid
+        or not shapes_list_for_final_grid_hw
+        or len(wcs_list_for_final_grid) != len(shapes_list_for_final_grid_hw)
+    ):
+        pcb(
+            "run_error_phase4_insufficient_tile_info",
+            prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC),
+            lvl="ERROR",
+        )
+        return
+
     final_mosaic_drizzle_scale = 1.0
-    final_output_wcs, final_output_shape_hw = prepare_tiles_and_calc_grid(
-        master_tiles_results_list,
-        crop_percent=master_tile_crop_percent_config if apply_master_tile_crop_config else 0.0,
-        re_solve_cropped_tiles=re_solve_cropped_tiles_config,
-        solver_settings=solver_settings,
-        solver_instance=None,
-        drizzle_scale_factor=final_mosaic_drizzle_scale,
-        progress_callback=progress_callback,
+    final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(
+        wcs_list_for_final_grid,
+        shapes_list_for_final_grid_hw,
+        final_mosaic_drizzle_scale,
+        progress_callback,
     )
     if not final_output_wcs or not final_output_shape_hw: pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
     current_global_progress = base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC
