@@ -119,7 +119,7 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name):
+    def _align_image(self, img_to_align, reference_image, file_name, classic_mode=False):
         """
         Aligns a single image to the reference.
         1. Finds transform using astroalign.find_transform on potentially normalized versions.
@@ -213,9 +213,13 @@ class SeestarAligner:
             cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
             cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
 
-            target_w = self.ref_w if isinstance(self.ref_w, int) and self.ref_w > 0 else w_ref
-            target_h = self.ref_h if isinstance(self.ref_h, int) and self.ref_h > 0 else h_ref
-            dsize_cv2 = (int(target_w), int(target_h))
+            if classic_mode:
+                # Force output size to the reference dimensions for classic stacking
+                target_w = self.ref_w if isinstance(self.ref_w, int) and self.ref_w > 0 else w_ref
+                target_h = self.ref_h if isinstance(self.ref_h, int) and self.ref_h > 0 else h_ref
+                dsize_cv2 = (int(target_w), int(target_h))
+            else:
+                dsize_cv2 = (int(new_w), int(new_h))
 
             align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
             try:
@@ -505,7 +509,7 @@ class SeestarAligner:
             if self.stop_processing:
                 return None
             try:
-                aligned_img, success = self._align_image(img_float_01, reference_image, fname)
+                aligned_img, success = self._align_image(img_float_01, reference_image, fname, classic_mode=True)
                 if not success:
                     # MODIFIÉ : Utiliser le callback de déplacement si fourni
                     if self.move_to_unaligned_callback:
