@@ -159,6 +159,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Lecture du setting d'utilisation des solveurs tiers ---
+            self.use_third_party_solver = getattr(
+                gui_instance,
+                'use_third_party_solver_var',
+                tk.BooleanVar(value=default_values_from_code.get('use_third_party_solver', True)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): self.use_third_party_solver lu (attribut UI ou défaut): {self.use_third_party_solver}"
+            )
+            # --- FIN NOUVEAU ---
+
 
             self.mosaic_mode_active = bool(getattr(gui_instance, 'mosaic_mode_active', default_values_from_code.get('mosaic_mode_active', False)))
             logger.debug(f"DEBUG SM (update_from_ui): self.mosaic_mode_active (lu depuis gui_instance ou défaut): {self.mosaic_mode_active}")
@@ -371,6 +382,13 @@ class SettingsManager:
                 f"DEBUG (Settings apply_to_ui): preserve_linear_output appliqué à l'UI (valeur: {self.preserve_linear_output})"
             )
             # --- FIN NOUVEAU ---
+
+            # --- NOUVEAU : Application du toggle use_third_party_solver ---
+            getattr(gui_instance, 'use_third_party_solver_var', tk.BooleanVar()).set(self.use_third_party_solver)
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): use_third_party_solver appliqué à l'UI (valeur: {self.use_third_party_solver})"
+            )
+            # --- FIN NOUVEAU ---
             
             getattr(gui_instance, 'preview_stretch_method', tk.StringVar()).set(self.preview_stretch_method)
             getattr(gui_instance, 'preview_black_point', tk.DoubleVar()).set(self.preview_black_point)
@@ -504,6 +522,13 @@ class SettingsManager:
         defaults_dict['preserve_linear_output'] = False
         logger.debug(
             f"DEBUG (SettingsManager get_default_values): Ajout de 'preserve_linear_output'={defaults_dict['preserve_linear_output']}"
+        )
+        # --- FIN NOUVEAU ---
+
+        # --- Nouveau : activation/désactivation solveurs tiers ---
+        defaults_dict['use_third_party_solver'] = True
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'use_third_party_solver'={defaults_dict['use_third_party_solver']}"
         )
         # --- FIN NOUVEAU ---
 
@@ -898,6 +923,20 @@ class SettingsManager:
                 self.preserve_linear_output = current_preserve_val
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Validation du toggle use_third_party_solver ---
+            logger.debug("    -> Validating use_third_party_solver...")
+            current_use_solver_val = getattr(
+                self, 'use_third_party_solver', defaults_fallback['use_third_party_solver']
+            )
+            if not isinstance(current_use_solver_val, bool):
+                messages.append(
+                    f"Option 'Use Third Party Solver' ('{current_use_solver_val}') invalide, réinitialisée à {defaults_fallback['use_third_party_solver']}."
+                )
+                self.use_third_party_solver = defaults_fallback['use_third_party_solver']
+            else:
+                self.use_third_party_solver = current_use_solver_val
+            # --- FIN NOUVEAU ---
+
 
             # --- Local Solver Paths and ASTAP Search Radius ---
             # ... (inchangé) ...
@@ -1112,6 +1151,10 @@ class SettingsManager:
 
             # --- NOUVEAU : Sauvegarde du setting preserve_linear_output ---
             'preserve_linear_output': bool(getattr(self, 'preserve_linear_output', False)),
+            # --- FIN NOUVEAU ---
+
+            # --- NOUVEAU : Sauvegarde du toggle use_third_party_solver ---
+            'use_third_party_solver': bool(getattr(self, 'use_third_party_solver', True)),
             # --- FIN NOUVEAU ---
 
             'local_solver_preference': str(getattr(self, 'local_solver_preference', 'none')),

@@ -361,6 +361,7 @@ EN_TRANSLATIONS = {
 
     # --- New Local Solver GUI strings ---
     'solver_config_title': "Local Astrometry Solvers Configuration",
+    'use_third_party_solver_label': "Use third-party solver",
     'solver_label': "Solver",
     'solver_astap': "ASTAP",
     'solver_astrometry': "Astrometry.net",

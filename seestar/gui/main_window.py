@@ -461,6 +461,10 @@ class SeestarStackerGUI:
         print(
             f"DEBUG (GUI init_variables): Variable preserve_linear_output_var créée (valeur initiale: {self.preserve_linear_output_var.get()})."
         )
+        self.use_third_party_solver_var = tk.BooleanVar(value=True)
+        print(
+            f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
+        )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value='127.0.0.1:8080')
 
@@ -4166,6 +4170,10 @@ class SeestarStackerGUI:
         valeur_a_passer_pour_float32 = getattr(self.settings, 'save_final_as_float32', "ERREUR_ATTR_DANS_GUI_START")
         print(f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32} (type: {type(valeur_a_passer_pour_float32)})")
         # === FIN AJOUT ===
+
+        if not self.settings.use_third_party_solver:
+            self.settings.local_solver_preference = "none"
+            self.settings.reproject_between_batches = False
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")

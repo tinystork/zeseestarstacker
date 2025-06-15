@@ -397,6 +397,7 @@ FR_TRANSLATIONS = {
 
     # --- Nouvelles chaînes pour Local Solver GUI ---
     'solver_config_title': "Configuration locale des solveurs astrométriques",
+    'use_third_party_solver_label': "Utiliser un solveur tiers",
     'solver_label': "Solveur",
     'solver_astap': "ASTAP",
     'solver_astrometry': "Astrometry.net",
