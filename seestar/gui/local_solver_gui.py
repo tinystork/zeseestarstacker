@@ -209,16 +209,24 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
     def _update_warning(self, *args):
         show = False
-        choice = self.local_solver_choice_var.get()
-        if self.reproject_between_batches_var.get():
-            if choice == 'astap' and not self.astap_path_var.get().strip():
-                show = True
-            elif choice == 'ansvr' and not self.ansvr_host_port_var.get().strip():
-                show = True
-
-            elif choice == 'astrometry' and not self.astrometry_solve_field_dir_var.get().strip():
-
-                show = True
+        if self.reproject_between_batches_var.get() and self.use_third_party_solver_var.get():
+            choice = self.local_solver_choice_var.get()
+            api_key = self.parent_gui.astrometry_api_key_var.get().strip()
+            if choice == 'astap':
+                show = not bool(self.astap_path_var.get().strip())
+            elif choice == 'ansvr':
+                show = not bool(self.local_ansvr_path_var.get().strip())
+            elif choice == 'astrometry':
+                show = not (self.astrometry_solve_field_dir_var.get().strip() or api_key)
+            elif choice == 'none':
+                show = not any(
+                    [
+                        self.astap_path_var.get().strip(),
+                        self.local_ansvr_path_var.get().strip(),
+                        self.astrometry_solve_field_dir_var.get().strip(),
+                        api_key,
+                    ]
+                )
         self.warning_label.configure(
             text='⚠️ Aucun solveur local configuré' if show else ''
         )
@@ -228,14 +236,15 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         if choice == 'astap':
             return bool(self.astap_path_var.get().strip())
         if choice == 'ansvr':
-            return bool(self.ansvr_host_port_var.get().strip())
+            return bool(self.local_ansvr_path_var.get().strip())
         if choice == 'astrometry':
-            return bool(self.astrometry_solve_field_dir_var.get().strip())
+            return bool(self.astrometry_solve_field_dir_var.get().strip() or self.parent_gui.astrometry_api_key_var.get().strip())
         return any(
             [
                 self.astap_path_var.get().strip(),
-                self.ansvr_host_port_var.get().strip(),
+                self.local_ansvr_path_var.get().strip(),
                 self.astrometry_solve_field_dir_var.get().strip(),
+                self.parent_gui.astrometry_api_key_var.get().strip(),
             ]
         )
 
@@ -725,19 +734,32 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                                  self.tr("ansvr_path_required_error", default="Astrometry.net Local is selected, but the path/config is missing."),
                                  parent=self)
             validation_ok = False
-        elif solver_choice == "astrometry" and not astrometry_dir:
-            messagebox.showerror(self.tr("error"),
-                                 self.tr("astrometry_path_required_error", default="Astrometry.net is selected, but the solve-field directory is missing."),
-                                 parent=self)
+        elif solver_choice == "astrometry" and not (astrometry_dir or self.parent_gui.astrometry_api_key_var.get().strip()):
+            messagebox.showerror(
+                self.tr("error"),
+                self.tr(
+                    "astrometry_path_required_error",
+                    default="Astrometry.net is selected, but neither API key nor solve-field directory is provided.",
+                ),
+                parent=self,
+            )
             validation_ok = False
         
         if not validation_ok:
             print("DEBUG (LocalSolverSettingsWindow _on_ok): Validation échouée (chemin manquant pour solveur choisi).") # DEBUG
             return # Ne pas fermer la fenêtre
 
-        # --- MODIFIÉ : Sauvegarder la nouvelle préférence et supprimer l'ancienne ---
-        # Nous allons ajouter 'local_solver_preference' à SettingsManager plus tard
-        setattr(self.parent_gui.settings, 'local_solver_preference', solver_choice)
+        # --- MODIFIÉ : Déterminer la préférence finale du solveur ---
+        final_solver_pref = solver_choice
+        if solver_choice == "astrometry":
+            # Utilisation locale si un dossier solve-field est fourni,
+            # sinon résolution via le service web.
+            if astrometry_dir:
+                final_solver_pref = "ansvr"
+            else:
+                final_solver_pref = "none"
+
+        setattr(self.parent_gui.settings, 'local_solver_preference', final_solver_pref)
         if hasattr(self.parent_gui.settings, 'use_local_solver_priority'):
             delattr(self.parent_gui.settings, 'use_local_solver_priority') # Supprimer l'ancien attribut
         
