@@ -233,7 +233,9 @@ except ImportError as e:
     apply_scnr = None  # Fonction factice
     logger.warning("Échec import apply_scnr: %s", e)
 
+
 from ..enhancement.stack_enhancement import apply_edge_crop
+
 
 # --- Imports INTERNES à déplacer en IMPORTS TARDIFS ---
 # Ces modules seront importés seulement quand les méthodes spécifiques sont appelées
@@ -3380,9 +3382,12 @@ class SeestarQueuedStacker:
             
             is_drizzle_or_mosaic_mode = (self.drizzle_active_session or self.is_mosaic_run)
             logger.debug(f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}")
-            
+
             image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
             logger.debug(f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]")
+
+            if reference_image_data_for_alignment is not None:
+                self.aligner.ref_h, self.aligner.ref_w = reference_image_data_for_alignment.shape[:2]
 
             current_max_val = np.nanmax(image_for_alignment_or_drizzle_input)
             if is_drizzle_or_mosaic_mode:
@@ -3508,7 +3513,11 @@ class SeestarQueuedStacker:
                 if reference_image_data_for_alignment is None: raise RuntimeError("Image de référence Astroalign manquante.")
                 
                 aligned_img_astroalign, align_success_astroalign = self.aligner._align_image(
-                    image_for_alignment_or_drizzle_input, reference_image_data_for_alignment, file_name)
+                    image_for_alignment_or_drizzle_input,
+                    reference_image_data_for_alignment,
+                    file_name,
+                    classic_mode=not is_drizzle_or_mosaic_mode,
+                )
                 
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
@@ -5660,6 +5669,12 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  DEBUG QM [_save_final_stack]: self.raw_adu_data_for_ui_histogram STOCKE (ADU). Range: [{np.min(self.raw_adu_data_for_ui_histogram):.3f}, {np.max(self.raw_adu_data_for_ui_histogram):.3f}]"
         )
+        if getattr(self, "final_edge_crop_percent_decimal", 0.0) > 0:
+            crop_val = self.final_edge_crop_percent_decimal
+            self.raw_adu_data_for_ui_histogram = apply_edge_crop(
+                self.raw_adu_data_for_ui_histogram,
+                crop_val,
+            )
 
         # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
         if preserve_linear_output_setting:
@@ -5724,6 +5739,11 @@ class SeestarQueuedStacker:
 
         # data_after_postproc est la version 0-1 qui subira les post-traitements cosmétiques.
         data_after_postproc = final_image_normalized_for_cosmetics.copy()
+        if getattr(self, "final_edge_crop_percent_decimal", 0.0) > 0:
+            data_after_postproc = apply_edge_crop(
+                data_after_postproc,
+                self.final_edge_crop_percent_decimal,
+            )
 
         self.update_progress(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
         logger.debug(f"  DEBUG QM [SaveFinalStack] data_after_postproc (AVANT post-traitements) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}]")
