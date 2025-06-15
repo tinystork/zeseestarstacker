@@ -39,7 +39,7 @@ from ..core.background import subtract_background_2d, _PHOTOUTILS_AVAILABLE as _
 import astroalign as aa
 import cv2
 import numpy as np
-from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate
+from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate, Angle
 from astropy import units as u
 from astropy.wcs import FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
@@ -1333,10 +1333,7 @@ class SeestarQueuedStacker:
 
 ###########################################################################################################################################################
 
-
-
-
-    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None, scale_factor: float = 1.0):
+    def _calculate_final_mosaic_grid_dynamic(self, all_input_wcs_list, all_input_headers_list=None, scale_factor: float = 1.0):
         """Compute a global WCS using a dynamic bounding box with optional rotation.
 
         Parameters
@@ -1447,6 +1444,136 @@ class SeestarQueuedStacker:
             f"DEBUG (Backend Grid Calc): dynamic grid {nw}x{nh}  scale={final_pixel_scale_arcsec:.3f} arcsec/pix  theta={theta:.2f}  factor={scale_factor}"
         )
         return output_wcs, (nh, nw)
+
+    def _calculate_final_mosaic_grid(self, all_input_wcs_list, all_input_headers_list=None, scale_factor: float = 1.0):
+        """Compute the final mosaic grid using ``find_optimal_celestial_wcs``.
+
+        Parameters
+        ----------
+        all_input_wcs_list : list
+            List of input :class:`~astropy.wcs.WCS` objects.
+        all_input_headers_list : list, optional
+            Optional list of FITS headers matching ``all_input_wcs_list`` used to
+            recover missing ``pixel_shape`` information.
+        scale_factor : float, optional
+            Drizzle scale factor to apply to the output grid. The final pixel
+            scale of the mosaic is divided by this factor. Defaults to ``1.0``.
+        """
+
+        num_wcs = len(all_input_wcs_list)
+        logger.debug(
+            f"DEBUG (Backend _calculate_final_mosaic_grid - Optimal): Appel avec {num_wcs} WCS (scale={scale_factor})."
+        )
+        self.update_progress(
+            f"📐 Calcul de la grille de sortie ({num_wcs} WCS)..."
+        )
+
+        if num_wcs == 0:
+            return None, None
+
+        try:
+            from reproject.mosaicking import find_optimal_celestial_wcs
+        except Exception as e:
+            logger.error("find_optimal_celestial_wcs unavailable: %s", e)
+            find_optimal_celestial_wcs = None
+        _fallback_grid = None
+
+        valid_wcs = []
+        valid_shapes_hw = []
+        headers = all_input_headers_list or []
+
+        for i, wcs_in in enumerate(all_input_wcs_list):
+            if not isinstance(wcs_in, WCS) or not wcs_in.is_celestial:
+                continue
+
+            shape_hw = None
+
+            if wcs_in.pixel_shape is not None:
+                shape_hw = (wcs_in.pixel_shape[1], wcs_in.pixel_shape[0])
+            elif i < len(headers):
+                hdr = headers[i]
+                n1 = hdr.get("NAXIS1")
+                n2 = hdr.get("NAXIS2")
+                if n1 and n2:
+                    shape_hw = (int(n2), int(n1))
+                    wcs_in.pixel_shape = (int(n1), int(n2))
+
+            if shape_hw is None:
+                continue
+
+            valid_wcs.append(wcs_in)
+            valid_shapes_hw.append(shape_hw)
+
+        if not valid_wcs:
+            return None, None
+
+        inputs_for_optimal = []
+        for wcs_obj, shape_hw in zip(valid_wcs, valid_shapes_hw):
+            if wcs_obj.pixel_shape is None:
+                wcs_obj.pixel_shape = (shape_hw[1], shape_hw[0])
+            inputs_for_optimal.append((shape_hw, wcs_obj))
+
+        sum_scales_deg = 0.0
+        count_scales = 0
+        for wcs_scale in valid_wcs:
+            try:
+                pixel_scales = proj_plane_pixel_scales(wcs_scale)
+                scale_deg = np.mean(np.abs([s.to_value(u.deg) for s in pixel_scales]))
+            except Exception:
+                try:
+                    scale_deg = np.sqrt(np.abs(np.linalg.det(wcs_scale.pixel_scale_matrix)))
+                except Exception:
+                    continue
+            if np.isfinite(scale_deg) and scale_deg > 1e-10:
+                sum_scales_deg += scale_deg
+                count_scales += 1
+
+        avg_scale_deg = 2.0 / 3600.0
+        if count_scales > 0:
+            avg_scale_deg = sum_scales_deg / count_scales
+
+        target_res_deg_per_pix = avg_scale_deg / float(scale_factor or 1.0)
+
+        try:
+            if find_optimal_celestial_wcs:
+                out_wcs, out_shape_hw = find_optimal_celestial_wcs(
+                    inputs_for_optimal,
+                    resolution=Angle(target_res_deg_per_pix, unit=u.deg),
+                    auto_rotate=True,
+                    projection="TAN",
+                    reference=None,
+                    frame="icrs",
+                )
+            else:
+                raise ImportError("find_optimal_celestial_wcs unavailable")
+        except Exception as e:
+            logger.error("Error calling find_optimal_celestial_wcs: %s", e, exc_info=True)
+            if _fallback_grid:
+                out_wcs, out_shape_hw = _fallback_grid(valid_wcs, valid_shapes_hw, scale_factor)
+            else:
+                out_wcs, out_shape_hw = self._calculate_final_mosaic_grid_dynamic(valid_wcs, None, scale_factor)
+
+        if out_wcs and out_shape_hw:
+            expected_wh = (out_shape_hw[1], out_shape_hw[0])
+            try:
+                out_wcs.pixel_shape = expected_wh
+                out_wcs.wcs.naxis1 = expected_wh[0]
+                out_wcs.wcs.naxis2 = expected_wh[1]
+            except Exception:
+                pass
+
+            self.update_progress(
+                f"🗺️ Global grid : optimal {(out_shape_hw)} px",
+                "INFO",
+            )
+            logger.debug(
+                "DEBUG (Backend Grid Calc): optimal grid %dx%d scale=%.5f deg/pix",
+                expected_wh[0], expected_wh[1], target_res_deg_per_pix,
+            )
+
+        return out_wcs, out_shape_hw
+
+
 ###########################################################################################################################################################
 
     def _prepare_global_reprojection_grid(self):
