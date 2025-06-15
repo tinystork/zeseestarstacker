@@ -45,6 +45,8 @@ class SeestarAligner:
         self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
         self.move_to_unaligned_callback = move_to_unaligned_callback
         self.use_cuda = False
+        self.ref_h = None
+        self.ref_w = None
     
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
@@ -97,7 +99,7 @@ class SeestarAligner:
                     g, M3, dsize,
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0,
+                    borderValue=np.nan,
                 )
                 chans.append(warped.download())
             return np.stack(chans, axis=2)
@@ -107,7 +109,7 @@ class SeestarAligner:
             g, M3, dsize,
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
+            borderValue=np.nan,
         )
         return warped.download()
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
@@ -210,7 +212,10 @@ class SeestarAligner:
                                 [0, 0, 1]], dtype=np.float32)
             cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
             cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
-            dsize_cv2 = (new_w, new_h)
+
+            target_w = self.ref_w if isinstance(self.ref_w, int) and self.ref_w > 0 else w_ref
+            target_h = self.ref_h if isinstance(self.ref_h, int) and self.ref_h > 0 else h_ref
+            dsize_cv2 = (int(target_w), int(target_h))
 
             align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
             try:
@@ -452,6 +457,7 @@ class SeestarAligner:
             return None, None # Impossible de continuer si pas d'image de référence
 
         ref_shape_log = reference_image_data.shape
+        self.ref_h, self.ref_w = ref_shape_log[:2]
         print(f"DEBUG ALIGNER [_get_reference_image V7_CleanHeaderForTempSave]: Fin. Réf finale de '{source_basename_of_selected_ref}', Shape: {ref_shape_log}")
         return reference_image_data, final_reference_header_for_worker
 
