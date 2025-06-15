@@ -4363,6 +4363,12 @@ class SeestarQueuedStacker:
             self._close_memmaps()
             self._create_sum_wht_memmaps(incoming_shape_hw)
 
+        if not self.reproject_between_batches and incoming_shape_hw != self.memmap_shape[:2]:
+            logger.debug(
+                f"DEBUG QM [_combine_batch_result]: resizing memmaps inplace to {incoming_shape_hw}"
+            )
+            self._resize_memmaps_inplace(incoming_shape_hw)
+
         # Vérifier la cohérence des shapes
         # stacked_batch_data_np peut être HWC ou HW. memmap_shape est HWC.
         # batch_coverage_map_2d doit être HW.
@@ -4420,7 +4426,7 @@ class SeestarQueuedStacker:
 
 
 
-        if batch_coverage_map_2d.shape != expected_shape_hw:
+        if self.reproject_between_batches and batch_coverage_map_2d.shape != expected_shape_hw:
             handled_cov = False
             if batch_coverage_map_2d.shape == expected_shape_hw[::-1]:
                 batch_coverage_map_2d = batch_coverage_map_2d.T
@@ -5161,6 +5167,13 @@ class SeestarQueuedStacker:
             shape=shape_hw,
         )
         self.cumulative_wht_memmap[:] = 0.0
+
+    def _resize_memmaps_inplace(self, new_shape_hw):
+        """Resize SUM/WHT memmaps to ``new_shape_hw`` maintaining dtype."""
+        if self.memmap_shape is None or tuple(self.memmap_shape[:2]) == tuple(new_shape_hw):
+            return
+        self._close_memmaps()
+        self._create_sum_wht_memmaps(new_shape_hw)
 
     def _final_reproject_cached_files(self, cache_list):
         """Reproject cached solved images and accumulate them."""
