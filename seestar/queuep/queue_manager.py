@@ -474,6 +474,10 @@ class SeestarQueuedStacker:
                 )
 
         self.stacking_mode = "kappa-sigma"; self.kappa = 2.5; self.batch_size = 10
+        self.stack_kappa_low = 2.5
+        self.stack_kappa_high = 2.5
+        self.winsor_limits = (0.05, 0.05)
+        self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
         self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
@@ -4865,8 +4869,6 @@ class SeestarQueuedStacker:
             )
 
             image_data_list = valid_images_for_ccdproc
-            data_stack_for_numpy = np.stack(image_data_list, axis=0)
-
             coverage_maps_list = valid_pixel_masks_for_coverage
             coverage_stack_for_numpy = np.stack(coverage_maps_list, axis=0)
 
@@ -4874,24 +4876,56 @@ class SeestarQueuedStacker:
             if quality_weights is None:
                 quality_weights = np.ones(num_valid_images_for_processing, dtype=np.float32)
 
-            weight_shape = (-1,) + (1,) * (data_stack_for_numpy.ndim - 1)
-            quality_weights = quality_weights.reshape(weight_shape)
+            if (
+                getattr(self, "stacking_mode", "") == "winsorized-sigma"
+                or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
+            ):
+                images_for_winsor = [
+                    img * (mask[..., None] if img.ndim == 3 else mask)
+                    for img, mask in zip(image_data_list, coverage_maps_list)
+                ]
+                stacked_batch_data_np, _ = self._stack_winsorized_sigma(
+                    images_for_winsor,
+                    quality_weights,
+                    kappa=max(self.stack_kappa_low, self.stack_kappa_high),
+                    winsor_limits=self.winsor_limits,
+                )
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stack_info_header = fits.Header()
+                stack_info_header["NIMAGES"] = (
+                    num_valid_images_for_processing,
+                    "Images in this batch stack",
+                )
+                stack_info_header["STK_NOTE"] = "Stacked with winsorized sigma clip"
+            else:
+                data_stack_for_numpy = np.stack(image_data_list, axis=0)
+                weight_shape = (-1,) + (1,) * (data_stack_for_numpy.ndim - 1)
+                quality_weights = quality_weights.reshape(weight_shape)
 
-            coverage_mult = coverage_stack_for_numpy[..., np.newaxis] if data_stack_for_numpy.ndim == 4 else coverage_stack_for_numpy
+                coverage_mult = (
+                    coverage_stack_for_numpy[..., np.newaxis]
+                    if data_stack_for_numpy.ndim == 4
+                    else coverage_stack_for_numpy
+                )
 
-            weighted_signal = data_stack_for_numpy * coverage_mult * quality_weights
-            total_weights = coverage_mult * quality_weights
+                weighted_signal = data_stack_for_numpy * coverage_mult * quality_weights
+                total_weights = coverage_mult * quality_weights
 
-            sum_weighted_signal = np.sum(weighted_signal, axis=0)
-            sum_total_weights = np.sum(total_weights, axis=0)
-            sum_total_weights_safe = np.maximum(sum_total_weights, 1e-9)
+                sum_weighted_signal = np.sum(weighted_signal, axis=0)
+                sum_total_weights = np.sum(total_weights, axis=0)
+                sum_total_weights_safe = np.maximum(sum_total_weights, 1e-9)
 
-            stacked_batch_data_np = (sum_weighted_signal / sum_total_weights_safe).astype(np.float32)
-            batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stacked_batch_data_np = (
+                    sum_weighted_signal / sum_total_weights_safe
+                ).astype(np.float32)
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
 
-            stack_info_header = fits.Header()
-            stack_info_header['NIMAGES'] = (num_valid_images_for_processing, 'Images in this batch stack')
-            stack_info_header['STK_NOTE'] = 'Stacked with NumPy weighted average'
+                stack_info_header = fits.Header()
+                stack_info_header["NIMAGES"] = (
+                    num_valid_images_for_processing,
+                    "Images in this batch stack",
+                )
+                stack_info_header["STK_NOTE"] = "Stacked with NumPy weighted average"
 
             self.update_progress(
                 f"✅ Combinaison lot (Lot {current_batch_num}/{total_batches_est}) terminée (Shape: {stacked_batch_data_np.shape})"
@@ -6057,54 +6091,77 @@ class SeestarQueuedStacker:
 
 # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def start_processing(self, input_dir, output_dir, reference_path_ui=None,
-                         output_filename="",
-                         initial_additional_folders=None,
-                         stacking_mode="kappa-sigma", kappa=2.5,
-                         batch_size=10, correct_hot_pixels=True, hot_pixel_threshold=3.0,
-                         neighborhood_size=5, bayer_pattern="GRBG", perform_cleanup=True,
-                         use_weighting=False, 
-                         weight_by_snr=True, 
-                         weight_by_stars=True,
-                         snr_exp=1.0, 
-                         stars_exp=0.5, 
-                         min_w=0.1,
-                         use_drizzle=False, drizzle_scale=2.0, drizzle_wht_threshold=0.7,
-                         drizzle_mode="Final", drizzle_kernel="square", drizzle_pixfrac=1.0,
-                         apply_chroma_correction=True,
-                         apply_final_scnr=False, final_scnr_target_channel='green',
-                         final_scnr_amount=0.8, final_scnr_preserve_luminosity=True,
-                         bn_grid_size_str="16x16", bn_perc_low=5, bn_perc_high=30,
-                         bn_std_factor=1.0, bn_min_gain=0.2, bn_max_gain=7.0,
-                         cb_border_size=25, cb_blur_radius=8,
-                         cb_min_b_factor=0.4, cb_max_b_factor=1.5,
-                         final_edge_crop_percent=2.0,
-                         apply_photutils_bn=False,
-                         photutils_bn_box_size=128,
-                         photutils_bn_filter_size=5,
-                         photutils_bn_sigma_clip=3.0,
-                         photutils_bn_exclude_percentile=98.0,
-                         apply_feathering=False,
-                         feather_blur_px=256,
-                         apply_low_wht_mask=False, 
-                         low_wht_percentile=5,    
-                         low_wht_soften_px=128,   
-                         is_mosaic_run=False, api_key=None, 
-                         mosaic_settings=None,
-                         use_local_solver_priority=False, # DEPRECATED - ignoré, mais gardé pour compatibilité signature
-                         astap_path="",
-                         astap_data_dir="",
-                         local_ansvr_path="",
-                         astap_search_radius=3.0,
-
-                         astap_downsample=1,
-                         astap_sensitivity=100,
-
-                         local_solver_preference="none",
-                         save_as_float32=False,
-                         preserve_linear_output=False,
-                         reproject_between_batches=False
-                         ):
+    def start_processing(
+        self,
+        input_dir,
+        output_dir,
+        reference_path_ui=None,
+        output_filename="",
+        initial_additional_folders=None,
+        stacking_mode="kappa-sigma",
+        kappa=2.5,
+        stack_kappa_low=2.5,
+        stack_kappa_high=2.5,
+        winsor_limits=(0.05, 0.05),
+        batch_size=10,
+        correct_hot_pixels=True,
+        hot_pixel_threshold=3.0,
+        neighborhood_size=5,
+        bayer_pattern="GRBG",
+        perform_cleanup=True,
+        use_weighting=False,
+        weight_by_snr=True,
+        weight_by_stars=True,
+        snr_exp=1.0,
+        stars_exp=0.5,
+        min_w=0.1,
+        use_drizzle=False,
+        drizzle_scale=2.0,
+        drizzle_wht_threshold=0.7,
+        drizzle_mode="Final",
+        drizzle_kernel="square",
+        drizzle_pixfrac=1.0,
+        apply_chroma_correction=True,
+        apply_final_scnr=False,
+        final_scnr_target_channel='green',
+        final_scnr_amount=0.8,
+        final_scnr_preserve_luminosity=True,
+        bn_grid_size_str="16x16",
+        bn_perc_low=5,
+        bn_perc_high=30,
+        bn_std_factor=1.0,
+        bn_min_gain=0.2,
+        bn_max_gain=7.0,
+        cb_border_size=25,
+        cb_blur_radius=8,
+        cb_min_b_factor=0.4,
+        cb_max_b_factor=1.5,
+        final_edge_crop_percent=2.0,
+        apply_photutils_bn=False,
+        photutils_bn_box_size=128,
+        photutils_bn_filter_size=5,
+        photutils_bn_sigma_clip=3.0,
+        photutils_bn_exclude_percentile=98.0,
+        apply_feathering=False,
+        feather_blur_px=256,
+        apply_low_wht_mask=False,
+        low_wht_percentile=5,
+        low_wht_soften_px=128,
+        is_mosaic_run=False,
+        api_key=None,
+        mosaic_settings=None,
+        use_local_solver_priority=False,  # DEPRECATED - kept for signature compat
+        astap_path="",
+        astap_data_dir="",
+        local_ansvr_path="",
+        astap_search_radius=3.0,
+        astap_downsample=1,
+        astap_sensitivity=100,
+        local_solver_preference="none",
+        save_as_float32=False,
+        preserve_linear_output=False,
+        reproject_between_batches=False,
+    ):
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
                          
@@ -6202,7 +6259,17 @@ class SeestarQueuedStacker:
         if getattr(self, 'reference_pixel_scale_arcsec', None) is None:
             self.reference_pixel_scale_arcsec = None 
         
-        self.stacking_mode = str(stacking_mode); self.kappa = float(kappa)
+        self.stacking_mode = str(stacking_mode)
+        self.kappa = float(kappa)
+        self.stack_kappa_low = float(stack_kappa_low)
+        self.stack_kappa_high = float(stack_kappa_high)
+        try:
+            self.winsor_limits = (
+                float(winsor_limits[0]),
+                float(winsor_limits[1]),
+            )
+        except Exception:
+            self.winsor_limits = (0.05, 0.05)
         self.correct_hot_pixels = bool(correct_hot_pixels); self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size); self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
