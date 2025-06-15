@@ -747,6 +747,16 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.parent_gui.settings.local_ansvr_path = local_ansvr_path
         self.parent_gui.settings.ansvr_host_port = ansvr_host_port
         self.parent_gui.settings.use_third_party_solver = self.use_third_party_solver_var.get()
+
+        if hasattr(self.parent_gui, 'use_third_party_solver_var'):
+            try:
+                self.parent_gui.use_third_party_solver_var.set(
+                    self.use_third_party_solver_var.get()
+                )
+            except Exception:
+                pass
+
+
         self.parent_gui.settings.reproject_between_batches = reproject_batches
         if hasattr(self.parent_gui, 'reproject_between_batches_var'):
             try:
