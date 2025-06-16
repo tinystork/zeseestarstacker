@@ -6,7 +6,12 @@ from astropy.wcs import WCS
 from .reprojection import reproject_to_reference_wcs
 
 
-def initialize_master(batch_img: np.ndarray, batch_cov: np.ndarray, ref_wcs: WCS):
+def initialize_master(
+    batch_img: np.ndarray,
+    batch_cov: np.ndarray,
+    ref_wcs: WCS,
+    batch_wcs: WCS | None = None,
+):
     """Return initial weighted sum and coverage map.
 
     Parameters
@@ -17,18 +22,34 @@ def initialize_master(batch_img: np.ndarray, batch_cov: np.ndarray, ref_wcs: WCS
         Coverage/weight map for the batch.
     ref_wcs : astropy.wcs.WCS
         Reference WCS used for later reprojection.
+    batch_wcs : astropy.wcs.WCS, optional
+        WCS of ``batch_img`` for reprojection of the first batch.
     """
     if batch_img is None or batch_cov is None:
         raise ValueError("batch_img and batch_cov are required")
     batch_img_f = batch_img.astype(np.float32, copy=True)
     batch_cov_f = batch_cov.astype(np.float32, copy=True)
 
-    if batch_img_f.ndim == 3:
-        master_sum = batch_img_f * batch_cov_f[..., None]
+    if batch_wcs is not None and ref_wcs.pixel_shape is not None:
+        target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
+        reproj_img = reproject_to_reference_wcs(
+            batch_img_f, batch_wcs, ref_wcs, target_shape
+        )
+        reproj_cov = reproject_to_reference_wcs(
+            batch_cov_f, batch_wcs, ref_wcs, target_shape
+        )
+        if reproj_img.ndim == 3:
+            master_sum = reproj_img * reproj_cov[..., None]
+        else:
+            master_sum = reproj_img * reproj_cov
+        master_cov = reproj_cov
     else:
-        master_sum = batch_img_f * batch_cov_f
+        if batch_img_f.ndim == 3:
+            master_sum = batch_img_f * batch_cov_f[..., None]
+        else:
+            master_sum = batch_img_f * batch_cov_f
+        master_cov = batch_cov_f
 
-    master_cov = batch_cov_f
     return master_sum, master_cov
 
 
@@ -40,24 +61,35 @@ def reproject_and_combine(
     batch_wcs: WCS,
     ref_wcs: WCS,
 ):
-    """Reproject ``batch_img`` to ``ref_wcs`` and accumulate its weighted signal."""
+    """Reproject ``batch_img`` to ``ref_wcs`` and accumulate its weighted signal.
+
+    Parameters
+    ----------
+    master_sum : np.ndarray
+        Current accumulated weighted signal.
+    master_cov : np.ndarray
+        Current accumulated coverage map.
+    batch_img : np.ndarray
+        Image from the next batch to add.
+    batch_cov : np.ndarray
+        Coverage/weight map for ``batch_img``.
+    batch_wcs : astropy.wcs.WCS
+        WCS describing ``batch_img``.
+    ref_wcs : astropy.wcs.WCS
+        Reference WCS defining the target grid. ``ref_wcs.pixel_shape`` is used
+        to compute the reprojection geometry.
+    """
 
     if batch_wcs is None or ref_wcs is None:
         return master_sum, master_cov
 
-    # Use the existing master array dimensions to avoid orientation issues
-    target_shape = master_sum.shape[:2]
     if ref_wcs.pixel_shape is not None:
         target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
+    else:
+        target_shape = master_sum.shape[:2]
 
     reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
     reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
-
-    if reproj_img.shape[:2] != target_shape:
-        # Fallback in case pixel_shape orientation was wrong
-        target_shape = target_shape[::-1]
-        reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
-        reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
 
     master_sum = master_sum.astype(np.float32, copy=False)
     master_cov = master_cov.astype(np.float32, copy=False)
