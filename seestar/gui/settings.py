@@ -101,6 +101,7 @@ class SettingsManager:
             self.drizzle_mode = getattr(gui_instance, 'drizzle_mode_var', tk.StringVar(value=default_values_from_code.get('drizzle_mode', 'Final'))).get()
             self.drizzle_kernel = getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar(value=default_values_from_code.get('drizzle_kernel', 'square'))).get()
             self.drizzle_pixfrac = getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar(value=default_values_from_code.get('drizzle_pixfrac', 1.0))).get()
+            self.drizzle_renorm = getattr(gui_instance, 'drizzle_renorm_var', tk.StringVar(value=default_values_from_code.get('drizzle_renorm', 'max'))).get()
             self.astrometry_api_key = getattr(gui_instance, 'astrometry_api_key_var', tk.StringVar(value=default_values_from_code.get('astrometry_api_key', ''))).get().strip()
             self.apply_chroma_correction = getattr(gui_instance, 'apply_chroma_correction_var', tk.BooleanVar(value=default_values_from_code.get('apply_chroma_correction', True))).get()
             self.apply_final_scnr = getattr(gui_instance, 'apply_final_scnr_var', tk.BooleanVar(value=default_values_from_code.get('apply_final_scnr', True))).get()
@@ -315,6 +316,11 @@ class SettingsManager:
             getattr(gui_instance, 'drizzle_mode_var', tk.StringVar()).set(self.drizzle_mode)
             getattr(gui_instance, 'drizzle_kernel_var', tk.StringVar()).set(self.drizzle_kernel)
             getattr(gui_instance, 'drizzle_pixfrac_var', tk.DoubleVar()).set(self.drizzle_pixfrac)
+            getattr(gui_instance, 'drizzle_renorm_var', tk.StringVar()).set(self.drizzle_renorm)
+            if hasattr(gui_instance, 'drizzle_renorm_key_to_label'):
+                gui_instance.drizzle_renorm_display_var.set(
+                    gui_instance.drizzle_renorm_key_to_label.get(self.drizzle_renorm, self.drizzle_renorm)
+                )
             
             setattr(gui_instance, 'mosaic_mode_active', bool(self.mosaic_mode_active))
             setattr(gui_instance, 'mosaic_settings', self.mosaic_settings.copy() if isinstance(self.mosaic_settings, dict) else {})
@@ -482,8 +488,9 @@ class SettingsManager:
         defaults_dict['drizzle_scale'] = 2
         defaults_dict['drizzle_wht_threshold'] = 0.7 
         defaults_dict['drizzle_mode'] = "Final" 
-        defaults_dict['drizzle_kernel'] = "square" 
-        defaults_dict['drizzle_pixfrac'] = 1.0    
+        defaults_dict['drizzle_kernel'] = "square"
+        defaults_dict['drizzle_pixfrac'] = 1.0
+        defaults_dict['drizzle_renorm'] = 'max'
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
         defaults_dict['apply_chroma_correction'] = True 
@@ -814,6 +821,14 @@ class SettingsManager:
                 original = self.drizzle_pixfrac; self.drizzle_pixfrac = defaults_fallback['drizzle_pixfrac']
                 messages.append(f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}")
 
+            valid_renorm = ["none", "max", "n_images"]
+            current_renorm = getattr(self, 'drizzle_renorm', defaults_fallback['drizzle_renorm'])
+            if current_renorm not in valid_renorm:
+                original = current_renorm; self.drizzle_renorm = defaults_fallback['drizzle_renorm']
+                messages.append(f"Option Renormalize flux ('{original}') invalide, réinitialisée à '{self.drizzle_renorm}'")
+            else:
+                self.drizzle_renorm = current_renorm
+
 
             # --- SCNR Final Validation ---
             # ... (inchangé) ...
@@ -1106,6 +1121,7 @@ class SettingsManager:
             'drizzle_mode': str(self.drizzle_mode),
             'drizzle_kernel': str(self.drizzle_kernel),
             'drizzle_pixfrac': float(self.drizzle_pixfrac),
+            'drizzle_renorm': str(self.drizzle_renorm),
             'mosaic_mode_active': bool(self.mosaic_mode_active),
             'mosaic_settings': self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {},
             'apply_chroma_correction': bool(self.apply_chroma_correction),
