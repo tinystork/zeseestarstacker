@@ -51,7 +51,9 @@ def initialize_master(
     else:
         master_sum = reproj_img * reproj_cov
 
+
     master_cov = reproj_cov
+
 
     return master_sum.astype(np.float32), master_cov.astype(np.float32)
 
@@ -69,9 +71,11 @@ def reproject_and_combine(
     if batch_wcs is None or ref_wcs is None:
         return master_sum, master_cov
 
+
     if ref_wcs.pixel_shape is None:
         raise ValueError("ref_wcs.pixel_shape is required for reprojection")
     target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
+
 
     reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
     reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
