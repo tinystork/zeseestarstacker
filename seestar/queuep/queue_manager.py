@@ -727,9 +727,20 @@ class SeestarQueuedStacker:
             return False
 
         # --- Validation Shape Référence (HWC) ---
-        if not isinstance(reference_image_shape_hwc_input, tuple) or len(reference_image_shape_hwc_input) != 3 or \
-           reference_image_shape_hwc_input[2] != 3:
-            self.update_progress(f"❌ Erreur interne: Shape référence HWC invalide ({reference_image_shape_hwc_input}).")
+        if (
+            not isinstance(reference_image_shape_hwc_input, tuple)
+            or len(reference_image_shape_hwc_input) != 3
+            or reference_image_shape_hwc_input[2] != 3
+        ):
+            self.update_progress(
+                f"❌ Erreur interne: Shape référence HWC invalide ({reference_image_shape_hwc_input})."
+            )
+            return False
+
+        if reference_image_shape_hwc_input[0] <= 0 or reference_image_shape_hwc_input[1] <= 0:
+            self.update_progress(
+                f"❌ Erreur interne: Dimensions non-positives pour la référence ({reference_image_shape_hwc_input})."
+            )
             return False
         
         current_output_shape_hw_for_accum_or_driz = None 
