@@ -745,19 +745,27 @@ class SeestarQueuedStacker:
         logger.debug(f"    -> not self.is_mosaic_run ÉTAIT: {not self.is_mosaic_run} (self.is_mosaic_run était {self.is_mosaic_run})")
 
         if is_true_incremental_drizzle_mode:
-            logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté.")
+            logger.debug(
+                "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté."
+            )
             if self.reference_wcs_object is None:
-                self.update_progress("❌ Erreur: WCS de référence manquant pour initialiser la grille Drizzle Incrémental.", "ERROR")
+                self.update_progress(
+                    "❌ Erreur: WCS de référence manquant pour initialiser la grille Drizzle Incrémental.",
+                    "ERROR",
+                )
                 return False
             try:
                 ref_shape_hw_for_grid = reference_image_shape_hwc_input[:2]
-                self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                    self.reference_wcs_object, ref_shape_hw_for_grid, self.drizzle_scale
-                )
                 if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-                    raise RuntimeError("Échec _create_drizzle_output_wcs pour Drizzle Incrémental.")
+                    self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
+                        self.reference_wcs_object, ref_shape_hw_for_grid, self.drizzle_scale
+                    )
+                    if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                        raise RuntimeError("Échec _create_drizzle_output_wcs pour Drizzle Incrémental.")
                 current_output_shape_hw_for_accum_or_driz = self.drizzle_output_shape_hw
-                logger.debug(f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}")
+                logger.debug(
+                    f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}"
+                )
             except Exception as e_grid:
                 self.update_progress(f"❌ Erreur création grille Drizzle Incrémental: {e_grid}", "ERROR")
                 return False
@@ -1616,6 +1624,7 @@ class SeestarQueuedStacker:
                 else:
                     wcs_obj_local = solve_image_wcs(
                         path, hdr_local, solver_settings, update_header_with_solution=False
+
                     )
                 return path, hdr_local, wcs_obj_local, None
             except Exception as exc:
@@ -1639,6 +1648,7 @@ class SeestarQueuedStacker:
                         f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
                         "WARN",
                     )
+
                 elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
@@ -2126,23 +2136,35 @@ class SeestarQueuedStacker:
             logger.debug(f"!!!! DEBUG _worker APRÈS BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}")
 
             # --- Initialisation grille Drizzle Standard (si applicable pour un run NON-mosaïque) ---
-            if self.drizzle_active_session and not self.is_mosaic_run: 
-                self.update_progress("DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...", "DEBUG_DETAIL")
+            if self.drizzle_active_session and not self.is_mosaic_run:
+                self.update_progress(
+                    "DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...",
+                    "DEBUG_DETAIL",
+                )
                 if self.reference_wcs_object and hasattr(reference_image_data_for_global_alignment, 'shape'):
                     ref_shape_for_drizzle_grid_hw = reference_image_data_for_global_alignment.shape[:2]
                     try:
-                        self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                            self.reference_wcs_object,      
-                            ref_shape_for_drizzle_grid_hw,  
-                            self.drizzle_scale              
-                        )
                         if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-                            raise RuntimeError("Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard.")
-                        logger.debug(f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}")
-                        self.update_progress(f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}", "INFO")
+                            self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
+                                self.reference_wcs_object,
+                                ref_shape_for_drizzle_grid_hw,
+                                self.drizzle_scale,
+                            )
+                            if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                                raise RuntimeError(
+                                    "Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard."
+                                )
+                        logger.debug(
+                            f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}"
+                        )
+                        self.update_progress(
+                            f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}",
+                            "INFO",
+                        )
                     except Exception as e_grid_driz:
                         error_msg_grid = f"Échec critique création grille de sortie Drizzle Standard: {e_grid_driz}"
-                        self.update_progress(error_msg_grid, "ERROR"); raise RuntimeError(error_msg_grid)
+                        self.update_progress(error_msg_grid, "ERROR")
+                        raise RuntimeError(error_msg_grid)
                 else:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
                     self.update_progress(error_msg_ref_driz, "ERROR"); raise RuntimeError(error_msg_ref_driz)
@@ -6588,40 +6610,6 @@ class SeestarQueuedStacker:
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
         logger.debug("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
 
-        # --- NEW STEP: Pre-scan headers to compute a fixed output grid ---
-        if self.reproject_between_batches:
-            all_paths = []
-            if self.current_folder and os.path.isdir(self.current_folder):
-                for fn in sorted(os.listdir(self.current_folder)):
-                    if fn.lower().endswith((".fit", ".fits")):
-                        all_paths.append(os.path.join(self.current_folder, fn))
-            if initial_additional_folders:
-                for f in initial_additional_folders:
-                    abs_f = os.path.abspath(str(f))
-                    if os.path.isdir(abs_f):
-                        for fn in sorted(os.listdir(abs_f)):
-                            if fn.lower().endswith((".fit", ".fits")):
-                                all_paths.append(os.path.join(abs_f, fn))
-            from ..core.reprojection_utils import collect_headers, compute_final_output_grid
-            header_infos = collect_headers(all_paths)
-            if header_infos:
-                try:
-                    self.fixed_output_wcs, self.fixed_output_shape = compute_final_output_grid(
-                        header_infos, scale=self.drizzle_scale
-                    )
-
-
-                    self.reference_shape = self.fixed_output_shape
-                    self.update_progress(
-                        f"🗺️ Grille fixe calculée {self.fixed_output_shape} px.",
-                        None,
-                    )
-                except Exception as e_grid:
-                    self.update_progress(f"⚠️ Erreur calcul grille fixe: {e_grid}", "WARN")
-            self.all_input_filepaths = all_paths
-
-
-
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
         logger.debug("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
@@ -6855,10 +6843,17 @@ class SeestarQueuedStacker:
         elif not self.additional_folders:
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
 
-        if self.reproject_between_batches and not self.fixed_output_wcs:
+
+        if self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
                 return False
+            self.fixed_output_wcs = self.reference_wcs_object
+            self.fixed_output_shape = self.reference_shape
+            if self.drizzle_active_session:
+                self.drizzle_output_wcs = self.reference_wcs_object
+                self.drizzle_output_shape_hw = self.reference_shape
+
 
         self.aligner.reference_image_path = reference_path_ui or None
 
