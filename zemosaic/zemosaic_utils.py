@@ -760,9 +760,12 @@ def save_fits_image(image_data: np.ndarray,
         elif np.any(np.isfinite(image_data)): image_normalized_01 = np.full_like(image_data, 0.5, dtype=np.float32)
         
         image_clipped_01 = np.clip(image_normalized_01, 0.0, 1.0)
-        data_to_write_temp = (image_clipped_01 * 65535.0).astype(np.uint16)
-        final_header_to_write['BITPIX'] = 16; final_header_to_write['BSCALE'] = 1; final_header_to_write['BZERO'] = 32768
-        _log_util_save(f"  SAVE_DEBUG: (Uint16) data_to_write_temp: Range [{np.min(data_to_write_temp)}, {np.max(data_to_write_temp)}]", "WARN")
+        data_uint16 = (image_clipped_01 * 65535.0).astype(np.uint16)
+        data_to_write_temp = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
+        final_header_to_write['BITPIX'] = 16
+        final_header_to_write['BSCALE'] = 1
+        final_header_to_write['BZERO'] = 32768
+        _log_util_save(f"  SAVE_DEBUG: (Int16) data_to_write_temp: Range [{np.min(data_to_write_temp)}, {np.max(data_to_write_temp)}]", "WARN")
 
     data_for_hdu_cxhxw = None
     is_color = data_to_write_temp.ndim == 3 and data_to_write_temp.shape[-1] == 3
@@ -813,7 +816,15 @@ def save_fits_image(image_data: np.ndarray,
         hdul = current_fits_module.HDUList([primary_hdu_object])
         _log_util_save(f"Écriture vers '{base_output_filename}' (overwrite={overwrite})...", "DEBUG_DETAIL")
         
-        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception') 
+        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception')
+        if final_header_to_write.get('BITPIX') == 16:
+            # Renforcer la présence de BSCALE/BZERO au cas où astropy les aurait
+            # supprimés avec des données int16.
+            with current_fits_module.open(output_path, mode="update", memmap=False) as hdul_fix:
+                hd0 = hdul_fix[0]
+                hd0.header["BSCALE"] = 1
+                hd0.header["BZERO"] = 32768
+                hdul_fix.flush()
         _log_util_save(f"Sauvegarde FITS vers '{base_output_filename}' RÉUSSIE.", "INFO")
 
     except Exception as e_write:

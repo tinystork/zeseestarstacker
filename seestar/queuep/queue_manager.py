@@ -43,6 +43,7 @@ import astroalign as aa
 import cv2
 import numpy as np
 from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate, Angle
+from typing import Literal
 from astropy import units as u
 from astropy.wcs import FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
@@ -235,11 +236,65 @@ except ImportError as e_feather:
     )
     # Définir une fonction factice pour que le code ne plante pas si l'import échoue
     # lors des appels ultérieurs, bien qu'on vérifiera _FEATHERING_AVAILABLE.
-    def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
+def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
         logger.error(
             "Fonction feather_by_weight_map non disponible (échec import)."
         )
         return img # Retourner l'image originale
+
+def renormalize_fits(
+    fits_path: str,
+    method: Literal["none", "max", "n_images"],
+    n_images: int,
+) -> None:
+    """In-place renormalises a drizzle FITS stack."""
+    log = logging.getLogger(__name__)
+    m = (method or "none").lower()
+    if m not in {"none", "max", "n_images"}:
+        log.debug(f"renormalize_fits: unknown method '{method}', fallback to 'none'")
+        m = "none"
+    if m == "none":
+        return
+    try:
+        with fits.open(fits_path, mode="update", memmap=False) as hdul:
+            orig_dtype = hdul[0].data.dtype
+            data = hdul[0].data.astype(np.float32)
+            hdr = hdul[0].header
+            wht = None
+            wht_orig_dtype = None
+            if len(hdul) > 1 and hdul[1].header.get("EXTNAME", "").strip().upper() == "WHT":
+                wht_orig_dtype = hdul[1].data.dtype
+                wht = hdul[1].data.astype(np.float32)
+            if wht is not None:
+                wht_max = float(np.max(wht)) if wht.size else 1.0
+                wht_mean = float(np.mean(wht)) if wht.size else 1.0
+            else:
+                wht_max = float(hdr.get("DRZWHT_MAX", 1.0))
+                wht_mean = float(hdr.get("DRZWHT_MEAN", 1.0))
+            if m == "max":
+                s = 1.0 / max(wht_max, 1.0)
+            else:  # "n_images"
+                denom = max(wht_mean, 1e-9)
+                s = float(n_images) / denom
+            data *= s
+            if wht is not None:
+                wht *= s
+            if np.issubdtype(orig_dtype, np.integer):
+                hdul[0].data = np.round(data).astype(orig_dtype)
+            else:
+                hdul[0].data = data.astype(orig_dtype)
+            if wht is not None:
+                if np.issubdtype(wht_orig_dtype, np.integer):
+                    hdul[1].data = np.round(wht).astype(wht_orig_dtype)
+                else:
+                    hdul[1].data = wht.astype(wht_orig_dtype)
+            hdr["RENORM"] = (s, "Flux renormalisation factor")
+            hdr["RENORMMD"] = (m, "Renormalisation method")
+            hdul.flush()
+        log.debug(f"renormalize_fits: method={m} factor={s:.4g} applied to {os.path.basename(fits_path)}")
+    except Exception:
+        log.exception("renormalize_fits failed")
+        raise
 try:
     from ..enhancement.stack_enhancement import apply_low_wht_mask # NOUVEL IMPORT
     _LOW_WHT_MASK_AVAILABLE = True
@@ -501,6 +556,7 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
+        self.drizzle_renorm_method = "none"
         # Option de reprojection des lots intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -566,6 +622,12 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
                 )
+                self.drizzle_renorm_method = str(
+                    getattr(settings, 'drizzle_renorm', 'none')
+                )
+                logger.debug(
+                    f"  -> Méthode de renormalisation drizzle: {self.drizzle_renorm_method}"
+                )
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -577,7 +639,7 @@ class SeestarQueuedStacker:
         self.winsor_limits = (0.05, 0.05)
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
-        self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
+        self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.0
         self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
         self.drizzle_fillval = "0.0"  # default fill value for Drizzle
         self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
@@ -5350,8 +5412,27 @@ class SeestarQueuedStacker:
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
                 y_lot_intermed, x_lot_intermed = np.indices(shape_lot_intermediaire_hw)
                 sky_coords_lot_ra, sky_coords_lot_dec = wcs_lot_intermediaire.all_pix2world(x_lot_intermed.ravel(), y_lot_intermed.ravel(), 0)
-                x_final_output_pix, y_final_output_pix = output_wcs_final_target.all_world2pix(sky_coords_lot_ra, sky_coords_lot_dec, 0)
-                pixmap_batch_to_final_grid = np.dstack((x_final_output_pix.reshape(shape_lot_intermediaire_hw), y_final_output_pix.reshape(shape_lot_intermediaire_hw))).astype(np.float32)
+                x_final_output_pix, y_final_output_pix = output_wcs_final_target.all_world2pix(
+                    sky_coords_lot_ra, sky_coords_lot_dec, 0
+                )
+                x_final_output_pix = np.nan_to_num(x_final_output_pix, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                y_final_output_pix = np.nan_to_num(y_final_output_pix, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                x_final_output_pix = np.clip(
+                    x_final_output_pix,
+                    0,
+                    output_shape_final_target_hw[1] - 1,
+                )
+                y_final_output_pix = np.clip(
+                    y_final_output_pix,
+                    0,
+                    output_shape_final_target_hw[0] - 1,
+                )
+                pixmap_batch_to_final_grid = np.dstack(
+                    (
+                        x_final_output_pix.reshape(shape_lot_intermediaire_hw),
+                        y_final_output_pix.reshape(shape_lot_intermediaire_hw),
+                    )
+                ).astype(np.float32)
 
                 if pixmap_batch_to_final_grid is not None:
                     ninputs_this_batch = int(header_sci_lot.get('NINPUTS', 0))
@@ -6172,18 +6253,25 @@ class SeestarQueuedStacker:
             final_header['BITPIX'] = -32 
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
-        else: # Sauvegarde en uint16
-            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
-            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
+        else: # Sauvegarde en int16 décalé (représentation FITS "unsigned")
+            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)...")
+            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)...")
             raw_data = self.raw_adu_data_for_ui_histogram
             if np.nanmax(raw_data) <= 1.0 + 1e-5:
                 data_scaled_uint16 = (np.clip(raw_data, 0.0, 1.0) * 65535.0).astype(np.uint16)
             else:
                 data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
-            data_for_primary_hdu_save = data_scaled_uint16
-            self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            final_header['BITPIX'] = 16 
+            # Convertir en int16 décalé pour conformité FITS
+            data_for_primary_hdu_save = (data_scaled_uint16.astype(np.int32) - 32768).astype(np.int16)
+            self.update_progress(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
+            logger.debug(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
+            final_header['BITPIX'] = 16
+            final_header['BSCALE'] = 1
+            final_header['BZERO'] = 32768
         
         if data_for_primary_hdu_save.ndim == 3 and data_for_primary_hdu_save.shape[2] == 3 : 
             data_for_primary_hdu_save_cxhxw = np.moveaxis(data_for_primary_hdu_save, -1, 0) 
@@ -6193,13 +6281,29 @@ class SeestarQueuedStacker:
         logger.debug(f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})")
 
         # --- ÉTAPE 6: Sauvegarde FITS effective ---
-        try: 
+        try:
             primary_hdu = fits.PrimaryHDU(data=data_for_primary_hdu_save_cxhxw, header=final_header)
             hdus_list = [primary_hdu]
             # ... (logique HDU background_model si besoin) ...
             fits.HDUList(hdus_list).writeto(fits_path, overwrite=True, checksum=True, output_verify='ignore')
-            self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee.");  
-        except Exception as save_err: 
+            # Astropy peut retirer BSCALE/BZERO lorsque des données int16 sont
+            # fournies. Les rétablir uniquement dans ce cas.
+            if not save_as_float32_setting:
+                with fits.open(fits_path, mode="update", memmap=False) as hdul_fix:
+                    hd0 = hdul_fix[0]
+                    hd0.header["BSCALE"] = 1
+                    hd0.header["BZERO"] = 32768
+                    hdul_fix.flush()
+            self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee.");
+            try:
+                renormalize_fits(
+                    fits_path,
+                    getattr(self, 'drizzle_renorm_method', 'none'),
+                    getattr(self, 'images_in_cumulative_stack', 0),
+                )
+            except Exception as ren_err:
+                self.update_progress(f"   ⚠️ Renormalisation échouée: {ren_err}", "WARN")
+        except Exception as save_err:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); self.final_stacked_path = None
 
         # --- ÉTAPE 7: Sauvegarde preview PNG ---

@@ -392,6 +392,8 @@ class SeestarStackerGUI:
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
+        self.drizzle_renorm_var = tk.StringVar(value="max")
+        self.drizzle_renorm_display_var = tk.StringVar()
 
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
@@ -521,6 +523,8 @@ class SeestarStackerGUI:
                 # Pixfrac Drizzle
                 getattr(self, 'drizzle_pixfrac_label', None),
                 getattr(self, 'drizzle_pixfrac_spinbox', None),
+                getattr(self, 'drizzle_renorm_label', None),
+                getattr(self, 'drizzle_renorm_combo', None),
                 # --- FIN DES NOUVELLES LIGNES ---
             ]
 
@@ -919,6 +923,14 @@ class SeestarStackerGUI:
         wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5)); self.drizzle_wht_label = ttk.Label(wht_frame, text="WHT Threshold %:"); self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_wht_spinbox = ttk.Spinbox(wht_frame, from_=10.0, to=100.0, increment=5.0, textvariable=self.drizzle_wht_display_var, width=6, command=self._convert_spinbox_percent_to_float, format="%.0f"); self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
         kernel_frame = ttk.Frame(self.drizzle_options_frame); kernel_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_kernel_label = ttk.Label(kernel_frame, text="Kernel:"); self.drizzle_kernel_label.pack(side=tk.LEFT, padx=(0, 5)); valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']; self.drizzle_kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.drizzle_kernel_var, values=valid_kernels, state="readonly", width=12); self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame); pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text="Pixfrac:"); self.drizzle_pixfrac_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=2.00, increment=0.05, textvariable=self.drizzle_pixfrac_var, width=6, format="%.2f"); self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        renorm_frame = ttk.Frame(self.drizzle_options_frame); renorm_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
+        self.drizzle_renorm_label = ttk.Label(renorm_frame, text=self.tr("drizzle_renorm_label", default="Renormalize flux")); self.drizzle_renorm_label.pack(side=tk.LEFT, padx=(0,5))
+        self.drizzle_renorm_combo = ttk.Combobox(renorm_frame, textvariable=self.drizzle_renorm_display_var, state="readonly", width=12); self.drizzle_renorm_combo.pack(side=tk.LEFT, padx=5)
+        self.drizzle_renorm_keys = ["none", "max", "n_images"]
+        self.drizzle_renorm_key_to_label = {"none": "None", "max": "Max weight", "n_images": "# images"}
+        self.drizzle_renorm_label_to_key = {v: k for k, v in self.drizzle_renorm_key_to_label.items()}
+        self.drizzle_renorm_combo["values"] = list(self.drizzle_renorm_key_to_label.values())
+        self.drizzle_renorm_display_var.set(self.drizzle_renorm_key_to_label.get(self.drizzle_renorm_var.get(), self.drizzle_renorm_var.get()))
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction"); self.hp_frame.pack(fill=tk.X, pady=5, padx=5); hp_check_frame = ttk.Frame(self.hp_frame); hp_check_frame.pack(fill=tk.X, padx=5, pady=2); self.hot_pixels_check = ttk.Checkbutton(hp_check_frame, text="Correct hot pixels", variable=self.correct_hot_pixels); self.hot_pixels_check.pack(side=tk.LEFT, padx=(0, 10)); hp_params_frame = ttk.Frame(self.hp_frame); hp_params_frame.pack(fill=tk.X, padx=5, pady=(2,5)); self.hot_pixel_threshold_label = ttk.Label(hp_params_frame, text="Threshold:"); self.hot_pixel_threshold_label.pack(side=tk.LEFT); self.hp_thresh_spinbox = ttk.Spinbox(hp_params_frame, from_=1.0, to=10.0, increment=0.1, textvariable=self.hot_pixel_threshold, width=5); self.hp_thresh_spinbox.pack(side=tk.LEFT, padx=5); self.neighborhood_size_label = ttk.Label(hp_params_frame, text="Neighborhood:"); self.neighborhood_size_label.pack(side=tk.LEFT); self.hp_neigh_spinbox = ttk.Spinbox(hp_params_frame, from_=3, to=15, increment=2, textvariable=self.neighborhood_size, width=4); self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
         self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Quality Weighting"); self.weighting_frame.pack(fill=tk.X, pady=5, padx=5); self.use_weighting_check = ttk.Checkbutton(self.weighting_frame, text="Enable weighting", variable=self.use_weighting_var, command=self._update_weighting_options_state); self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5,2)); self.weighting_options_frame = ttk.Frame(self.weighting_frame); self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); metrics_frame = ttk.Frame(self.weighting_options_frame); metrics_frame.pack(fill=tk.X, pady=2); self.weight_metrics_label = ttk.Label(metrics_frame, text="Metrics:"); self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5)); self.weight_snr_check = ttk.Checkbutton(metrics_frame, text="SNR", variable=self.weight_snr_var); self.weight_snr_check.pack(side=tk.LEFT, padx=5); self.weight_stars_check = ttk.Checkbutton(metrics_frame, text="Star Count", variable=self.weight_stars_var); self.weight_stars_check.pack(side=tk.LEFT, padx=5); params_frame = ttk.Frame(self.weighting_options_frame); params_frame.pack(fill=tk.X, pady=2); self.snr_exp_label = ttk.Label(params_frame, text="SNR Exp.:"); self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.snr_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.snr_exponent_var, width=5); self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.stars_exp_label = ttk.Label(params_frame, text="Stars Exp.:"); self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2)); self.stars_exp_spinbox = ttk.Spinbox(params_frame, from_=0.1, to=3.0, increment=0.1, textvariable=self.stars_exponent_var, width=5); self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10)); self.min_w_label = ttk.Label(params_frame, text="Min Weight:"); self.min_w_label.pack(side=tk.LEFT, padx=(0, 2)); self.min_w_spinbox = ttk.Spinbox(params_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.min_weight_var, width=5); self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text="Post-Processing Options"); self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5); self.cleanup_temp_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Cleanup temporary files", variable=self.cleanup_temp_var); self.cleanup_temp_check.pack(side=tk.LEFT, padx=5, pady=5); self.chroma_correction_check = ttk.Checkbutton(self.post_proc_opts_frame, text="Edge Enhance", variable=self.apply_chroma_correction_var); self.chroma_correction_check.pack(side=tk.LEFT, padx=5, pady=5)
@@ -4232,6 +4244,7 @@ class SeestarStackerGUI:
             "drizzle_mode": self.settings.drizzle_mode,
             "drizzle_kernel": self.settings.drizzle_kernel,
             "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+            "drizzle_renorm": self.settings.drizzle_renorm,
             "apply_chroma_correction": self.settings.apply_chroma_correction,
             "apply_final_scnr": self.settings.apply_final_scnr,
             "final_scnr_target_channel": self.settings.final_scnr_target_channel,

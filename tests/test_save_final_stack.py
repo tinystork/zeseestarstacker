@@ -88,7 +88,7 @@ def test_save_final_stack_preserve_linear_float32(tmp_path):
     assert np.allclose(saved.astype(np.float32), data)
 
 
-def test_save_final_stack_preserve_linear_uint16(tmp_path):
+def test_save_final_stack_preserve_linear_int16(tmp_path):
     obj = _make_obj(tmp_path, False)
     data = np.array([[0.0, 1.0], [0.5, 0.25]], dtype=np.float32)
     wht = np.ones_like(data, dtype=np.float32)
@@ -100,7 +100,9 @@ def test_save_final_stack_preserve_linear_uint16(tmp_path):
         preserve_linear_output=True,
     )
     saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
     assert saved.dtype == np.uint16
+    assert header['BZERO'] == 32768
     expected = (np.clip(data, 0.0, 1.0) * 65535).astype(np.uint16)
     assert np.array_equal(saved, expected)
 
