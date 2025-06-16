@@ -6250,23 +6250,23 @@ class SeestarQueuedStacker:
             final_header['BITPIX'] = -32 
             if 'BSCALE' in final_header: del final_header['BSCALE']; 
             if 'BZERO' in final_header: del final_header['BZERO']
-        else: # Sauvegarde en uint16
-            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
-            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en uint16 (depuis données ADU -> 0-65535)...")
+        else: # Sauvegarde en int16 décalé (représentation FITS "unsigned")
+            self.update_progress("   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)...")
+            logger.debug("   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)...")
             raw_data = self.raw_adu_data_for_ui_histogram
             if np.nanmax(raw_data) <= 1.0 + 1e-5:
                 data_scaled_uint16 = (np.clip(raw_data, 0.0, 1.0) * 65535.0).astype(np.uint16)
             else:
                 data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
-            data_for_primary_hdu_save = data_scaled_uint16
-            self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
+            # Convertir en int16 décalé pour conformité FITS
+            data_for_primary_hdu_save = (data_scaled_uint16.astype(np.int32) - 32768).astype(np.int16)
+            self.update_progress(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
+            logger.debug(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
             final_header['BITPIX'] = 16
-            # Ensure unsigned 16-bit is properly represented when reading the
-            # FITS file. Astropy only adds BZERO/BSCALE automatically if it
-            # creates the header itself. Because we pass a custom header, set
-            # these keywords explicitly so that downstream loaders interpret
-            # the data as unsigned.
             final_header['BSCALE'] = 1
             final_header['BZERO'] = 32768
         
@@ -6278,11 +6278,19 @@ class SeestarQueuedStacker:
         logger.debug(f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})")
 
         # --- ÉTAPE 6: Sauvegarde FITS effective ---
-        try: 
+        try:
             primary_hdu = fits.PrimaryHDU(data=data_for_primary_hdu_save_cxhxw, header=final_header)
             hdus_list = [primary_hdu]
             # ... (logique HDU background_model si besoin) ...
             fits.HDUList(hdus_list).writeto(fits_path, overwrite=True, checksum=True, output_verify='ignore')
+            # Astropy peut retirer BSCALE/BZERO lorsque des données int16 sont
+            # fournies. Les rétablir uniquement dans ce cas.
+            if not save_as_float32_setting:
+                with fits.open(fits_path, mode="update", memmap=False) as hdul_fix:
+                    hd0 = hdul_fix[0]
+                    hd0.header["BSCALE"] = 1
+                    hd0.header["BZERO"] = 32768
+                    hdul_fix.flush()
             self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee.");
             try:
                 renormalize_fits(

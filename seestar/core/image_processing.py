@@ -241,14 +241,15 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
     image_float32 = image.astype(np.float32)
     image_clipped = np.clip(image_float32, 0.0, 1.0)
     image_uint16 = (image_clipped * 65535.0).astype(np.uint16)
+    image_int16_shifted = (image_uint16.astype(np.int32) - 32768).astype(np.int16)
 
     if is_color:
-        image_to_save = np.moveaxis(image_uint16, -1, 0)
+        image_to_save = np.moveaxis(image_int16_shifted, -1, 0)
         final_header['NAXIS'] = 3; final_header['NAXIS1'] = image.shape[1]
         final_header['NAXIS2'] = image.shape[0]; final_header['NAXIS3'] = 3
         if 'CTYPE3' not in final_header: final_header['CTYPE3'] = ('RGB', 'Color Format')
     else: # Grayscale
-        image_to_save = image_uint16
+        image_to_save = image_int16_shifted
         final_header['NAXIS'] = 2; final_header['NAXIS1'] = image.shape[1]
         final_header['NAXIS2'] = image.shape[0]
         if 'NAXIS3' in final_header: del final_header['NAXIS3']
@@ -278,6 +279,12 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
 
             # The actual saving function call is *inside* the 'with' block
             hdul.writeto(output_path, overwrite=overwrite, checksum=True)
+            if final_header.get('BITPIX') == 16:
+                with fits.open(output_path, mode="update", memmap=False) as hdul_fix:
+                    hd0 = hdul_fix[0]
+                    hd0.header["BSCALE"] = 1
+                    hd0.header["BZERO"] = 32768
+                    hdul_fix.flush()
         
     except Exception as e:
         print(f"Error saving FITS file to {output_path}: {e}")

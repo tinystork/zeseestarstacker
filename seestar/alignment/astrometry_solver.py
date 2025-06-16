@@ -956,20 +956,39 @@ class AstrometrySolver:
             min_v, max_v = np.min(data_to_solve), np.max(data_to_solve)
             data_norm_float = (data_to_solve - min_v) / (max_v - min_v) if max_v > min_v else np.zeros_like(data_to_solve)
             data_uint16 = (np.clip(data_norm_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            data_int16 = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
             
-            header_temp_for_submission = fits.Header() 
-            header_temp_for_submission['SIMPLE'] = True; header_temp_for_submission['BITPIX'] = 16
+            header_temp_for_submission = fits.Header()
+            header_temp_for_submission['SIMPLE'] = True
+            header_temp_for_submission['BITPIX'] = 16
+            header_temp_for_submission['BSCALE'] = 1
+            header_temp_for_submission['BZERO'] = 32768
             header_temp_for_submission['NAXIS'] = 2
-            header_temp_for_submission['NAXIS1'] = data_uint16.shape[1]
-            header_temp_for_submission['NAXIS2'] = data_uint16.shape[0]
+            header_temp_for_submission['NAXIS1'] = data_int16.shape[1]
+            header_temp_for_submission['NAXIS2'] = data_int16.shape[0]
             for key in ['OBJECT', 'DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'TELESCOP']:
                  if fits_header_original and key in fits_header_original:
                      header_temp_for_submission[key] = fits_header_original[key]
 
             with tempfile.NamedTemporaryFile(suffix=".fits", delete=False, mode="wb") as temp_f:
                 temp_prepared_fits_path = temp_f.name
-            fits.writeto(temp_prepared_fits_path, data_uint16, header=header_temp_for_submission, overwrite=True, output_verify='silentfix')
-            self._log(f"WebANET: Fichier temporaire uint16 créé: {os.path.basename(temp_prepared_fits_path)}", "DEBUG")
+            fits.writeto(
+                temp_prepared_fits_path,
+                data_int16,
+                header=header_temp_for_submission,
+                overwrite=True,
+                output_verify='silentfix',
+            )
+            if header_temp_for_submission.get("BITPIX") == 16:
+                with fits.open(temp_prepared_fits_path, mode="update", memmap=False) as hdul_fix:
+                    hd0 = hdul_fix[0]
+                    hd0.header["BSCALE"] = 1
+                    hd0.header["BZERO"] = 32768
+                    hdul_fix.flush()
+            self._log(
+                f"WebANET: Fichier temporaire int16 créé: {os.path.basename(temp_prepared_fits_path)}",
+                "DEBUG",
+            )
             del data_to_solve, data_norm_float, data_uint16, img_data_np
             gc.collect()
             
