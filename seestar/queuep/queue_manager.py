@@ -1689,6 +1689,8 @@ class SeestarQueuedStacker:
             "INFO",
         )
 
+        self._ensure_memmaps_match_reference()
+
         return True
 
 
@@ -5367,6 +5369,46 @@ class SeestarQueuedStacker:
             shape=shape_hw,
         )
         self.cumulative_wht_memmap[:] = 0.0
+
+    def _ensure_memmaps_match_reference(self) -> None:
+        """Ensure SUM/WHT memmaps match ``self.reference_shape``."""
+        if self.reference_shape is None:
+            return
+
+        expected_sum_shape = (self.reference_shape[0], self.reference_shape[1], 3)
+        expected_wht_shape = (self.reference_shape[0], self.reference_shape[1])
+
+        need_recreate = (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.cumulative_sum_memmap.shape != expected_sum_shape
+            or self.cumulative_wht_memmap.shape != expected_wht_shape
+        )
+
+        if need_recreate:
+            self._close_memmaps()
+            memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+            os.makedirs(memmap_dir, exist_ok=True)
+            self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+            self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_sum,
+                shape=expected_sum_shape,
+            )
+            self.cumulative_sum_memmap[:] = 0.0
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_wht,
+                shape=expected_wht_shape,
+            )
+            self.cumulative_wht_memmap[:] = 0.0
+            self.memmap_shape = expected_sum_shape
+            self.update_progress(
+                f"Re-init memmaps → new shape {self.memmap_shape[:2]}"
+            )
 
     def _final_reproject_cached_files(self, cache_list):
         """Reproject cached solved images and accumulate them."""
