@@ -1624,6 +1624,7 @@ class SeestarQueuedStacker:
                 else:
                     wcs_obj_local = solve_image_wcs(
                         path, hdr_local, solver_settings, update_header_with_solution=False
+
                     )
                 return path, hdr_local, wcs_obj_local, None
             except Exception as exc:
@@ -1647,6 +1648,7 @@ class SeestarQueuedStacker:
                         f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
                         "WARN",
                     )
+a
                 elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
@@ -6840,6 +6842,7 @@ class SeestarQueuedStacker:
             self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
         elif not self.additional_folders:
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
+
 
         if self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
