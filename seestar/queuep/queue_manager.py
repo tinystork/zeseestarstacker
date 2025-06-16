@@ -6180,7 +6180,14 @@ class SeestarQueuedStacker:
             data_for_primary_hdu_save = data_scaled_uint16
             self.update_progress(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
             logger.debug(f"     DEBUG QM: -> FITS uint16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]")
-            final_header['BITPIX'] = 16 
+            final_header['BITPIX'] = 16
+            # Ensure unsigned 16-bit is properly represented when reading the
+            # FITS file. Astropy only adds BZERO/BSCALE automatically if it
+            # creates the header itself. Because we pass a custom header, set
+            # these keywords explicitly so that downstream loaders interpret
+            # the data as unsigned.
+            final_header['BSCALE'] = 1
+            final_header['BZERO'] = 32768
         
         if data_for_primary_hdu_save.ndim == 3 and data_for_primary_hdu_save.shape[2] == 3 : 
             data_for_primary_hdu_save_cxhxw = np.moveaxis(data_for_primary_hdu_save, -1, 0) 
