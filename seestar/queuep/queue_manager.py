@@ -1648,7 +1648,7 @@ class SeestarQueuedStacker:
                         f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
                         "WARN",
                     )
-
+a
                 elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
@@ -6853,7 +6853,6 @@ class SeestarQueuedStacker:
             if self.drizzle_active_session:
                 self.drizzle_output_wcs = self.reference_wcs_object
                 self.drizzle_output_shape_hw = self.reference_shape
-
 
         self.aligner.reference_image_path = reference_path_ui or None
 

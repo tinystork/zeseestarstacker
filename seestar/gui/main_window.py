@@ -4277,24 +4277,33 @@ class SeestarStackerGUI:
         for k in list(start_proc_kwargs.keys()):
             if k not in sig.parameters:
                 start_proc_kwargs.pop(k)
-        processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
-        self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)") # Optionnel, mais bon pour le log
-        self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
-        self._final_stretch_set_by_processing_finished = False
-        
-        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
+        def _backend_start_worker():
+            processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
+            def _on_finish():
+                self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)")
+                self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
+                self._final_stretch_set_by_processing_finished = False
+                print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
-        # --- 7. Gérer résultat démarrage backend ---
-        if processing_started:
-            if hasattr(self, 'stop_button') and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
-            self.thread.start()
-        else:
-            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
-            self.processing = False
-            self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
-            self._set_parameter_widgets_state(tk.NORMAL)
-        print("DEBUG (GUI start_processing): Fin de la méthode.")
+                if processing_started:
+                    if hasattr(self, 'stop_button') and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.NORMAL)
+                    self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+                    self.thread.start()
+                else:
+                    if hasattr(self, 'start_button') and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    self.processing = False
+                    self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
+                    self._set_parameter_widgets_state(tk.NORMAL)
+                print("DEBUG (GUI start_processing): Fin de la méthode.")
+
+            try:
+                self.root.after(0, _on_finish)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=_backend_start_worker, daemon=True, name="BackendStarter").start()
 
 
 ##############################################################################################################################################
