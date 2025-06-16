@@ -2,8 +2,11 @@
 
 import numpy as np
 from astropy.wcs import WCS
+import logging
 
 from .reprojection import reproject_to_reference_wcs
+
+logger = logging.getLogger(__name__)
 
 
 def initialize_master(batch_img: np.ndarray, batch_cov: np.ndarray, ref_wcs: WCS):
@@ -138,15 +141,20 @@ def reproject_and_coadd_batch(
     if first_img.ndim == 2:
         data_list = pairs
         cov_list = weights
-        result, footprint = reproject_and_coadd(
-            data_list,
-            output_projection=target_wcs,
-            shape_out=target_shape_hw,
-            input_weights=cov_list,
-            reproject_function=reproject_interp,
-            combine_function=combine_function,
-            match_background=True,
-        )
+        try:
+            result, footprint = reproject_and_coadd(
+                data_list,
+                output_projection=target_wcs,
+                shape_out=target_shape_hw,
+                input_weights=cov_list,
+                reproject_function=reproject_interp,
+                combine_function=combine_function,
+                match_background=True,
+            )
+        except Exception:
+            logger.warning("reproject_and_coadd failed", exc_info=True)
+            return None, None
+
         return result.astype(np.float32), footprint.astype(np.float32)
 
     # Colour images
@@ -161,15 +169,19 @@ def reproject_and_coadd_batch(
     final_channels = []
     final_cov = None
     for c in range(n_channels):
-        res, cov = reproject_and_coadd(
-            channel_arrays[c],
-            output_projection=target_wcs,
-            shape_out=target_shape_hw,
-            input_weights=channel_weights[c],
-            reproject_function=reproject_interp,
-            combine_function=combine_function,
-            match_background=True,
-        )
+        try:
+            res, cov = reproject_and_coadd(
+                channel_arrays[c],
+                output_projection=target_wcs,
+                shape_out=target_shape_hw,
+                input_weights=channel_weights[c],
+                reproject_function=reproject_interp,
+                combine_function=combine_function,
+                match_background=True,
+            )
+        except Exception:
+            logger.warning("reproject_and_coadd failed", exc_info=True)
+            return None, None
         final_channels.append(res.astype(np.float32))
         if final_cov is None:
             final_cov = cov.astype(np.float32)
