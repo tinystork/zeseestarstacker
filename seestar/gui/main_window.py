@@ -3061,13 +3061,18 @@ class SeestarStackerGUI:
 
         widgets_to_set = []
         if state == tk.NORMAL:
-            print("DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets...") 
+            print("DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets...")
             # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
             # S'assurer que les options de pondération ET DRIZZLE sont dans le bon état initial
             self._update_weighting_options_state()
             self._update_drizzle_options_state() # <-- Appel ajouté ici
             # ... (reste de la logique pour state == tk.NORMAL) ...
+            if hasattr(self, 'add_files_button'):
+                try:
+                    self.add_files_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
 
         else: # tk.DISABLED (Pendant le traitement)
             # Désactiver les paramètres de traitement (y compris Drizzle)
@@ -3075,8 +3080,16 @@ class SeestarStackerGUI:
             # Les widgets de preview restent actifs
             for widget in preview_widgets:
                 # ... (logique existante) ...
-            # Le bouton Ajouter Dossier reste NORMAL
-                if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
+                pass
+            # Le bouton Ajouter Dossier est désactivé si la reprojection est active
+            if hasattr(self, 'add_files_button'):
+                btn_state = tk.NORMAL
+                if getattr(self.settings, 'reproject_between_batches', False):
+                    btn_state = tk.DISABLED
+                try:
+                    self.add_files_button.config(state=btn_state)
+                except tk.TclError:
+                    pass
 
         # Appliquer l'état aux widgets sélectionnés
         for widget in widgets_to_set:

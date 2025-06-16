@@ -1605,24 +1605,41 @@ class SeestarQueuedStacker:
         }
 
         total = len(self.all_input_filepaths)
-        for idx, fpath in enumerate(self.all_input_filepaths):
-            if self.stop_processing:
-                return False
-            self.update_progress(
-                f"   Solving {idx + 1}/{total}: {os.path.basename(fpath)}",
-                5 + int(35 * (idx / max(total, 1))),
-            )
+
+        def _solve_single(path):
             try:
-                hdr = fits.getheader(fpath, memmap=False)
+                hdr_local = fits.getheader(path, memmap=False)
                 if self.astrometry_solver:
-                    wcs_obj = self.astrometry_solver.solve(
-                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    wcs_obj_local = self.astrometry_solver.solve(
+                        path, hdr_local, solver_settings, update_header_with_solution=False
                     )
                 else:
-                    wcs_obj = solve_image_wcs(
-                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    wcs_obj_local = solve_image_wcs(
+                        path, hdr_local, solver_settings, update_header_with_solution=False
                     )
-                if wcs_obj and wcs_obj.is_celestial:
+                return path, hdr_local, wcs_obj_local, None
+            except Exception as exc:
+                return path, None, None, exc
+
+        max_workers = max(1, (os.cpu_count() or 1) // 2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_solve_single, fp) for fp in self.all_input_filepaths]
+            for idx, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                if self.stop_processing:
+                    for f in futures:
+                        f.cancel()
+                    return False
+                fpath, hdr, wcs_obj, err = fut.result()
+                self.update_progress(
+                    f"   Solving {idx}/{total}: {os.path.basename(fpath)}",
+                    5 + int(35 * ((idx - 1) / max(total, 1))),
+                )
+                if err is not None:
+                    self.update_progress(
+                        f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
+                        "WARN",
+                    )
+                elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
                 else:
@@ -1630,11 +1647,6 @@ class SeestarQueuedStacker:
                         f"⚠️ [Pré-scan] Échec résolution pour {os.path.basename(fpath)}",
                         "WARN",
                     )
-            except Exception as e:
-                self.update_progress(
-                    f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {e}",
-                    "WARN",
-                )
 
         if not wcs_list:
             self.update_progress(
@@ -2140,14 +2152,6 @@ class SeestarQueuedStacker:
             self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
             self.update_progress("⭐ Référence(s) prête(s).", 5)
             self._recalculate_total_batches()
-
-            ok_grid = True
-            if self.reproject_between_batches and self.fixed_output_wcs is None:
-                ok_grid = self._prepare_global_reprojection_grid()
-                if not ok_grid:
-                    self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
-                    self.stop_processing = True
-                    return
 
             self.update_progress(
                 f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})..."
@@ -3277,11 +3281,15 @@ class SeestarQueuedStacker:
             )
             return
 
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
-            all_wcs_for_grid_calc,
-            all_headers_for_grid_calc,
-            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-        )
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            output_wcs = self.reference_wcs_object
+            output_shape_hw = self.reference_shape
+        else:
+            output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
+                all_wcs_for_grid_calc,
+                all_headers_for_grid_calc,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
 
         if output_wcs is None or output_shape_hw is None:
             self.update_progress(
@@ -5853,7 +5861,15 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
-        if is_classic_reproject_mode and final_wht_map_for_postproc is not None:
+        if (
+            final_wht_map_for_postproc is not None
+            and (
+                is_classic_reproject_mode
+                or is_reproject_mosaic_mode
+                or is_true_incremental_drizzle_from_objects
+                or is_drizzle_final_mode_with_data
+            )
+        ):
             rows, cols = np.where(final_wht_map_for_postproc > 0)
             if rows.size and cols.size:
                 y0, y1 = rows.min(), rows.max() + 1
@@ -6242,7 +6258,12 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
     def add_folder(self, folder_path):
-        if not self.processing_active: self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif."); return False
+        if not self.processing_active:
+            self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif.")
+            return False
+        if self.reproject_between_batches:
+            self.update_progress("⚠️ Reprojection active : ajout de dossier désactivé")
+            return False
         abs_path = os.path.abspath(folder_path)
         if not os.path.isdir(abs_path): self.update_progress(f"❌ Dossier non trouvé: {folder_path}"); return False
         output_abs = os.path.abspath(self.output_folder) if self.output_folder else None
@@ -6827,14 +6848,19 @@ class SeestarQueuedStacker:
 
 
 
-        initial_files_added = self._add_files_to_queue(self.current_folder) 
-        if initial_files_added > 0: 
+        initial_files_added = self._add_files_to_queue(self.current_folder)
+        if initial_files_added > 0:
             self._recalculate_total_batches()
             self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders: 
+        elif not self.additional_folders:
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
-        
-        self.aligner.reference_image_path = reference_path_ui or None 
+
+        if self.reproject_between_batches and not self.fixed_output_wcs:
+            ok_grid = self._prepare_global_reprojection_grid()
+            if not ok_grid:
+                return False
+
+        self.aligner.reference_image_path = reference_path_ui or None
 
         logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
