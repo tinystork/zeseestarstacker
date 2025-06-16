@@ -3277,11 +3277,15 @@ class SeestarQueuedStacker:
             )
             return
 
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
-            all_wcs_for_grid_calc,
-            all_headers_for_grid_calc,
-            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-        )
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            output_wcs = self.reference_wcs_object
+            output_shape_hw = self.reference_shape
+        else:
+            output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
+                all_wcs_for_grid_calc,
+                all_headers_for_grid_calc,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
 
         if output_wcs is None or output_shape_hw is None:
             self.update_progress(
@@ -5853,7 +5857,15 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
-        if is_classic_reproject_mode and final_wht_map_for_postproc is not None:
+        if (
+            final_wht_map_for_postproc is not None
+            and (
+                is_classic_reproject_mode
+                or is_reproject_mosaic_mode
+                or is_true_incremental_drizzle_from_objects
+                or is_drizzle_final_mode_with_data
+            )
+        ):
             rows, cols = np.where(final_wht_map_for_postproc > 0)
             if rows.size and cols.size:
                 y0, y1 = rows.min(), rows.max() + 1
@@ -6827,14 +6839,19 @@ class SeestarQueuedStacker:
 
 
 
-        initial_files_added = self._add_files_to_queue(self.current_folder) 
-        if initial_files_added > 0: 
+        initial_files_added = self._add_files_to_queue(self.current_folder)
+        if initial_files_added > 0:
             self._recalculate_total_batches()
             self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders: 
+        elif not self.additional_folders:
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
-        
-        self.aligner.reference_image_path = reference_path_ui or None 
+
+        if self.reproject_between_batches and not self.fixed_output_wcs:
+            ok_grid = self._prepare_global_reprojection_grid()
+            if not ok_grid:
+                return False
+
+        self.aligner.reference_image_path = reference_path_ui or None
 
         logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
