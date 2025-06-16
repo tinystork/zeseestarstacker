@@ -43,6 +43,7 @@ import astroalign as aa
 import cv2
 import numpy as np
 from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate, Angle
+from typing import Literal
 from astropy import units as u
 from astropy.wcs import FITSFixedWarning
 from ccdproc import combine as ccdproc_combine
@@ -235,11 +236,53 @@ except ImportError as e_feather:
     )
     # Définir une fonction factice pour que le code ne plante pas si l'import échoue
     # lors des appels ultérieurs, bien qu'on vérifiera _FEATHERING_AVAILABLE.
-    def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
+def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
         logger.error(
             "Fonction feather_by_weight_map non disponible (échec import)."
         )
         return img # Retourner l'image originale
+
+def renormalize_fits(
+    fits_path: str,
+    method: Literal["none", "max", "n_images"],
+    n_images: int,
+) -> None:
+    """In-place renormalises a drizzle FITS stack."""
+    log = logging.getLogger(__name__)
+    m = (method or "none").lower()
+    if m not in {"none", "max", "n_images"}:
+        log.debug(f"renormalize_fits: unknown method '{method}', fallback to 'none'")
+        m = "none"
+    if m == "none":
+        return
+    try:
+        with fits.open(fits_path, mode="update", memmap=False) as hdul:
+            data = hdul[0].data.astype(np.float32)
+            hdr = hdul[0].header
+            wht = None
+            if len(hdul) > 1 and hdul[1].header.get("EXTNAME", "").strip().upper() == "WHT":
+                wht = hdul[1].data.astype(np.float32)
+            if wht is not None:
+                wht_max = float(np.max(wht)) if wht.size else 1.0
+                wht_mean = float(np.mean(wht)) if wht.size else 1.0
+            else:
+                wht_max = float(hdr.get("DRZWHT_MAX", 1.0))
+                wht_mean = float(hdr.get("DRZWHT_MEAN", 1.0))
+            if m == "max":
+                s = 1.0 / max(wht_max, 1.0)
+            else:  # "n_images"
+                denom = max(wht_mean, 1e-9)
+                s = float(n_images) / denom
+            data *= s
+            if wht is not None:
+                wht *= s
+            hdr["RENORM"] = (s, "Flux renormalisation factor")
+            hdr["RENORMMD"] = (m, "Renormalisation method")
+            hdul.flush()
+        log.debug(f"renormalize_fits: method={m} factor={s:.4g} applied to {os.path.basename(fits_path)}")
+    except Exception:
+        log.exception("renormalize_fits failed")
+        raise
 try:
     from ..enhancement.stack_enhancement import apply_low_wht_mask # NOUVEL IMPORT
     _LOW_WHT_MASK_AVAILABLE = True
@@ -498,6 +541,7 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
+        self.drizzle_renorm_method = "none"
         # Option de reprojection des lots intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -562,6 +606,12 @@ class SeestarQueuedStacker:
                 )
                 logger.debug(
                     f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
+                )
+                self.drizzle_renorm_method = str(
+                    getattr(settings, 'drizzle_renorm', 'none')
+                )
+                logger.debug(
+                    f"  -> Méthode de renormalisation drizzle: {self.drizzle_renorm_method}"
                 )
             except Exception:
                 logger.debug(
@@ -6202,8 +6252,16 @@ class SeestarQueuedStacker:
             hdus_list = [primary_hdu]
             # ... (logique HDU background_model si besoin) ...
             fits.HDUList(hdus_list).writeto(fits_path, overwrite=True, checksum=True, output_verify='ignore')
-            self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee.");  
-        except Exception as save_err: 
+            self.update_progress(f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee.");
+            try:
+                renormalize_fits(
+                    fits_path,
+                    getattr(self, 'drizzle_renorm_method', 'none'),
+                    getattr(self, 'images_in_cumulative_stack', 0),
+                )
+            except Exception as ren_err:
+                self.update_progress(f"   ⚠️ Renormalisation échouée: {ren_err}", "WARN")
+        except Exception as save_err:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}"); self.final_stacked_path = None
 
         # --- ÉTAPE 7: Sauvegarde preview PNG ---
