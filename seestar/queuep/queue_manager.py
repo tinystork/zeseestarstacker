@@ -624,7 +624,7 @@ class SeestarQueuedStacker:
         self.winsor_limits = (0.05, 0.05)
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0; self.neighborhood_size = 5; self.bayer_pattern = "GRBG"
-        self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.7
+        self.drizzle_mode = "Final"; self.drizzle_scale = 2.0; self.drizzle_wht_threshold = 0.0
         self.drizzle_kernel = "square"; self.drizzle_pixfrac = 1.0
         self.drizzle_fillval = "0.0"  # default fill value for Drizzle
         self.final_scnr_target_channel = 'green'; self.final_scnr_amount = 0.8; self.final_scnr_preserve_luminosity = True
