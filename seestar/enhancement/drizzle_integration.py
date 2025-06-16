@@ -462,4 +462,39 @@ class DrizzleProcessor:
             gc.collect()
 
 
+class DrizzleIntegrator:
+    """Combine drizzle outputs while optionally renormalizing the flux."""
+
+    def __init__(self, renormalize: str = "max") -> None:
+        self.renormalize = renormalize
+        self._sci_accum: np.ndarray | None = None
+        self._wht_accum: np.ndarray | None = None
+        self._n_images = 0
+
+    def add(self, sci: np.ndarray, wht: np.ndarray) -> None:
+        """Add a drizzle result to the accumulation."""
+        sci = np.asarray(sci, dtype=np.float32)
+        wht = np.asarray(wht, dtype=np.float32)
+        if self._sci_accum is None:
+            self._sci_accum = sci.copy()
+            self._wht_accum = wht.copy()
+        else:
+            self._sci_accum += sci
+            self._wht_accum += wht
+        self._n_images += 1
+
+    def finalize(self) -> np.ndarray:
+        """Return the stacked image after optional renormalization."""
+        if self._sci_accum is None or self._wht_accum is None:
+            raise ValueError("No images added")
+
+        wht_accum_safe = np.maximum(self._wht_accum, 1e-9)
+        final_img = self._sci_accum / wht_accum_safe
+        if self.renormalize == "max":
+            final_img *= wht_accum_safe.max()
+        elif self.renormalize == "n_images":
+            final_img *= self._n_images
+        return final_img.astype(np.float32)
+
+
 # --- FIN DU FICHIER seestar/enhancement/drizzle_integration.py ---
