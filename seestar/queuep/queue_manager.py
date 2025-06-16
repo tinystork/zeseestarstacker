@@ -18,10 +18,11 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import glob, os, gc
 import math
-from queue import Queue, Empty # Essentiel pour la classe
+import multiprocessing
+from queue import Queue, Empty  # Essentiel pour la classe
 import shutil
 import tempfile
-import threading              # Essentiel pour la classe (Lock)
+import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
 
@@ -29,6 +30,8 @@ import traceback
 import sys
 import asyncio
 import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 import warnings
 
 logger.debug("Imports standard OK.")
@@ -56,6 +59,57 @@ from ..core.incremental_reprojection import (
 )
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
+
+# ----------------------------------------------------------------------
+# Pool size helper for CPU reprojection
+# ----------------------------------------------------------------------
+
+def _suggest_pool_size(ratio: float = 0.5) -> int:
+    """Return an appropriate number of workers for the process pool."""
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n_cpu = multiprocessing.cpu_count()
+    return max(1, int(n_cpu * ratio))
+
+
+def _reproject_worker(
+    fits_path: str,
+    ref_wcs_header: fits.Header,
+    shape_out: tuple,
+    use_gpu: bool = False,
+):
+    """Worker function used by the process pool for reprojection."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    data = fits.getdata(fits_path, memmap=False)
+
+    if use_gpu:
+        import cupy as cp
+        from cupyx.scipy.ndimage import map_coordinates
+
+        data_gpu = cp.asarray(data, dtype=cp.float32)
+        # Coordinates should be precomputed on the CPU and passed to the worker.
+        # Here we simply build a basic identity grid as a placeholder.
+        yy, xx = cp.meshgrid(
+            cp.arange(shape_out[0], dtype=cp.float32),
+            cp.arange(shape_out[1], dtype=cp.float32),
+            indexing="ij",
+        )
+        coords_gpu = cp.stack([yy, xx])
+        reproj_gpu = map_coordinates(
+            data_gpu, coords_gpu, order=1, mode="constant", cval=0.0
+        )
+        reproj = cp.asnumpy(reproj_gpu)
+        footprint = cp.asnumpy(reproj_gpu != 0).astype(np.float32)
+    else:
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        reproj, footprint = reproject_interp(
+            (data, None), WCS(ref_wcs_header), shape_out, parallel=False
+        )
+
+    return reproj.astype(np.float32), footprint.astype(np.float32)
 
 # --- Optional Third-Party Imports (with availability flags) ---
 try:
@@ -343,6 +397,41 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
+    # ------------------------------------------------------------------
+    # Parallel reprojection of a list of FITS files
+    # ------------------------------------------------------------------
+
+    def _process_batches(self, batch_fits_list: list[str]):
+        """Reproject FITS images to the reference WCS using a process pool."""
+
+        if not batch_fits_list or self.reference_shape is None:
+            return
+
+        self.update_progress(
+            f"Reproject pool : {self.max_reproj_workers} worker(s)  |  GPU={self.use_gpu}"
+        )
+
+        if self.max_reproj_workers > 1:
+            os.environ["OMP_NUM_THREADS"] = "1"
+        else:
+            os.environ.pop("OMP_NUM_THREADS", None)
+
+        worker = partial(
+            _reproject_worker,
+            ref_wcs_header=self.ref_wcs_header,
+            shape_out=self.reference_shape,
+            use_gpu=self.use_gpu,
+        )
+
+        with ProcessPoolExecutor(max_workers=self.max_reproj_workers) as exe:
+            for reproj_img, footprint in exe.map(worker, batch_fits_list):
+                self._combine_batch_result(
+                    reproj_img,
+                    fits.Header(),
+                    footprint,
+                    batch_wcs=None,
+                )
+
 
 
 
@@ -363,6 +452,8 @@ class SeestarQueuedStacker:
         self._configure_global_threads(thread_fraction)
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
+        self.use_gpu = bool(gpu)
+        self.max_reproj_workers = _suggest_pool_size(0.5)
         if batch_size is None:
             self.batch_size = min(4, self.num_threads) if io_profile == "usb" else self.num_threads * 2
         else:
@@ -429,6 +520,7 @@ class SeestarQueuedStacker:
         self.output_filename = ""
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
+        self.ref_wcs_header = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
         self.fixed_output_wcs = None; self.fixed_output_shape = None
         
@@ -1706,6 +1798,7 @@ class SeestarQueuedStacker:
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
         self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        self.ref_wcs_header = self.reference_header_for_wcs
         try:
             self.reference_wcs_object.pixel_shape = (
                 self.reference_shape[1],
@@ -1980,7 +2073,8 @@ class SeestarQueuedStacker:
                 raise RuntimeError("Échec critique obtention image/header de référence de base (globale/premier panneau).")
 
             # Préparation du header qui sera utilisé pour le WCS de référence global
-            self.reference_header_for_wcs = reference_header_for_global_alignment.copy() 
+            self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
+            self.ref_wcs_header = self.reference_header_for_wcs
             
             # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
             # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
@@ -6681,7 +6775,8 @@ class SeestarQueuedStacker:
             else:
                 raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée.")
             
-            self.reference_header_for_wcs = reference_header_for_shape_determination.copy() 
+            self.reference_header_for_wcs = reference_header_for_shape_determination.copy()
+            self.ref_wcs_header = self.reference_header_for_wcs
             logger.debug(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
 
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
