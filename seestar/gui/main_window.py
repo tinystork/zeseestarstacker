@@ -3061,13 +3061,18 @@ class SeestarStackerGUI:
 
         widgets_to_set = []
         if state == tk.NORMAL:
-            print("DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets...") 
+            print("DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets...")
             # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
             # S'assurer que les options de pondération ET DRIZZLE sont dans le bon état initial
             self._update_weighting_options_state()
             self._update_drizzle_options_state() # <-- Appel ajouté ici
             # ... (reste de la logique pour state == tk.NORMAL) ...
+            if hasattr(self, 'add_files_button'):
+                try:
+                    self.add_files_button.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
 
         else: # tk.DISABLED (Pendant le traitement)
             # Désactiver les paramètres de traitement (y compris Drizzle)
@@ -3075,8 +3080,16 @@ class SeestarStackerGUI:
             # Les widgets de preview restent actifs
             for widget in preview_widgets:
                 # ... (logique existante) ...
-            # Le bouton Ajouter Dossier reste NORMAL
-                if hasattr(self, 'add_files_button'): self.add_files_button.config(state=tk.NORMAL)
+                pass
+            # Le bouton Ajouter Dossier est désactivé si la reprojection est active
+            if hasattr(self, 'add_files_button'):
+                btn_state = tk.NORMAL
+                if getattr(self.settings, 'reproject_between_batches', False):
+                    btn_state = tk.DISABLED
+                try:
+                    self.add_files_button.config(state=btn_state)
+                except tk.TclError:
+                    pass
 
         # Appliquer l'état aux widgets sélectionnés
         for widget in widgets_to_set:
@@ -4264,24 +4277,33 @@ class SeestarStackerGUI:
         for k in list(start_proc_kwargs.keys()):
             if k not in sig.parameters:
                 start_proc_kwargs.pop(k)
-        processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
-        self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)") # Optionnel, mais bon pour le log
-        self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
-        self._final_stretch_set_by_processing_finished = False
-        
-        print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
+        def _backend_start_worker():
+            processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
+            def _on_finish():
+                self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)")
+                self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
+                self._final_stretch_set_by_processing_finished = False
+                print(f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}")
 
-        # --- 7. Gérer résultat démarrage backend ---
-        if processing_started:
-            if hasattr(self, 'stop_button') and self.stop_button.winfo_exists(): self.stop_button.config(state=tk.NORMAL)
-            self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
-            self.thread.start()
-        else:
-            if hasattr(self, 'start_button') and self.start_button.winfo_exists(): self.start_button.config(state=tk.NORMAL)
-            self.processing = False
-            self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
-            self._set_parameter_widgets_state(tk.NORMAL)
-        print("DEBUG (GUI start_processing): Fin de la méthode.")
+                if processing_started:
+                    if hasattr(self, 'stop_button') and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.NORMAL)
+                    self.thread = threading.Thread(target=self._track_processing_progress, daemon=True, name="GUI_ProgressTracker")
+                    self.thread.start()
+                else:
+                    if hasattr(self, 'start_button') and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    self.processing = False
+                    self.update_progress_gui("ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.", None)
+                    self._set_parameter_widgets_state(tk.NORMAL)
+                print("DEBUG (GUI start_processing): Fin de la méthode.")
+
+            try:
+                self.root.after(0, _on_finish)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=_backend_start_worker, daemon=True, name="BackendStarter").start()
 
 
 ##############################################################################################################################################

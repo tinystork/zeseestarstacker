@@ -18,10 +18,11 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import glob, os, gc
 import math
-from queue import Queue, Empty # Essentiel pour la classe
+import multiprocessing
+from queue import Queue, Empty  # Essentiel pour la classe
 import shutil
 import tempfile
-import threading              # Essentiel pour la classe (Lock)
+import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
 
@@ -29,6 +30,8 @@ import traceback
 import sys
 import asyncio
 import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 import warnings
 
 logger.debug("Imports standard OK.")
@@ -56,6 +59,57 @@ from ..core.incremental_reprojection import (
 )
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
+
+# ----------------------------------------------------------------------
+# Pool size helper for CPU reprojection
+# ----------------------------------------------------------------------
+
+def _suggest_pool_size(ratio: float = 0.5) -> int:
+    """Return an appropriate number of workers for the process pool."""
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n_cpu = multiprocessing.cpu_count()
+    return max(1, int(n_cpu * ratio))
+
+
+def _reproject_worker(
+    fits_path: str,
+    ref_wcs_header: fits.Header,
+    shape_out: tuple,
+    use_gpu: bool = False,
+):
+    """Worker function used by the process pool for reprojection."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    data = fits.getdata(fits_path, memmap=False)
+
+    if use_gpu:
+        import cupy as cp
+        from cupyx.scipy.ndimage import map_coordinates
+
+        data_gpu = cp.asarray(data, dtype=cp.float32)
+        # Coordinates should be precomputed on the CPU and passed to the worker.
+        # Here we simply build a basic identity grid as a placeholder.
+        yy, xx = cp.meshgrid(
+            cp.arange(shape_out[0], dtype=cp.float32),
+            cp.arange(shape_out[1], dtype=cp.float32),
+            indexing="ij",
+        )
+        coords_gpu = cp.stack([yy, xx])
+        reproj_gpu = map_coordinates(
+            data_gpu, coords_gpu, order=1, mode="constant", cval=0.0
+        )
+        reproj = cp.asnumpy(reproj_gpu)
+        footprint = cp.asnumpy(reproj_gpu != 0).astype(np.float32)
+    else:
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        reproj, footprint = reproject_interp(
+            (data, None), WCS(ref_wcs_header), shape_out, parallel=False
+        )
+
+    return reproj.astype(np.float32), footprint.astype(np.float32)
 
 # --- Optional Third-Party Imports (with availability flags) ---
 try:
@@ -343,6 +397,41 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
+    # ------------------------------------------------------------------
+    # Parallel reprojection of a list of FITS files
+    # ------------------------------------------------------------------
+
+    def _process_batches(self, batch_fits_list: list[str]):
+        """Reproject FITS images to the reference WCS using a process pool."""
+
+        if not batch_fits_list or self.reference_shape is None:
+            return
+
+        self.update_progress(
+            f"Reproject pool : {self.max_reproj_workers} worker(s)  |  GPU={self.use_gpu}"
+        )
+
+        if self.max_reproj_workers > 1:
+            os.environ["OMP_NUM_THREADS"] = "1"
+        else:
+            os.environ.pop("OMP_NUM_THREADS", None)
+
+        worker = partial(
+            _reproject_worker,
+            ref_wcs_header=self.ref_wcs_header,
+            shape_out=self.reference_shape,
+            use_gpu=self.use_gpu,
+        )
+
+        with ProcessPoolExecutor(max_workers=self.max_reproj_workers) as exe:
+            for reproj_img, footprint in exe.map(worker, batch_fits_list):
+                self._combine_batch_result(
+                    reproj_img,
+                    fits.Header(),
+                    footprint,
+                    batch_wcs=None,
+                )
+
 
 
 
@@ -363,6 +452,8 @@ class SeestarQueuedStacker:
         self._configure_global_threads(thread_fraction)
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
+        self.use_gpu = bool(gpu)
+        self.max_reproj_workers = _suggest_pool_size(0.5)
         if batch_size is None:
             self.batch_size = min(4, self.num_threads) if io_profile == "usb" else self.num_threads * 2
         else:
@@ -432,6 +523,7 @@ class SeestarQueuedStacker:
         self.output_filename = ""
         self.drizzle_batch_output_dir = None; self.final_stacked_path = None
         self.api_key = None; self.reference_wcs_object = None; self.reference_header_for_wcs = None
+        self.ref_wcs_header = None
         self.reference_pixel_scale_arcsec = None; self.drizzle_output_wcs = None; self.drizzle_output_shape_hw = None
         self.fixed_output_wcs = None; self.fixed_output_shape = None
         
@@ -730,9 +822,20 @@ class SeestarQueuedStacker:
             return False
 
         # --- Validation Shape Référence (HWC) ---
-        if not isinstance(reference_image_shape_hwc_input, tuple) or len(reference_image_shape_hwc_input) != 3 or \
-           reference_image_shape_hwc_input[2] != 3:
-            self.update_progress(f"❌ Erreur interne: Shape référence HWC invalide ({reference_image_shape_hwc_input}).")
+        if (
+            not isinstance(reference_image_shape_hwc_input, tuple)
+            or len(reference_image_shape_hwc_input) != 3
+            or reference_image_shape_hwc_input[2] != 3
+        ):
+            self.update_progress(
+                f"❌ Erreur interne: Shape référence HWC invalide ({reference_image_shape_hwc_input})."
+            )
+            return False
+
+        if reference_image_shape_hwc_input[0] <= 0 or reference_image_shape_hwc_input[1] <= 0:
+            self.update_progress(
+                f"❌ Erreur interne: Dimensions non-positives pour la référence ({reference_image_shape_hwc_input})."
+            )
             return False
         
         current_output_shape_hw_for_accum_or_driz = None 
@@ -748,19 +851,27 @@ class SeestarQueuedStacker:
         logger.debug(f"    -> not self.is_mosaic_run ÉTAIT: {not self.is_mosaic_run} (self.is_mosaic_run était {self.is_mosaic_run})")
 
         if is_true_incremental_drizzle_mode:
-            logger.debug("DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté.")
+            logger.debug(
+                "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode Drizzle Incrémental VRAI détecté."
+            )
             if self.reference_wcs_object is None:
-                self.update_progress("❌ Erreur: WCS de référence manquant pour initialiser la grille Drizzle Incrémental.", "ERROR")
+                self.update_progress(
+                    "❌ Erreur: WCS de référence manquant pour initialiser la grille Drizzle Incrémental.",
+                    "ERROR",
+                )
                 return False
             try:
                 ref_shape_hw_for_grid = reference_image_shape_hwc_input[:2]
-                self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                    self.reference_wcs_object, ref_shape_hw_for_grid, self.drizzle_scale
-                )
                 if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-                    raise RuntimeError("Échec _create_drizzle_output_wcs pour Drizzle Incrémental.")
+                    self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
+                        self.reference_wcs_object, ref_shape_hw_for_grid, self.drizzle_scale
+                    )
+                    if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                        raise RuntimeError("Échec _create_drizzle_output_wcs pour Drizzle Incrémental.")
                 current_output_shape_hw_for_accum_or_driz = self.drizzle_output_shape_hw
-                logger.debug(f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}")
+                logger.debug(
+                    f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}"
+                )
             except Exception as e_grid:
                 self.update_progress(f"❌ Erreur création grille Drizzle Incrémental: {e_grid}", "ERROR")
                 return False
@@ -1608,24 +1719,45 @@ class SeestarQueuedStacker:
         }
 
         total = len(self.all_input_filepaths)
-        for idx, fpath in enumerate(self.all_input_filepaths):
-            if self.stop_processing:
-                return False
-            self.update_progress(
-                f"   Solving {idx + 1}/{total}: {os.path.basename(fpath)}",
-                5 + int(35 * (idx / max(total, 1))),
-            )
+
+        def _solve_single(path):
             try:
-                hdr = fits.getheader(fpath, memmap=False)
+                hdr_local = fits.getheader(path, memmap=False)
                 if self.astrometry_solver:
-                    wcs_obj = self.astrometry_solver.solve(
-                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    wcs_obj_local = self.astrometry_solver.solve(
+                        path, hdr_local, solver_settings, update_header_with_solution=False
                     )
                 else:
-                    wcs_obj = solve_image_wcs(
-                        fpath, hdr, solver_settings, update_header_with_solution=False
+                    wcs_obj_local = solve_image_wcs(
+                        path, hdr_local, solver_settings, update_header_with_solution=False
+
                     )
-                if wcs_obj and wcs_obj.is_celestial:
+                return path, hdr_local, wcs_obj_local, None
+            except Exception as exc:
+                return path, None, None, exc
+
+        max_workers = max(1, (os.cpu_count() or 1) // 2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_solve_single, fp) for fp in self.all_input_filepaths]
+            for idx, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                if self.stop_processing:
+                    for f in futures:
+                        f.cancel()
+                    return False
+
+                fpath, hdr, wcs_obj, err = fut.result()
+                self.update_progress(
+                    f"   Solving {idx}/{total}: {os.path.basename(fpath)}",
+                    5 + int(35 * ((idx - 1) / max(total, 1))),
+                )
+
+                if err is not None:
+                    self.update_progress(
+                        f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
+                        "WARN",
+                    )
+
+                elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
                 else:
@@ -1633,11 +1765,6 @@ class SeestarQueuedStacker:
                         f"⚠️ [Pré-scan] Échec résolution pour {os.path.basename(fpath)}",
                         "WARN",
                     )
-            except Exception as e:
-                self.update_progress(
-                    f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {e}",
-                    "WARN",
-                )
 
         if not wcs_list:
             self.update_progress(
@@ -1674,6 +1801,7 @@ class SeestarQueuedStacker:
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
         self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        self.ref_wcs_header = self.reference_header_for_wcs
         try:
             self.reference_wcs_object.pixel_shape = (
                 self.reference_shape[1],
@@ -1691,6 +1819,8 @@ class SeestarQueuedStacker:
             f"🗺️ Grille globale finale prête – Centre={crval_str}, Shape={self.reference_shape}",
             "INFO",
         )
+
+        self._ensure_memmaps_match_reference()
 
         return True
 
@@ -1946,7 +2076,8 @@ class SeestarQueuedStacker:
                 raise RuntimeError("Échec critique obtention image/header de référence de base (globale/premier panneau).")
 
             # Préparation du header qui sera utilisé pour le WCS de référence global
-            self.reference_header_for_wcs = reference_header_for_global_alignment.copy() 
+            self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
+            self.ref_wcs_header = self.reference_header_for_wcs
             
             # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
             # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
@@ -2116,22 +2247,34 @@ class SeestarQueuedStacker:
 
             # --- Initialisation grille Drizzle Standard (si applicable pour un run NON-mosaïque) ---
             if self.drizzle_active_session and not self.is_mosaic_run:
-                self.update_progress("DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...", "DEBUG_DETAIL")
+                self.update_progress(
+                    "DEBUG WORKER: Initialisation grille de sortie pour Drizzle Standard...",
+                    "DEBUG_DETAIL",
+                )
                 if self.reference_wcs_object and hasattr(reference_image_data_for_global_alignment, 'shape'):
                     ref_shape_for_drizzle_grid_hw = reference_image_data_for_global_alignment.shape[:2]
                     try:
-                        self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
-                            self.reference_wcs_object,      
-                            ref_shape_for_drizzle_grid_hw,  
-                            self.drizzle_scale              
-                        )
                         if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-                            raise RuntimeError("Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard.")
-                        logger.debug(f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}")
-                        self.update_progress(f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}", "INFO")
+                            self.drizzle_output_wcs, self.drizzle_output_shape_hw = self._create_drizzle_output_wcs(
+                                self.reference_wcs_object,
+                                ref_shape_for_drizzle_grid_hw,
+                                self.drizzle_scale,
+                            )
+                            if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
+                                raise RuntimeError(
+                                    "Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard."
+                                )
+                        logger.debug(
+                            f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}"
+                        )
+                        self.update_progress(
+                            f"   Grille Drizzle Standard prête: {self.drizzle_output_shape_hw}",
+                            "INFO",
+                        )
                     except Exception as e_grid_driz:
                         error_msg_grid = f"Échec critique création grille de sortie Drizzle Standard: {e_grid_driz}"
-                        self.update_progress(error_msg_grid, "ERROR"); raise RuntimeError(error_msg_grid)
+                        self.update_progress(error_msg_grid, "ERROR")
+                        raise RuntimeError(error_msg_grid)
                 else:
                     error_msg_ref_driz = "Référence WCS ou shape de l'image de référence globale manquante pour initialiser la grille Drizzle Standard."
                     self.update_progress(error_msg_ref_driz, "ERROR"); raise RuntimeError(error_msg_ref_driz)
@@ -2141,14 +2284,6 @@ class SeestarQueuedStacker:
             self.update_progress("DEBUG WORKER: Fin Section 1 (Préparation Référence).") # Message plus général
             self.update_progress("⭐ Référence(s) prête(s).", 5)
             self._recalculate_total_batches()
-
-            ok_grid = True
-            if self.reproject_between_batches and self.fixed_output_wcs is None:
-                ok_grid = self._prepare_global_reprojection_grid()
-                if not ok_grid:
-                    self.update_progress("❌ Failed to initialise global WCS grid", "ERROR")
-                    self.stop_processing = True
-                    return
 
             self.update_progress(
                 f"▶️ Démarrage boucle principale (En file: {self.files_in_queue} | Lots Estimés: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})..."
@@ -3278,11 +3413,15 @@ class SeestarQueuedStacker:
             )
             return
 
-        output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
-            all_wcs_for_grid_calc,
-            all_headers_for_grid_calc,
-            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-        )
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            output_wcs = self.reference_wcs_object
+            output_shape_hw = self.reference_shape
+        else:
+            output_wcs, output_shape_hw = self._calculate_final_mosaic_grid(
+                all_wcs_for_grid_calc,
+                all_headers_for_grid_calc,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
 
         if output_wcs is None or output_shape_hw is None:
             self.update_progress(
@@ -5371,6 +5510,46 @@ class SeestarQueuedStacker:
         )
         self.cumulative_wht_memmap[:] = 0.0
 
+    def _ensure_memmaps_match_reference(self) -> None:
+        """Ensure SUM/WHT memmaps match ``self.reference_shape``."""
+        if self.reference_shape is None:
+            return
+
+        expected_sum_shape = (self.reference_shape[0], self.reference_shape[1], 3)
+        expected_wht_shape = (self.reference_shape[0], self.reference_shape[1])
+
+        need_recreate = (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.cumulative_sum_memmap.shape != expected_sum_shape
+            or self.cumulative_wht_memmap.shape != expected_wht_shape
+        )
+
+        if need_recreate:
+            self._close_memmaps()
+            memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+            os.makedirs(memmap_dir, exist_ok=True)
+            self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+            self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_sum,
+                shape=expected_sum_shape,
+            )
+            self.cumulative_sum_memmap[:] = 0.0
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_wht,
+                shape=expected_wht_shape,
+            )
+            self.cumulative_wht_memmap[:] = 0.0
+            self.memmap_shape = expected_sum_shape
+            self.update_progress(
+                f"Re-init memmaps → new shape {self.memmap_shape[:2]}"
+            )
+
     def _final_reproject_cached_files(self, cache_list):
         """Reproject cached solved images and accumulate them."""
         if not cache_list:
@@ -5814,7 +5993,15 @@ class SeestarQueuedStacker:
         self.update_progress(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
         logger.debug(f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}")
 
-        if is_classic_reproject_mode and final_wht_map_for_postproc is not None:
+        if (
+            final_wht_map_for_postproc is not None
+            and (
+                is_classic_reproject_mode
+                or is_reproject_mosaic_mode
+                or is_true_incremental_drizzle_from_objects
+                or is_drizzle_final_mode_with_data
+            )
+        ):
             rows, cols = np.where(final_wht_map_for_postproc > 0)
             if rows.size and cols.size:
                 y0, y1 = rows.min(), rows.max() + 1
@@ -6203,7 +6390,12 @@ class SeestarQueuedStacker:
 ################################################################################################################################################
 
     def add_folder(self, folder_path):
-        if not self.processing_active: self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif."); return False
+        if not self.processing_active:
+            self.update_progress("ⓘ Impossible d'ajouter un dossier, traitement non actif.")
+            return False
+        if self.reproject_between_batches:
+            self.update_progress("⚠️ Reprojection active : ajout de dossier désactivé")
+            return False
         abs_path = os.path.abspath(folder_path)
         if not os.path.isdir(abs_path): self.update_progress(f"❌ Dossier non trouvé: {folder_path}"); return False
         output_abs = os.path.abspath(self.output_folder) if self.output_folder else None
@@ -6528,40 +6720,6 @@ class SeestarQueuedStacker:
         self.update_progress(f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}")
         logger.debug("DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session.")
 
-        # --- NEW STEP: Pre-scan headers to compute a fixed output grid ---
-        if self.reproject_between_batches:
-            all_paths = []
-            if self.current_folder and os.path.isdir(self.current_folder):
-                for fn in sorted(os.listdir(self.current_folder)):
-                    if fn.lower().endswith((".fit", ".fits")):
-                        all_paths.append(os.path.join(self.current_folder, fn))
-            if initial_additional_folders:
-                for f in initial_additional_folders:
-                    abs_f = os.path.abspath(str(f))
-                    if os.path.isdir(abs_f):
-                        for fn in sorted(os.listdir(abs_f)):
-                            if fn.lower().endswith((".fit", ".fits")):
-                                all_paths.append(os.path.join(abs_f, fn))
-            from ..core.reprojection_utils import collect_headers, compute_final_output_grid
-            header_infos = collect_headers(all_paths)
-            if header_infos:
-                try:
-                    self.fixed_output_wcs, self.fixed_output_shape = compute_final_output_grid(
-                        header_infos, scale=self.drizzle_scale
-                    )
-
-
-                    self.reference_shape = self.fixed_output_shape
-                    self.update_progress(
-                        f"🗺️ Grille fixe calculée {self.fixed_output_shape} px.",
-                        None,
-                    )
-                except Exception as e_grid:
-                    self.update_progress(f"⚠️ Erreur calcul grille fixe: {e_grid}", "WARN")
-            self.all_input_filepaths = all_paths
-
-
-
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
         logger.debug("DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)...")
@@ -6620,7 +6778,8 @@ class SeestarQueuedStacker:
             else:
                 raise RuntimeError(f"Shape de l'image de référence ({ref_shape_initial}) non supportée.")
             
-            self.reference_header_for_wcs = reference_header_for_shape_determination.copy() 
+            self.reference_header_for_wcs = reference_header_for_shape_determination.copy()
+            self.ref_wcs_header = self.reference_header_for_wcs
             logger.debug(f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}")
 
             ref_temp_processing_dir = os.path.join(self.output_folder, "temp_processing")
@@ -6788,14 +6947,25 @@ class SeestarQueuedStacker:
 
 
 
-        initial_files_added = self._add_files_to_queue(self.current_folder) 
-        if initial_files_added > 0: 
+        initial_files_added = self._add_files_to_queue(self.current_folder)
+        if initial_files_added > 0:
             self._recalculate_total_batches()
             self.update_progress(f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}")
-        elif not self.additional_folders: 
+        elif not self.additional_folders:
             self.update_progress("⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente.")
-        
-        self.aligner.reference_image_path = reference_path_ui or None 
+
+
+        if self.reproject_between_batches:
+            ok_grid = self._prepare_global_reprojection_grid()
+            if not ok_grid:
+                return False
+            self.fixed_output_wcs = self.reference_wcs_object
+            self.fixed_output_shape = self.reference_shape
+            if self.drizzle_active_session:
+                self.drizzle_output_wcs = self.reference_wcs_object
+                self.drizzle_output_shape_hw = self.reference_shape
+
+        self.aligner.reference_image_path = reference_path_ui or None
 
         logger.debug("DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker...") # Version Log
         self.processing_thread = threading.Thread(target=self._worker, name="StackerWorker")
