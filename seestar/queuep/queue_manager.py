@@ -1638,17 +1638,19 @@ class SeestarQueuedStacker:
                     for f in futures:
                         f.cancel()
                     return False
+
                 fpath, hdr, wcs_obj, err = fut.result()
                 self.update_progress(
                     f"   Solving {idx}/{total}: {os.path.basename(fpath)}",
                     5 + int(35 * ((idx - 1) / max(total, 1))),
                 )
+
                 if err is not None:
                     self.update_progress(
                         f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
                         "WARN",
                     )
-a
+
                 elif wcs_obj and wcs_obj.is_celestial:
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
