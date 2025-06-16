@@ -5397,8 +5397,27 @@ class SeestarQueuedStacker:
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
                 y_lot_intermed, x_lot_intermed = np.indices(shape_lot_intermediaire_hw)
                 sky_coords_lot_ra, sky_coords_lot_dec = wcs_lot_intermediaire.all_pix2world(x_lot_intermed.ravel(), y_lot_intermed.ravel(), 0)
-                x_final_output_pix, y_final_output_pix = output_wcs_final_target.all_world2pix(sky_coords_lot_ra, sky_coords_lot_dec, 0)
-                pixmap_batch_to_final_grid = np.dstack((x_final_output_pix.reshape(shape_lot_intermediaire_hw), y_final_output_pix.reshape(shape_lot_intermediaire_hw))).astype(np.float32)
+                x_final_output_pix, y_final_output_pix = output_wcs_final_target.all_world2pix(
+                    sky_coords_lot_ra, sky_coords_lot_dec, 0
+                )
+                x_final_output_pix = np.nan_to_num(x_final_output_pix, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                y_final_output_pix = np.nan_to_num(y_final_output_pix, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                x_final_output_pix = np.clip(
+                    x_final_output_pix,
+                    0,
+                    output_shape_final_target_hw[1] - 1,
+                )
+                y_final_output_pix = np.clip(
+                    y_final_output_pix,
+                    0,
+                    output_shape_final_target_hw[0] - 1,
+                )
+                pixmap_batch_to_final_grid = np.dstack(
+                    (
+                        x_final_output_pix.reshape(shape_lot_intermediaire_hw),
+                        y_final_output_pix.reshape(shape_lot_intermediaire_hw),
+                    )
+                ).astype(np.float32)
 
                 if pixmap_batch_to_final_grid is not None:
                     ninputs_this_batch = int(header_sci_lot.get('NINPUTS', 0))
