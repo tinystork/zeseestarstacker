@@ -1426,6 +1426,9 @@ class SeestarQueuedStacker:
 
         nw = int(np.ceil(content_width_deg / final_pixel_scale_deg)) + 4
         nh = int(np.ceil(content_height_deg / final_pixel_scale_deg)) + 4
+        # Guard against degenerate shapes which can cause downstream errors
+        nw = max(1, nw)
+        nh = max(1, nh)
 
         output_wcs = WCS(naxis=2)
         output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
@@ -1557,6 +1560,15 @@ class SeestarQueuedStacker:
                 out_wcs, out_shape_hw = self._calculate_final_mosaic_grid_dynamic(valid_wcs, None, scale_factor)
 
         if out_wcs and out_shape_hw:
+            if out_shape_hw[0] < 1 or out_shape_hw[1] < 1:
+                logger.error(
+                    "find_optimal_celestial_wcs returned invalid shape %s, falling back to dynamic grid",
+                    out_shape_hw,
+                )
+                out_wcs, out_shape_hw = self._calculate_final_mosaic_grid_dynamic(
+                    valid_wcs, None, scale_factor
+                )
+
             expected_wh = (out_shape_hw[1], out_shape_hw[0])
             try:
                 out_wcs.pixel_shape = expected_wh
