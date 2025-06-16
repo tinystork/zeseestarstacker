@@ -257,10 +257,13 @@ def renormalize_fits(
         return
     try:
         with fits.open(fits_path, mode="update", memmap=False) as hdul:
+            orig_dtype = hdul[0].data.dtype
             data = hdul[0].data.astype(np.float32)
             hdr = hdul[0].header
             wht = None
+            wht_orig_dtype = None
             if len(hdul) > 1 and hdul[1].header.get("EXTNAME", "").strip().upper() == "WHT":
+                wht_orig_dtype = hdul[1].data.dtype
                 wht = hdul[1].data.astype(np.float32)
             if wht is not None:
                 wht_max = float(np.max(wht)) if wht.size else 1.0
@@ -276,6 +279,15 @@ def renormalize_fits(
             data *= s
             if wht is not None:
                 wht *= s
+            if np.issubdtype(orig_dtype, np.integer):
+                hdul[0].data = np.round(data).astype(orig_dtype)
+            else:
+                hdul[0].data = data.astype(orig_dtype)
+            if wht is not None:
+                if np.issubdtype(wht_orig_dtype, np.integer):
+                    hdul[1].data = np.round(wht).astype(wht_orig_dtype)
+                else:
+                    hdul[1].data = wht.astype(wht_orig_dtype)
             hdr["RENORM"] = (s, "Flux renormalisation factor")
             hdr["RENORMMD"] = (m, "Renormalisation method")
             hdul.flush()
