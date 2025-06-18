@@ -337,10 +337,14 @@ class SeestarQueuedStacker:
         self.total_exposure_seconds = 0.0 
         self.intermediate_drizzle_batch_files = [] 
         
-        self.incremental_drizzle_objects = []     
-        self.incremental_drizzle_sci_arrays = []  
-        self.incremental_drizzle_wht_arrays = []  
+        self.incremental_drizzle_objects = []
+        self.incremental_drizzle_sci_arrays = []
+        self.incremental_drizzle_wht_arrays = []
         print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
+
+        self.update_ref_every = int(getattr(settings, 'update_ref_every', 0)) if settings is not None else 0
+        self._images_since_ref = 0
+        self.current_ref_image = None
 
         if settings is not None:
             try:
@@ -531,6 +535,18 @@ class SeestarQueuedStacker:
             print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: {error_details}")
             traceback.print_exc(limit=1)
             self.update_progress(f"   ❌ Erreur inattendue déplacement/copie fichier non-aligné '{file_basename}': {type(e).__name__}", "ERROR")
+
+
+    def _update_sliding_reference(self, aligned_img: np.ndarray) -> None:
+        if not self.update_ref_every:
+            return
+        self._images_since_ref += 1
+        if self.current_ref_image is None:
+            self.current_ref_image = aligned_img.copy()
+        if self._images_since_ref >= self.update_ref_every:
+            self.current_ref_image = aligned_img.copy()
+            self._images_since_ref = 0
+            self.update_progress(f"🔄 Sliding reference updated (frame {self.images_in_cumulative_stack})")
 
 
 
@@ -1805,11 +1821,17 @@ class SeestarQueuedStacker:
                     print(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
                     print(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
 
+                    reference_image_data_for_alignment = (
+                        self.current_ref_image
+                        if (self.update_ref_every and self.current_ref_image is not None)
+                        else reference_image_data_for_global_alignment
+                    )
+
                     if use_local_aligner_for_this_mosaic_run: 
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
-                            reference_image_data_for_global_alignment, 
+                            reference_image_data_for_alignment,
                             solve_astrometry_for_this_file=False,      
                             fa_orb_features_config=self.fa_orb_features,
                             fa_min_abs_matches_config=self.fa_min_abs_matches,
@@ -1831,6 +1853,7 @@ class SeestarQueuedStacker:
                                 (panel_data, panel_header, panel_wcs, panel_matrix_m, panel_mask)
                             )
                             self.aligned_files_count += 1
+                            self._update_sliding_reference(panel_data)
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
                             print(f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
@@ -1842,7 +1865,7 @@ class SeestarQueuedStacker:
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
-                            reference_image_data_for_global_alignment, # Passé mais pas utilisé pour l'alignement direct dans ce mode
+                            reference_image_data_for_alignment, # Passé mais pas utilisé pour l'alignement direct dans ce mode
                             solve_astrometry_for_this_file=True
                         )
                         self.processed_files_count += 1
@@ -1856,6 +1879,7 @@ class SeestarQueuedStacker:
                                 (panel_data, panel_header, wcs_object_panel, M_to_store, valid_mask_panel)
                             )
                             self.aligned_files_count += 1
+                            self._update_sliding_reference(panel_data)
                             align_method_used_log = panel_header.get('_ALIGN_METHOD_LOG', ('Unknown',None))[0]
                             print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic.")
                         else:
@@ -1867,7 +1891,7 @@ class SeestarQueuedStacker:
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
                         item_result_tuple = self._process_file(
                             file_path,
-                            reference_image_data_for_global_alignment,
+                            reference_image_data_for_alignment,
                             solve_astrometry_for_this_file=self.reproject_between_batches
                         )
                         self.processed_files_count += 1 
@@ -1875,6 +1899,7 @@ class SeestarQueuedStacker:
                            item_result_tuple[0] is not None: 
                             
                             self.aligned_files_count += 1
+                            self._update_sliding_reference(aligned_data)
                             aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple # Déballer les 6
                             
                             if self.drizzle_active_session: # Drizzle Standard (non-mosaïque)
@@ -5418,7 +5443,8 @@ class SeestarQueuedStacker:
 
                          local_solver_preference="none",
                          save_as_float32=False,
-                         reproject_between_batches=False
+                         reproject_between_batches=False,
+                         update_ref_every=0
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
@@ -5546,6 +5572,8 @@ class SeestarQueuedStacker:
         self.enable_inter_batch_reprojection = self.reproject_between_batches
         self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
         self.inter_batch_reprojection = self.reproject_between_batches or self.inter_batch_reprojection
+
+        self.update_ref_every = int(update_ref_every) if update_ref_every >= 0 else 0
 
         # --- FIN NOUVEAU ---
 

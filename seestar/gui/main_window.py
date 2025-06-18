@@ -4274,7 +4274,8 @@ class SeestarStackerGUI:
             astap_search_radius=self.settings.astap_search_radius,
             save_as_float32=self.settings.save_final_as_float32,
 
-            reproject_between_batches=self.settings.reproject_between_batches
+            reproject_between_batches=self.settings.reproject_between_batches,
+            update_ref_every=self.settings.update_ref_every
 
             # Lire depuis self.settings
             
