@@ -1,3 +1,4 @@
+
 import numpy as np
 
 class Dummy:
@@ -23,8 +24,10 @@ def test_no_op():
     for i in range(5):
         q.images_in_cumulative_stack = i + 1
         q._update_sliding_reference(np.full((1, 1), i, dtype=np.float32))
+
     assert q.current_ref_image is None
     assert q._images_since_ref == 0
+
 
 
 def test_refresh_trigger():
@@ -48,3 +51,4 @@ def test_skip_on_failure():
         q.images_in_cumulative_stack = frame
         q._update_sliding_reference(arr)
     assert np.array_equal(q.current_ref_image, np.full((1,1),40,dtype=np.float32))
+

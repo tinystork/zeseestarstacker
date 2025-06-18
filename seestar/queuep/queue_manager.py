@@ -342,8 +342,10 @@ class SeestarQueuedStacker:
         self.incremental_drizzle_wht_arrays = []
         print("  -> Attributs pour Drizzle Incrémental (objets/arrays) initialisés à listes vides.")
 
+
         # — Référence glissante (init)
         self.update_ref_every = int(getattr(settings, 'update_ref_every', 0)) if settings else 0
+
         self._images_since_ref = 0
         self.current_ref_image = None
 
@@ -536,6 +538,18 @@ class SeestarQueuedStacker:
             print(f"ERREUR QM [_move_to_unaligned_V_MoveUnaligned_RobustAdd]: {error_details}")
             traceback.print_exc(limit=1)
             self.update_progress(f"   ❌ Erreur inattendue déplacement/copie fichier non-aligné '{file_basename}': {type(e).__name__}", "ERROR")
+
+
+    def _update_sliding_reference(self, aligned_img: np.ndarray) -> None:
+        if not self.update_ref_every:
+            return
+        self._images_since_ref += 1
+        if self.current_ref_image is None:
+            self.current_ref_image = aligned_img.copy()
+        if self._images_since_ref >= self.update_ref_every:
+            self.current_ref_image = aligned_img.copy()
+            self._images_since_ref = 0
+            self.update_progress(f"🔄 Sliding reference updated (frame {self.images_in_cumulative_stack})")
 
 
 
@@ -1830,6 +1844,13 @@ class SeestarQueuedStacker:
                     print(f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}")
                     print(f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}")
 
+                    reference_image_data_for_alignment = (
+                        self.current_ref_image
+                        if (self.update_ref_every and self.current_ref_image is not None)
+                        else reference_image_data_for_global_alignment
+                    )
+
+
                     if use_local_aligner_for_this_mosaic_run:
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file.") # DEBUG
                         reference_for_this_img = (
@@ -1841,6 +1862,7 @@ class SeestarQueuedStacker:
                             file_path,
                             reference_for_this_img,
                             solve_astrometry_for_this_file=False,
+
                             fa_orb_features_config=self.fa_orb_features,
                             fa_min_abs_matches_config=self.fa_min_abs_matches,
                             fa_min_ransac_inliers_value_config=self.fa_min_ransac_raw,
@@ -1869,6 +1891,7 @@ class SeestarQueuedStacker:
                             print(f"  DEBUG QM [_worker / Mosaïque Locale]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
+
                     elif use_astrometry_per_panel_mosaic:
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file.") # DEBUG
                         reference_for_this_img = (
@@ -1881,6 +1904,7 @@ class SeestarQueuedStacker:
                             reference_for_this_img, # Passé mais pas utilisé pour l'alignement direct dans ce mode
                             solve_astrometry_for_this_file=True
                         )
+
                         self.processed_files_count += 1
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
                            item_result_tuple[0] is not None and \
@@ -1900,6 +1924,7 @@ class SeestarQueuedStacker:
                             print(f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}")
                             if hasattr(self, '_move_to_unaligned'): self._move_to_unaligned(file_path)
 
+
                     else: # Stacking Classique ou Drizzle Standard (non-mosaïque)
                         print(f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file.") # DEBUG
                         reference_for_this_img = (
@@ -1910,18 +1935,21 @@ class SeestarQueuedStacker:
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_for_this_img,
+
                             solve_astrometry_for_this_file=self.reproject_between_batches
                         )
                         self.processed_files_count += 1 
                         if item_result_tuple and isinstance(item_result_tuple, tuple) and len(item_result_tuple) == 6 and \
                            item_result_tuple[0] is not None: 
                             
+
                             self.aligned_files_count += 1
                             aligned_data, header_orig, scores_val, wcs_gen_val, matrix_M_val, valid_mask_val = item_result_tuple # Déballer les 6
 
                             if self.drizzle_active_session: # Drizzle Standard (non-mosaïque)
                                 print(f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'.")
                                 temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig)
+
                                 if temp_driz_file_path:
                                     current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
                                 else:
@@ -5461,7 +5489,8 @@ class SeestarQueuedStacker:
 
                          local_solver_preference="none",
                          save_as_float32=False,
-                         reproject_between_batches=False
+                         reproject_between_batches=False,
+                         update_ref_every=0
                          ):
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         print(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
@@ -5589,6 +5618,8 @@ class SeestarQueuedStacker:
         self.enable_inter_batch_reprojection = self.reproject_between_batches
         self.enable_interbatch_reproj = self.reproject_between_batches  # alias rétro
         self.inter_batch_reprojection = self.reproject_between_batches or self.inter_batch_reprojection
+
+        self.update_ref_every = int(update_ref_every) if update_ref_every >= 0 else 0
 
         # --- FIN NOUVEAU ---
 

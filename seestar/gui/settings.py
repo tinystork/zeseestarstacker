@@ -83,6 +83,11 @@ class SettingsManager:
             self.hot_pixel_threshold = getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar(value=default_values_from_code.get('hot_pixel_threshold', 3.0))).get()
             self.neighborhood_size = getattr(gui_instance, 'neighborhood_size', tk.IntVar(value=default_values_from_code.get('neighborhood_size', 5))).get()
             self.cleanup_temp = getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar(value=default_values_from_code.get('cleanup_temp', True))).get()
+            self.update_ref_every = getattr(
+                gui_instance,
+                'update_ref_every_var',
+                tk.IntVar(value=default_values_from_code.get('update_ref_every', 0)),
+            ).get()
             self.bayer_pattern = getattr(gui_instance, 'bayer_pattern_var', tk.StringVar(value=default_values_from_code.get('bayer_pattern', 'GRBG'))).get() 
             self.use_quality_weighting = getattr(gui_instance, 'use_weighting_var', tk.BooleanVar(value=default_values_from_code.get('use_quality_weighting', True))).get()
             self.weight_by_snr = getattr(gui_instance, 'weight_snr_var', tk.BooleanVar(value=default_values_from_code.get('weight_by_snr', True))).get()
@@ -251,6 +256,7 @@ class SettingsManager:
             getattr(gui_instance, 'hot_pixel_threshold', tk.DoubleVar()).set(self.hot_pixel_threshold)
             getattr(gui_instance, 'neighborhood_size', tk.IntVar()).set(self.neighborhood_size)
             getattr(gui_instance, 'cleanup_temp_var', tk.BooleanVar()).set(self.cleanup_temp)
+            getattr(gui_instance, 'update_ref_every_var', tk.IntVar()).set(self.update_ref_every)
             
             if not hasattr(self, 'local_solver_preference'): self.local_solver_preference = self.get_default_values()['local_solver_preference']
             if not hasattr(self, 'astap_path'): self.astap_path = self.get_default_values()['astap_path']
@@ -419,7 +425,8 @@ class SettingsManager:
         defaults_dict['output_filename'] = ""
         defaults_dict['reference_image_path'] = ""
         defaults_dict['bayer_pattern'] = "GRBG" 
-        defaults_dict['batch_size'] = 0 
+        defaults_dict['batch_size'] = 0
+        defaults_dict['update_ref_every'] = 0
         defaults_dict['stacking_mode'] = "kappa-sigma"
         defaults_dict['kappa'] = 2.5
         defaults_dict['stack_norm_method'] = "none"
@@ -596,6 +603,15 @@ class SettingsManager:
             except (ValueError, TypeError):
                 original = self.neighborhood_size; self.neighborhood_size = defaults_fallback['neighborhood_size']
                 messages.append(f"Voisinage Px Chauds ('{original}') invalide, réinitialisé à {self.neighborhood_size}")
+
+            try:
+                self.update_ref_every = int(self.update_ref_every)
+                if self.update_ref_every < 0:
+                    original = self.update_ref_every; self.update_ref_every = 0
+                    messages.append(f"update_ref_every ({original}) ajusté à {self.update_ref_every}")
+            except (ValueError, TypeError):
+                original = self.update_ref_every; self.update_ref_every = defaults_fallback['update_ref_every']
+                messages.append(f"update_ref_every ('{original}') invalide, réinitialisé à {self.update_ref_every}")
 
             # --- Validation des Options de Stacking avancées ---
             valid_methods = ['mean', 'median', 'kappa_sigma', 'winsorized_sigma_clip', 'linear_fit_clip']
@@ -1030,6 +1046,7 @@ class SettingsManager:
             'stack_final_combine': str(self.stack_final_combine),
             'stack_method': str(self.stack_method),
             'batch_size': int(self.batch_size),
+            'update_ref_every': int(self.update_ref_every),
             'correct_hot_pixels': bool(self.correct_hot_pixels),
             'hot_pixel_threshold': float(self.hot_pixel_threshold),
             'neighborhood_size': int(self.neighborhood_size),
