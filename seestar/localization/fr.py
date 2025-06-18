@@ -36,6 +36,7 @@ FR_TRANSLATIONS = {
     'stacking_method': "Méthode :",
     'kappa_value': "Kappa :",
     'batch_size': "Taille Lot :",
+    'update_ref_every_label': "Rafraîchir Référence :",
     'batch_size_auto': "(0=auto)", # Gardé pour affichage
     'hot_pixels_correction': 'Correction Pixels Chauds',
     'perform_hot_pixels_correction': 'Corriger pixels chauds',
@@ -191,6 +192,7 @@ FR_TRANSLATIONS = {
     'tooltip_apply_low_wht_mask': "Masque Bas WHT: Atténue les zones de l'image où la carte de poids (WHT) est très faible (typiquement les bords avec peu de signal). Aide à réduire les bandes et les dérives de couleur dans ces zones. Agit après le Feathering et avant la soustraction de fond Photutils.",
     'tooltip_low_wht_percentile': "Percentile Bas WHT: Définit le seuil pour considérer un poids comme 'faible'. Par exemple, 5% signifie que les 5% de pixels ayant les plus faibles poids (non-nuls) seront ciblés. Plage: 1-20. Défaut: 5.",
     'tooltip_low_wht_soften_px': "Adoucir Masque Bas WHT (px): Rayon de flou gaussien appliqué au masque binaire des zones de faible poids. Permet une transition plus douce de la correction. Plage: 32-512. Défaut: 128.",
+    'tooltip_update_ref_every': "Nombre d'images alignées avant mise à jour de la référence glissante. 0 désactive la fonction.",
     
     # Tooltips save flaot32
     'tooltip_save_as_float32': "Si coché, le fichier FITS final sera sauvegardé en utilisant des nombres flottants 32 bits, préservant la précision numérique maximale du traitement mais résultant en des fichiers plus volumineux (env. 2x). Si décoché (défaut), le fichier sera sauvegardé en entiers non signés 16 bits (plage 0-65535 après mise à l'échelle depuis 0-1), réduisant significativement la taille du fichier.",

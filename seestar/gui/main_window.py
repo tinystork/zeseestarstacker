@@ -363,7 +363,8 @@ class SeestarStackerGUI:
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
-        self.batch_size = tk.IntVar(value=10) 
+        self.batch_size = tk.IntVar(value=10)
+        self.update_ref_every_var = tk.IntVar(value=0)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
         self.neighborhood_size = tk.IntVar(value=5)
@@ -890,6 +891,7 @@ class SeestarStackerGUI:
         self.scnr_amount_ctrls = self._create_slider_spinbox_group(self.scnr_params_frame, "final_scnr_amount_label", min_val=0.0, max_val=1.0, step=0.05, tk_var=self.final_scnr_amount_var, callback=None)
         self.final_scnr_preserve_lum_check = ttk.Checkbutton(self.scnr_params_frame, text=self.tr("final_scnr_preserve_lum_label", default="Preserve Luminosity (SCNR)"), variable=self.final_scnr_preserve_lum_var); self.final_scnr_preserve_lum_check.pack(anchor=tk.W, pady=(0,5))
         batch_frame = ttk.Frame(self.options_frame); batch_frame.pack(fill=tk.X, padx=5, pady=(5, 5)); self.batch_size_label = ttk.Label(batch_frame, text="Batch Size:"); self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5)); self.batch_spinbox = ttk.Spinbox(batch_frame, from_=3, to=500, increment=1, textvariable=self.batch_size, width=5); self.batch_spinbox.pack(side=tk.LEFT)
+        refupd_frame = ttk.Frame(self.options_frame); refupd_frame.pack(fill=tk.X, padx=5, pady=(0, 5)); self.update_ref_every_label = ttk.Label(refupd_frame, text=self.tr("update_ref_every_label", default="Update Ref Every:")); self.update_ref_every_label.pack(side=tk.LEFT, padx=(0,5)); self.update_ref_every_spinbox = ttk.Spinbox(refupd_frame, from_=0, to=500, increment=1, textvariable=self.update_ref_every_var, width=5); self.update_ref_every_spinbox.pack(side=tk.LEFT)
         self.drizzle_options_frame = ttk.LabelFrame(tab_stacking, text="Drizzle Options"); self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5); self.drizzle_check = ttk.Checkbutton(self.drizzle_options_frame, text="Enable Drizzle", variable=self.use_drizzle_var, command=self._update_drizzle_options_state); self.drizzle_check.pack(anchor=tk.W, padx=5, pady=(5, 2)); self.drizzle_mode_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_mode_frame.pack(fill=tk.X, padx=(20, 5), pady=(2, 5)); self.drizzle_mode_label = ttk.Label(self.drizzle_mode_frame, text="Mode:"); self.drizzle_mode_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_final = ttk.Radiobutton(self.drizzle_mode_frame, text="Final", variable=self.drizzle_mode_var, value="Final", command=self._update_drizzle_options_state); self.drizzle_radio_incremental = ttk.Radiobutton(self.drizzle_mode_frame, text="Incremental", variable=self.drizzle_mode_var, value="Incremental", command=self._update_drizzle_options_state); self.drizzle_radio_final.pack(side=tk.LEFT, padx=3); self.drizzle_radio_incremental.pack(side=tk.LEFT, padx=3)
         self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame); self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5)); self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text="Scale:"); self.drizzle_scale_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_radio_2x = ttk.Radiobutton(self.drizzle_scale_frame, text="x2", variable=self.drizzle_scale_var, value="2"); self.drizzle_radio_3x = ttk.Radiobutton(self.drizzle_scale_frame, text="x3", variable=self.drizzle_scale_var, value="3"); self.drizzle_radio_4x = ttk.Radiobutton(self.drizzle_scale_frame, text="x4", variable=self.drizzle_scale_var, value="4"); self.drizzle_radio_2x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_3x.pack(side=tk.LEFT, padx=3); self.drizzle_radio_4x.pack(side=tk.LEFT, padx=3)
         wht_frame = ttk.Frame(self.drizzle_options_frame); wht_frame.pack(fill=tk.X, padx=(20, 5), pady=(5, 5)); self.drizzle_wht_label = ttk.Label(wht_frame, text="WHT Threshold %:"); self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5)); self.drizzle_wht_spinbox = ttk.Spinbox(wht_frame, from_=10.0, to=100.0, increment=5.0, textvariable=self.drizzle_wht_display_var, width=6, command=self._convert_spinbox_percent_to_float, format="%.0f"); self.drizzle_wht_spinbox.pack(side=tk.LEFT, padx=5)
@@ -1764,6 +1766,7 @@ class SeestarStackerGUI:
             "input_folder": 'input_label', "output_folder": 'output_label',
             "reference_image": 'reference_label', "stack_method_label": 'stack_method_label',
             "batch_size": 'batch_size_label',
+            "update_ref_every_label": 'update_ref_every_label',
             "drizzle_scale_label": 'drizzle_scale_label', "drizzle_mode_label": 'drizzle_mode_label',
             "drizzle_kernel_label": 'drizzle_kernel_label', "drizzle_pixfrac_label": 'drizzle_pixfrac_label',
             "drizzle_wht_threshold_label": 'drizzle_wht_label',
@@ -1886,6 +1889,8 @@ class SeestarStackerGUI:
             ('low_wht_pct_spinbox', 'tooltip_low_wht_percentile'),
             ('low_wht_soften_px_label', 'tooltip_low_wht_soften_px'),
             ('low_wht_soften_px_spinbox', 'tooltip_low_wht_soften_px'),
+            ('update_ref_every_label', 'tooltip_update_ref_every'),
+            ('update_ref_every_spinbox', 'tooltip_update_ref_every'),
             # NOUVEAU : Tooltip pour la nouvelle Checkbutton
             ('save_as_float32_check', 'tooltip_save_as_float32')
         ]

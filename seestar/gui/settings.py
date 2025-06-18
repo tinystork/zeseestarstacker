@@ -122,6 +122,7 @@ class SettingsManager:
             self.photutils_bn_exclude_percentile = getattr(gui_instance, 'photutils_bn_exclude_percentile_var', tk.DoubleVar(value=default_values_from_code.get('photutils_bn_exclude_percentile', 95.0))).get()
             self.apply_feathering = getattr(gui_instance, 'apply_feathering_var', tk.BooleanVar(value=default_values_from_code.get('apply_feathering', True))).get()
             self.feather_blur_px = getattr(gui_instance, 'feather_blur_px_var', tk.IntVar(value=default_values_from_code.get('feather_blur_px', 256))).get()
+            self.update_ref_every = getattr(gui_instance, 'update_ref_every_var', tk.IntVar(value=default_values_from_code.get('update_ref_every', 0))).get()
             self.apply_low_wht_mask = getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar(value=default_values_from_code.get('apply_low_wht_mask', False))).get()
             self.low_wht_percentile = getattr(gui_instance, 'low_wht_pct_var', tk.IntVar(value=default_values_from_code.get('low_wht_percentile', 5))).get()
             self.low_wht_soften_px = getattr(gui_instance, 'low_wht_soften_px_var', tk.IntVar(value=default_values_from_code.get('low_wht_soften_px', 128))).get()
@@ -331,6 +332,8 @@ class SettingsManager:
             if hasattr(gui_instance, 'feather_blur_px_var'):
                 getattr(gui_instance, 'feather_blur_px_var', tk.IntVar()).set(self.feather_blur_px)
                 print(f"DEBUG (Settings apply_to_ui): Feather Blur Px appliqué à UI: {self.feather_blur_px}")
+            if hasattr(gui_instance, 'update_ref_every_var'):
+                getattr(gui_instance, 'update_ref_every_var', tk.IntVar()).set(self.update_ref_every)
             
             if hasattr(gui_instance, 'apply_low_wht_mask_var'):
                 getattr(gui_instance, 'apply_low_wht_mask_var', tk.BooleanVar()).set(self.apply_low_wht_mask)
@@ -471,8 +474,9 @@ class SettingsManager:
         defaults_dict['photutils_bn_sigma_clip'] = 3.0
         defaults_dict['photutils_bn_exclude_percentile'] = 95.0 
         defaults_dict['apply_feathering'] = True 
-        defaults_dict['feather_blur_px'] = 256   
-        defaults_dict['apply_low_wht_mask'] = False   
+        defaults_dict['feather_blur_px'] = 256
+        defaults_dict['update_ref_every'] = 0
+        defaults_dict['apply_low_wht_mask'] = False
         defaults_dict['low_wht_percentile'] = 5       
         defaults_dict['low_wht_soften_px'] = 128      
         
@@ -842,6 +846,17 @@ class SettingsManager:
                 original_soften = self.low_wht_soften_px; self.low_wht_soften_px = defaults_fallback['low_wht_soften_px']
                 messages.append(f"Low WHT Soften Px ('{original_soften}') invalide, réinitialisé à {self.low_wht_soften_px}.")
             self.apply_chroma_correction = bool(getattr(self, 'apply_chroma_correction', defaults_fallback['apply_chroma_correction']))
+
+            try:
+                self.update_ref_every = int(self.update_ref_every)
+                if self.update_ref_every < 0:
+                    original_ure = self.update_ref_every
+                    self.update_ref_every = 0
+                    messages.append(f"update_ref_every ({original_ure}) ajusté à 0")
+            except (ValueError, TypeError):
+                original_ure = self.update_ref_every
+                self.update_ref_every = defaults_fallback['update_ref_every']
+                messages.append(f"update_ref_every ('{original_ure}') invalide, réinitialisé à {self.update_ref_every}")
  
             # --- NOUVEAU : Validation du setting save_final_as_float32 ---
             print("    -> Validating Save as float32...")
@@ -1066,6 +1081,7 @@ class SettingsManager:
             'window_geometry': str(self.window_geometry),
             'apply_feathering': bool(self.apply_feathering),
             'feather_blur_px': int(self.feather_blur_px),
+            'update_ref_every': int(getattr(self, 'update_ref_every', 0)),
             'apply_low_wht_mask': bool(self.apply_low_wht_mask),
             'low_wht_percentile': int(self.low_wht_percentile),
             'low_wht_soften_px': int(self.low_wht_soften_px),
