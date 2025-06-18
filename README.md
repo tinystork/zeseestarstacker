@@ -262,6 +262,7 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
     `run_zemosaic.py`) to enable verbose debug output.
 2.  **Select Folders:** Choose Input, Output, and optional Reference folders/files.
 3.  **Adjust Stacking Settings:** Select Method, Kappa, Batch Size, Hot Pixel options, Quality Weighting parameters, and Cleanup preference.
+    Use `--update-ref-every N` or the matching GUI field to refresh the internal alignment reference every N aligned frames (0 disables).
 4.  **Adjust Preview (Optional):** Modify preview display settings (WB, Stretch, Gamma, etc.) using the Preview tab and Histogram. *This does not affect the final FITS stack.*
 5.  **Start Processing:** Click the "Start" button.
 6.  **Monitor Progress:** Watch the progress bar, log messages, timers, and live preview.
@@ -275,6 +276,7 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
     l'option `-v` avec `run_zemosaic.py`) pour activer les messages de débogage détaillés.
 2.  **Sélectionner les Dossiers :** Choisissez les dossiers d'Entrée, de Sortie et optionnellement le fichier de Référence.
 3.  **Ajuster les Paramètres d'Empilement :** Sélectionnez la Méthode, Kappa, Taille de Lot, options de Pixels Chauds, paramètres de Pondération par Qualité et préférence de Nettoyage.
+    Utilisez `--update-ref-every N` ou le champ correspondant dans l'interface pour remplacer l'image de référence interne toutes les N images alignées (0 désactive).
 4.  **Ajuster l'Aperçu (Optionnel) :** Modifiez les paramètres d'affichage de l'aperçu (BdB, Étirement, Gamma, etc.) via l'onglet Aperçu et l'Histogramme. *Ceci n'affecte pas le stack FITS final sauvegardé.*
 5.  **Démarrer le Traitement :** Cliquez sur le bouton "Démarrer".
 6.  **Suivre la Progression :** Observez la barre de progression, les messages du log, les chronomètres et l'aperçu en direct.

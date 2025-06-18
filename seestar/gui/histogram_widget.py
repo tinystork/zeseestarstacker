@@ -2,11 +2,15 @@
 Widget Tkinter intégrant Matplotlib pour afficher un histogramme interactif
 des données d'image astronomique.
 """
+import os
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg') # Explicitly use TkAgg backend for compatibility
+if os.environ.get("MPLBACKEND", "").lower() != "agg":
+    matplotlib.use('TkAgg')
+else:
+    matplotlib.use('Agg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import traceback
