@@ -673,7 +673,7 @@ class SeestarQueuedStacker:
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
         self.drizzle_renorm_method = "none"
-        # Option de reprojection des lots intermédiaires
+        # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
@@ -3213,7 +3213,7 @@ class SeestarQueuedStacker:
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,  # Passé mais pas utilisé pour l'alignement direct dans ce mode
-                            solve_astrometry_for_this_file=True,
+                            solve_astrometry_for_this_file=False if self.reproject_between_batches else True,
                         )
                         self.processed_files_count += 1
                         if (
@@ -3271,7 +3271,7 @@ class SeestarQueuedStacker:
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,
-                            solve_astrometry_for_this_file=self.reproject_between_batches,
+                            solve_astrometry_for_this_file=False,
                         )
                         self.processed_files_count += 1
                         if (
@@ -3282,95 +3282,46 @@ class SeestarQueuedStacker:
                         ):
 
                             if self.reproject_between_batches:
-                                # --- MODE REPROJECTION INCREMENTALE ---
-                                self.aligned_files_count += 1
-                                current_batch_items_with_masks_for_stack_batch.append(
-                                    item_result_tuple
-                                )
+                                # --- NEW incremental reprojection on *stacked* batches ---
+                                current_batch_items_with_masks_for_stack_batch.append(item_result_tuple)
                                 self._current_batch_paths.append(file_path)
 
-                                if (
-                                    len(current_batch_items_with_masks_for_stack_batch)
-                                    >= self.batch_size
-                                ):
+                                if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
                                     self.stacked_batches_count += 1
-                                    self._send_eta_update()
-                                    num_in_batch = len(
-                                        current_batch_items_with_masks_for_stack_batch
-                                    )
-                                    progress_info_reproj = (
-                                        f"(Lot Reproj. {self.stacked_batches_count}/"
-                                        f"{self.total_batches_estimated if self.total_batches_estimated > 0 else '?'})"
-                                    )
-                                    self.update_progress(
-                                        f"⚙️ Reprojection du lot {progress_info_reproj} ({num_in_batch} images)..."
-                                    )
+                                    num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
 
-                                    imgs = [
-                                        it[0]
-                                        for it in current_batch_items_with_masks_for_stack_batch
-                                    ]
-                                    hdrs = [
-                                        it[1]
-                                        for it in current_batch_items_with_masks_for_stack_batch
-                                    ]
-                                    reproj_img, reproj_cov = reproject_and_coadd_batch(
-                                        imgs,
-                                        hdrs,
-                                        self.fixed_output_wcs
-                                        or self.reference_wcs_object,
-                                        self.reference_shape,
-                                        combine_function="mean",
+                                    # 1. Stack the batch (classic SUM/W)
+                                    stacked_np, hdr, wht_2d = self._stack_batch(
+                                        current_batch_items_with_masks_for_stack_batch,
+                                        self.stacked_batches_count,
+                                        self.total_batches_estimated,
                                     )
-
-                                    if (
-                                        reproj_img is not None
-                                        and reproj_cov is not None
-                                    ):
-                                        tmp = tempfile.NamedTemporaryFile(
-                                            suffix=".fits", delete=False
-                                        )
-                                        fits.PrimaryHDU(
-                                            data=np.moveaxis(reproj_img, -1, 0)
-                                        ).writeto(tmp.name, overwrite=True)
-                                        self.intermediate_classic_batch_files.append(
-                                            tmp.name
-                                        )
-                                        self.update_progress(
-                                            f"   -> {num_in_batch} images reprojetées, "
-                                            f"résultat {reproj_img.shape} -> {os.path.basename(tmp.name)}"
-                                        )
-                                        header_tmp = fits.Header()
-                                        header_tmp["NIMAGES"] = num_in_batch
-                                        self._combine_batch_result(
-                                            reproj_img,
-                                            header_tmp,
-                                            reproj_cov,
-                                            batch_wcs=self.fixed_output_wcs
-                                            or self.reference_wcs_object,
-                                        )
-                                        if hasattr(self.cumulative_sum_memmap, "flush"):
-                                            self.cumulative_sum_memmap.flush()
-                                        if hasattr(self.cumulative_wht_memmap, "flush"):
-                                            self.cumulative_wht_memmap.flush()
-                                        self._update_preview_sum_w()
+                                    if stacked_np is None:
+                                        current_batch_items_with_masks_for_stack_batch.clear()
+                                        gc.collect()
                                     else:
-                                        self.update_progress(
-                                            "   -> Échec reproject_and_coadd_batch",
-                                            "ERROR",
+                                        # 2. Ensure WCS on the stacked image
+                                        solved_path, _ = self._save_and_solve_classic_batch(
+                                            stacked_np, wht_2d, hdr, self.stacked_batches_count
+                                        )
+                                        batch_wcs = None
+                                        try:
+                                            batch_wcs = WCS(hdr, naxis=2)
+                                        except Exception:
+                                            batch_wcs = None
+
+                                        # 3. Accumulate (reprojection now happens inside _combine_batch_result)
+                                        self._combine_batch_result(
+                                            stacked_np,
+                                            hdr,
+                                            wht_2d,
+                                            batch_wcs=batch_wcs,
                                         )
 
-                                    if self.move_stacked and self._current_batch_paths:
-                                        move_to_stacked(
-                                            self._current_batch_paths,
-                                            self.update_progress,
-                                            self.stacked_subdir_name,
-                                        )
+                                        current_batch_items_with_masks_for_stack_batch.clear()
                                         self._current_batch_paths = []
-                                    self._update_batches_meta()
-                                    self._save_partial_stack()
-                                    current_batch_items_with_masks_for_stack_batch = []
-                                    gc.collect()
+                                        self._save_partial_stack()
+                                        gc.collect()
 
                             else:
                                 # --- MODE CLASSIQUE OU DRIZZLE ---
@@ -6809,7 +6760,7 @@ class SeestarQueuedStacker:
                 f"DEBUG QM [_combine_batch_result]: erreur stats initiales: {dbg_err}"
             )
 
-        if not self.reproject_between_batches:
+        if self.reproject_between_batches:
             input_wcs = batch_wcs
             if input_wcs is None and self.reference_wcs_object:
                 try:
@@ -6820,7 +6771,7 @@ class SeestarQueuedStacker:
             if self.reference_wcs_object and input_wcs is not None:
                 try:
                     self.update_progress(
-                        f"➡️ [Reproject] Entrée dans reproject pour le batch {self.stacked_batches_count}/{self.total_batches_estimated}",
+                        f"➡️ [Reproject] Reprojection du lot empilé {self.stacked_batches_count}/{self.total_batches_estimated}",
                         "INFO_DETAIL",
                     )
                     stacked_batch_data_np, _ = self._reproject_to_reference(
@@ -6830,7 +6781,7 @@ class SeestarQueuedStacker:
                         batch_coverage_map_2d, input_wcs
                     )
                     self.update_progress(
-                        f"✅ [Reproject] Batch {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
+                        f"✅ [Reproject] Lot {self.stacked_batches_count}/{self.total_batches_estimated} reprojecté vers référence (shape {expected_shape_hw})",
                         "INFO_DETAIL",
                     )
                 except Exception as e:
@@ -8223,8 +8174,9 @@ class SeestarQueuedStacker:
         np.nan_to_num(final_wht, copy=False)
 
         # Always attempt to solve the intermediate batch with ASTAP so that a
-        # valid WCS is present on each file. This is required for the optional
-        # inter-batch reprojection step. When solving fails we fall back to the
+        # valid WCS is present on each stacked batch file. This is required for
+        # the optional inter-batch reprojection step (performed on stacked batches).
+        # When solving fails we fall back to the
         # reference header WCS if available.
         luminance = (
             stacked_np[..., 0] * 0.299

@@ -30,7 +30,7 @@ if "seestar.gui" not in sys.modules:
     sys.modules["seestar"] = seestar_pkg
     sys.modules["seestar.gui"] = gui_pkg
     sys.modules["seestar.gui.settings"] = settings_mod
-sys.modules["seestar.gui.histogram_widget"] = hist_mod
+    sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
 spec = importlib.util.spec_from_file_location(
     "seestar.enhancement.reproject_utils",

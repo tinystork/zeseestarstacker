@@ -59,7 +59,7 @@ class DummyStacker:
     def _combine_batch_result(self, data, header, coverage, batch_wcs=None):
         batch_sum = data.astype(np.float32)
         batch_wht = coverage.astype(np.float32)
-        if not self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
+        if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
             reproject_interp = reproject_utils.reproject_interp
             shp = self.memmap_shape[:2]
             if batch_sum.ndim == 3:
@@ -99,14 +99,14 @@ def test_combine_batch_respects_flag(monkeypatch):
     monkeypatch.setattr(reproject_utils, "reproject_interp", fake_reproj)
     s.reproject_between_batches = False
     s._combine_batch_result(img, fits.Header(), cov, wcs_in)
-    assert calls["n"] > 0
+    assert calls["n"] == 0
 
     calls["n"] = 0
     s.cumulative_sum_memmap.fill(0)
     s.cumulative_wht_memmap.fill(0)
     s.reproject_between_batches = True
     s._combine_batch_result(img, fits.Header(), cov, wcs_in)
-    assert calls["n"] == 0
+    assert calls["n"] > 0
 
 
 def test_process_file_returns_wcs_when_reproject(tmp_path, monkeypatch):
