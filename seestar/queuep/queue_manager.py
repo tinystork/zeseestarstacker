@@ -25,6 +25,7 @@ import tempfile
 import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
+from pathlib import Path
 
 
 import sys
@@ -588,9 +589,15 @@ class SeestarQueuedStacker:
         self.cumulative_sum_memmap = None  
         self.cumulative_wht_memmap = None  
         self.memmap_shape = None           
-        self.memmap_dtype_sum = np.float32 
-        self.memmap_dtype_wht = np.float32 
+        self.memmap_dtype_sum = np.float32
+        self.memmap_dtype_wht = np.float32
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
+
+        # Options pour déplacement et sauvegarde partiels
+        self.partial_save_interval = 10
+        self.stacked_subdir_name = "stacked"
+        self.batch_count_path = None
+        self._current_batch_paths = []
         
         self.use_quality_weighting = False 
         self.weight_by_snr = True          
@@ -2026,6 +2033,7 @@ class SeestarQueuedStacker:
         mosaic_ref_panel_header = None     # Utilisé seulement si local_fast_fallback
 
         current_batch_items_with_masks_for_stack_batch = []
+        self._current_batch_paths = []
         self.intermediate_drizzle_batch_files = []
         solved_items_for_final_reprojection = []
         all_aligned_files_with_info_for_mosaic = []
@@ -2464,6 +2472,7 @@ class SeestarQueuedStacker:
                                 # --- MODE REPROJECTION INCREMENTALE ---
                                 self.aligned_files_count += 1
                                 current_batch_items_with_masks_for_stack_batch.append(item_result_tuple)
+                                self._current_batch_paths.append(file_path)
 
                                 if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
                                     self.stacked_batches_count += 1
@@ -2524,6 +2533,7 @@ class SeestarQueuedStacker:
                                     temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig)
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
+                                        self._current_batch_paths.append(file_path)
                                     else:
                                         self.failed_stack_count += 1
                                         logger.debug(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
@@ -2531,6 +2541,7 @@ class SeestarQueuedStacker:
                                     logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
                                     classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val)
                                     current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
+                                    self._current_batch_paths.append(file_path)
 
                                 if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
                                     self.stacked_batches_count += 1
@@ -2560,6 +2571,10 @@ class SeestarQueuedStacker:
                                             self.total_batches_estimated,
                                             self.reference_wcs_object
                                         )
+                                    self._move_to_stacked(self._current_batch_paths)
+                                    self._save_partial_stack()
+                                    self._update_batch_count_file()
+                                    self._current_batch_paths = []
                                     current_batch_items_with_masks_for_stack_batch = []
 
                         else:  # _process_file a échoué
@@ -2715,6 +2730,10 @@ class SeestarQueuedStacker:
                             current_batch_items_with_masks_for_stack_batch, # Liste de CHEMINS
                             self.stacked_batches_count, self.total_batches_estimated
                         )
+                    self._move_to_stacked(self._current_batch_paths)
+                    self._save_partial_stack()
+                    self._update_batch_count_file()
+                    self._current_batch_paths = []
                     current_batch_items_with_masks_for_stack_batch = []
                 
                 # --- Sauvegarde finale spécifique au mode Drizzle ---
@@ -2781,6 +2800,10 @@ class SeestarQueuedStacker:
                             batch_wcs=self.fixed_output_wcs or self.reference_wcs_object,
                         )
                         self._update_preview_sum_w()
+                        self._move_to_stacked(self._current_batch_paths)
+                        self._save_partial_stack()
+                        self._update_batch_count_file()
+                        self._current_batch_paths = []
                     else:
                         self.update_progress("   -> Échec reproject_and_coadd_batch", "ERROR")
 
@@ -2795,6 +2818,10 @@ class SeestarQueuedStacker:
                         current_batch_items_with_masks_for_stack_batch,
                         self.stacked_batches_count, self.total_batches_estimated, self.reference_wcs_object
                     )
+                    self._move_to_stacked(self._current_batch_paths)
+                    self._save_partial_stack()
+                    self._update_batch_count_file()
+                    self._current_batch_paths = []
                     current_batch_items_with_masks_for_stack_batch = []
 
                 if self.reproject_between_batches:
@@ -5069,6 +5096,63 @@ class SeestarQueuedStacker:
             save_preview_image(self.current_stack_data, preview_path, apply_stretch=False)
         except Exception as e: logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
+    def _move_to_stacked(self, paths: list[str]):
+        """Déplace chaque fichier vers un sous-dossier 'stacked'."""
+        for p in paths:
+            if not p or not os.path.exists(p):
+                continue
+            src_dir = os.path.dirname(os.path.abspath(p))
+            dst_dir = os.path.join(src_dir, self.stacked_subdir_name)
+            os.makedirs(dst_dir, exist_ok=True)
+            base = os.path.basename(p)
+            dest = os.path.join(dst_dir, base)
+            if os.path.exists(dest):
+                stem, ext = os.path.splitext(base)
+                dest = os.path.join(dst_dir, f"{stem}_dup_{int(time.time())}{ext}")
+            try:
+                if os.stat(src_dir).st_dev == os.stat(dst_dir).st_dev:
+                    os.rename(p, dest)
+                else:
+                    shutil.copy2(p, dest)
+                    os.remove(p)
+                self.update_progress(f"📦 Moved to stacked: {base}", "INFO_DETAIL")
+            except Exception as e:
+                self.update_progress(f"⚠️ Move failed for {base}: {e}", "WARN")
+
+    def _save_partial_stack(self):
+        if (
+            self.partial_save_interval <= 0
+            or self.stacked_batches_count % self.partial_save_interval != 0
+        ):
+            return
+        if (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.output_folder is None
+        ):
+            return
+        sum_arr = np.array(self.cumulative_sum_memmap, dtype=np.float32)
+        wht_arr = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            stack = np.nan_to_num(sum_arr / np.maximum(wht_arr, 1e-6))
+        base = Path(self.output_folder) / f"{self.output_filename}_partial_batch_{self.stacked_batches_count:03d}.fits"
+        tmp = base.with_suffix(".fits.tmp")
+        try:
+            fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0)).writeto(tmp, overwrite=True)
+            os.replace(tmp, base)
+            self.update_progress(f"💾 Saved {base.name}", "INFO_DETAIL")
+        except Exception as e:
+            self.update_progress(f"⚠️ Erreur sauvegarde partielle: {e}", "WARN")
+
+    def _update_batch_count_file(self):
+        if not self.batch_count_path:
+            return
+        try:
+            with open(self.batch_count_path, "w") as f:
+                f.write(str(self.stacked_batches_count))
+        except Exception as e:
+            self.update_progress(f"⚠️ Erreur écriture compteur batch: {e}", "WARN")
+
     def _stack_winsorized_sigma(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
         from scipy.stats.mstats import winsorize
         from astropy.stats import sigma_clipped_stats
@@ -5576,20 +5660,34 @@ class SeestarQueuedStacker:
         self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
         self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
         self.memmap_shape = (shape_hw[0], shape_hw[1], 3)
+        self.batch_count_path = os.path.join(memmap_dir, "batch_count.txt")
+        mode = "w+"
+        if os.path.exists(self.sum_memmap_path) and os.path.exists(self.wht_memmap_path):
+            mode = "r+"
         self.cumulative_sum_memmap = np.lib.format.open_memmap(
             self.sum_memmap_path,
-            mode="w+",
+            mode=mode,
             dtype=self.memmap_dtype_sum,
             shape=self.memmap_shape,
         )
-        self.cumulative_sum_memmap[:] = 0.0
         self.cumulative_wht_memmap = np.lib.format.open_memmap(
             self.wht_memmap_path,
-            mode="w+",
+            mode=mode,
             dtype=self.memmap_dtype_wht,
             shape=shape_hw,
         )
-        self.cumulative_wht_memmap[:] = 0.0
+        if mode == "w+":
+            self.cumulative_sum_memmap[:] = 0.0
+            self.cumulative_wht_memmap[:] = 0.0
+            self.stacked_batches_count = 0
+            self._update_batch_count_file()
+        else:
+            if os.path.exists(self.batch_count_path):
+                try:
+                    with open(self.batch_count_path, "r") as f:
+                        self.stacked_batches_count = int(f.read().strip())
+                except Exception:
+                    self.stacked_batches_count = 0
 
     def _ensure_memmaps_match_reference(self) -> None:
         """Ensure SUM/WHT memmaps match ``self.reference_shape``."""
@@ -6543,6 +6641,8 @@ class SeestarQueuedStacker:
                 if fname.lower().endswith(('.fit', '.fits')):
                     fpath = os.path.join(abs_folder_path, fname)
                     abs_fpath = os.path.abspath(fpath)
+                    if self.stacked_subdir_name in Path(abs_fpath).parts:
+                        continue
                     if abs_fpath not in self.processed_files:
                         # ---> AJOUTER CETTE LIGNE <---
                         logger.debug(f"DEBUG [_add_files_to_queue]: ADDING to queue and processed_files: '{fpath}'")
@@ -6630,6 +6730,8 @@ class SeestarQueuedStacker:
         astap_downsample=1,
         astap_sensitivity=100,
         local_solver_preference="none",
+        move_stacked=False,
+        partial_save_interval=10,
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=False,
@@ -6765,6 +6867,9 @@ class SeestarQueuedStacker:
         self.photutils_bn_exclude_percentile = float(photutils_bn_exclude_percentile)
         self.apply_feathering = bool(apply_feathering); self.feather_blur_px = int(feather_blur_px)
         self.apply_low_wht_mask = bool(apply_low_wht_mask); self.low_wht_percentile = int(low_wht_percentile); self.low_wht_soften_px = int(low_wht_soften_px)
+
+        self.move_stacked = bool(move_stacked)
+        self.partial_save_interval = int(partial_save_interval)
 
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
 
