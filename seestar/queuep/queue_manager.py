@@ -605,6 +605,11 @@ class SeestarQueuedStacker:
         self.stacked_subdir_name = "stacked"
         self.batch_count_path = None
         self._current_batch_paths = []
+
+
+        # By default, keep raw files where they are
+        self.move_stacked = False
+
         
         self.use_quality_weighting = False 
         self.weight_by_snr = True          
@@ -6796,6 +6801,7 @@ class SeestarQueuedStacker:
         astap_downsample=1,
         astap_sensitivity=100,
         local_solver_preference="none",
+
         move_stacked=False,
         partial_save_interval=10,
         save_as_float32=False,
