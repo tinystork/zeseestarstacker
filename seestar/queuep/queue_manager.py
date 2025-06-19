@@ -3304,8 +3304,11 @@ class SeestarQueuedStacker:
 
                             if self.reproject_between_batches:
                                 # --- NEW incremental reprojection on *stacked* batches ---
+                                # store only the components expected by
+                                # ``_stack_batch`` (data, header, scores,
+                                # wcs_object, valid_mask)
                                 current_batch_items_with_masks_for_stack_batch.append(
-                                    item_result_tuple
+                                    item_result_tuple[:5]
                                 )
                                 self._current_batch_paths.append(file_path)
 
@@ -7489,8 +7492,10 @@ class SeestarQueuedStacker:
             )
             return None, None, None
 
-        # --- NOUVELLE VÉRIFICATION STRICTE POUR LA REPROJECTION ---
-        if self.reproject_between_batches:
+        # --- Vérification WCS seulement si nécessaire ---
+        if self.reproject_between_batches and (
+            self.drizzle_active_session or self.is_mosaic_run
+        ):
             all_have_wcs = all(
                 wcs is not None and getattr(wcs, "is_celestial", False)
                 for wcs in valid_wcs_objs_for_ccdproc
