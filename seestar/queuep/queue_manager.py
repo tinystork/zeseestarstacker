@@ -33,7 +33,7 @@ from pathlib import Path
 import sys
 import asyncio
 import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 import warnings
 
@@ -7503,36 +7503,52 @@ class SeestarQueuedStacker:
                 )
                 stack_info_header["STK_NOTE"] = "Stacked with winsorized sigma clip"
             else:
-                data_stack_for_numpy = np.stack(image_data_list, axis=0)
-                weight_shape = (-1,) + (1,) * (data_stack_for_numpy.ndim - 1)
-                quality_weights = quality_weights.reshape(weight_shape)
+                # ------------------------------------------------------------------
+                # 🆕 Implémentation mémoire-efficient & multithread
+                # ------------------------------------------------------------------
+                # Prépare les listes déjà filtrées : image_data_list, coverage_maps_list,
+                # et le tableau quality_weights (shape = (N,))
 
-                coverage_mult = (
-                    coverage_stack_for_numpy[..., np.newaxis]
-                    if data_stack_for_numpy.ndim == 4
-                    else coverage_stack_for_numpy
+                N = num_valid_images_for_processing
+                img0 = image_data_list[0]
+                is_color = img0.ndim == 3  # (H,W,3)   sinon (H,W)
+
+                # Accumulateurs (float32 pour limiter la RAM)
+                sum_signal = np.zeros_like(img0, dtype=np.float32)
+                sum_weights = np.zeros(
+                    img0.shape[:2] + ((1,) if is_color else ()), dtype=np.float32
                 )
 
-                weighted_signal = data_stack_for_numpy * coverage_mult * quality_weights
-                total_weights = coverage_mult * quality_weights
+                def weigh_one(arg):
+                    """Calcule (signal × poids, poids) pour une image."""
+                    img, cov, w = arg
+                    cov_b = cov[..., None] if is_color else cov
+                    weighted = img * (cov_b * w)
+                    return weighted.astype(np.float32), (cov_b * w).astype(np.float32)
 
-                sum_weighted_signal = np.sum(weighted_signal, axis=0)
-                sum_total_weights = np.sum(total_weights, axis=0)
-                sum_total_weights_safe = np.maximum(sum_total_weights, 1e-9)
+                max_workers = min(8, os.cpu_count() or 2)
+                with ThreadPoolExecutor(max_workers=max_workers) as exe:
+                    for sig, wgt in exe.map(
+                        weigh_one,
+                        zip(image_data_list, coverage_maps_list, quality_weights),
+                    ):
+                        sum_signal += sig
+                        sum_weights += wgt
 
-                stacked_batch_data_np = (
-                    sum_weighted_signal / sum_total_weights_safe
+                stacked_batch_data_np = np.divide(
+                    sum_signal,
+                    np.maximum(sum_weights, 1e-9),
+                    out=np.zeros_like(sum_signal, dtype=np.float32),
+                    where=sum_weights > 1e-9,
                 ).astype(np.float32)
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
-                )
+
+                batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
 
                 stack_info_header = fits.Header()
-                stack_info_header["NIMAGES"] = (
-                    num_valid_images_for_processing,
-                    "Images in this batch stack",
+                stack_info_header["NIMAGES"] = (N, "Images in this batch stack")
+                stack_info_header["STK_NOTE"] = (
+                    f"Stacked with incremental NumPy ({max_workers} threads)"
                 )
-                stack_info_header["STK_NOTE"] = "Stacked with NumPy weighted average"
 
             self.update_progress(
                 f"✅ Combinaison lot (Lot {current_batch_num}/{total_batches_est}) terminée (Shape: {stacked_batch_data_np.shape})"
