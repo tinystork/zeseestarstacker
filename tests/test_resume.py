@@ -64,6 +64,7 @@ def test_open_existing_memmaps(tmp_path):
     assert s.stacked_batches_count == 3
 
 
+
 def test_save_partial_stack(tmp_path):
     out = tmp_path
     s = SeestarQueuedStacker()
@@ -84,3 +85,4 @@ def test_save_partial_stack(tmp_path):
 
     expected = out / "stack_batch002.fit"
     assert expected.exists()
+

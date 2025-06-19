@@ -7216,6 +7216,7 @@ class SeestarQueuedStacker:
             stack = np.nan_to_num(sum_arr / np.maximum(wht_arr, 1e-6))
         base = (
             Path(self.output_folder)
+
             / f"{self.output_filename}_batch{self.stacked_batches_count:03d}.fit"
         )
         tmp = base.with_suffix(".tmp")
@@ -7223,6 +7224,7 @@ class SeestarQueuedStacker:
             fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0)).writeto(tmp, overwrite=True)
             os.replace(tmp, base)
             self.update_progress(f"💾 Saved {base.name}")
+
             if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
                 try:
                     self.gui.last_stack_path.set(str(base))
@@ -9102,7 +9104,9 @@ class SeestarQueuedStacker:
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
         fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
         os.replace(tmp, out_path)
+
         self.update_progress(f"💾 Saved {os.path.basename(out_path)}")
+
         if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
             try:
                 self.gui.last_stack_path.set(out_path)
