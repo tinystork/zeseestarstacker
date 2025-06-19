@@ -68,7 +68,7 @@ from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
 )
-from ..core.stack_methods import (
+from seestar.core.stack_methods import (
     _stack_mean,
     _stack_median,
     _stack_kappa_sigma,
@@ -147,7 +147,9 @@ def _stack_worker(args):
     ) = args
     os.environ["OMP_NUM_THREADS"] = "1"
 
-    from ..core.stack_methods import (
+
+    from seestar.core.stack_methods import (
+
         _stack_mean,
         _stack_median,
         _stack_kappa_sigma,
