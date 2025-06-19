@@ -1380,7 +1380,7 @@ class SettingsManager:
                 )
                 self.stack_norm_method = defaults_fallback["stack_norm_method"]
 
-            valid_weight_methods = ["none", "noise_variance", "noise_fwhm"]
+            valid_weight_methods = ["none", "noise_variance", "noise_fwhm", "quality"]
             self.stack_weight_method = str(
                 getattr(
                     self,

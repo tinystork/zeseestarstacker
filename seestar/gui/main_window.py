@@ -355,7 +355,6 @@ class SeestarStackerGUI:
 
         if hasattr(self, "_update_spinbox_from_float"):
             self._update_spinbox_from_float()
-        self._update_weighting_options_state()
         self._update_drizzle_options_state()
         self._update_show_folders_button_state()
         self.update_ui_language()
@@ -792,26 +791,6 @@ class SeestarStackerGUI:
         # Update additional folders display initially
         self.update_additional_folders_display()
 
-    def _update_weighting_options_state(self):
-        """Active ou désactive les options de pondération détaillées."""
-        state = tk.NORMAL if self.use_weighting_var.get() else tk.DISABLED
-        widgets_to_toggle = [
-            getattr(self, "weight_metrics_label", None),
-            getattr(self, "weight_snr_check", None),
-            getattr(self, "weight_stars_check", None),
-            getattr(self, "snr_exp_label", None),
-            getattr(self, "snr_exp_spinbox", None),
-            getattr(self, "stars_exp_label", None),
-            getattr(self, "stars_exp_spinbox", None),
-            getattr(self, "min_w_label", None),
-            getattr(self, "min_w_spinbox", None),
-        ]
-        for widget in widgets_to_toggle:
-            if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists():
-                try:
-                    widget.config(state=state)
-                except tk.TclError:
-                    pass
 
     def show_initial_preview(self):
         """Affiche un état initial dans la zone d'aperçu."""
@@ -1170,7 +1149,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.weight_keys = ["none", "noise_variance", "noise_fwhm"]
+        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "quality"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
@@ -1446,64 +1425,6 @@ class SeestarStackerGUI:
             width=4,
         )
         self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
-        self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Quality Weighting")
-        self.weighting_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.use_weighting_check = ttk.Checkbutton(
-            self.weighting_frame,
-            text="Enable weighting",
-            variable=self.use_weighting_var,
-            command=self._update_weighting_options_state,
-        )
-        self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
-        self.weighting_options_frame = ttk.Frame(self.weighting_frame)
-        self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
-        metrics_frame = ttk.Frame(self.weighting_options_frame)
-        metrics_frame.pack(fill=tk.X, pady=2)
-        self.weight_metrics_label = ttk.Label(metrics_frame, text="Metrics:")
-        self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.weight_snr_check = ttk.Checkbutton(
-            metrics_frame, text="SNR", variable=self.weight_snr_var
-        )
-        self.weight_snr_check.pack(side=tk.LEFT, padx=5)
-        self.weight_stars_check = ttk.Checkbutton(
-            metrics_frame, text="Star Count", variable=self.weight_stars_var
-        )
-        self.weight_stars_check.pack(side=tk.LEFT, padx=5)
-        params_frame = ttk.Frame(self.weighting_options_frame)
-        params_frame.pack(fill=tk.X, pady=2)
-        self.snr_exp_label = ttk.Label(params_frame, text="SNR Exp.:")
-        self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.snr_exp_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.1,
-            to=3.0,
-            increment=0.1,
-            textvariable=self.snr_exponent_var,
-            width=5,
-        )
-        self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.stars_exp_label = ttk.Label(params_frame, text="Stars Exp.:")
-        self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.stars_exp_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.1,
-            to=3.0,
-            increment=0.1,
-            textvariable=self.stars_exponent_var,
-            width=5,
-        )
-        self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.min_w_label = ttk.Label(params_frame, text="Min Weight:")
-        self.min_w_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.min_w_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.01,
-            to=1.0,
-            increment=0.01,
-            textvariable=self.min_weight_var,
-            width=5,
-        )
-        self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         self.post_proc_opts_frame = ttk.LabelFrame(
             tab_stacking, text="Post-Processing Options"
         )
@@ -3138,7 +3059,6 @@ class SeestarStackerGUI:
             "options": "options_frame",
             "drizzle_options_frame_label": "drizzle_options_frame",
             "hot_pixels_correction": "hp_frame",
-            "quality_weighting_frame": "weighting_frame",
             "post_proc_opts_frame_label": "post_proc_opts_frame",
             "white_balance": "wb_frame",
             "stretch_options": "stretch_frame_controls",
@@ -5008,8 +4928,7 @@ class SeestarStackerGUI:
             )
             # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
-            # S'assurer que les options de pondération ET DRIZZLE sont dans le bon état initial
-            self._update_weighting_options_state()
+            # S'assurer que les options Drizzle sont dans le bon état initial
             self._update_drizzle_options_state()  # <-- Appel ajouté ici
             # ... (reste de la logique pour state == tk.NORMAL) ...
             if hasattr(self, "add_files_button"):
@@ -5047,7 +4966,6 @@ class SeestarStackerGUI:
         # les options internes (scale drizzle, options poids) sont aussi désactivées,
         # même si la case principale était déjà décochée.
         if state == tk.DISABLED:
-            self._update_weighting_options_state()
             self._update_drizzle_options_state()
 
     def _debounce_resize(self, event=None):
@@ -6646,7 +6564,6 @@ class SeestarStackerGUI:
                 self.update_progress_gui(f"  - {msg}", None)
             print("  -> (4C) Ré-appel self.settings.apply_to_ui(self)...")
             self.settings.apply_to_ui(self)
-            self._update_weighting_options_state()
             self._update_drizzle_options_state()
             self._update_final_scnr_options_state()
             self._update_photutils_bn_options_state()
@@ -6804,13 +6721,15 @@ class SeestarStackerGUI:
                 if isinstance(self.settings.stack_winsor_limits, str)
                 else (0.05, 0.05)
             ),
+            "normalize_method": self.settings.stack_norm_method,
+            "weighting_method": self.settings.stack_weight_method,
             "batch_size": self.settings.batch_size,
             "correct_hot_pixels": self.settings.correct_hot_pixels,
             "hot_pixel_threshold": self.settings.hot_pixel_threshold,
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.use_quality_weighting,
+            "use_weighting": self.settings.stack_weight_method == "quality",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
             "snr_exp": self.settings.snr_exponent,
