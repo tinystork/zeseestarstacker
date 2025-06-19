@@ -3,10 +3,11 @@ import numpy as np
 from astropy.io import fits
 from PIL import Image
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                            QHBoxLayout, QPushButton, QLabel, QFileDialog,
-                            QSlider, QComboBox, QGraphicsView, QGraphicsScene,
-                            QGroupBox, QToolBar, QAction,
-                            QDoubleSpinBox, QTabWidget, QSizePolicy, QMessageBox)
+                             QHBoxLayout, QPushButton, QLabel, QFileDialog,
+                             QSlider, QComboBox, QGraphicsView, QGraphicsScene,
+                             QGroupBox, QToolBar, QAction,
+                             QDoubleSpinBox, QTabWidget, QSizePolicy, QMessageBox,
+                             QSplitter, QScrollArea)
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPalette
 from PyQt5.QtCore import Qt, QRectF, QSettings, pyqtSignal, QTimer, pyqtSlot, QFileInfo, QDir
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -255,7 +256,10 @@ class TelescopeImageViewer(QMainWindow):
     # ... (init_ui : création bouton R identique) ...
     def init_ui(self):
         self.view = ZoomGraphicsView(); self.histogram = HistogramWidget(); self.init_toolbar()
-        main_layout=QHBoxLayout(); control_panel=QWidget(); control_layout=QVBoxLayout(); control_panel.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred); control_panel.setMaximumWidth(450)
+        control_panel=QWidget(); control_layout=QVBoxLayout();
+        control_panel.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred); control_panel.setMaximumWidth(450)
+        control_panel.setMinimumWidth(320)
+        scroll_control = QScrollArea(); scroll_control.setWidgetResizable(True); scroll_control.setFrameShape(QScrollArea.NoFrame); scroll_control.setWidget(control_panel)
         tabs=QTabWidget(); file_tab=QWidget(); self.init_file_tab(file_tab); tabs.addTab(file_tab, "Fichier")
         debayer_tab=QWidget(); self.init_debayer_tab(debayer_tab); tabs.addTab(debayer_tab, "Débayering")
         color_tab=QWidget(); self.init_color_tab(color_tab); tabs.addTab(color_tab, "Couleur")
@@ -267,8 +271,15 @@ class TelescopeImageViewer(QMainWindow):
         reset_zoom_btn = QPushButton("R"); reset_zoom_btn.setToolTip("Réinitialiser zoom histogramme"); reset_zoom_btn.setFixedWidth(35); reset_zoom_btn.setFixedHeight(35)
         reset_zoom_btn.clicked.connect(self.histogram.reset_zoom); hist_container_layout.addWidget(reset_zoom_btn, 0, Qt.AlignTop)
         display_layout.addLayout(hist_container_layout, 2); display_panel.setLayout(display_layout)
-        main_layout.addWidget(control_panel); main_layout.addWidget(display_panel)
-        container=QWidget(); container.setLayout(main_layout); self.setCentralWidget(container)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(scroll_control)
+        self.splitter.addWidget(display_panel)
+        self.splitter.setSizes([350, 900])
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(self.splitter)
+        sizes = QSettings().value("viewer/splitter", None)
+        if sizes: self.splitter.setSizes([int(s) for s in sizes])
         self.histogram.rangeChanged.connect(self.update_stretch_sliders_from_histogram); self.histogram.histogramUpdated.connect(self.on_histogram_ready)
         self.statusBar().showMessage("Prêt. Chargez une image.")
 
@@ -547,7 +558,9 @@ class TelescopeImageViewer(QMainWindow):
         except Exception as e: print(f"Erreur sauvegarde: {e}"); QMessageBox.critical(self, "Erreur", f"Sauvegarde impossible:\n{e}"); self.statusBar().showMessage("Erreur sauvegarde.", 5000)
         finally: QApplication.restoreOverrideCursor()
 
-    def closeEvent(self, event): self.save_settings(); print("Fermeture, paramètres sauvegardés."); super().closeEvent(event)
+    def closeEvent(self, event):
+        QSettings().setValue("viewer/splitter", self.splitter.sizes())
+        self.save_settings(); print("Fermeture, paramètres sauvegardés."); super().closeEvent(event)
 
 # --- Main Execution ---
 if __name__ == "__main__":
