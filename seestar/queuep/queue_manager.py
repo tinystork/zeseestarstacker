@@ -589,6 +589,8 @@ class SeestarQueuedStacker:
         self.correct_hot_pixels = True
         self.apply_chroma_correction = True
         self.apply_final_scnr = False
+        # Flag pour détecter un arrêt demandé explicitement par l'utilisateur
+        self.user_requested_stop = False
 
         # Info message pour l'utilisateur
         self.warned_unaligned_source_folders = set()
@@ -3895,7 +3897,10 @@ class SeestarQueuedStacker:
                 self._cleanup_drizzle_temp_files()  # Dossier des inputs Drizzle (aligned_input_*.fits)
                 self._cleanup_drizzle_batch_outputs()  # Dossier des sorties Drizzle par lot (batch_*_sci.fits, batch_*_wht_*.fits)
                 self._cleanup_mosaic_panel_stacks_temp()  # Dossier des stacks de panneaux (si ancienne logique ou tests)
-                self.cleanup_temp_reference()  # Fichiers reference_image.fit/png
+                if not self.user_requested_stop:
+                    self.cleanup_temp_reference()  # Fichiers reference_image.fit/png
+                if not self.stop_processing:
+                    self._cleanup_memmap_files()
 
             self.processing_active = False
             self.stop_processing_flag_for_gui = (
@@ -9150,6 +9155,28 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"⚠️ Erreur nettoyage référence temp: {e}")
 
+    ############################################################################
+    ####################################################################
+
+    def _cleanup_memmap_files(self):
+        """Supprime le dossier memmap_accumulators en fin de traitement."""
+        if self.output_folder is None:
+            logger.debug(
+                "WARN QM [_cleanup_memmap_files]: self.output_folder non défini, nettoyage annulé."
+            )
+            return
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        if os.path.isdir(memmap_dir):
+            try:
+                shutil.rmtree(memmap_dir)
+                self.update_progress(
+                    f"🧹 Dossier memmap supprimé: {os.path.basename(memmap_dir)}"
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Erreur suppression dossier memmap ({os.path.basename(memmap_dir)}): {e}"
+                )
+
     ################################################################################################################################################
 
     def add_folder(self, folder_path):
@@ -9376,6 +9403,7 @@ class SeestarQueuedStacker:
             return False
 
         self.stop_processing = False
+        self.user_requested_stop = False
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:
@@ -10247,6 +10275,7 @@ class SeestarQueuedStacker:
         if not self.processing_active:
             return
         self.update_progress("⛔ Arrêt demandé...")
+        self.user_requested_stop = True
         self.stop_processing = True
         self.aligner.stop_processing = True
 

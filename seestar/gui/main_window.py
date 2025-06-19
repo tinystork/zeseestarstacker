@@ -6731,6 +6731,15 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée."
         )
+
+        # Sauvegarde d'un fichier .cfg résumant ce run
+        try:
+            cfg_name = f"{self.settings.output_filename}_stack_{time.strftime('%Y%m%d_%H%M%S')}.cfg"
+            cfg_path = os.path.join(self.settings.output_folder, cfg_name)
+            self.settings.export_run_settings(cfg_path)
+            self.logger.info(f"Configuration du run sauvegardée dans {cfg_path}")
+        except Exception as e_cfg:
+            self.logger.warning(f"Échec sauvegarde fichier cfg: {e_cfg}")
         # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
         valeur_a_passer_pour_float32_gui = getattr(
             self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START"

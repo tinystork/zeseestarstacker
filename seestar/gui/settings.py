@@ -2358,6 +2358,15 @@ class SettingsManager:
         except Exception as e:
             logger.debug(f"Unexpected error saving settings: {e}")
 
+    def export_run_settings(self, file_path: str):
+        """Enregistre les paramètres actuels dans un fichier spécifique."""
+        original = self.settings_file
+        try:
+            self.settings_file = file_path
+            self.save_settings()
+        finally:
+            self.settings_file = original
+
     ###################################################################################################################################
 
     # --- DANS LA CLASSE SettingsManager DANS seestar/gui/settings.py ---
