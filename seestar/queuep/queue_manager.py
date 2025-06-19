@@ -606,7 +606,6 @@ class SeestarQueuedStacker:
         self.batch_count_path = None
         self._current_batch_paths = []
 
-
         # By default, keep raw files where they are
         self.move_stacked = False
 
@@ -6804,6 +6803,8 @@ class SeestarQueuedStacker:
 
         move_stacked=False,
         partial_save_interval=10,
+        *,
+
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=False,
