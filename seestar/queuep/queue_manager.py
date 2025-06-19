@@ -3213,7 +3213,9 @@ class SeestarQueuedStacker:
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,  # Passé mais pas utilisé pour l'alignement direct dans ce mode
-                            solve_astrometry_for_this_file=False if self.reproject_between_batches else True,
+                            solve_astrometry_for_this_file=(
+                                False if self.reproject_between_batches else True
+                            ),
                         )
                         self.processed_files_count += 1
                         if (
@@ -3269,7 +3271,10 @@ class SeestarQueuedStacker:
                             f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file."
                         )
                         solve_astrometry = False
-                        if self.reproject_between_batches and not current_batch_items_with_masks_for_stack_batch:
+                        if (
+                            self.reproject_between_batches
+                            and not current_batch_items_with_masks_for_stack_batch
+                        ):
                             solve_astrometry = True
 
                         item_result_tuple = self._process_file(
@@ -3287,12 +3292,19 @@ class SeestarQueuedStacker:
 
                             if self.reproject_between_batches:
                                 # --- NEW incremental reprojection on *stacked* batches ---
-                                current_batch_items_with_masks_for_stack_batch.append(item_result_tuple)
+                                current_batch_items_with_masks_for_stack_batch.append(
+                                    item_result_tuple
+                                )
                                 self._current_batch_paths.append(file_path)
 
-                                if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
+                                if (
+                                    len(current_batch_items_with_masks_for_stack_batch)
+                                    >= self.batch_size
+                                ):
                                     self.stacked_batches_count += 1
-                                    num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
+                                    num_in_batch = len(
+                                        current_batch_items_with_masks_for_stack_batch
+                                    )
 
                                     # 1. Stack the batch (classic SUM/W)
                                     stacked_np, hdr, wht_2d = self._stack_batch(
@@ -3305,8 +3317,13 @@ class SeestarQueuedStacker:
                                         gc.collect()
                                     else:
                                         # 2. Ensure WCS on the stacked image
-                                        solved_path, _ = self._save_and_solve_classic_batch(
-                                            stacked_np, wht_2d, hdr, self.stacked_batches_count
+                                        solved_path, _ = (
+                                            self._save_and_solve_classic_batch(
+                                                stacked_np,
+                                                wht_2d,
+                                                hdr,
+                                                self.stacked_batches_count,
+                                            )
                                         )
                                         batch_wcs = None
                                         try:
@@ -3322,14 +3339,35 @@ class SeestarQueuedStacker:
                                             batch_wcs=batch_wcs,
                                         )
 
-                                        # Use the solved and stacked batch as the
-                                        # new reference for subsequent alignment
-                                        reference_image_data_for_global_alignment = stacked_np.astype(
-                                            np.float32, copy=True
-                                        )
-                                        reference_header_for_global_alignment = hdr.copy()
-                                        if batch_wcs is not None:
-                                            self.reference_wcs_object = batch_wcs
+                                        # After accumulation, solve the cumulative stack
+                                        if self.reproject_between_batches:
+                                            stack_img, solved_hdr = (
+                                                self._solve_cumulative_stack()
+                                            )
+                                            if (
+                                                stack_img is not None
+                                                and solved_hdr is not None
+                                            ):
+                                                reference_image_data_for_global_alignment = (
+                                                    stack_img
+                                                )
+                                                reference_header_for_global_alignment = (
+                                                    solved_hdr.copy()
+                                                )
+                                            else:
+                                                reference_image_data_for_global_alignment = stacked_np.astype(
+                                                    np.float32, copy=True
+                                                )
+                                                reference_header_for_global_alignment = (
+                                                    hdr.copy()
+                                                )
+                                        else:
+                                            reference_image_data_for_global_alignment = stacked_np.astype(
+                                                np.float32, copy=True
+                                            )
+                                            reference_header_for_global_alignment = (
+                                                hdr.copy()
+                                            )
 
                                         current_batch_items_with_masks_for_stack_batch.clear()
                                         self._current_batch_paths = []
@@ -3791,12 +3829,23 @@ class SeestarQueuedStacker:
                             batch_wcs=batch_wcs,
                         )
 
-                        reference_image_data_for_global_alignment = stacked_np.astype(
-                            np.float32, copy=True
-                        )
-                        reference_header_for_global_alignment = hdr.copy()
-                        if batch_wcs is not None:
-                            self.reference_wcs_object = batch_wcs
+                        if self.reproject_between_batches:
+                            stack_img, solved_hdr = self._solve_cumulative_stack()
+                            if stack_img is not None and solved_hdr is not None:
+                                reference_image_data_for_global_alignment = stack_img
+                                reference_header_for_global_alignment = (
+                                    solved_hdr.copy()
+                                )
+                            else:
+                                reference_image_data_for_global_alignment = (
+                                    stacked_np.astype(np.float32, copy=True)
+                                )
+                                reference_header_for_global_alignment = hdr.copy()
+                        else:
+                            reference_image_data_for_global_alignment = (
+                                stacked_np.astype(np.float32, copy=True)
+                            )
+                            reference_header_for_global_alignment = hdr.copy()
 
                         if hasattr(self.cumulative_sum_memmap, "flush"):
                             self.cumulative_sum_memmap.flush()
@@ -8022,6 +8071,47 @@ class SeestarQueuedStacker:
             cache_path, overwrite=True
         )
         return cache_path
+
+    def _solve_cumulative_stack(self):
+        """Solve the current cumulative stack with ASTAP and update reference WCS."""
+
+        if (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.reference_header_for_wcs is None
+        ):
+            return None, None
+
+        sum_arr = np.array(self.cumulative_sum_memmap, dtype=np.float32)
+        wht_arr = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            wht_safe = np.maximum(wht_arr, 1e-6)
+            stack = np.nan_to_num(sum_arr / wht_safe[:, :, np.newaxis])
+
+        hdr = self.reference_header_for_wcs.copy()
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp.close()
+        fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
+            tmp.name, overwrite=True
+        )
+        solved_ok = self._run_astap_and_update_header(tmp.name)
+        if solved_ok:
+            hdr = fits.getheader(tmp.name)
+        os.remove(tmp.name)
+
+        try:
+            self.reference_wcs_object = WCS(hdr, naxis=2)
+            self.reference_wcs_object.pixel_shape = (
+                stack.shape[1],
+                stack.shape[0],
+            )
+        except Exception:
+            pass
+
+        self.reference_header_for_wcs = hdr.copy()
+        self.ref_wcs_header = hdr.copy()
+
+        return stack.astype(np.float32), hdr
 
     def _can_resume(self, out_dir: Path) -> bool:
         req = [
