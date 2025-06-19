@@ -21,6 +21,7 @@ import math
 import multiprocessing
 from queue import Queue, Empty  # Essentiel pour la classe
 import shutil
+from ..tools.file_ops import move_to_stacked
 import tempfile
 import threading  # Essentiel pour la classe (Lock)
 import time
@@ -562,6 +563,12 @@ class SeestarQueuedStacker:
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
 
+        self.partial_save_interval = 10
+        self.stacked_subdir_name = "stacked"
+        self.move_stacked = False
+        self._current_batch_paths = []
+        self.meta_batches_path = None
+
         # Master arrays when combining batches with incremental reprojection
         self.master_sum = None
         self.master_coverage = None
@@ -982,32 +989,44 @@ class SeestarQueuedStacker:
             wht_shape_memmap = self.memmap_shape[:2]
             logger.debug(f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}")
 
-            logger.debug(
-                "  -> Tentative création/ouverture fichiers memmap SUM/WHT (mode 'w+')..."
+            self.meta_batches_path = os.path.join(memmap_dir, "batches_count.txt")
+            resume_existing = (
+                os.path.exists(self.sum_memmap_path)
+                and os.path.exists(self.wht_memmap_path)
             )
             try:
-                self.cumulative_sum_memmap = np.lib.format.open_memmap(
-                    self.sum_memmap_path,
-                    mode='w+',
-                    dtype=self.memmap_dtype_sum,
-                    shape=self.memmap_shape,
-                )
-                self.cumulative_sum_memmap[:] = 0.0
-                logger.debug(
-                    f"  -> Memmap SUM ({self.memmap_shape}) créé/ouvert et initialisé à zéro."
-                )
-
-                self.cumulative_wht_memmap = np.lib.format.open_memmap(
-                    self.wht_memmap_path,
-                    mode='w+',
-                    dtype=self.memmap_dtype_wht,
-                    shape=wht_shape_memmap,
-                )
-                self.cumulative_wht_memmap[:] = 0
-                logger.debug(
-                    f"  -> Memmap WHT ({wht_shape_memmap}) créé/ouvert et initialisé à zéro."
-                )
-
+                if resume_existing:
+                    self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                        self.sum_memmap_path, mode="r+"
+                    )
+                    self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                        self.wht_memmap_path, mode="r+"
+                    )
+                    self.memmap_shape = self.cumulative_sum_memmap.shape
+                    self.update_progress("Resuming from existing memmaps", "INFO")
+                    if os.path.exists(self.meta_batches_path):
+                        try:
+                            with open(self.meta_batches_path, "r") as f:
+                                self.stacked_batches_count = int(f.read().strip())
+                        except Exception:
+                            pass
+                else:
+                    self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                        self.sum_memmap_path,
+                        mode="w+",
+                        dtype=self.memmap_dtype_sum,
+                        shape=self.memmap_shape,
+                    )
+                    self.cumulative_sum_memmap[:] = 0.0
+                    self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                        self.wht_memmap_path,
+                        mode="w+",
+                        dtype=self.memmap_dtype_wht,
+                        shape=wht_shape_memmap,
+                    )
+                    self.cumulative_wht_memmap[:] = 0
+                    if os.path.exists(self.meta_batches_path):
+                        os.remove(self.meta_batches_path)
                 self.incremental_drizzle_objects = []
 
             except (IOError, OSError, ValueError, TypeError) as e_memmap:
@@ -2026,6 +2045,7 @@ class SeestarQueuedStacker:
         mosaic_ref_panel_header = None     # Utilisé seulement si local_fast_fallback
 
         current_batch_items_with_masks_for_stack_batch = []
+        self._current_batch_paths = []
         self.intermediate_drizzle_batch_files = []
         solved_items_for_final_reprojection = []
         all_aligned_files_with_info_for_mosaic = []
@@ -2464,6 +2484,7 @@ class SeestarQueuedStacker:
                                 # --- MODE REPROJECTION INCREMENTALE ---
                                 self.aligned_files_count += 1
                                 current_batch_items_with_masks_for_stack_batch.append(item_result_tuple)
+                                self._current_batch_paths.append(file_path)
 
                                 if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
                                     self.stacked_batches_count += 1
@@ -2511,6 +2532,11 @@ class SeestarQueuedStacker:
                                             "   -> Échec reproject_and_coadd_batch", "ERROR"
                                         )
 
+                                    if self.move_stacked and self._current_batch_paths:
+                                        move_to_stacked(self._current_batch_paths, self.update_progress, self.stacked_subdir_name)
+                                        self._current_batch_paths = []
+                                    self._update_batches_meta()
+                                    self._save_partial_stack()
                                     current_batch_items_with_masks_for_stack_batch = []
                                     gc.collect()
 
@@ -2524,6 +2550,7 @@ class SeestarQueuedStacker:
                                     temp_driz_file_path = self._save_drizzle_input_temp(aligned_data, header_orig)
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(temp_driz_file_path)
+                                        self._current_batch_paths.append(file_path)
                                     else:
                                         self.failed_stack_count += 1
                                         logger.debug(f"    DEBUG _worker (iter {iteration_count}): Échec _save_drizzle_input_temp pour '{file_name_for_log}'.")
@@ -2531,6 +2558,7 @@ class SeestarQueuedStacker:
                                     logger.debug(f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'.")
                                     classic_stack_item = (aligned_data, header_orig, scores_val, wcs_gen_val, valid_mask_val)
                                     current_batch_items_with_masks_for_stack_batch.append(classic_stack_item)
+                                    self._current_batch_paths.append(file_path)
 
                                 if len(current_batch_items_with_masks_for_stack_batch) >= self.batch_size:
                                     self.stacked_batches_count += 1
@@ -2560,6 +2588,11 @@ class SeestarQueuedStacker:
                                             self.total_batches_estimated,
                                             self.reference_wcs_object
                                         )
+                                    if self.move_stacked and self._current_batch_paths:
+                                        move_to_stacked(self._current_batch_paths, self.update_progress, self.stacked_subdir_name)
+                                        self._current_batch_paths = []
+                                    self._update_batches_meta()
+                                    self._save_partial_stack()
                                     current_batch_items_with_masks_for_stack_batch = []
 
                         else:  # _process_file a échoué
@@ -2715,6 +2748,11 @@ class SeestarQueuedStacker:
                             current_batch_items_with_masks_for_stack_batch, # Liste de CHEMINS
                             self.stacked_batches_count, self.total_batches_estimated
                         )
+                    if self.move_stacked and self._current_batch_paths:
+                        move_to_stacked(self._current_batch_paths, self.update_progress, self.stacked_subdir_name)
+                        self._current_batch_paths = []
+                    self._update_batches_meta()
+                    self._save_partial_stack()
                     current_batch_items_with_masks_for_stack_batch = []
                 
                 # --- Sauvegarde finale spécifique au mode Drizzle ---
@@ -2784,6 +2822,11 @@ class SeestarQueuedStacker:
                     else:
                         self.update_progress("   -> Échec reproject_and_coadd_batch", "ERROR")
 
+                    if self.move_stacked and self._current_batch_paths:
+                        move_to_stacked(self._current_batch_paths, self.update_progress, self.stacked_subdir_name)
+                        self._current_batch_paths = []
+                    self._update_batches_meta()
+                    self._save_partial_stack()
                     current_batch_items_with_masks_for_stack_batch = []
                     gc.collect()
 
@@ -2795,6 +2838,11 @@ class SeestarQueuedStacker:
                         current_batch_items_with_masks_for_stack_batch,
                         self.stacked_batches_count, self.total_batches_estimated, self.reference_wcs_object
                     )
+                    if self.move_stacked and self._current_batch_paths:
+                        move_to_stacked(self._current_batch_paths, self.update_progress, self.stacked_subdir_name)
+                        self._current_batch_paths = []
+                    self._update_batches_meta()
+                    self._save_partial_stack()
                     current_batch_items_with_masks_for_stack_batch = []
 
                 if self.reproject_between_batches:
@@ -6444,12 +6492,42 @@ class SeestarQueuedStacker:
             # else:
                 # Optionnel: loguer que le dossier existe déjà
                 # self.update_progress(f"ⓘ Dossier pour fichiers non alignés existe déjà: {self.unaligned_folder}")
-            
-            # Log explicite que les fichiers ne sont PAS supprimés par cette fonction
-            logger.debug(f"DEBUG QM [cleanup_unaligned_files]: Contenu de '{self.unaligned_folder}' CONSERVÉ (pas de suppression automatique).")
-            # self.update_progress(f"ⓘ Fichiers dans '{os.path.basename(self.unaligned_folder)}' conservés pour analyse.") # Optionnel pour l'UI
-        else:
-            logger.debug(f"DEBUG QM [cleanup_unaligned_files]: self.unaligned_folder non défini, aucune action de nettoyage/création.")
+
+    def _update_batches_meta(self):
+        if not self.meta_batches_path:
+            return
+        try:
+            tmp = self.meta_batches_path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(str(self.stacked_batches_count))
+            os.replace(tmp, self.meta_batches_path)
+        except Exception as e:
+            self.update_progress(f"⚠️ Meta update failed: {e}", "WARN")
+
+    def _save_partial_stack(self):
+        if (
+            self.partial_save_interval <= 0
+            or self.stacked_batches_count % self.partial_save_interval != 0
+        ):
+            return
+        if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None:
+            return
+
+        base_name = self.output_filename or "stack"
+        out_path = os.path.join(
+            self.output_folder,
+            f"{base_name}_partial_batch_{self.stacked_batches_count:03d}.fits",
+        )
+        tmp = out_path + ".tmp"
+        sum_data = np.array(self.cumulative_sum_memmap, dtype=np.float32)
+        wht_data = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+        eps = 1e-9
+        with np.errstate(divide="ignore", invalid="ignore"):
+            avg = sum_data / np.maximum(wht_data[..., None], eps)
+        avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
+        fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
+        os.replace(tmp, out_path)
+        self.update_progress(f"💾 Saved {os.path.basename(out_path)}", "INFO_DETAIL")
 
 
 
@@ -6542,6 +6620,8 @@ class SeestarQueuedStacker:
                 if self.stop_processing: self.update_progress("⛔ Scan interrompu."); break
                 if fname.lower().endswith(('.fit', '.fits')):
                     fpath = os.path.join(abs_folder_path, fname)
+                    if self.stacked_subdir_name in os.path.relpath(fpath, abs_folder_path).split(os.sep):
+                        continue
                     abs_fpath = os.path.abspath(fpath)
                     if abs_fpath not in self.processed_files:
                         # ---> AJOUTER CETTE LIGNE <---
@@ -6633,6 +6713,8 @@ class SeestarQueuedStacker:
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=False,
+        move_stacked=False,
+        partial_save_interval=10,
     ):
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
@@ -6775,6 +6857,8 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.preserve_linear_output (attribut d'instance) mis à : {self.preserve_linear_output} (depuis argument {preserve_linear_output})"
         )
         self.reproject_between_batches = bool(reproject_between_batches)
+        self.move_stacked = bool(move_stacked)
+        self.partial_save_interval = max(1, int(partial_save_interval))
 
 
         # --- FIN NOUVEAU ---
