@@ -2933,7 +2933,18 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     "DEBUG WORKER: Branche Drizzle Std / AstroMosaic / ReprojectBatches pour référence globale..."
                 )
-                if self.astrometry_solver and os.path.exists(
+
+                if (
+                    self.reproject_between_batches
+                    and not self.drizzle_active_session
+                    and not self.is_mosaic_run
+                ):
+                    self.update_progress(
+                        "   -> Reproject entre lots actif: résolution de la référence reportée au premier stack",
+                        "INFO_DETAIL",
+                    )
+                    self.reference_wcs_object = None
+                elif self.astrometry_solver and os.path.exists(
                     reference_image_path_for_solver
                 ):
                     self.update_progress(
@@ -3273,6 +3284,7 @@ class SeestarQueuedStacker:
                         solve_astrometry = False
                         if (
                             self.reproject_between_batches
+                            and self.drizzle_active_session
                             and not current_batch_items_with_masks_for_stack_batch
                         ):
                             solve_astrometry = True
