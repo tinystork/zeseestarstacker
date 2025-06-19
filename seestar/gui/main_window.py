@@ -3843,6 +3843,20 @@ class SeestarStackerGUI:
         """Callback function triggered by the backend worker.
         MODIFIED: Performs auto-stretch/WB ONLY ONCE at the beginning of a session.
         """
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(
+                0,
+                lambda sd=stack_data,
+                sh=stack_header,
+                sn=stack_name,
+                ic=img_count,
+                ti=total_imgs,
+                cb=current_batch,
+                tb=total_batches: self.update_preview_from_stacker(
+                    sd, sh, sn, ic, ti, cb, tb
+                ),
+            )
+            return
         self.logger.debug("[DEBUG-GUI] update_preview_from_stacker: Called.")
 
         if self._final_stretch_set_by_processing_finished:
@@ -4559,98 +4573,61 @@ class SeestarStackerGUI:
             try:
                 # Check if the worker thread is still active
                 if not self.queued_stacker.is_running():
-                    # print("DEBUG: Worker is_running() is False. Preparing to finalize.") # Keep disabled
-                    # --- CORRECTED JOIN LOGIC ---
-                    # Check and join the *worker* thread object stored in the queued_stacker
                     worker_thread = getattr(
                         self.queued_stacker, "processing_thread", None
                     )
                     if worker_thread and worker_thread.is_alive():
-                        # print("DEBUG: Joining worker thread...") # Keep disabled
-                        worker_thread.join(timeout=0.5)  # Wait up to 0.5 seconds
-                        # if worker_thread.is_alive():
-                        #     print("WARN: Worker thread did not exit cleanly after join timeout.") # Keep disabled
-                        # else:
-                        #     print("DEBUG: Worker thread joined successfully.") # Keep disabled
-                    # else:
-                    # print("DEBUG: Worker thread object not found or already dead.") # Keep disabled
-                    # --- END CORRECTED JOIN LOGIC ---
-
-                    # Now that we've waited, schedule the final GUI update routine
-                    # print("DEBUG: Scheduling _processing_finished...") # Keep disabled
+                        worker_thread.join(timeout=0.5)
                     self.root.after(0, self._processing_finished)
-                    break  # Exit the monitoring loop
+                    break
 
-                # --- Update intermediate progress stats (ETA, counts) ---
                 q_stacker = self.queued_stacker
                 processed = q_stacker.processed_files_count
                 aligned = q_stacker.aligned_files_count
                 total_queued = q_stacker.files_in_queue
 
-                # Calculate ETA
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
                     self.time_per_image = elapsed / processed
-                    try:
-                        remaining_estimated = max(0, total_queued - processed)
-                        if self.time_per_image > 1e-6 and remaining_estimated > 0:
-                            eta_seconds = remaining_estimated * self.time_per_image
-                            h, rem = divmod(int(eta_seconds), 3600)
-                            m, s = divmod(rem, 60)
-                            self.remaining_time_var.set(f"{h:02}:{m:02}:{s:02}")
-                        elif remaining_estimated == 0 and total_queued > 0:
-                            self.remaining_time_var.set("00:00:00")  # Finishing up
-                        else:
-                            self.remaining_time_var.set(
-                                self.tr("eta_calculating", default="Calculating...")
-                            )
-                    except tk.TclError:
-                        # print("DEBUG: tk.TclError updating ETA, breaking tracker loop.") # Keep disabled
-                        break  # Exit loop if Tkinter objects are gone
-                    except Exception as eta_err:
-                        print(f"Warning: Error calculating ETA: {eta_err}")
-                        traceback.print_exc(limit=2)
-                        try:
-                            self.remaining_time_var.set("--:--:--")
-                        except tk.TclError:
-                            break
+                    remaining_estimated = max(0, total_queued - processed)
+                    if self.time_per_image > 1e-6 and remaining_estimated > 0:
+                        eta_seconds = remaining_estimated * self.time_per_image
+                        h, rem = divmod(int(eta_seconds), 3600)
+                        m, s = divmod(rem, 60)
+                        eta_str = f"{h:02}:{m:02}:{s:02}"
+                    elif remaining_estimated == 0 and total_queued > 0:
+                        eta_str = "00:00:00"
+                    else:
+                        eta_str = self.tr("eta_calculating", default="Calculating...")
+                else:
+                    eta_str = self.tr("eta_calculating", default="Calculating...")
 
-                else:  # Not enough info for ETA yet
-                    try:
-                        self.remaining_time_var.set(
-                            self.tr("eta_calculating", default="Calculating...")
-                        )
-                    except tk.TclError:
-                        break  # Exit loop
-
-                # Update Aligned Files Count
                 default_aligned_fmt = self.tr(
                     "aligned_files_label_format", default="Aligned: {count}"
                 )
-                try:
-                    self.aligned_files_var.set(
-                        default_aligned_fmt.format(count=aligned)
-                    )
-                except tk.TclError:
-                    # print("DEBUG: tk.TclError updating aligned count, breaking tracker loop.") # Keep disabled
-                    break  # Exit loop
+                remaining = max(0, total_queued - processed)
+                total = total_queued
 
-                # Update Remaining/Total Files display
-                self.update_remaining_files()  # Calls the method to update R/T label
+                def _gui_update(es=eta_str, al=aligned, rem=remaining, tot=total, fmt=default_aligned_fmt):
+                    try:
+                        self.remaining_time_var.set(es)
+                        self.aligned_files_var.set(fmt.format(count=al))
+                        self.remaining_files_var.set(f"{rem}/{tot}")
+                    except tk.TclError:
+                        pass
 
-                # Sleep briefly to avoid busy-waiting
+                self.root.after(0, _gui_update)
+
                 time.sleep(0.5)
 
             except Exception as e:
-                # Catch errors within the tracking loop itself
                 print(f"Error in GUI progress tracker thread loop: {e}")
                 traceback.print_exc(limit=2)
-                # Attempt to gracefully finish processing in case of tracker error
                 try:
                     self.root.after(0, self._processing_finished)
                 except tk.TclError:
-                    pass  # Tk might be gone
-                break  # Exit the tracker loop on error
+                    pass
+                break
 
         # print("DEBUG: GUI Progress Tracker Thread Exiting.") # Keep disabled
 
@@ -5385,12 +5362,18 @@ class SeestarStackerGUI:
 
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
-    def update_progress_gui(self, message, progress=None):
+    def update_progress_gui(self, message: str, progress: float | None = None):
         """
-        Met à jour l'interface de progression.
-        MODIFIED: Détection et transmission du message UNALIGNED_INFO avec niveau WARN.
-        Version: V_UnalignedInfoLog_1
+        Affiche un message dans le widget log et met à jour la barre de progression.
+        S'assure d'être toujours exécuté dans le thread principal Tkinter.
         """
+        # --- ROUTAGE VERS LE THREAD GUI ---
+        if threading.current_thread() is not threading.main_thread():
+            # Planifie l'exécution dans la boucle d'événements Tkinter et sort.
+            self.root.after(0, lambda m=message, p=progress: self.update_progress_gui(m, p))
+            return
+
+        # --- CODE EXISTANT (garde intact le reste) ------------------------------
         # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try:
