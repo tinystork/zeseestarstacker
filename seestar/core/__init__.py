@@ -17,6 +17,20 @@ from .weights import (
     _calculate_image_weights_noise_variance,
     _calculate_image_weights_noise_fwhm,
 )
+from .normalization import (
+    _normalize_images_linear_fit,
+    _normalize_images_sky_mean,
+)
+from .stack_methods import (
+    _stack_mean,
+    _stack_median,
+    _stack_kappa_sigma,
+    _stack_linear_fit_clip,
+)
+from .incremental_reprojection import reproject_and_combine
+from .reprojection import resolve_all_wcs
+from .reprojection_utils import collect_headers, compute_final_output_grid
+from .simple_stacker import create_master_tile as create_master_tile_simple
 
 # Liste initiale des éléments à exporter
 __all__ = [
@@ -31,7 +45,18 @@ __all__ = [
     'check_cupy_cuda',        # Exposer la fonction de vérification CuPy
     'SeestarAligner',         # L'aligneur astroalign
     '_calculate_image_weights_noise_variance',
-    '_calculate_image_weights_noise_fwhm'
+    '_calculate_image_weights_noise_fwhm',
+    '_normalize_images_linear_fit',
+    '_normalize_images_sky_mean',
+    '_stack_mean',
+    '_stack_median',
+    '_stack_kappa_sigma',
+    '_stack_linear_fit_clip',
+    'create_master_tile_simple',
+    'reproject_and_combine',
+    'resolve_all_wcs',
+    'collect_headers',
+    'compute_final_output_grid'
 ]
 
 # Tentative d'importation du nouvel aligneur local

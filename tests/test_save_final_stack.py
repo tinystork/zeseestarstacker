@@ -66,6 +66,9 @@ def _make_obj(tmp_path, save_as_float32):
     obj.drizzle_mode = "Final"
     obj.drizzle_output_wcs = None
     obj.drizzle_fillval = "0.0"
+    obj.reproject_between_batches = False
+    obj.cumulative_sum_memmap = None
+    obj.cumulative_wht_memmap = None
     return obj
 
 
@@ -85,7 +88,7 @@ def test_save_final_stack_preserve_linear_float32(tmp_path):
     assert np.allclose(saved.astype(np.float32), data)
 
 
-def test_save_final_stack_preserve_linear_uint16(tmp_path):
+def test_save_final_stack_preserve_linear_int16(tmp_path):
     obj = _make_obj(tmp_path, False)
     data = np.array([[0.0, 1.0], [0.5, 0.25]], dtype=np.float32)
     wht = np.ones_like(data, dtype=np.float32)
@@ -97,7 +100,9 @@ def test_save_final_stack_preserve_linear_uint16(tmp_path):
         preserve_linear_output=True,
     )
     saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
     assert saved.dtype == np.uint16
+    assert header['BZERO'] == 32768
     expected = (np.clip(data, 0.0, 1.0) * 65535).astype(np.uint16)
     assert np.array_equal(saved, expected)
 
@@ -308,3 +313,57 @@ def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
     wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
     for b_val, a_val in zip(wht_mid, wht_after):
         assert a_val >= b_val - 1e-6
+
+
+def test_save_final_stack_classic_reproject(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.reproject_between_batches = True
+    obj.preserve_linear_output = True
+    data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_classic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.dtype.kind == "f"
+    assert np.allclose(saved.astype(np.float32), data)
+
+
+def test_save_final_stack_classic_reproject_crop(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.reproject_between_batches = True
+    obj.preserve_linear_output = True
+
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    wht = np.array(
+        [
+            [0, 0, 0, 0],
+            [0, 1, 1, 0],
+            [0, 1, 1, 0],
+            [0, 0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+
+    obj.current_stack_header["CRPIX1"] = 2.0
+    obj.current_stack_header["CRPIX2"] = 2.0
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_classic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
+
+    assert saved.shape == (2, 2)
+    assert np.array_equal(saved.astype(np.float32), data[1:3, 1:3])
+    assert header["CRPIX1"] == 1.0
+    assert header["CRPIX2"] == 1.0

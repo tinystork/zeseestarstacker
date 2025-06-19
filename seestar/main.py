@@ -43,8 +43,10 @@ try:
             pass # N'était pas là, c'est bien.
             
     # 3. Définir __package__ pour aider les imports relatifs dans le package
-    #    Seulement si ce script est le point d'entrée.
-    if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    #    Fonctionne aussi lorsque ce script est relancé par multiprocessing
+    if __name__ in ("__main__", "__mp_main__") and (
+        __package__ is None or __package__ == ""
+    ):
         # Le nom du package est le nom du dossier parent du script main.py,
         # qui est 'seestar' dans ce cas.
         package_name = os.path.basename(seestar_package_dir)
@@ -73,15 +75,15 @@ for p_idx, p_path in enumerate(sys.path):
     logger.debug("  [%s] %s", p_idx, p_path)
 logger.debug("--------------------")
 try:
-    import queuep.queue_manager
+    from seestar.queuep import queue_manager
     logger.debug(
         "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
-        queuep.queue_manager.__file__,
+        queue_manager.__file__,
     )
-    import gui.main_window
+    from seestar.gui import main_window
     logger.debug(
         "Chemin module seestar.gui.main_window CHARGÉ : %s",
-        gui.main_window.__file__,
+        main_window.__file__,
     )
 except Exception as e_qm_debug:
     logger.debug("ERREUR import pour debug: %s", e_qm_debug)
@@ -98,17 +100,16 @@ for p_idx, p_path in enumerate(sys.path):
 logger.debug("--------------------")
 
 try:
-    # Tentative d'import pour vérifier le chemin
-    # Maintenant, on importe directement car project_root_dir est dans sys.path
-    import queuep.queue_manager
+    # Tentative d'import pour vérifier le chemin avec un nom de package complet
+    from seestar.queuep import queue_manager
     logger.debug(
         "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
-        queuep.queue_manager.__file__,
+        queue_manager.__file__,
     )
-    import gui.main_window
+    from seestar.gui import main_window
     logger.debug(
         "Chemin module seestar.gui.main_window CHARGÉ : %s",
-        gui.main_window.__file__,
+        main_window.__file__,
     )
 
 except ImportError as e_qm_debug:

@@ -8,9 +8,10 @@ from .stretch import (
      ColorCorrection,
      apply_auto_stretch,
      apply_auto_white_balance,
-     apply_enhanced_stretch, # Keep if needed
-     save_fits_as_png
+     apply_enhanced_stretch,  # Keep if needed
+     save_fits_as_png,
 )
+from .file_ops import move_to_stacked
 
 # Optionally import visu if you want it accessible via seestar.tools.visu (though it's standalone)
 # from . import visu
@@ -23,7 +24,8 @@ __all__ = [
      'apply_auto_stretch',
      'apply_auto_white_balance',
      'apply_enhanced_stretch',
-     'save_fits_as_png'
+     'save_fits_as_png',
+     'move_to_stacked'
      # Add 'visu', 'testimg' here if you import and want to expose them
      ]
 # --- END OF FILE seestar/tools/__init__.py ---
