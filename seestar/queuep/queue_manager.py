@@ -7485,7 +7485,9 @@ class SeestarQueuedStacker:
 
         try:
             self.update_progress(
-                f"✨ Combinaison NumPy du batch (Lot {current_batch_num}/{total_batches_est}) ({num_valid_images_for_processing} images)..."
+                f"✨ Combinaison NumPy du batch (Lot {current_batch_num}/{total_batches_est})"
+                f" ({num_valid_images_for_processing} images)"
+                f" [mode={self.stacking_mode}, norm={self.normalize_method}, weight={self.weighting_method}]..."
             )
 
             image_data_list = valid_images_for_ccdproc
@@ -9608,12 +9610,13 @@ class SeestarQueuedStacker:
             self.winsor_limits = (0.05, 0.05)
         self.normalize_method = str(normalize_method)
         self.weighting_method = str(weighting_method)
+        # If weighting method 'quality' is selected, ensure quality weighting flag is set
+        self.use_quality_weighting = bool(use_weighting) or self.weighting_method == "quality"
         self.correct_hot_pixels = bool(correct_hot_pixels)
         self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size)
         self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
-        self.use_quality_weighting = bool(use_weighting)
         self.weight_by_snr = bool(weight_by_snr)
         self.weight_by_stars = bool(weight_by_stars)
         self.snr_exponent = float(snr_exp)
