@@ -68,11 +68,12 @@ from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
 )
-from ..core.stack_methods import (
+from seestar.core.stack_methods import (
     _stack_mean,
     _stack_median,
     _stack_kappa_sigma,
     _stack_linear_fit_clip,
+    _stack_winsorized_sigma,
 )
 from ..core.weights import (
     _calculate_image_weights_noise_variance,
@@ -132,6 +133,48 @@ def _reproject_worker(
         )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
+
+
+def _stack_worker(args):
+    """Worker for heavy stacking computations."""
+    (
+        mode,
+        images,
+        weights,
+        kappa_low,
+        kappa_high,
+        winsor_limits,
+    ) = args
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    from seestar.core.stack_methods import (
+        _stack_mean,
+        _stack_median,
+        _stack_kappa_sigma,
+        _stack_linear_fit_clip,
+        _stack_winsorized_sigma,
+    )
+
+    if mode == "winsorized-sigma":
+        return _stack_winsorized_sigma(
+            images,
+            weights,
+            kappa=max(kappa_low, kappa_high),
+            winsor_limits=winsor_limits,
+        )
+    elif mode == "kappa-sigma":
+        return _stack_kappa_sigma(
+            images,
+            weights,
+            sigma_low=kappa_low,
+            sigma_high=kappa_high,
+        )
+    elif mode == "linear_fit_clip":
+        return _stack_linear_fit_clip(images, weights)
+    elif mode == "median":
+        return _stack_median(images, weights)
+    else:
+        return _stack_mean(images, weights)
 
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -559,6 +602,7 @@ class SeestarQueuedStacker:
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
         self.max_reproj_workers = _suggest_pool_size(0.5)
+        self.max_stack_workers = _suggest_pool_size(0.75)
         if batch_size is None:
             self.batch_size = (
                 min(4, self.num_threads)
@@ -7285,39 +7329,18 @@ class SeestarQueuedStacker:
         winsor_limits=(0.05, 0.05),
         apply_rewinsor=True,
     ):
-        from scipy.stats.mstats import winsorize
-        from astropy.stats import sigma_clipped_stats
+        """Run winsorized sigma clipping in a separate process."""
+        stack_args = (
+            "winsorized-sigma",
+            images,
+            weights.tolist() if hasattr(weights, "tolist") else weights,
+            kappa,
+            kappa,
+            winsor_limits,
+        )
+        with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
+            return exe.submit(_stack_worker, stack_args).result()
 
-        arr = np.stack([im for im in images], axis=0).astype(np.float32)
-        arr_w = winsorize(arr, limits=winsor_limits, axis=0)
-        try:
-            _, med, std = sigma_clipped_stats(arr_w, sigma=3.0, axis=0, maxiters=5)
-        except TypeError:
-            _, med, std = sigma_clipped_stats(
-                arr_w, sigma_lower=3.0, sigma_upper=3.0, axis=0, maxiters=5
-            )
-        low = med - kappa * std
-        high = med + kappa * std
-        mask = (arr >= low) & (arr <= high)
-        if apply_rewinsor:
-            arr_clip = np.where(mask, arr, arr_w)
-        else:
-            arr_clip = np.where(mask, arr, np.nan)
-        if weights is not None:
-            w = np.asarray(weights)[:, None, None]
-            if arr.ndim == 4:
-                w = w[..., None]
-            sum_w = np.nansum(w * mask, axis=0)
-            sum_d = np.nansum(arr_clip * w, axis=0)
-            result = np.divide(
-                sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6
-            )
-        else:
-            result = np.nanmean(arr_clip, axis=0)
-        rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
-        return result.astype(np.float32), rejected_pct
-
-    ################################################################################################################################################
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
