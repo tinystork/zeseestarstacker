@@ -609,7 +609,7 @@ class SeestarQueuedStacker:
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
 
-        self.partial_save_interval = 10
+        self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
         self.move_stacked = False
         self._current_batch_paths = []
@@ -660,7 +660,7 @@ class SeestarQueuedStacker:
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
 
         # Options pour déplacement et sauvegarde partiels
-        self.partial_save_interval = 10
+        self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
         self.batch_count_path = None
         self._current_batch_paths = []
@@ -7216,13 +7216,15 @@ class SeestarQueuedStacker:
             stack = np.nan_to_num(sum_arr / np.maximum(wht_arr, 1e-6))
         base = (
             Path(self.output_folder)
-            / f"{self.output_filename}_partial_batch_{self.stacked_batches_count:03d}.fits"
+
+            / f"{self.output_filename}_batch{self.stacked_batches_count:03d}.fit"
         )
-        tmp = base.with_suffix(".fits.tmp")
+        tmp = base.with_suffix(".tmp")
         try:
             fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0)).writeto(tmp, overwrite=True)
             os.replace(tmp, base)
-            self.update_progress(f"💾 Saved {base.name}", "INFO_DETAIL")
+            self.update_progress(f"💾 Saved {base.name}")
+
             if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
                 try:
                     self.gui.last_stack_path.set(str(base))
@@ -9091,7 +9093,7 @@ class SeestarQueuedStacker:
         base_name = self.output_filename or "stack"
         out_path = os.path.join(
             self.output_folder,
-            f"{base_name}_partial_batch_{self.stacked_batches_count:03d}.fits",
+            f"{base_name}_batch{self.stacked_batches_count:03d}.fit",
         )
         tmp = out_path + ".tmp"
         sum_data = np.array(self.cumulative_sum_memmap, dtype=np.float32)
@@ -9102,7 +9104,9 @@ class SeestarQueuedStacker:
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
         fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
         os.replace(tmp, out_path)
-        self.update_progress(f"💾 Saved {os.path.basename(out_path)}", "INFO_DETAIL")
+
+        self.update_progress(f"💾 Saved {os.path.basename(out_path)}")
+
         if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
             try:
                 self.gui.last_stack_path.set(out_path)
@@ -9328,7 +9332,7 @@ class SeestarQueuedStacker:
         astap_sensitivity=100,
         local_solver_preference="none",
         move_stacked=False,
-        partial_save_interval=10,
+        partial_save_interval=1,
         *,
         save_as_float32=False,
         preserve_linear_output=False,

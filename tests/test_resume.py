@@ -62,3 +62,27 @@ def test_open_existing_memmaps(tmp_path):
     assert s._open_existing_memmaps()
     assert s.memmap_shape == (2, 2, 3)
     assert s.stacked_batches_count == 3
+
+
+
+def test_save_partial_stack(tmp_path):
+    out = tmp_path
+    s = SeestarQueuedStacker()
+    s.output_folder = str(out)
+    s.output_filename = "stack"
+    s.cumulative_sum_memmap = np.zeros((2, 2, 3), dtype=np.float32)
+    s.cumulative_wht_memmap = np.ones((2, 2), dtype=np.float32)
+    s.stacked_batches_count = 2
+    s.partial_save_interval = 1
+
+    class DummyVar:
+        def set(self, value):
+            self.value = value
+
+    s.gui = types.SimpleNamespace(last_stack_path=DummyVar())
+
+    s._save_partial_stack()
+
+    expected = out / "stack_batch002.fit"
+    assert expected.exists()
+
