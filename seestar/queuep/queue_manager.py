@@ -3307,8 +3307,17 @@ class SeestarQueuedStacker:
                                 # store only the components expected by
                                 # ``_stack_batch`` (data, header, scores,
                                 # wcs_object, valid_mask)
+                                # _stack_batch expects (data, header, scores, wcs, valid_mask)
+                                # item_result_tuple structure is
+                                # (data, header, scores, wcs, matrix_M, valid_mask)
                                 current_batch_items_with_masks_for_stack_batch.append(
-                                    item_result_tuple[:5]
+                                    (
+                                        item_result_tuple[0],
+                                        item_result_tuple[1],
+                                        item_result_tuple[2],
+                                        item_result_tuple[3],
+                                        item_result_tuple[5],
+                                    )
                                 )
                                 self._current_batch_paths.append(file_path)
 
