@@ -3318,6 +3318,15 @@ class SeestarQueuedStacker:
                                             batch_wcs=batch_wcs,
                                         )
 
+                                        # Use the solved and stacked batch as the
+                                        # new reference for subsequent alignment
+                                        reference_image_data_for_global_alignment = stacked_np.astype(
+                                            np.float32, copy=True
+                                        )
+                                        reference_header_for_global_alignment = hdr.copy()
+                                        if batch_wcs is not None:
+                                            self.reference_wcs_object = batch_wcs
+
                                         current_batch_items_with_masks_for_stack_batch.clear()
                                         self._current_batch_paths = []
                                         self._save_partial_stack()
@@ -3753,41 +3762,38 @@ class SeestarQueuedStacker:
                     self._send_eta_update()
                     num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
                     self.update_progress(
-                        f"⚙️ Reprojection du dernier lot partiel ({num_in_batch} images)..."
+                        f"⚙️ Traitement classique du dernier lot partiel ({num_in_batch} images)..."
                     )
 
-                    imgs = [
-                        it[0] for it in current_batch_items_with_masks_for_stack_batch
-                    ]
-                    hdrs = [
-                        it[1] for it in current_batch_items_with_masks_for_stack_batch
-                    ]
-                    reproj_img, reproj_cov = reproject_and_coadd_batch(
-                        imgs,
-                        hdrs,
-                        self.fixed_output_wcs or self.reference_wcs_object,
-                        self.reference_shape,
-                        combine_function="mean",
+                    stacked_np, hdr, wht_2d = self._stack_batch(
+                        current_batch_items_with_masks_for_stack_batch,
+                        self.stacked_batches_count,
+                        self.total_batches_estimated,
                     )
+                    if stacked_np is not None:
+                        solved_path, _ = self._save_and_solve_classic_batch(
+                            stacked_np, wht_2d, hdr, self.stacked_batches_count
+                        )
+                        batch_wcs = None
+                        try:
+                            batch_wcs = WCS(hdr, naxis=2)
+                        except Exception:
+                            batch_wcs = None
 
-                    if reproj_img is not None and reproj_cov is not None:
-                        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-                        fits.PrimaryHDU(data=np.moveaxis(reproj_img, -1, 0)).writeto(
-                            tmp.name, overwrite=True
-                        )
-                        self.intermediate_classic_batch_files.append(tmp.name)
-                        self.update_progress(
-                            f"   -> {num_in_batch} images reprojetées, résultat {reproj_img.shape} -> {os.path.basename(tmp.name)}"
-                        )
-                        hdr_tmp = fits.Header()
-                        hdr_tmp["NIMAGES"] = num_in_batch
                         self._combine_batch_result(
-                            reproj_img,
-                            hdr_tmp,
-                            reproj_cov,
-                            batch_wcs=self.fixed_output_wcs
-                            or self.reference_wcs_object,
+                            stacked_np,
+                            hdr,
+                            wht_2d,
+                            batch_wcs=batch_wcs,
                         )
+
+                        reference_image_data_for_global_alignment = stacked_np.astype(
+                            np.float32, copy=True
+                        )
+                        reference_header_for_global_alignment = hdr.copy()
+                        if batch_wcs is not None:
+                            self.reference_wcs_object = batch_wcs
+
                         if hasattr(self.cumulative_sum_memmap, "flush"):
                             self.cumulative_sum_memmap.flush()
                         if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -3799,7 +3805,7 @@ class SeestarQueuedStacker:
                         self._current_batch_paths = []
                     else:
                         self.update_progress(
-                            "   -> Échec reproject_and_coadd_batch", "ERROR"
+                            "   -> Échec combinaison du dernier lot partiel", "ERROR"
                         )
 
                     if self.move_stacked and self._current_batch_paths:
