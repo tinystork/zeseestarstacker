@@ -27,9 +27,9 @@ photutils
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
-
+psutil
 # --- Optional Dependencies ---
-psutil            # For automatic batch size estimation (Uncomment if needed)
+            # For automatic batch size estimation (Uncomment if needed)
 acstools          # For satellite trail detection (Uncomment if needed)
 reproject         # For mosaic
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
