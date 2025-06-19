@@ -2,6 +2,9 @@
 Module de gestion de file d'attente pour le traitement des images astronomiques.
 Gère l'alignement et l'empilement incrémental par LOTS dans un thread séparé.
 (Version Révisée 13: Correction finale avec pré-solving global et aperçu dynamique)
+
+Auto-Tune CPU/I-O : ajuste ``thread_fraction`` et ``max_reproj_workers``
+via :class:`seestar.queuep.autotuner.CpuIoAutoTuner`.
 """
 
 import logging
@@ -36,6 +39,8 @@ import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 import warnings
+
+from seestar.queuep.autotuner import CpuIoAutoTuner
 
 logger.debug("Imports standard OK.")
 
@@ -147,9 +152,7 @@ def _stack_worker(args):
     ) = args
     os.environ["OMP_NUM_THREADS"] = "1"
 
-
     from seestar.core.stack_methods import (
-
         _stack_mean,
         _stack_median,
         _stack_kappa_sigma,
@@ -595,11 +598,13 @@ class SeestarQueuedStacker:
         thread_fraction: float = 0.5,
         batch_size: int | None = None,
         settings: SettingsManager | None = None,
+        autotune: bool = True,
         *args,
         **kwargs,
     ):
         self.progress_callback = None
         self._configure_global_threads(thread_fraction)
+        self.autotuner = CpuIoAutoTuner(self) if autotune else None
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
@@ -3968,6 +3973,8 @@ class SeestarQueuedStacker:
             self.stop_processing_flag_for_gui = (
                 self.stop_processing
             )  # Transmettre l'état d'arrêt à l'UI
+            if self.autotuner:
+                self.autotuner.stop()
             gc.collect()
             logger.debug(
                 f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False."
@@ -7283,7 +7290,6 @@ class SeestarQueuedStacker:
             stack = np.nan_to_num(sum_arr / np.maximum(wht_arr, 1e-6))
         base = (
             Path(self.output_folder)
-
             / f"{self.output_filename}_batch{self.stacked_batches_count:03d}.fit"
         )
         tmp = base.with_suffix(".tmp")
@@ -7294,7 +7300,9 @@ class SeestarQueuedStacker:
             if base.exists():
                 prev_idx = self.stacked_batches_count - 1
                 if prev_idx > 0:
-                    prev = base.with_name(f"{self.output_filename}_batch{prev_idx:03d}.fit")
+                    prev = base.with_name(
+                        f"{self.output_filename}_batch{prev_idx:03d}.fit"
+                    )
                     try:
                         prev.unlink()
                     except FileNotFoundError:
@@ -7342,7 +7350,6 @@ class SeestarQueuedStacker:
         )
         with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
             return exe.submit(_stack_worker, stack_args).result()
-
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
@@ -7548,19 +7555,24 @@ class SeestarQueuedStacker:
             extra_w = None
             if self.weighting_method == "variance":
                 w_maps = _calculate_image_weights_noise_variance(image_data_list)
-                extra_w = np.array([
-                    float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps
-                ], dtype=np.float32)
+                extra_w = np.array(
+                    [float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps],
+                    dtype=np.float32,
+                )
             elif self.weighting_method == "fwhm":
                 w_maps = _calculate_image_weights_noise_fwhm(image_data_list)
-                extra_w = np.array([
-                    float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps
-                ], dtype=np.float32)
+                extra_w = np.array(
+                    [float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps],
+                    dtype=np.float32,
+                )
             if extra_w is not None and extra_w.size == quality_weights.size:
                 quality_weights = quality_weights * extra_w
 
             mode = getattr(self, "stacking_mode", "")
-            if mode == "winsorized-sigma" or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip":
+            if (
+                mode == "winsorized-sigma"
+                or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
+            ):
                 images_for_stack = [
                     img * (mask[..., None] if img.ndim == 3 else mask)
                     for img, mask in zip(image_data_list, coverage_maps_list)
@@ -7571,9 +7583,14 @@ class SeestarQueuedStacker:
                     kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                     winsor_limits=self.winsor_limits,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
+                    np.float32
+                )
                 stack_note = "winsorized sigma clip"
-            elif mode == "kappa-sigma" or getattr(self, "stack_reject_algo", "") == "kappa_sigma":
+            elif (
+                mode == "kappa-sigma"
+                or getattr(self, "stack_reject_algo", "") == "kappa_sigma"
+            ):
                 images_for_stack = [
                     img * (mask[..., None] if img.ndim == 3 else mask)
                     for img, mask in zip(image_data_list, coverage_maps_list)
@@ -7584,9 +7601,14 @@ class SeestarQueuedStacker:
                     sigma_low=self.stack_kappa_low,
                     sigma_high=self.stack_kappa_high,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
+                    np.float32
+                )
                 stack_note = "kappa sigma"
-            elif mode == "linear_fit_clip" or getattr(self, "stack_reject_algo", "") == "linear_fit_clip":
+            elif (
+                mode == "linear_fit_clip"
+                or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
+            ):
                 images_for_stack = [
                     img * (mask[..., None] if img.ndim == 3 else mask)
                     for img, mask in zip(image_data_list, coverage_maps_list)
@@ -7595,7 +7617,9 @@ class SeestarQueuedStacker:
                     images_for_stack,
                     quality_weights,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
+                    np.float32
+                )
                 stack_note = "linear fit clip"
             elif mode == "median":
                 images_for_stack = [
@@ -7606,7 +7630,9 @@ class SeestarQueuedStacker:
                     images_for_stack,
                     quality_weights,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
+                    np.float32
+                )
                 stack_note = "median"
             else:
                 # ------------------------------------------------------------------
@@ -9560,6 +9586,9 @@ class SeestarQueuedStacker:
         self.current_folder = os.path.abspath(input_dir) if input_dir else None
         self.output_folder = os.path.abspath(output_dir) if output_dir else None
 
+        if self.autotuner:
+            self.autotuner.start()
+
         # =========================================================================================
         # === ÉTAPE 1 : CONFIGURATION DES PARAMÈTRES DE SESSION SUR L'INSTANCE (AVANT TOUT LE RESTE) ===
         # =========================================================================================
@@ -9666,7 +9695,9 @@ class SeestarQueuedStacker:
         self.normalize_method = str(normalize_method)
         self.weighting_method = str(weighting_method)
         # If weighting method 'quality' is selected, ensure quality weighting flag is set
-        self.use_quality_weighting = bool(use_weighting) or self.weighting_method == "quality"
+        self.use_quality_weighting = (
+            bool(use_weighting) or self.weighting_method == "quality"
+        )
         self.correct_hot_pixels = bool(correct_hot_pixels)
         self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size)
@@ -10425,6 +10456,8 @@ class SeestarQueuedStacker:
         self.user_requested_stop = True
         self.stop_processing = True
         self.aligner.stop_processing = True
+        if self.autotuner:
+            self.autotuner.stop()
 
     ################################################################################################################################################
 
