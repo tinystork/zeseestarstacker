@@ -3268,10 +3268,14 @@ class SeestarQueuedStacker:
                         logger.debug(
                             f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file."
                         )
+                        solve_astrometry = False
+                        if self.reproject_between_batches and not current_batch_items_with_masks_for_stack_batch:
+                            solve_astrometry = True
+
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,
-                            solve_astrometry_for_this_file=False,
+                            solve_astrometry_for_this_file=solve_astrometry,
                         )
                         self.processed_files_count += 1
                         if (
