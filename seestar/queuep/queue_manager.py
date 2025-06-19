@@ -64,6 +64,20 @@ from ..core.incremental_reprojection import (
     reproject_and_combine,
     reproject_and_coadd_batch,
 )
+from ..core.normalization import (
+    _normalize_images_linear_fit,
+    _normalize_images_sky_mean,
+)
+from ..core.stack_methods import (
+    _stack_mean,
+    _stack_median,
+    _stack_kappa_sigma,
+    _stack_linear_fit_clip,
+)
+from ..core.weights import (
+    _calculate_image_weights_noise_variance,
+    _calculate_image_weights_noise_fwhm,
+)
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
@@ -589,6 +603,8 @@ class SeestarQueuedStacker:
         self.correct_hot_pixels = True
         self.apply_chroma_correction = True
         self.apply_final_scnr = False
+        self.normalize_method = "none"
+        self.weighting_method = "none"
         # Flag pour détecter un arrêt demandé explicitement par l'utilisateur
         self.user_requested_stop = False
 
@@ -7323,6 +7339,9 @@ class SeestarQueuedStacker:
         self.update_progress(
             f"✨ Combinaison ccdproc du batch {progress_info} ({num_physical_images_in_batch_initial} images physiques initiales)..."
         )
+        self.update_progress(
+            f"    -> mode={self.stacking_mode}, norm={self.normalize_method}, weight={self.weighting_method}"
+        )
         logger.debug(
             f"DEBUG QM [_stack_batch]: Début pour lot #{current_batch_num} avec {num_physical_images_in_batch_initial} items."
         )
@@ -7479,29 +7498,75 @@ class SeestarQueuedStacker:
                     num_valid_images_for_processing, dtype=np.float32
                 )
 
-            if (
-                getattr(self, "stacking_mode", "") == "winsorized-sigma"
-                or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
-            ):
-                images_for_winsor = [
+            # Apply normalization
+            if self.normalize_method == "linear_fit":
+                image_data_list = _normalize_images_linear_fit(image_data_list, 0)
+            elif self.normalize_method == "sky_mean":
+                image_data_list = _normalize_images_sky_mean(image_data_list, 0)
+
+            extra_w = None
+            if self.weighting_method == "variance":
+                w_maps = _calculate_image_weights_noise_variance(image_data_list)
+                extra_w = np.array([
+                    float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps
+                ], dtype=np.float32)
+            elif self.weighting_method == "fwhm":
+                w_maps = _calculate_image_weights_noise_fwhm(image_data_list)
+                extra_w = np.array([
+                    float(np.nanmean(w)) if w is not None else 1.0 for w in w_maps
+                ], dtype=np.float32)
+            if extra_w is not None and extra_w.size == quality_weights.size:
+                quality_weights = quality_weights * extra_w
+
+            mode = getattr(self, "stacking_mode", "")
+            if mode == "winsorized-sigma" or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip":
+                images_for_stack = [
                     img * (mask[..., None] if img.ndim == 3 else mask)
                     for img, mask in zip(image_data_list, coverage_maps_list)
                 ]
                 stacked_batch_data_np, _ = self._stack_winsorized_sigma(
-                    images_for_winsor,
+                    images_for_stack,
                     quality_weights,
                     kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                     winsor_limits=self.winsor_limits,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stack_note = "winsorized sigma clip"
+            elif mode == "kappa-sigma" or getattr(self, "stack_reject_algo", "") == "kappa_sigma":
+                images_for_stack = [
+                    img * (mask[..., None] if img.ndim == 3 else mask)
+                    for img, mask in zip(image_data_list, coverage_maps_list)
+                ]
+                stacked_batch_data_np, _ = _stack_kappa_sigma(
+                    images_for_stack,
+                    quality_weights,
+                    sigma_low=self.stack_kappa_low,
+                    sigma_high=self.stack_kappa_high,
                 )
-                stack_info_header = fits.Header()
-                stack_info_header["NIMAGES"] = (
-                    num_valid_images_for_processing,
-                    "Images in this batch stack",
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stack_note = "kappa sigma"
+            elif mode == "linear_fit_clip" or getattr(self, "stack_reject_algo", "") == "linear_fit_clip":
+                images_for_stack = [
+                    img * (mask[..., None] if img.ndim == 3 else mask)
+                    for img, mask in zip(image_data_list, coverage_maps_list)
+                ]
+                stacked_batch_data_np, _ = _stack_linear_fit_clip(
+                    images_for_stack,
+                    quality_weights,
                 )
-                stack_info_header["STK_NOTE"] = "Stacked with winsorized sigma clip"
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stack_note = "linear fit clip"
+            elif mode == "median":
+                images_for_stack = [
+                    img * (mask[..., None] if img.ndim == 3 else mask)
+                    for img, mask in zip(image_data_list, coverage_maps_list)
+                ]
+                stacked_batch_data_np, _ = _stack_median(
+                    images_for_stack,
+                    quality_weights,
+                )
+                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(np.float32)
+                stack_note = "median"
             else:
                 # ------------------------------------------------------------------
                 # 🆕 Implémentation mémoire-efficient & multithread
@@ -7544,11 +7609,13 @@ class SeestarQueuedStacker:
 
                 batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
 
-                stack_info_header = fits.Header()
-                stack_info_header["NIMAGES"] = (N, "Images in this batch stack")
-                stack_info_header["STK_NOTE"] = (
-                    f"Stacked with incremental NumPy ({max_workers} threads)"
-                )
+                stack_note = f"mean ({max_workers} threads)"
+            stack_info_header = fits.Header()
+            stack_info_header["NIMAGES"] = (
+                num_valid_images_for_processing,
+                "Images in this batch stack",
+            )
+            stack_info_header["STK_NOTE"] = f"Stacked with {stack_note}"
 
             self.update_progress(
                 f"✅ Combinaison lot (Lot {current_batch_num}/{total_batches_est}) terminée (Shape: {stacked_batch_data_np.shape})"
@@ -9319,6 +9386,8 @@ class SeestarQueuedStacker:
         stack_kappa_low=2.5,
         stack_kappa_high=2.5,
         winsor_limits=(0.05, 0.05),
+        normalize_method="none",
+        weighting_method="none",
         batch_size=10,
         correct_hot_pixels=True,
         hot_pixel_threshold=3.0,
@@ -9411,6 +9480,8 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    reproject_between_batches (arg de func): {reproject_between_batches}"
         )
+        logger.debug(f"    normalize_method: {normalize_method}")
+        logger.debug(f"    weighting_method: {weighting_method}")
         logger.debug(f"    output_filename (arg de func): {output_filename}")
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
@@ -9535,6 +9606,8 @@ class SeestarQueuedStacker:
             )
         except Exception:
             self.winsor_limits = (0.05, 0.05)
+        self.normalize_method = str(normalize_method)
+        self.weighting_method = str(weighting_method)
         self.correct_hot_pixels = bool(correct_hot_pixels)
         self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size)
