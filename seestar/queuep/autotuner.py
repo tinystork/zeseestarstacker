@@ -24,7 +24,7 @@ class CpuIoAutoTuner:
         self.duration = int(duration)
         self.target = float(target)
         self._stop = threading.Event()
-        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t: threading.Thread | None = None
 
         out = Path(getattr(stacker, "output_folder", ""))
         self.disk_dev = None
@@ -39,11 +39,16 @@ class CpuIoAutoTuner:
         if not _PSUTIL_OK:
             log.warning("AutoTune d\u00e9sactiv\u00e9 : psutil manquant.")
             return
+        if self._t is not None and self._t.is_alive():
+            log.debug("AutoTune thread already running")
+            return
+        self._stop.clear()
+        self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._t.is_alive():
+        if self._t and self._t.is_alive():
             self._t.join(timeout=3)
 
     # ------------------------------------------------------------------
