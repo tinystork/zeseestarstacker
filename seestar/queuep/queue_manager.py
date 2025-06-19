@@ -147,7 +147,9 @@ def _stack_worker(args):
     ) = args
     os.environ["OMP_NUM_THREADS"] = "1"
 
+
     from seestar.core.stack_methods import (
+
         _stack_mean,
         _stack_median,
         _stack_kappa_sigma,
