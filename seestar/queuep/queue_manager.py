@@ -6808,8 +6808,6 @@ class SeestarQueuedStacker:
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=False,
-        move_stacked=False,
-        partial_save_interval=10,
     ):
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!")
         logger.debug(f"!!!!!!!!!! VALEUR BRUTE ARGUMENT save_as_float32 REÇU : {save_as_float32} !!!!!!!!!!") # DEBUG
@@ -6944,7 +6942,7 @@ class SeestarQueuedStacker:
         self.apply_low_wht_mask = bool(apply_low_wht_mask); self.low_wht_percentile = int(low_wht_percentile); self.low_wht_soften_px = int(low_wht_soften_px)
 
         self.move_stacked = bool(move_stacked)
-        self.partial_save_interval = int(partial_save_interval)
+        self.partial_save_interval = max(1, int(partial_save_interval))
 
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
 
@@ -6954,9 +6952,8 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    [OutputFormat] self.preserve_linear_output (attribut d'instance) mis à : {self.preserve_linear_output} (depuis argument {preserve_linear_output})"
         )
+
         self.reproject_between_batches = bool(reproject_between_batches)
-        self.move_stacked = bool(move_stacked)
-        self.partial_save_interval = max(1, int(partial_save_interval))
 
 
         # --- FIN NOUVEAU ---
