@@ -7244,6 +7244,20 @@ class SeestarQueuedStacker:
         try:
             fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0)).writeto(tmp, overwrite=True)
             os.replace(tmp, base)
+
+            if base.exists():
+                prev_idx = self.stacked_batches_count - 1
+                if prev_idx > 0:
+                    prev = base.with_name(f"{self.output_filename}_batch{prev_idx:03d}.fit")
+                    try:
+                        prev.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ Erreur suppression ancien stack: {e}", "WARN"
+                        )
+
             self.update_progress(f"💾 Saved {base.name}")
 
             if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
@@ -9194,6 +9208,22 @@ class SeestarQueuedStacker:
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
         fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
         os.replace(tmp, out_path)
+
+        if os.path.exists(out_path):
+            prev_idx = self.stacked_batches_count - 1
+            if prev_idx > 0:
+                prev_path = os.path.join(
+                    self.output_folder,
+                    f"{base_name}_batch{prev_idx:03d}.fit",
+                )
+                try:
+                    os.remove(prev_path)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    self.update_progress(
+                        f"⚠️ Erreur suppression ancien stack: {e}", "WARN"
+                    )
 
         self.update_progress(f"💾 Saved {os.path.basename(out_path)}")
 

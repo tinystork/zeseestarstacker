@@ -2,8 +2,10 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+import os
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -81,8 +83,37 @@ def test_save_partial_stack(tmp_path):
 
     s.gui = types.SimpleNamespace(last_stack_path=DummyVar())
 
+    # create previous intermediate stack to ensure it's removed
+    prev = out / "stack_batch001.fit"
+    prev.write_bytes(b"test")
+
     s._save_partial_stack()
 
     expected = out / "stack_batch002.fit"
     assert expected.exists()
+    assert not prev.exists()
+
+
+def test_save_partial_stack_failure_keeps_previous(tmp_path, monkeypatch):
+    out = tmp_path
+    s = SeestarQueuedStacker()
+    s.output_folder = str(out)
+    s.output_filename = "stack"
+    s.cumulative_sum_memmap = np.zeros((2, 2, 3), dtype=np.float32)
+    s.cumulative_wht_memmap = np.ones((2, 2), dtype=np.float32)
+    s.stacked_batches_count = 2
+    s.partial_save_interval = 1
+
+    prev = out / "stack_batch001.fit"
+    prev.write_bytes(b"test")
+
+    def fail_replace(src, dst):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError):
+        s._save_partial_stack()
+
+    assert prev.exists()
 
