@@ -349,9 +349,10 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
 
-- `reproject_between_batches`: when true, each stacked batch is plate-solved and
-  immediately reprojected onto the reference WCS. The master stack is updated
-  incrementally so no final reprojection step is required.
+- `reproject_between_batches`: when enabled the frames of each batch are first
+  stacked. The resulting stack is solved once with ASTAP and reprojected onto
+  the reference WCS obtained from the first solved batch. Individual images are
+  never sent to the solver.
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
