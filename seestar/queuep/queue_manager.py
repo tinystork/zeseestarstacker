@@ -10255,24 +10255,26 @@ class SeestarQueuedStacker:
             )
         self.update_progress(f"folder_count_update:{len(self.additional_folders)}")
 
-        # Build the list of all FITS filepaths for global reprojection grid
-        self.all_input_filepaths = []
-        folders_for_scan = []
-        if self.current_folder:
-            folders_for_scan.append(self.current_folder)
-        folders_for_scan.extend(self.additional_folders)
-        for folder_iter in folders_for_scan:
-            if folder_iter and os.path.isdir(folder_iter):
-                try:
-                    for fname in sorted(os.listdir(folder_iter)):
-                        if fname.lower().endswith((".fit", ".fits")):
-                            self.all_input_filepaths.append(
-                                os.path.join(folder_iter, fname)
-                            )
-                except Exception as e_scan:
-                    self.update_progress(
-                        f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
-                    )
+        # --- PRE-SCAN WCS SEULEMENT POUR LE MODE MOSAÏQUE ---
+        if self.is_mosaic_run:
+            # Build the list of all FITS filepaths for global reprojection grid
+            self.all_input_filepaths = []
+            folders_for_scan = []
+            if self.current_folder:
+                folders_for_scan.append(self.current_folder)
+            folders_for_scan.extend(self.additional_folders)
+            for folder_iter in folders_for_scan:
+                if folder_iter and os.path.isdir(folder_iter):
+                    try:
+                        for fname in sorted(os.listdir(folder_iter)):
+                            if fname.lower().endswith((".fit", ".fits")):
+                                self.all_input_filepaths.append(
+                                    os.path.join(folder_iter, fname)
+                                )
+                    except Exception as e_scan:
+                        self.update_progress(
+                            f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
+                        )
 
         initial_files_added = self._add_files_to_queue(self.current_folder)
         if initial_files_added > 0:
@@ -10303,7 +10305,7 @@ class SeestarQueuedStacker:
                 self._recalculate_total_batches()
                 self.update_progress(f"Resuming: {skipped} fichiers ignorés.")
 
-        if self.reproject_between_batches:
+        if self.is_mosaic_run and self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
                 return False
