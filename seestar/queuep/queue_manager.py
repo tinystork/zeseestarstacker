@@ -2822,7 +2822,10 @@ class SeestarQueuedStacker:
                 logger.debug(
                     "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
                 )
-            self.reference_wcs_object = None
+            if not (
+                self.reproject_between_batches and self.freeze_reference_wcs
+            ):
+                self.reference_wcs_object = None
             temp_wcs_ancre = None  # Spécifique pour la logique mosaïque locale
 
             logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
@@ -8203,6 +8206,18 @@ class SeestarQueuedStacker:
             stack = np.nan_to_num(sum_arr / wht_safe[:, :, np.newaxis])
 
         hdr = self.reference_header_for_wcs.copy()
+
+        # If the reference WCS is frozen and already defined, skip solving
+        # additional stacked batches and simply return the current stack using
+        # the existing reference header.
+        if self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            self.reference_header_for_wcs = hdr.copy()
+            self.ref_wcs_header = hdr.copy()
+            logger.debug(
+                "DEBUG QM [_solve_cumulative_stack]: Skipping ASTAP solve (freeze_reference_wcs)."
+            )
+            return stack.astype(np.float32), hdr
+
         tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
         tmp.close()
         fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
