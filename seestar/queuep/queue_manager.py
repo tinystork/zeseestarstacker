@@ -8329,7 +8329,9 @@ class SeestarQueuedStacker:
         ).astype(np.float32)
         tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
         tmp.close()
-        fits.PrimaryHDU(data=luminance, header=header).writeto(tmp.name, overwrite=True)
+        fits.PrimaryHDU(
+            data=luminance, header=header
+        ).writeto(tmp.name, overwrite=True, output_verify="ignore")
         solved_ok = self._run_astap_and_update_header(tmp.name)
         if solved_ok:
             solved_hdr = fits.getheader(tmp.name)
@@ -8367,15 +8369,15 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-        fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
-            sci_fits, overwrite=True
-        )
+        fits.PrimaryHDU(
+            data=np.moveaxis(final_stacked, -1, 0), header=header
+        ).writeto(sci_fits, overwrite=True, output_verify="ignore")
         for ch_i in range(final_stacked.shape[2]):
             wht_path = os.path.join(
                 out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
             )
             fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                wht_path, overwrite=True
+                wht_path, overwrite=True, output_verify="ignore"
             )
             wht_paths.append(wht_path)
 
