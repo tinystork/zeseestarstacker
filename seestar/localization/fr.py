@@ -46,6 +46,7 @@ FR_TRANSLATIONS = {
     "post_proc_opts_frame_label": "Options Post-Traitement",
     "cleanup_temp_check_label": "Nettoyer fichiers temporaires après traitement",
     "stacking_norm_method_label": "Normalisation :",
+    "last_stack_treated": "Dernier stack :",
     "norm_method_none": "Aucune",
     "norm_method_linear_fit": "Ajustement Linéaire (Fond Ciel)",
     "norm_method_sky_mean": "Soustraction Fond Ciel Moyen",

@@ -1025,7 +1025,7 @@ class SeestarStackerGUI:
         last_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         last_lbl = ttk.Label(
             last_frame,
-            text=self.tr("last_stack_treated", default="Last stack treated"),
+            text=self.tr("last_stack_treated", default="Last stack :"),
             width=10,
             anchor="w",
         )
