@@ -7214,11 +7214,13 @@ class SeestarQueuedStacker:
 
             # Mettre à jour SUMWGHTS avec la somme des poids max de WHT (approximation de l'exposition pondérée)
             # self.cumulative_wht_memmap est HW, float32
-            current_total_wht_center = (
-                np.max(self.cumulative_wht_memmap)
-                if self.cumulative_wht_memmap.size > 0
-                else 0.0
-            )
+            if self.cumulative_wht_memmap.size > 0:
+                with np.errstate(all="ignore"):
+                    current_total_wht_center = np.nanmax(self.cumulative_wht_memmap)
+                if not np.isfinite(current_total_wht_center):
+                    current_total_wht_center = 0.0
+            else:
+                current_total_wht_center = 0.0
             self.current_stack_header["SUMWGHTS"] = (
                 float(current_total_wht_center),
                 "Approx. max sum of weights in WHT map",
