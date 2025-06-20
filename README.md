@@ -364,6 +364,15 @@ the FITS header. This option is **disabled by default** and should only be
 enabled when those header values are trustworthy. When disabled the solver
 performs a blind search centered only on the provided search radius.
 
+### Inter-Batch Reprojection with Constant WCS
+
+You can reproject each stacked batch without solving them all. Enable
+`reproject_between_batches` and set `solve_batches` to `false` so only the first
+batch is solved. Setting `freeze_reference_wcs` to `true` keeps that initial WCS
+for the rest of the run. Subsequent batches are reprojected using a new
+fixed-orientation grid so the image orientation stays constant and small
+rotation drifts are eliminated.
+
 ---
 
 ## Configuration (`seestar_settings.json`)
