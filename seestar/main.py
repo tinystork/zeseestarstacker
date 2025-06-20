@@ -72,7 +72,8 @@ except Exception as path_e:
     traceback.print_exc()
 # --- FIN MODIFIED ---
 
-from seestar.core.cuda_utils import enforce_nvidia_gpu
+from .core.cuda_utils import enforce_nvidia_gpu
+
 
 if enforce_nvidia_gpu():
     print(f"GPU NVIDIA forcée (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})")
