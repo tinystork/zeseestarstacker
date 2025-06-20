@@ -353,9 +353,11 @@ zemosaic_worker.run_hierarchical_mosaic(
   stacked. The resulting stack is solved once with ASTAP and reprojected onto
   the reference WCS obtained from the first solved batch. Individual images are
   never sent to the solver.
-- `freeze_reference_wcs`: when set to `true` the reference WCS determined from
-  the first solved batch remains fixed for the whole run, preventing small
-  drifts between batches when using inter-batch reprojection.
+- `freeze_reference_wcs`: when `true` the reference WCS determined from the
+  first solved batch remains fixed for the whole run, preventing small drifts
+  between batches when using inter-batch reprojection. This is automatically
+  enabled when `reproject_between_batches` is used unless explicitly set to
+  `false` before starting the process.
 - `solve_batches`: disable solving of each stacked batch when set to `false`.
   The stored reference WCS header is applied instead.
 
@@ -368,10 +370,11 @@ performs a blind search centered only on the provided search radius.
 
 You can reproject each stacked batch without solving them all. Enable
 `reproject_between_batches` and set `solve_batches` to `false` so only the first
-batch is solved. Setting `freeze_reference_wcs` to `true` keeps that initial WCS
-for the rest of the run. Subsequent batches are reprojected using a new
-fixed-orientation grid so the image orientation stays constant and small
-rotation drifts are eliminated.
+batch is solved. `freeze_reference_wcs` will be turned on automatically in this
+mode (unless you disable it explicitly) so the initial WCS is kept for the rest
+of the run. Subsequent batches are reprojected using a new fixed-orientation
+grid so the image orientation stays constant and small rotation drifts are
+eliminated.
 
 ---
 
