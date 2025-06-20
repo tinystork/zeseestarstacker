@@ -2997,6 +2997,7 @@ class SeestarQueuedStacker:
 
                 if (
                     self.reproject_between_batches
+                    and not self.freeze_reference_wcs
                     and not self.drizzle_active_session
                     and not self.is_mosaic_run
                 ):
@@ -9959,8 +9960,15 @@ class SeestarQueuedStacker:
         )
 
         self.reproject_between_batches = bool(reproject_between_batches)
-        # Disable solving of intermediate batches when reprojection is used and
-        # the reference WCS should remain fixed.
+        # When inter-batch reprojection is requested we typically want to keep
+        # the reference WCS stable. If the caller did not explicitly set
+        # ``freeze_reference_wcs`` beforehand, enable it automatically so that
+        # intermediate batches are not solved again.
+        if self.reproject_between_batches and not self.freeze_reference_wcs:
+            self.freeze_reference_wcs = True
+
+        # Disable solving of intermediate batches when reprojection is active
+        # and the reference WCS should remain fixed.
         self.solve_batches = not (
             self.reproject_between_batches and self.freeze_reference_wcs
         )
