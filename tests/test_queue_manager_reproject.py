@@ -584,3 +584,124 @@ def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
     assert os.path.exists(sci)
     assert len(wht_paths) == data.shape[2]
 
+
+def test_calculate_fixed_orientation_grid():
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+
+    ref = make_wcs(shape=(4, 6))
+    out_wcs, out_shape = obj._calculate_fixed_orientation_grid(ref, 2.0)
+
+    assert out_shape == (8, 12)
+    assert out_wcs.pixel_shape == (12, 8)
+    assert out_wcs.wcs.cd[0, 1] == 0
+    assert out_wcs.wcs.cd[1, 0] == 0
+
+
+def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = True
+    obj.drizzle_active_session = False
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+
+    data = np.zeros((3, 3, 3), dtype=np.float32)
+    hdr = make_wcs(shape=(3, 3)).to_header()
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr, overwrite=True)
+    fits.writeto(sci2, data, hdr, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+
+    calls = {"fixed": 0, "optimal": 0}
+
+    def fake_fixed(ref, scale_factor=1.0):
+        calls["fixed"] += 1
+        return make_wcs(shape=(5, 5)), (5, 5)
+
+    def fake_optimal(*a, **k):
+        calls["optimal"] += 1
+        return make_wcs(shape=(5, 5)), (5, 5)
+
+    monkeypatch.setattr(obj, "_calculate_fixed_orientation_grid", fake_fixed)
+    monkeypatch.setattr(obj, "_calculate_final_mosaic_grid", fake_optimal)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        return np.zeros(k.get("shape_out"), dtype=np.float32), np.ones(k.get("shape_out"), dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches([
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ])
+
+    assert calls["fixed"] == 1
+    assert calls["optimal"] == 0
+
