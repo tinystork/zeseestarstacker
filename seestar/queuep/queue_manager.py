@@ -555,19 +555,10 @@ class SeestarQueuedStacker:
     # ------------------------------------------------------------------
 
     def _process_batches(self, batch_fits_list: list[str]):
-        """Reproject FITS images to the reference WCS using a process pool."""
+        """Reproject and accumulate each FITS file individually."""
 
         if not batch_fits_list or self.reference_shape is None:
             return
-
-        self.update_progress(
-            f"Reproject pool : {self.max_reproj_workers} worker(s)  |  GPU={self.use_gpu}"
-        )
-
-        if self.max_reproj_workers > 1:
-            os.environ["OMP_NUM_THREADS"] = "1"
-        else:
-            os.environ.pop("OMP_NUM_THREADS", None)
 
         worker = partial(
             _reproject_worker,
@@ -576,18 +567,22 @@ class SeestarQueuedStacker:
             use_gpu=self.use_gpu,
         )
 
-        with ProcessPoolExecutor(max_workers=self.max_reproj_workers) as exe:
-            for reproj_img, footprint in exe.map(worker, batch_fits_list):
-                self._combine_batch_result(
-                    reproj_img,
-                    fits.Header(),
-                    footprint,
-                    batch_wcs=None,
-                )
-                if hasattr(self.cumulative_sum_memmap, "flush"):
-                    self.cumulative_sum_memmap.flush()
-                if hasattr(self.cumulative_wht_memmap, "flush"):
-                    self.cumulative_wht_memmap.flush()
+        for fits_path in batch_fits_list:
+            try:
+                data, wht, hdr, input_wcs = self._load_and_prepare_simple(fits_path)
+            except Exception:
+                continue
+
+            reproj_data, reproj_wht = worker(fits_path)
+
+            # continuous accumulation
+            self.cumulative_sum_memmap += reproj_data * reproj_wht[..., None]
+            self.cumulative_wht_memmap += reproj_wht
+            self.cumulative_sum_memmap.flush()
+            self.cumulative_wht_memmap.flush()
+
+            if self.enable_preview:
+                self._downsample_preview(reproj_data, reproj_wht)
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
@@ -726,6 +721,7 @@ class SeestarQueuedStacker:
         self.memmap_shape = None
         self.memmap_dtype_sum = np.float32
         self.memmap_dtype_wht = np.float32
+        self.enable_preview = False
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
 
         # Options pour déplacement et sauvegarde partiels
@@ -1066,7 +1062,7 @@ class SeestarQueuedStacker:
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def initialize(
-        self, output_dir, reference_image_shape_hwc_input
+        self, output_dir, reference_image_shape_hwc_input, enable_preview=False
     ):  # Renommé pour clarté
         """
         Prépare les dossiers, réinitialise l'état.
@@ -1088,6 +1084,8 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    -> self.drizzle_mode: {getattr(self, 'drizzle_mode', 'Non Défini')}"
         )
+
+        self.enable_preview = bool(enable_preview)
 
         # --- Nettoyage et création dossiers ---
         try:
@@ -1262,68 +1260,33 @@ class SeestarQueuedStacker:
                 "  -> Memmaps SUM/WHT désactivés pour Drizzle Incrémental VRAI."
             )
 
-        else:  # Mosaïque, Drizzle Final standard, ou Stacking Classique -> Utiliser Memmaps SUM/W
+        else:  # Mosaïque, Drizzle Final standard, ou Stacking Classique
             logger.debug(
                 "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Mode NON-Drizzle Incr. VRAI. Initialisation Memmaps SUM/W..."
             )
 
-            # ***** CORRECTION: Créer memmap_dir ICI, seulement si cette branche est exécutée *****
-            try:
-                os.makedirs(memmap_dir, exist_ok=True)
-                logger.debug(
-                    f"  -> Dossier pour memmap '{memmap_dir}' créé (ou existait déjà)."
-                )
-            except OSError as e_mkdir_memmap:
-                self.update_progress(
-                    f"❌ Erreur critique création dossier memmap '{memmap_dir}': {e_mkdir_memmap}",
-                    "ERROR",
-                )
-                return False
-            # ***** FIN CORRECTION *****
+            os.makedirs(memmap_dir, exist_ok=True)
+            H, W, C = reference_image_shape_hwc_input
 
-            self.memmap_shape = reference_image_shape_hwc_input
-            wht_shape_memmap = self.memmap_shape[:2]
-            logger.debug(
-                f"  -> Shape Memmap SUM={self.memmap_shape}, WHT={wht_shape_memmap}"
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path, mode="w+", dtype=np.float32, shape=(H, W, C)
             )
+            self.cumulative_sum_memmap[:] = 0.0
 
-            self.batch_count_path = os.path.join(
-                self.output_folder, "batches_count.txt"
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path, mode="w+", dtype=np.float32, shape=(H, W)
             )
-            resume_existing = self._resume_requested and self._open_existing_memmaps()
-            try:
-                if not resume_existing:
-                    self.cumulative_sum_memmap = np.lib.format.open_memmap(
-                        self.sum_memmap_path,
-                        mode="w+",
-                        dtype=self.memmap_dtype_sum,
-                        shape=self.memmap_shape,
-                    )
-                    self.cumulative_sum_memmap[:] = 0.0
-                    self.cumulative_wht_memmap = np.lib.format.open_memmap(
-                        self.wht_memmap_path,
-                        mode="w+",
-                        dtype=self.memmap_dtype_wht,
-                        shape=wht_shape_memmap,
-                    )
-                    self.cumulative_wht_memmap[:] = 0
-                    self.stacked_batches_count = 0
-                    self._update_batch_count_file()
-                    self.incremental_drizzle_objects = []
+            self.cumulative_wht_memmap[:] = 0.0
 
-            except (IOError, OSError, ValueError, TypeError) as e_memmap:
-                self.update_progress(
-                    f"❌ Erreur création/initialisation fichier memmap: {e_memmap}"
-                )
-                logger.debug(
-                    f"ERREUR QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Échec memmap : {e_memmap}"
-                )
-                traceback.print_exc(limit=2)
-                self.cumulative_sum_memmap = None
-                self.cumulative_wht_memmap = None
-                self.sum_memmap_path = None
-                self.wht_memmap_path = None
-                return False
+            self.reproject_between_batches = True
+
+            self.memmap_shape = (H, W, C)
+
+            if self.enable_preview:
+                self.preview_H = 256
+                self.preview_W = 256
+                self.preview_sum = np.zeros((self.preview_H, self.preview_W, C), dtype=np.float32)
+                self.preview_wht = np.zeros((self.preview_H, self.preview_W), dtype=np.float32)
 
         # --- Réinitialisations Communes ---
         self.warned_unaligned_source_folders.clear()
@@ -1895,6 +1858,19 @@ class SeestarQueuedStacker:
             self._update_preview()
         except Exception as e:
             logger.debug(f"Error in _update_preview_master: {e}")
+
+    def _downsample_preview(self, data: np.ndarray, wht: np.ndarray) -> None:
+        # Preview buffer logic
+        pH, pW = self.preview_H, self.preview_W
+        H, W, _ = data.shape
+        small = data.reshape(pH, H // pH, pW, W // pW, -1).mean(axis=(1, 3))
+        w_small = wht.reshape(pH, H // pH, pW, W // pW).sum(axis=(1, 3))
+        self.preview_sum += small * w_small[..., None]
+        self.preview_wht += w_small
+
+    def get_preview_image(self) -> np.ndarray:
+        w_safe = np.maximum(self.preview_wht, 1e-6)[..., None]
+        return (self.preview_sum / w_safe).astype(np.float32)
 
     #########################################################################################################################################################
 
@@ -8252,6 +8228,18 @@ class SeestarQueuedStacker:
 
         return stack.astype(np.float32), hdr
 
+    def _load_and_prepare_simple(self, fits_path: str):
+        data = fits.getdata(fits_path, memmap=False).astype(np.float32)
+        hdr = fits.getheader(fits_path)
+        try:
+            input_wcs = WCS(hdr)
+        except Exception:
+            input_wcs = None
+        if data.ndim == 2:
+            data = data[:, :, None]
+        wht = np.ones(data.shape[:2], dtype=np.float32)
+        return data, wht, hdr, input_wcs
+
     def _can_resume(self, out_dir: Path) -> bool:
         req = [
             "memmap_accumulators/cumulative_SUM.npy",
@@ -8355,6 +8343,18 @@ class SeestarQueuedStacker:
             self.cumulative_wht_memmap[:] = 0.0
             self.memmap_shape = expected_sum_shape
             self.update_progress(f"Re-init memmaps → new shape {self.memmap_shape[:2]}")
+
+    def finalize_continuous_stack(self):
+        wht_safe = np.maximum(self.cumulative_wht_memmap, 1e-9)
+        avg = self.cumulative_sum_memmap / wht_safe[..., None]
+        avg = np.nan_to_num(avg, nan=0.0)
+
+        hdu = fits.PrimaryHDU(
+            data=avg.astype(np.float32), header=self.reference_header_for_wcs
+        )
+        fits.writeto(
+            'master_stack_classic_nodriz.fits', hdu.data, hdu.header, overwrite=True
+        )
 
     def _final_reproject_cached_files(self, cache_list):
         """Reproject cached solved images and accumulate them."""
