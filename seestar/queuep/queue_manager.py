@@ -3427,6 +3427,12 @@ class SeestarQueuedStacker:
                                             wht_2d,
                                             batch_wcs=batch_wcs,
                                         )
+                                        if hasattr(self.cumulative_sum_memmap, "flush"):
+                                            self.cumulative_sum_memmap.flush()
+                                        if hasattr(self.cumulative_wht_memmap, "flush"):
+                                            self.cumulative_wht_memmap.flush()
+                                        if not self.drizzle_active_session:
+                                            self._update_preview_sum_w()
 
                                         # After accumulation, solve the cumulative stack
                                         if self.reproject_between_batches:
