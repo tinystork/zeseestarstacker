@@ -32,7 +32,7 @@ FR_TRANSLATIONS = {
     "input_folder": "Entrée :",
     "output_folder": "Sortie :",
     "output_filename_label": "Nom de fichier :",
-    "reference_image": "Référence (Opt.) :",
+    "reference_image": "Référence :",
     "last_stack_treated": "Dernier stack traité",
     "options": "Options d'Empilement",
     "stacking_method": "Méthode :",

@@ -1007,7 +1007,7 @@ class SeestarStackerGUI:
         ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
         self.reference_label = ttk.Label(
             ref_frame,
-            text=self.tr("reference_image", default="Reference (Opt.):"),
+            text=self.tr("reference_image", default="Reference "),
             width=10,
             anchor="w",
         )
