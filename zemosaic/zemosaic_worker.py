@@ -415,6 +415,9 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
         and os.path.isfile(astap_exe_path)
     )
 
+    # Si solver_method est 'astap', on ne tentera aucun autre solveur
+    use_astap_only = solver_method == "astap"
+
     if not (ZEMOSAIC_UTILS_AVAILABLE and zemosaic_utils):
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
         return None, None, None
@@ -531,7 +534,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
             _pcb_local("getwcs_warn_astap_failed_or_invalid", lvl="WARN", filename=filename)
 
     # ---------- Étape 2 : Astrometry locale ----------
-    if wcs_brute is None:
+    if not use_astap_only and wcs_brute is None:
         _pcb_local("getwcs_info_try_local_astrometry", lvl="INFO_DETAIL", filename=filename)
         astrometry_local_path = solver_settings.get(
             "astrometry_local_path", zemosaic_config.get_astrometry_local_path()
@@ -547,7 +550,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
                 _pcb_local("getwcs_info_astrometry_local_ok", lvl="INFO_DETAIL", filename=filename)
 
     # ---------- Étape 3 : Astrometry.net ----------
-    if wcs_brute is None:
+    if not use_astap_only and wcs_brute is None:
         _pcb_local("getwcs_info_try_web_astrometry", lvl="INFO_DETAIL", filename=filename)
         astrometry_api_key = solver_settings.get(
             "astrometry_api_key", zemosaic_config.get_astrometry_api_key()
@@ -591,7 +594,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
     _pcb_local("getwcs_action_moving_unsolved_file", lvl="WARN", filename=filename)
     try:
         original_file_dir = os.path.dirname(file_path)
-        unaligned_dir_name = "unaligned_by_zemosaic"
+        unaligned_dir_name = "unaligned_by_stacker"
         unaligned_path = os.path.join(original_file_dir, unaligned_dir_name)
         
         if not os.path.exists(unaligned_path):
@@ -1443,11 +1446,11 @@ def run_hierarchical_mosaic(
     # Scan des fichiers FITS dans le dossier d'entrée et ses sous-dossiers
     for root_dir_iter, dirs, files_in_dir_iter in os.walk(input_folder):
         # 1) Ignorer complètement tout arbre déjà dans un dossier unaligned
-        if "unaligned_by_zemosaic" in root_dir_iter.split(os.sep):
+        if "unaligned_by_stacker" in root_dir_iter.split(os.sep):
             continue
 
         # 2) Empêcher os.walk de descendre plus loin dans ces dossiers
-        dirs[:] = [d for d in dirs if d != "unaligned_by_zemosaic"]
+        dirs[:] = [d for d in dirs if d != "unaligned_by_stacker"]
 
         for file_name_iter in files_in_dir_iter:
             if file_name_iter.lower().endswith((".fit", ".fits")):
