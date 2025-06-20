@@ -1597,55 +1597,38 @@ class SeestarQueuedStacker:
                 f"  Range avant normalisation 0-1: [{np.nanmin(avg_img_fullres):.4g}, {np.nanmax(avg_img_fullres):.4g}]"
             )
 
-            # --- NOUVEAU : Application du Low WHT Mask pour l'aperçu ---
-            # Utiliser les settings stockés sur self (qui viennent de l'UI via SettingsManager)
+            # --- NOUVEAU : Feathering et Low WHT Mask pour l'aperçu ---
+            if hasattr(self, "apply_feathering") and self.apply_feathering:
+                if _FEATHERING_AVAILABLE:
+                    logger.debug(
+                        "DEBUG QM [_update_preview_sum_w]: Application du Feathering pour l'aperçu..."
+                    )
+                    avg_img_fullres = feather_by_weight_map(
+                        avg_img_fullres,
+                        current_wht_map.astype(np.float32),
+                        blur_px=getattr(self, "feather_blur_px", 256),
+                    )
+                else:
+                    logger.debug(
+                        "WARN QM [_update_preview_sum_w]: Feathering activé mais fonction non disponible."
+                    )
+
             if hasattr(self, "apply_low_wht_mask") and self.apply_low_wht_mask:
                 if _LOW_WHT_MASK_AVAILABLE:
                     logger.debug(
                         "DEBUG QM [_update_preview_sum_w]: Application du Low WHT Mask pour l'aperçu..."
                     )
-                    pct_low_wht = getattr(self, "low_wht_percentile", 5)
-                    soften_val_low_wht = getattr(self, "low_wht_soften_px", 128)
-
-                    # La fonction apply_low_wht_mask attend une image déjà normalisée 0-1
-                    # Donc, normalisons d'abord avg_img_fullres avant de l'appliquer.
-                    temp_min_val = np.nanmin(avg_img_fullres)
-                    temp_max_val = np.nanmax(avg_img_fullres)
-                    avg_img_normalized_before_mask = avg_img_fullres  # Par défaut
-                    if temp_max_val > temp_min_val:
-                        avg_img_normalized_before_mask = (
-                            avg_img_fullres - temp_min_val
-                        ) / (temp_max_val - temp_min_val)
-                    else:
-                        avg_img_normalized_before_mask = np.zeros_like(avg_img_fullres)
-                    avg_img_normalized_before_mask = np.clip(
-                        avg_img_normalized_before_mask, 0.0, 1.0
-                    ).astype(np.float32)
-
                     avg_img_fullres = apply_low_wht_mask(
-                        avg_img_normalized_before_mask,  # Passer l'image normalisée 0-1
-                        current_wht_map.astype(
-                            np.float32
-                        ),  # Passer la carte de poids originale (H,W)
-                        percentile=pct_low_wht,
-                        soften_px=soften_val_low_wht,
-                        progress_callback=self.update_progress,  # Passer le callback pour les logs internes
-                    )
-                    # apply_low_wht_mask retourne déjà une image clippée 0-1 et en float32
-                    logger.debug(
-                        f"DEBUG QM [_update_preview_sum_w]: Low WHT Mask appliqué à l'aperçu. Shape retournée: {avg_img_fullres.shape}"
-                    )
-                    logger.debug(
-                        f"  Range après Low WHT Mask (devrait être 0-1): [{np.nanmin(avg_img_fullres):.3f}, {np.nanmax(avg_img_fullres):.3f}]"
+                        avg_img_fullres,
+                        current_wht_map.astype(np.float32),
+                        percentile=getattr(self, "low_wht_percentile", 5),
+                        soften_px=getattr(self, "low_wht_soften_px", 128),
+                        progress_callback=self.update_progress,
                     )
                 else:
                     logger.debug(
-                        "WARN QM [_update_preview_sum_w]: Low WHT Mask activé mais fonction non disponible (échec import). Aperçu non modifié."
+                        "WARN QM [_update_preview_sum_w]: Low WHT Mask activé mais fonction non disponible (échec import)."
                     )
-            else:
-                logger.debug(
-                    "DEBUG QM [_update_preview_sum_w]: Low WHT Mask non activé pour l'aperçu."
-                )
             # --- FIN NOUVEAU ---
 
             # Normalisation finale 0-1 (nécessaire si Low WHT Mask n'a pas été appliqué,
@@ -9124,8 +9107,47 @@ class SeestarQueuedStacker:
         )
 
         # --- Début du Pipeline de Post-Traitement (identique à votre version précédente) ---
-        # ... (BN Globale, Photutils BN, CB, Feathering, Low WHT Mask, SCNR, Crop) ...
-        # (Le code pour appliquer ces post-traitements à data_after_postproc reste ici)
+        # Ici nous n'implémentons que le Feathering et le Low WHT Mask pour
+        # démontrer la connexion avec les réglages de l'onglet Expert.
+        if (
+            hasattr(self, "apply_feathering")
+            and self.apply_feathering
+            and final_wht_map_for_postproc is not None
+        ):
+            if _FEATHERING_AVAILABLE:
+                self.update_progress("   [Feathering] Application au stack final...")
+                data_after_postproc = feather_by_weight_map(
+                    data_after_postproc,
+                    final_wht_map_for_postproc.astype(np.float32),
+                    blur_px=getattr(self, "feather_blur_px", 256),
+                )
+                self.feathering_applied_in_session = True
+            else:
+                self.update_progress(
+                    "   [Feathering] Fonction non disponible.",
+                    None,
+                )
+
+        if (
+            hasattr(self, "apply_low_wht_mask")
+            and self.apply_low_wht_mask
+            and final_wht_map_for_postproc is not None
+        ):
+            if _LOW_WHT_MASK_AVAILABLE:
+                self.update_progress("   [LowWHTMask] Application au stack final...")
+                data_after_postproc = apply_low_wht_mask(
+                    data_after_postproc,
+                    final_wht_map_for_postproc.astype(np.float32),
+                    percentile=getattr(self, "low_wht_percentile", 5),
+                    soften_px=getattr(self, "low_wht_soften_px", 128),
+                    progress_callback=self.update_progress,
+                )
+                self.low_wht_mask_applied_in_session = True
+            else:
+                self.update_progress(
+                    "   [LowWHTMask] Fonction non disponible.",
+                    None,
+                )
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(
             f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}"
