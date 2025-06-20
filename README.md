@@ -353,6 +353,9 @@ zemosaic_worker.run_hierarchical_mosaic(
   stacked. The resulting stack is solved once with ASTAP and reprojected onto
   the reference WCS obtained from the first solved batch. Individual images are
   never sent to the solver.
+- `freeze_reference_wcs`: when set to `true` the reference WCS determined from
+  the first solved batch remains fixed for the whole run, preventing small
+  drifts between batches when using inter-batch reprojection.
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
