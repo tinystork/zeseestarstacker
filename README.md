@@ -349,14 +349,35 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `api_key`: astrometry.net API key
 - `local_solver_preference`: preferred local solver (`astap` or `ansvr`)
 
-- `reproject_between_batches`: when true, each stacked batch is plate-solved and
-  immediately reprojected onto the reference WCS. The master stack is updated
-  incrementally so no final reprojection step is required.
+- `reproject_between_batches`: when enabled the frames of each batch are stacked
+  and reprojected onto the reference WCS solved from the initial reference
+  image. Intermediate stacks are not solved again unless `solve_batches` is
+  `true`.
+
+- `freeze_reference_wcs`: when `true` the reference WCS determined from the
+  first solved batch remains fixed for the whole run, preventing small drifts
+  between batches when using inter-batch reprojection. This is automatically
+  enabled when `reproject_between_batches` is used unless explicitly set to
+  `false` before starting the process.
+- `solve_batches`: disable solving of each stacked batch when set to `false`.
+  The stored reference WCS header is applied instead.
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
 enabled when those header values are trustworthy. When disabled the solver
 performs a blind search centered only on the provided search radius.
+
+### Inter-Batch Reprojection with Constant WCS
+
+You can reproject each stacked batch without solving them all. Enable
+
+`reproject_between_batches` and set `solve_batches` to `false` so only the
+reference image is solved once at the start. `freeze_reference_wcs` will be
+turned on automatically in this mode (unless you disable it explicitly) so the
+initial WCS is reused for every batch. Subsequent batches are reprojected using
+a new fixed-orientation grid so the image orientation stays constant and small
+rotation drifts are eliminated.
+
 
 ---
 

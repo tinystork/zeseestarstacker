@@ -7,7 +7,7 @@ Ce script est destiné à être lancé depuis l'intérieur du package 'seestar'.
 import os
 import sys
 import tkinter as tk
-import traceback 
+import traceback
 import warnings
 from astropy.io.fits.verify import VerifyWarning
 import argparse
@@ -15,23 +15,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- MODIFIED Robust PYTHONPATH Modification ---
+# --- Robust PYTHONPATH Modification (moved before package imports) ---
 try:
     current_script_path = os.path.abspath(__file__)
-    seestar_package_dir = os.path.dirname(current_script_path)  # Chemin vers F:\...\seestar\
-    project_root_dir = os.path.dirname(seestar_package_dir)     # Chemin vers F:\...\zeseestarstacker
+    seestar_package_dir = os.path.dirname(current_script_path)  # F:\...\seestar\
+    project_root_dir = os.path.dirname(seestar_package_dir)     # F:\...\zeseestarstacker
 
-    # 1. S'assurer que la RACINE DU PROJET est dans sys.path et en PREMIÈRE position.
-    #    Ceci est crucial pour que 'import seestar.xxx' fonctionne correctement.
+    # 1. Ensure project root is at the beginning of sys.path so that
+    #    'import seestar.xxx' works reliably when running this file directly.
     if project_root_dir in sys.path:
-        sys.path.remove(project_root_dir) # L'enlever s'il est déjà là pour le remettre en tête
+        sys.path.remove(project_root_dir)
     sys.path.insert(0, project_root_dir)
     logger.debug("Project root '%s' mis en tête de sys.path.", project_root_dir)
 
-    # 2. S'assurer que le DOSSIER DU SCRIPT LUI-MÊME (seestar/) N'EST PAS dans sys.path
-    #    s'il a été ajouté automatiquement parce qu'on lance le script depuis ce dossier.
-    #    Avoir à la fois la racine et le dossier du package peut causer des conflits.
-    #    Attention : ne le supprimer que s'il n'est pas identique à project_root_dir (ne devrait pas arriver ici)
+    # 2. Ensure the seestar/ directory itself isn't in sys.path to avoid
+    #    ambiguous imports when launching from that directory.
     if seestar_package_dir in sys.path and seestar_package_dir != project_root_dir:
         try:
             sys.path.remove(seestar_package_dir)
@@ -40,15 +38,14 @@ try:
                 seestar_package_dir,
             )
         except ValueError:
-            pass # N'était pas là, c'est bien.
-            
-    # 3. Définir __package__ pour aider les imports relatifs dans le package
-    #    Seulement si ce script est le point d'entrée.
-    if __name__ == "__main__" and (__package__ is None or __package__ == ""):
-        # Le nom du package est le nom du dossier parent du script main.py,
-        # qui est 'seestar' dans ce cas.
+            pass
+
+    # 3. Define __package__ so that relative imports work when executed as a script
+    if __name__ in ("__main__", "__mp_main__") and (
+        __package__ is None or __package__ == ""
+    ):
         package_name = os.path.basename(seestar_package_dir)
-        if package_name: # S'assurer que le nom n'est pas vide
+        if package_name:
             __package__ = package_name
             logger.debug("__package__ défini à '%s'.", __package__)
         else:
@@ -57,11 +54,18 @@ try:
                 seestar_package_dir,
             )
 
-
 except Exception as path_e:
     logger.error("Erreur configuration sys.path/package: %s", path_e)
     traceback.print_exc()
-# --- FIN MODIFIED ---
+# --- FIN modification PYTHONPATH ---
+
+from .core.cuda_utils import enforce_nvidia_gpu
+
+
+if enforce_nvidia_gpu():
+    print(f"GPU NVIDIA forcée (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})")
+else:
+    print("Aucun GPU NVIDIA détecté ou 'nvidia-smi' indisponible.")
 
 
 # --- Bloc de débogage des imports (gardé) ---
@@ -73,15 +77,15 @@ for p_idx, p_path in enumerate(sys.path):
     logger.debug("  [%s] %s", p_idx, p_path)
 logger.debug("--------------------")
 try:
-    import queuep.queue_manager
+    from seestar.queuep import queue_manager
     logger.debug(
         "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
-        queuep.queue_manager.__file__,
+        queue_manager.__file__,
     )
-    import gui.main_window
+    from seestar.gui import main_window
     logger.debug(
         "Chemin module seestar.gui.main_window CHARGÉ : %s",
-        gui.main_window.__file__,
+        main_window.__file__,
     )
 except Exception as e_qm_debug:
     logger.debug("ERREUR import pour debug: %s", e_qm_debug)
@@ -98,17 +102,16 @@ for p_idx, p_path in enumerate(sys.path):
 logger.debug("--------------------")
 
 try:
-    # Tentative d'import pour vérifier le chemin
-    # Maintenant, on importe directement car project_root_dir est dans sys.path
-    import queuep.queue_manager
+    # Tentative d'import pour vérifier le chemin avec un nom de package complet
+    from seestar.queuep import queue_manager
     logger.debug(
         "Chemin module seestar.queuep.queue_manager CHARGÉ : %s",
-        queuep.queue_manager.__file__,
+        queue_manager.__file__,
     )
-    import gui.main_window
+    from seestar.gui import main_window
     logger.debug(
         "Chemin module seestar.gui.main_window CHARGÉ : %s",
-        gui.main_window.__file__,
+        main_window.__file__,
     )
 
 except ImportError as e_qm_debug:

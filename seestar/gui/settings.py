@@ -166,6 +166,8 @@ class SettingsManager:
                     value=default_values_from_code.get("stack_method", "kappa_sigma")
                 ),
             ).get()
+            if getattr(self, "stacking_mode", "") != "classic":
+                self.stacking_mode = self.stack_method.replace("_", "-")
             self.batch_size = getattr(
                 gui_instance,
                 "batch_size",
@@ -741,6 +743,11 @@ class SettingsManager:
             )
             getattr(gui_instance, "stack_method_var", tk.StringVar()).set(
                 self.stack_method
+            )
+            getattr(gui_instance, "stacking_mode", tk.StringVar()).set(
+                self.stack_method.replace("_", "-")
+                if getattr(self, "stacking_mode", "") != "classic"
+                else self.stacking_mode
             )
             getattr(gui_instance, "batch_size", tk.IntVar()).set(self.batch_size)
             getattr(gui_instance, "correct_hot_pixels", tk.BooleanVar()).set(
@@ -1380,7 +1387,7 @@ class SettingsManager:
                 )
                 self.stack_norm_method = defaults_fallback["stack_norm_method"]
 
-            valid_weight_methods = ["none", "noise_variance", "noise_fwhm"]
+            valid_weight_methods = ["none", "noise_variance", "noise_fwhm", "quality"]
             self.stack_weight_method = str(
                 getattr(
                     self,
@@ -1868,9 +1875,6 @@ class SettingsManager:
                 self.astrometry_api_key = current_api_key.strip()
             self.output_filename = str(
                 getattr(self, "output_filename", defaults_fallback["output_filename"])
-            ).strip()
-            self.last_stack_path = str(
-                getattr(self, "last_stack_path", defaults_fallback["last_stack_path"])
             ).strip()
             logger.debug("    -> Validating Feathering...")
             self.apply_feathering = bool(
@@ -2360,6 +2364,15 @@ class SettingsManager:
             )
         except Exception as e:
             logger.debug(f"Unexpected error saving settings: {e}")
+
+    def export_run_settings(self, file_path: str):
+        """Enregistre les paramètres actuels dans un fichier spécifique."""
+        original = self.settings_file
+        try:
+            self.settings_file = file_path
+            self.save_settings()
+        finally:
+            self.settings_file = original
 
     ###################################################################################################################################
 

@@ -297,6 +297,7 @@ class SeestarStackerGUI:
         )
 
         self.init_variables()
+        self.last_stack_path.trace_add("write", self._on_last_stack_changed)
 
         self.settings.load_settings()
         self.language_var.set(self.settings.language)
@@ -356,7 +357,6 @@ class SeestarStackerGUI:
 
         if hasattr(self, "_update_spinbox_from_float"):
             self._update_spinbox_from_float()
-        self._update_weighting_options_state()
         self._update_drizzle_options_state()
         self._update_show_folders_button_state()
         self.update_ui_language()
@@ -501,6 +501,7 @@ class SeestarStackerGUI:
         self.output_path = tk.StringVar()
         self.output_filename_var = tk.StringVar()
         self.reference_image_path = tk.StringVar()
+        self.last_stack_path = tk.StringVar()
         self.stacking_mode = tk.StringVar(value="kappa-sigma")
         self.kappa = tk.DoubleVar(value=2.5)
         # New unified stacking method variable
@@ -792,27 +793,6 @@ class SeestarStackerGUI:
         # Update additional folders display initially
         self.update_additional_folders_display()
 
-    def _update_weighting_options_state(self):
-        """Active ou désactive les options de pondération détaillées."""
-        state = tk.NORMAL if self.use_weighting_var.get() else tk.DISABLED
-        widgets_to_toggle = [
-            getattr(self, "weight_metrics_label", None),
-            getattr(self, "weight_snr_check", None),
-            getattr(self, "weight_stars_check", None),
-            getattr(self, "snr_exp_label", None),
-            getattr(self, "snr_exp_spinbox", None),
-            getattr(self, "stars_exp_label", None),
-            getattr(self, "stars_exp_spinbox", None),
-            getattr(self, "min_w_label", None),
-            getattr(self, "min_w_spinbox", None),
-        ]
-        for widget in widgets_to_toggle:
-            if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists():
-                try:
-                    widget.config(state=state)
-                except tk.TclError:
-                    pass
-
     def show_initial_preview(self):
         """Affiche un état initial dans la zone d'aperçu."""
         if hasattr(self, "preview_manager") and self.preview_manager:
@@ -1029,7 +1009,7 @@ class SeestarStackerGUI:
         ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
         self.reference_label = ttk.Label(
             ref_frame,
-            text=self.tr("reference_image", default="Reference (Opt.):"),
+            text=self.tr("reference_image", default="Reference "),
             width=10,
             anchor="w",
         )
@@ -1047,13 +1027,13 @@ class SeestarStackerGUI:
         last_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         last_lbl = ttk.Label(
             last_frame,
-            text=self.tr("last_stack_treated", default="Last stack treated"),
-            width=14,
+            text=self.tr("last_stack_treated", default="Last stack :"),
+            width=10,
             anchor="w",
         )
         last_lbl.pack(side=tk.LEFT)
         last_browse = ttk.Button(
-            last_frame, text="…", command=self.file_handler.browse_last_stack, width=3
+            last_frame, text="…", command=self.file_handler.browse_last_stack
         )
         last_browse.pack(side=tk.RIGHT)
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
@@ -1170,7 +1150,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.weight_keys = ["none", "noise_variance", "noise_fwhm"]
+        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "quality"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
@@ -1446,64 +1426,6 @@ class SeestarStackerGUI:
             width=4,
         )
         self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
-        self.weighting_frame = ttk.LabelFrame(tab_stacking, text="Quality Weighting")
-        self.weighting_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.use_weighting_check = ttk.Checkbutton(
-            self.weighting_frame,
-            text="Enable weighting",
-            variable=self.use_weighting_var,
-            command=self._update_weighting_options_state,
-        )
-        self.use_weighting_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
-        self.weighting_options_frame = ttk.Frame(self.weighting_frame)
-        self.weighting_options_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
-        metrics_frame = ttk.Frame(self.weighting_options_frame)
-        metrics_frame.pack(fill=tk.X, pady=2)
-        self.weight_metrics_label = ttk.Label(metrics_frame, text="Metrics:")
-        self.weight_metrics_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.weight_snr_check = ttk.Checkbutton(
-            metrics_frame, text="SNR", variable=self.weight_snr_var
-        )
-        self.weight_snr_check.pack(side=tk.LEFT, padx=5)
-        self.weight_stars_check = ttk.Checkbutton(
-            metrics_frame, text="Star Count", variable=self.weight_stars_var
-        )
-        self.weight_stars_check.pack(side=tk.LEFT, padx=5)
-        params_frame = ttk.Frame(self.weighting_options_frame)
-        params_frame.pack(fill=tk.X, pady=2)
-        self.snr_exp_label = ttk.Label(params_frame, text="SNR Exp.:")
-        self.snr_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.snr_exp_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.1,
-            to=3.0,
-            increment=0.1,
-            textvariable=self.snr_exponent_var,
-            width=5,
-        )
-        self.snr_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.stars_exp_label = ttk.Label(params_frame, text="Stars Exp.:")
-        self.stars_exp_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.stars_exp_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.1,
-            to=3.0,
-            increment=0.1,
-            textvariable=self.stars_exponent_var,
-            width=5,
-        )
-        self.stars_exp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
-        self.min_w_label = ttk.Label(params_frame, text="Min Weight:")
-        self.min_w_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.min_w_spinbox = ttk.Spinbox(
-            params_frame,
-            from_=0.01,
-            to=1.0,
-            increment=0.01,
-            textvariable=self.min_weight_var,
-            width=5,
-        )
-        self.min_w_spinbox.pack(side=tk.LEFT, padx=(0, 5))
         self.post_proc_opts_frame = ttk.LabelFrame(
             tab_stacking, text="Post-Processing Options"
         )
@@ -2507,6 +2429,11 @@ class SeestarStackerGUI:
         display_value = self.stack_method_display_var.get()
         method = self.method_label_to_key.get(display_value, display_value)
         self.stack_method_var.set(method)
+        if hasattr(self, "stacking_mode"):
+            try:
+                self.stacking_mode.set(method.replace("_", "-"))
+            except tk.TclError:
+                pass
         if method == "mean":
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("none")
@@ -2906,12 +2833,14 @@ class SeestarStackerGUI:
             print(f"Error in _update_show_folders_button_state: {e}")
 
     def _on_last_stack_changed(self, *args):
+        """When last stack path changes, pre-fill output folder if empty."""
         try:
-            path = self.last_stack_path.get()
-            if path and not self.output_path.get():
-                self.output_path.set(os.path.dirname(path))
-        except Exception as e:
-            self.logger.error(f"Erreur gestion last_stack_path: {e}")
+            if not self.output_path.get():
+                p = self.last_stack_path.get()
+                if p:
+                    self.output_path.set(os.path.dirname(p))
+        except Exception:
+            pass
 
     #############################################################################################################################
 
@@ -3136,7 +3065,6 @@ class SeestarStackerGUI:
             "options": "options_frame",
             "drizzle_options_frame_label": "drizzle_options_frame",
             "hot_pixels_correction": "hp_frame",
-            "quality_weighting_frame": "weighting_frame",
             "post_proc_opts_frame_label": "post_proc_opts_frame",
             "white_balance": "wb_frame",
             "stretch_options": "stretch_frame_controls",
@@ -3921,6 +3849,14 @@ class SeestarStackerGUI:
         """Callback function triggered by the backend worker.
         MODIFIED: Performs auto-stretch/WB ONLY ONCE at the beginning of a session.
         """
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(
+                0,
+                lambda sd=stack_data, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
+                    sd, sh, sn, ic, ti, cb, tb
+                ),
+            )
+            return
         self.logger.debug("[DEBUG-GUI] update_preview_from_stacker: Called.")
 
         if self._final_stretch_set_by_processing_finished:
@@ -4637,98 +4573,67 @@ class SeestarStackerGUI:
             try:
                 # Check if the worker thread is still active
                 if not self.queued_stacker.is_running():
-                    # print("DEBUG: Worker is_running() is False. Preparing to finalize.") # Keep disabled
-                    # --- CORRECTED JOIN LOGIC ---
-                    # Check and join the *worker* thread object stored in the queued_stacker
                     worker_thread = getattr(
                         self.queued_stacker, "processing_thread", None
                     )
                     if worker_thread and worker_thread.is_alive():
-                        # print("DEBUG: Joining worker thread...") # Keep disabled
-                        worker_thread.join(timeout=0.5)  # Wait up to 0.5 seconds
-                        # if worker_thread.is_alive():
-                        #     print("WARN: Worker thread did not exit cleanly after join timeout.") # Keep disabled
-                        # else:
-                        #     print("DEBUG: Worker thread joined successfully.") # Keep disabled
-                    # else:
-                    # print("DEBUG: Worker thread object not found or already dead.") # Keep disabled
-                    # --- END CORRECTED JOIN LOGIC ---
-
-                    # Now that we've waited, schedule the final GUI update routine
-                    # print("DEBUG: Scheduling _processing_finished...") # Keep disabled
+                        worker_thread.join(timeout=0.5)
                     self.root.after(0, self._processing_finished)
-                    break  # Exit the monitoring loop
+                    break
 
-                # --- Update intermediate progress stats (ETA, counts) ---
                 q_stacker = self.queued_stacker
                 processed = q_stacker.processed_files_count
                 aligned = q_stacker.aligned_files_count
                 total_queued = q_stacker.files_in_queue
 
-                # Calculate ETA
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
                     self.time_per_image = elapsed / processed
-                    try:
-                        remaining_estimated = max(0, total_queued - processed)
-                        if self.time_per_image > 1e-6 and remaining_estimated > 0:
-                            eta_seconds = remaining_estimated * self.time_per_image
-                            h, rem = divmod(int(eta_seconds), 3600)
-                            m, s = divmod(rem, 60)
-                            self.remaining_time_var.set(f"{h:02}:{m:02}:{s:02}")
-                        elif remaining_estimated == 0 and total_queued > 0:
-                            self.remaining_time_var.set("00:00:00")  # Finishing up
-                        else:
-                            self.remaining_time_var.set(
-                                self.tr("eta_calculating", default="Calculating...")
-                            )
-                    except tk.TclError:
-                        # print("DEBUG: tk.TclError updating ETA, breaking tracker loop.") # Keep disabled
-                        break  # Exit loop if Tkinter objects are gone
-                    except Exception as eta_err:
-                        print(f"Warning: Error calculating ETA: {eta_err}")
-                        traceback.print_exc(limit=2)
-                        try:
-                            self.remaining_time_var.set("--:--:--")
-                        except tk.TclError:
-                            break
+                    remaining_estimated = max(0, total_queued - processed)
+                    if self.time_per_image > 1e-6 and remaining_estimated > 0:
+                        eta_seconds = remaining_estimated * self.time_per_image
+                        h, rem = divmod(int(eta_seconds), 3600)
+                        m, s = divmod(rem, 60)
+                        eta_str = f"{h:02}:{m:02}:{s:02}"
+                    elif remaining_estimated == 0 and total_queued > 0:
+                        eta_str = "00:00:00"
+                    else:
+                        eta_str = self.tr("eta_calculating", default="Calculating...")
+                else:
+                    eta_str = self.tr("eta_calculating", default="Calculating...")
 
-                else:  # Not enough info for ETA yet
-                    try:
-                        self.remaining_time_var.set(
-                            self.tr("eta_calculating", default="Calculating...")
-                        )
-                    except tk.TclError:
-                        break  # Exit loop
-
-                # Update Aligned Files Count
                 default_aligned_fmt = self.tr(
                     "aligned_files_label_format", default="Aligned: {count}"
                 )
-                try:
-                    self.aligned_files_var.set(
-                        default_aligned_fmt.format(count=aligned)
-                    )
-                except tk.TclError:
-                    # print("DEBUG: tk.TclError updating aligned count, breaking tracker loop.") # Keep disabled
-                    break  # Exit loop
+                remaining = max(0, total_queued - processed)
+                total = total_queued
 
-                # Update Remaining/Total Files display
-                self.update_remaining_files()  # Calls the method to update R/T label
+                def _gui_update(
+                    es=eta_str,
+                    al=aligned,
+                    rem=remaining,
+                    tot=total,
+                    fmt=default_aligned_fmt,
+                ):
+                    try:
+                        self.remaining_time_var.set(es)
+                        self.aligned_files_var.set(fmt.format(count=al))
+                        self.remaining_files_var.set(f"{rem}/{tot}")
+                    except tk.TclError:
+                        pass
 
-                # Sleep briefly to avoid busy-waiting
+                self.root.after(0, _gui_update)
+
                 time.sleep(0.5)
 
             except Exception as e:
-                # Catch errors within the tracking loop itself
                 print(f"Error in GUI progress tracker thread loop: {e}")
                 traceback.print_exc(limit=2)
-                # Attempt to gracefully finish processing in case of tracker error
                 try:
                     self.root.after(0, self._processing_finished)
                 except tk.TclError:
-                    pass  # Tk might be gone
-                break  # Exit the tracker loop on error
+                    pass
+                break
 
         # print("DEBUG: GUI Progress Tracker Thread Exiting.") # Keep disabled
 
@@ -5006,8 +4911,7 @@ class SeestarStackerGUI:
             )
             # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
-            # S'assurer que les options de pondération ET DRIZZLE sont dans le bon état initial
-            self._update_weighting_options_state()
+            # S'assurer que les options Drizzle sont dans le bon état initial
             self._update_drizzle_options_state()  # <-- Appel ajouté ici
             # ... (reste de la logique pour state == tk.NORMAL) ...
             if hasattr(self, "add_files_button"):
@@ -5045,7 +4949,6 @@ class SeestarStackerGUI:
         # les options internes (scale drizzle, options poids) sont aussi désactivées,
         # même si la case principale était déjà décochée.
         if state == tk.DISABLED:
-            self._update_weighting_options_state()
             self._update_drizzle_options_state()
 
     def _debounce_resize(self, event=None):
@@ -5465,26 +5368,26 @@ class SeestarStackerGUI:
 
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
-    def update_progress_gui(self, message, progress=None):
+    def update_progress_gui(self, message: str, progress: float | None = None):
         """
-        Met à jour l'interface de progression.
-        MODIFIED: Détection et transmission du message UNALIGNED_INFO avec niveau WARN.
-        Version: V_UnalignedInfoLog_1
+        Affiche un message dans le widget log et met à jour la barre de progression.
+        S'assure d'être toujours exécuté dans le thread principal Tkinter.
         """
+        # --- ROUTAGE VERS LE THREAD GUI ---
+        if threading.current_thread() is not threading.main_thread():
+            # Planifie l'exécution dans la boucle d'événements Tkinter et sort.
+            self.root.after(
+                0, lambda m=message, p=progress: self.update_progress_gui(m, p)
+            )
+            return
+
+        # --- CODE EXISTANT (garde intact le reste) ------------------------------
         # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
             try:
                 self.root.after_idle(self.update_additional_folders_display)
             except tk.TclError:
                 pass
-            return
-
-        last_prefix = "last_stack_path:"
-        if isinstance(message, str) and message.startswith(last_prefix):
-            path = message.split(":", 1)[1]
-            self.last_stack_path.set(path)
-            self.settings.last_stack_path = path
-            self.settings.save_settings()
             return
 
         eta_prefix = "ETA_UPDATE:"
@@ -6652,7 +6555,6 @@ class SeestarStackerGUI:
                 self.update_progress_gui(f"  - {msg}", None)
             print("  -> (4C) Ré-appel self.settings.apply_to_ui(self)...")
             self.settings.apply_to_ui(self)
-            self._update_weighting_options_state()
             self._update_drizzle_options_state()
             self._update_final_scnr_options_state()
             self._update_photutils_bn_options_state()
@@ -6737,6 +6639,15 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée."
         )
+
+        # Sauvegarde d'un fichier .cfg résumant ce run
+        try:
+            cfg_name = f"{self.settings.output_filename}_stack_{time.strftime('%Y%m%d_%H%M%S')}.cfg"
+            cfg_path = os.path.join(self.settings.output_folder, cfg_name)
+            self.settings.export_run_settings(cfg_path)
+            self.logger.info(f"Configuration du run sauvegardée dans {cfg_path}")
+        except Exception as e_cfg:
+            self.logger.warning(f"Échec sauvegarde fichier cfg: {e_cfg}")
         # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
         valeur_a_passer_pour_float32_gui = getattr(
             self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START"
@@ -6801,13 +6712,15 @@ class SeestarStackerGUI:
                 if isinstance(self.settings.stack_winsor_limits, str)
                 else (0.05, 0.05)
             ),
+            "normalize_method": self.settings.stack_norm_method,
+            "weighting_method": self.settings.stack_weight_method,
             "batch_size": self.settings.batch_size,
             "correct_hot_pixels": self.settings.correct_hot_pixels,
             "hot_pixel_threshold": self.settings.hot_pixel_threshold,
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.use_quality_weighting,
+            "use_weighting": self.settings.stack_weight_method == "quality",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
             "snr_exp": self.settings.snr_exponent,

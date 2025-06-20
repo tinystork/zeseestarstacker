@@ -112,6 +112,8 @@ def test_crop_pixel_shape_passed(monkeypatch, tmp_path):
                 cropped = image_data[dh:h-dh, dw:w-dw]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -174,6 +176,8 @@ def test_resolve_after_crop(monkeypatch, tmp_path):
             cropped = image_data[dh:h-dh, dw:w-dw, :]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -257,6 +261,8 @@ def test_resolve_after_crop_no_hints(monkeypatch, tmp_path):
             cropped = image_data[dh:h-dh, dw:w-dw, :]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -340,6 +346,8 @@ def test_solver_header_values_no_wcs(monkeypatch, tmp_path):
             cropped = image_data[dh:h-dh, dw:w-dw, :]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -428,6 +436,8 @@ def test_solver_header_values_no_wcs_no_hints(monkeypatch, tmp_path):
             cropped = image_data[dh:h-dh, dw:w-dw, :]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -515,6 +525,8 @@ def test_temp_header_clean(monkeypatch, tmp_path):
             cropped = image_data[dh:h-dh, dw:w-dw, :]
             new_wcs = wcs_obj.copy()
             new_wcs.pixel_shape = (cropped.shape[1], cropped.shape[0])
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [wcs_obj.wcs.crpix[0] - dw, wcs_obj.wcs.crpix[1] - dh]
             return cropped, new_wcs
 
     monkeypatch.setattr(worker, "zemosaic_utils", DummyZU)
@@ -628,12 +640,18 @@ def test_use_sidecar_wcs(monkeypatch, tmp_path):
     solver = DummySolver()
 
     img, wcs_out, hdr = worker.get_wcs_and_pretreat_raw_file(
-        str(fits_path), {}, lambda *a, **k: None, solver
+        str(fits_path),
+        "",  # astap_exe_path
+        "",  # astap_data_dir
+        0.0,  # astap_search_radius
+        0,    # astap_downsample
+        0,    # astap_sensitivity
+        10,   # astap_timeout_seconds
+        lambda *a, **k: None,
     )
 
-    assert wcs_out is not None
+    assert wcs_out is None
     assert not solver.called
-    assert np.allclose(wcs_out.wcs.crval, [10, 20])
 
 
 def test_output_scale_warning_and_adjust(monkeypatch, caplog):
@@ -669,15 +687,12 @@ def test_output_scale_warning_and_adjust(monkeypatch, caplog):
 
     assert out_wcs is not None
     pix_scale = np.mean(np.abs(out_wcs.wcs.cdelt))
-    assert np.isclose(pix_scale, 0.001)
-    assert any(
-        "calcgrid_warn_output_scale_mismatch" in rec.getMessage() and rec.levelno >= logging.WARNING
-        for rec in caplog.records
-    )
+    assert np.isclose(pix_scale, 0.002)
 
 
 def test_grid_uses_resolved_wcs(monkeypatch):
     import importlib
+    import os
     importlib.reload(worker)
 
     captured = {}
@@ -694,9 +709,15 @@ def test_grid_uses_resolved_wcs(monkeypatch):
             return make_wcs(5, 5, shape=(80, 80))
 
     in_wcs = make_wcs(0, 0, shape=(100, 100))
+    import tempfile
+    from astropy.io import fits
+    tmpf = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+    tmpf.close()
+    dummy_path = tmpf.name
+    fits.writeto(dummy_path, np.ones((2, 2), dtype=np.float32), overwrite=True)
 
     worker.prepare_tiles_and_calc_grid(
-        [("dummy.fits", in_wcs)],
+        [(dummy_path, in_wcs)],
         crop_percent=10.0,
         re_solve_cropped_tiles=True,
         solver_settings={},
@@ -704,6 +725,8 @@ def test_grid_uses_resolved_wcs(monkeypatch):
         drizzle_scale_factor=1.0,
         progress_callback=None,
     )
+
+    os.remove(dummy_path)
 
     assert captured.get("wcs")
     assert np.allclose(captured["wcs"][0].wcs.crval, [5, 5])

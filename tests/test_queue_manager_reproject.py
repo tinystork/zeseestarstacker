@@ -59,7 +59,7 @@ class DummyStacker:
     def _combine_batch_result(self, data, header, coverage, batch_wcs=None):
         batch_sum = data.astype(np.float32)
         batch_wht = coverage.astype(np.float32)
-        if not self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
+        if self.reproject_between_batches and self.reference_wcs_object and batch_wcs is not None:
             reproject_interp = reproject_utils.reproject_interp
             shp = self.memmap_shape[:2]
             if batch_sum.ndim == 3:
@@ -99,14 +99,14 @@ def test_combine_batch_respects_flag(monkeypatch):
     monkeypatch.setattr(reproject_utils, "reproject_interp", fake_reproj)
     s.reproject_between_batches = False
     s._combine_batch_result(img, fits.Header(), cov, wcs_in)
-    assert calls["n"] > 0
+    assert calls["n"] == 0
 
     calls["n"] = 0
     s.cumulative_sum_memmap.fill(0)
     s.cumulative_wht_memmap.fill(0)
     s.reproject_between_batches = True
     s._combine_batch_result(img, fits.Header(), cov, wcs_in)
-    assert calls["n"] == 0
+    assert calls["n"] > 0
 
 
 def test_process_file_returns_wcs_when_reproject(tmp_path, monkeypatch):
@@ -464,4 +464,244 @@ def test_drizzle_scale_applied_interbatch(tmp_path, monkeypatch):
 
     assert shape_off == (8, 8)
     assert shape_on == (12, 12)
+
+
+def test_freeze_reference_wcs(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    wcs_initial = make_wcs(shape=(4, 4))
+    hdr_init = wcs_initial.to_header()
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = True
+    obj.memmap_shape = (4, 4, 3)
+    obj.cumulative_sum_memmap = np.ones(obj.memmap_shape, dtype=np.float32)
+    obj.cumulative_wht_memmap = np.ones(obj.memmap_shape[:2], dtype=np.float32)
+    obj.reference_header_for_wcs = hdr_init.copy()
+    obj.ref_wcs_header = hdr_init.copy()
+    obj.reference_wcs_object = wcs_initial
+
+    def fake_run_astap(self, path):
+        hdr = fits.getheader(path)
+        new_wcs = make_wcs(shape=(4, 4))
+        new_wcs.wcs.crval = [5.0, 5.0]
+        for k, v in new_wcs.to_header().items():
+            hdr[k] = v
+        fits.writeto(path, np.moveaxis(np.zeros(obj.memmap_shape, dtype=np.float32), -1, 0), hdr, overwrite=True)
+        return True
+
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+
+    obj._solve_cumulative_stack()
+
+    assert np.allclose(obj.reference_wcs_object.wcs.crval, [0, 0])
+
+
+def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+    import os
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.output_folder = str(tmp_path)
+    obj.reference_header_for_wcs = qm.fits.Header()
+    obj.reference_header_for_wcs["CRPIX1"] = 1.0
+    obj.reference_header_for_wcs["CRPIX2"] = 1.0
+    obj.reference_header_for_wcs["CRVAL1"] = 0.0
+    obj.reference_header_for_wcs["CRVAL2"] = 0.0
+    obj.reference_header_for_wcs["CTYPE1"] = "RA---TAN"
+    obj.reference_header_for_wcs["CTYPE2"] = "DEC--TAN"
+    obj.solve_batches = False
+
+    called = {"n": 0}
+
+    def fake_run_astap(self, path):
+        called["n"] += 1
+        return True
+
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+
+    hdr = qm.fits.Header()
+    data = np.zeros((4, 4, 3), dtype=np.float32)
+    wht = np.ones((4, 4), dtype=np.float32)
+
+    sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
+
+    assert called["n"] == 0
+    assert hdr["CRPIX1"] == 1.0
+    assert os.path.exists(sci)
+    assert len(wht_paths) == data.shape[2]
+
+
+def test_calculate_fixed_orientation_grid():
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+
+    ref = make_wcs(shape=(4, 6))
+    out_wcs, out_shape = obj._calculate_fixed_orientation_grid(ref, 2.0)
+
+    assert out_shape == (8, 12)
+    assert out_wcs.pixel_shape == (12, 8)
+    assert out_wcs.wcs.cd[0, 1] == 0
+    assert out_wcs.wcs.cd[1, 0] == 0
+
+
+def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = True
+    obj.drizzle_active_session = False
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+
+    data = np.zeros((3, 3, 3), dtype=np.float32)
+    hdr = make_wcs(shape=(3, 3)).to_header()
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr, overwrite=True)
+    fits.writeto(sci2, data, hdr, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+
+    calls = {"fixed": 0, "optimal": 0}
+
+    def fake_fixed(ref, scale_factor=1.0):
+        calls["fixed"] += 1
+        return make_wcs(shape=(5, 5)), (5, 5)
+
+    def fake_optimal(*a, **k):
+        calls["optimal"] += 1
+        return make_wcs(shape=(5, 5)), (5, 5)
+
+    monkeypatch.setattr(obj, "_calculate_fixed_orientation_grid", fake_fixed)
+    monkeypatch.setattr(obj, "_calculate_final_mosaic_grid", fake_optimal)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        return np.zeros(k.get("shape_out"), dtype=np.float32), np.ones(k.get("shape_out"), dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches([
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ])
+
+    assert calls["fixed"] == 1
+    assert calls["optimal"] == 0
 
