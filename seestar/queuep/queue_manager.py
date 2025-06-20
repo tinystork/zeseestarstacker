@@ -754,6 +754,14 @@ class SeestarQueuedStacker:
         self.all_input_filepaths = []
         self.reference_shape = None
 
+        # --- NEW ---
+        # Store the original reference frame size (H, W) so that reprojection
+        # of stacked batches can optionally keep the exact input dimensions.
+        self.input_reference_shape_hw = None
+        # Flag controlling whether reprojection should enforce the original
+        # input size instead of the expanded drizzle size.
+        self.keep_input_size_for_reproject = False
+
         self.incremental_drizzle_objects = []
         logger.debug(
             "  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide."
@@ -5035,7 +5043,10 @@ class SeestarQueuedStacker:
         """
         from seestar.enhancement.reproject_utils import reproject_interp
 
-        target_shape = self.memmap_shape[:2]
+        if self.keep_input_size_for_reproject and self.input_reference_shape_hw:
+            target_shape = self.input_reference_shape_hw
+        else:
+            target_shape = self.memmap_shape[:2]
         if image_array.ndim == 3:
             channels = []
             footprint = None
@@ -5062,7 +5073,10 @@ class SeestarQueuedStacker:
 
         from seestar.enhancement.reproject_utils import reproject_interp
 
-        target_shape = self.memmap_shape[:2]
+        if self.keep_input_size_for_reproject and self.input_reference_shape_hw:
+            target_shape = self.input_reference_shape_hw
+        else:
+            target_shape = self.memmap_shape[:2]
 
         if batch_image.ndim == 3:
             channels = []
@@ -9855,6 +9869,13 @@ class SeestarQueuedStacker:
 
         self.reproject_between_batches = bool(reproject_between_batches)
 
+        # Determine if we should keep the original input frame size when
+        # reprojection between batches is enabled (to avoid changing the
+        # reference size and breaking alignment).
+        self.keep_input_size_for_reproject = (
+            self.reproject_between_batches and not is_mosaic_run
+        )
+
         # --- FIN NOUVEAU ---
 
         self.mosaic_settings_dict = (
@@ -10045,6 +10066,9 @@ class SeestarQueuedStacker:
                 raise RuntimeError(
                     f"Shape de l'image de référence ({ref_shape_initial}) non supportée."
                 )
+
+            # Store the input reference frame shape (H, W)
+            self.input_reference_shape_hw = ref_shape_hwc[:2]
 
             self.reference_header_for_wcs = (
                 reference_header_for_shape_determination.copy()
@@ -10262,7 +10286,11 @@ class SeestarQueuedStacker:
                 )
 
         init_shape_hwc = ref_shape_hwc
-        if self.reproject_between_batches and self.fixed_output_shape is not None:
+        if (
+            self.reproject_between_batches
+            and self.fixed_output_shape is not None
+            and not self.keep_input_size_for_reproject
+        ):
             init_shape_hwc = (
                 self.fixed_output_shape[0],
                 self.fixed_output_shape[1],
