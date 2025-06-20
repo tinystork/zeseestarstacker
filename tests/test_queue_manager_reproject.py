@@ -465,3 +465,61 @@ def test_drizzle_scale_applied_interbatch(tmp_path, monkeypatch):
     assert shape_off == (8, 8)
     assert shape_on == (12, 12)
 
+
+def test_freeze_reference_wcs(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    wcs_initial = make_wcs(shape=(4, 4))
+    hdr_init = wcs_initial.to_header()
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = True
+    obj.memmap_shape = (4, 4, 3)
+    obj.cumulative_sum_memmap = np.ones(obj.memmap_shape, dtype=np.float32)
+    obj.cumulative_wht_memmap = np.ones(obj.memmap_shape[:2], dtype=np.float32)
+    obj.reference_header_for_wcs = hdr_init.copy()
+    obj.ref_wcs_header = hdr_init.copy()
+    obj.reference_wcs_object = wcs_initial
+
+    def fake_run_astap(self, path):
+        hdr = fits.getheader(path)
+        new_wcs = make_wcs(shape=(4, 4))
+        new_wcs.wcs.crval = [5.0, 5.0]
+        for k, v in new_wcs.to_header().items():
+            hdr[k] = v
+        fits.writeto(path, np.moveaxis(np.zeros(obj.memmap_shape, dtype=np.float32), -1, 0), hdr, overwrite=True)
+        return True
+
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+
+    obj._solve_cumulative_stack()
+
+    assert np.allclose(obj.reference_wcs_object.wcs.crval, [0, 0])
+

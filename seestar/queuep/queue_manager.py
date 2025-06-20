@@ -751,6 +751,13 @@ class SeestarQueuedStacker:
         self.total_exposure_seconds = 0.0
         self.intermediate_drizzle_batch_files = []
 
+        # When inter-batch reprojection is enabled we may want to keep the
+        # reference WCS fixed after the first successful plate-solve to avoid
+        # drifting of the solution between batches. This flag controls that
+        # behaviour. When ``True`` the reference WCS is only set once and
+        # subsequent solves will not modify it.
+        self.freeze_reference_wcs = False
+
         self.all_input_filepaths = []
         self.reference_shape = None
 
@@ -775,6 +782,9 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
                 )
+                # When using inter-batch reprojection we want to keep the
+                # reference WCS stable after the first solve.
+                self.freeze_reference_wcs = self.reproject_between_batches
                 self.drizzle_renorm_method = str(
                     getattr(settings, "drizzle_renorm", "none")
                 )
@@ -8160,13 +8170,17 @@ class SeestarQueuedStacker:
         os.remove(tmp.name)
 
         try:
-            self.reference_wcs_object = WCS(hdr, naxis=2)
-            self.reference_wcs_object.pixel_shape = (
+            new_wcs = WCS(hdr, naxis=2)
+            new_wcs.pixel_shape = (
                 stack.shape[1],
                 stack.shape[0],
             )
         except Exception:
-            pass
+            new_wcs = None
+
+        if self.reference_wcs_object is None or not self.freeze_reference_wcs:
+            if new_wcs is not None:
+                self.reference_wcs_object = new_wcs
 
         self.reference_header_for_wcs = hdr.copy()
         self.ref_wcs_header = hdr.copy()
