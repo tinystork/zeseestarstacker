@@ -1,9 +1,38 @@
 # zemosaic/run_zemosaic.py
-import sys # Ajout pour sys.path et sys.modules
-# import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import os
+import sys  # Ajout pour sys.path et sys.modules
 import tkinter as tk
-from tkinter import messagebox # Nécessaire pour la messagebox d'erreur critique
+from tkinter import messagebox
+import logging
+import traceback
+
+logger = logging.getLogger(__name__)
+
+# --- Robust PYTHONPATH Modification (mirrors seestar/main.py logic) ---
+try:
+    current_script_path = os.path.abspath(__file__)
+    zemosaic_package_dir = os.path.dirname(current_script_path)
+    project_root_dir = os.path.dirname(zemosaic_package_dir)
+
+    if project_root_dir in sys.path:
+        sys.path.remove(project_root_dir)
+    sys.path.insert(0, project_root_dir)
+
+    if zemosaic_package_dir in sys.path and zemosaic_package_dir != project_root_dir:
+        try:
+            sys.path.remove(zemosaic_package_dir)
+        except ValueError:
+            pass
+
+    if __name__ in ("__main__", "__mp_main__") and (
+        __package__ is None or __package__ == ""
+    ):
+        __package__ = os.path.basename(zemosaic_package_dir)
+except Exception as path_e:
+    logger.error("Erreur configuration sys.path/package: %s", path_e)
+    traceback.print_exc()
+# --- FIN modification PYTHONPATH ---
+
 from .core.cuda_utils import enforce_nvidia_gpu
 
 
