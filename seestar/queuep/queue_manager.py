@@ -1969,6 +1969,46 @@ class SeestarQueuedStacker:
         logger.debug(f"[DrizzleWCS] Output WCS OK  (shape={out_shape_hw})")
         return out_wcs, out_shape_hw
 
+    def _calculate_fixed_orientation_grid(self, ref_wcs, scale_factor: float = 1.0):
+        """Return a WCS derived from ``ref_wcs`` with no rotation."""
+        if not ref_wcs or not ref_wcs.is_celestial or ref_wcs.pixel_shape is None:
+            return None, None
+        try:
+            ref_h = int(ref_wcs.pixel_shape[1])
+            ref_w = int(ref_wcs.pixel_shape[0])
+        except Exception:
+            return None, None
+
+        out_h = max(1, int(round(ref_h * scale_factor)))
+        out_w = max(1, int(round(ref_w * scale_factor)))
+        out_shape_hw = (out_h, out_w)
+
+        out_wcs = WCS(naxis=2)
+        out_wcs.wcs.crval = list(ref_wcs.wcs.crval)
+        out_wcs.wcs.crpix = (
+            np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor
+        ).tolist()
+
+        ref_scale_arcsec = self.reference_pixel_scale_arcsec
+        if ref_scale_arcsec is None:
+            try:
+                ref_scale_deg = np.mean(np.abs(proj_plane_pixel_scales(ref_wcs)))
+                ref_scale_arcsec = ref_scale_deg * 3600.0
+            except Exception:
+                ref_scale_arcsec = 1.0
+
+        final_scale_deg = (ref_scale_arcsec / scale_factor) / 3600.0
+        out_wcs.wcs.cd = np.array([[-final_scale_deg, 0.0], [0.0, final_scale_deg]])
+        out_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        out_wcs.pixel_shape = (out_w, out_h)
+        try:
+            out_wcs._naxis1 = out_w
+            out_wcs._naxis2 = out_h
+        except AttributeError:
+            pass
+
+        return out_wcs, out_shape_hw
+
     ###########################################################################################################################################################
 
     def _calculate_final_mosaic_grid_dynamic(
@@ -8484,11 +8524,21 @@ class SeestarQueuedStacker:
             )
             return
 
-        out_wcs, out_shape = self._calculate_final_mosaic_grid(
-            wcs_for_grid,
-            headers_for_grid,
-            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-        )
+        if (
+            self.freeze_reference_wcs
+            and self.reproject_between_batches
+            and self.reference_wcs_object is not None
+        ):
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+        else:
+            out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                wcs_for_grid,
+                headers_for_grid,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
         if out_wcs is None or out_shape is None:
             self.update_progress(
                 "⚠️ Reprojection ignorée: échec du calcul de la grille finale.",
