@@ -3,21 +3,18 @@ import subprocess
 
 
 def enforce_nvidia_gpu():
-
-    """Force usage of the first NVIDIA GPU if available."""
-
+    """Force l'utilisation du premier GPU NVIDIA via CUDA_VISIBLE_DEVICES."""
     try:
-        output = subprocess.check_output(
+        out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
             stderr=subprocess.STDOUT,
             text=True,
         )
-
-        index = output.splitlines()[0].strip()
-        if index:
-            os.environ["CUDA_VISIBLE_DEVICES"] = index
-
+        idx = out.strip().splitlines()[0]
+        if idx:
+            os.environ["CUDA_VISIBLE_DEVICES"] = idx
             return True
     except Exception:
         pass
     return False
+

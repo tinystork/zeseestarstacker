@@ -13,7 +13,14 @@ from astropy.io.fits.verify import VerifyWarning
 import argparse
 import logging
 
+# NVIDIA GPU enforcement before importing CUDA libraries
+from seestar.core.cuda_utils import enforce_nvidia_gpu
+
 logger = logging.getLogger(__name__)
+
+# Force NVIDIA GPU selection if available
+gpu_set = enforce_nvidia_gpu()
+print("GPU NVIDIA forc\u00e9" if gpu_set else "Aucun GPU NVIDIA d\u00e9tect\u00e9")
 
 # --- MODIFIED Robust PYTHONPATH Modification ---
 try:
@@ -66,6 +73,7 @@ except Exception as path_e:
 # --- FIN MODIFIED ---
 
 from .core.cuda_utils import enforce_nvidia_gpu
+
 
 if enforce_nvidia_gpu():
     print(f"GPU NVIDIA forcée (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})")
