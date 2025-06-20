@@ -1278,7 +1278,8 @@ class SeestarQueuedStacker:
             )
             self.cumulative_wht_memmap[:] = 0.0
 
-            self.reproject_between_batches = True
+            # Do not force inter-batch reprojection here. Respect existing
+            # configuration loaded from settings or previous state.
 
             self.memmap_shape = (H, W, C)
 
@@ -2381,7 +2382,9 @@ class SeestarQueuedStacker:
         except Exception:
             pass
 
-        self.reproject_between_batches = True
+
+        # Do not automatically enable inter-batch reprojection when preparing
+        # the global grid. The user's existing preference is preserved.
 
         crval_str = ", ".join(f"{x:.5f}" for x in self.reference_wcs_object.wcs.crval)
         self.update_progress(
