@@ -166,6 +166,8 @@ class SettingsManager:
                     value=default_values_from_code.get("stack_method", "kappa_sigma")
                 ),
             ).get()
+            if getattr(self, "stacking_mode", "") != "classic":
+                self.stacking_mode = self.stack_method.replace("_", "-")
             self.batch_size = getattr(
                 gui_instance,
                 "batch_size",
@@ -741,6 +743,11 @@ class SettingsManager:
             )
             getattr(gui_instance, "stack_method_var", tk.StringVar()).set(
                 self.stack_method
+            )
+            getattr(gui_instance, "stacking_mode", tk.StringVar()).set(
+                self.stack_method.replace("_", "-")
+                if getattr(self, "stacking_mode", "") != "classic"
+                else self.stacking_mode
             )
             getattr(gui_instance, "batch_size", tk.IntVar()).set(self.batch_size)
             getattr(gui_instance, "correct_hot_pixels", tk.BooleanVar()).set(

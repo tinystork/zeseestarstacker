@@ -791,7 +791,6 @@ class SeestarStackerGUI:
         # Update additional folders display initially
         self.update_additional_folders_display()
 
-
     def show_initial_preview(self):
         """Affiche un état initial dans la zone d'aperçu."""
         if hasattr(self, "preview_manager") and self.preview_manager:
@@ -2428,6 +2427,11 @@ class SeestarStackerGUI:
         display_value = self.stack_method_display_var.get()
         method = self.method_label_to_key.get(display_value, display_value)
         self.stack_method_var.set(method)
+        if hasattr(self, "stacking_mode"):
+            try:
+                self.stacking_mode.set(method.replace("_", "-"))
+            except tk.TclError:
+                pass
         if method == "mean":
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("none")
@@ -3846,13 +3850,7 @@ class SeestarStackerGUI:
         if threading.current_thread() is not threading.main_thread():
             self.root.after(
                 0,
-                lambda sd=stack_data,
-                sh=stack_header,
-                sn=stack_name,
-                ic=img_count,
-                ti=total_imgs,
-                cb=current_batch,
-                tb=total_batches: self.update_preview_from_stacker(
+                lambda sd=stack_data, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
                     sd, sh, sn, ic, ti, cb, tb
                 ),
             )
@@ -4608,7 +4606,13 @@ class SeestarStackerGUI:
                 remaining = max(0, total_queued - processed)
                 total = total_queued
 
-                def _gui_update(es=eta_str, al=aligned, rem=remaining, tot=total, fmt=default_aligned_fmt):
+                def _gui_update(
+                    es=eta_str,
+                    al=aligned,
+                    rem=remaining,
+                    tot=total,
+                    fmt=default_aligned_fmt,
+                ):
                     try:
                         self.remaining_time_var.set(es)
                         self.aligned_files_var.set(fmt.format(count=al))
@@ -5370,7 +5374,9 @@ class SeestarStackerGUI:
         # --- ROUTAGE VERS LE THREAD GUI ---
         if threading.current_thread() is not threading.main_thread():
             # Planifie l'exécution dans la boucle d'événements Tkinter et sort.
-            self.root.after(0, lambda m=message, p=progress: self.update_progress_gui(m, p))
+            self.root.after(
+                0, lambda m=message, p=progress: self.update_progress_gui(m, p)
+            )
             return
 
         # --- CODE EXISTANT (garde intact le reste) ------------------------------
