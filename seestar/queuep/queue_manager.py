@@ -5496,6 +5496,13 @@ class SeestarQueuedStacker:
                     )
                     data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
 
+                    if (
+                        self.reproject_between_batches
+                        and self.reference_wcs_object is not None
+                    ):
+                        # Attach the reference WCS so batches can be reprojected
+                        wcs_final_pour_retour = self.reference_wcs_object
+
                     if not is_drizzle_or_mosaic_mode:
                         # In classic stacking mode, keep the aligned image as-is
                         pass
@@ -7719,6 +7726,17 @@ class SeestarQueuedStacker:
                 "Images in this batch stack",
             )
             stack_info_header["STK_NOTE"] = f"Stacked with {stack_note}"
+
+            if self.reproject_between_batches and self.reference_wcs_object is not None:
+                try:
+                    wcs_hdr = self.reference_wcs_object.to_header(relax=True)
+                    for k, v in wcs_hdr.items():
+                        if k not in stack_info_header:
+                            stack_info_header[k] = v
+                    stack_info_header.setdefault("NAXIS1", ref_shape_check[1])
+                    stack_info_header.setdefault("NAXIS2", ref_shape_check[0])
+                except Exception:
+                    pass
 
             self.update_progress(
                 f"✅ Combinaison lot (Lot {current_batch_num}/{total_batches_est}) terminée (Shape: {stacked_batch_data_np.shape})"
