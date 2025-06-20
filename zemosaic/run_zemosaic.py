@@ -51,7 +51,9 @@ else:
 
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
-    from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+    # Utilisation d'un import relatif pour fonctionner lorsque ce fichier est
+    # lancé directement depuis le dossier zemosaic.
+    from .zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
     print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI ---")
 
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
@@ -59,7 +61,7 @@ try:
         try:
             # Tenter d'importer zemosaic_worker directement pour inspecter son chemin
             # Note: Il est déjà importé par zemosaic_gui si ZEMOSAIC_WORKER_AVAILABLE est True
-            import zemosaic_worker 
+            from . import zemosaic_worker
             print(f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}")
             if 'zemosaic_worker' in sys.modules:
                  print(f"DEBUG (run_zemosaic): sys.modules['zemosaic_worker'] pointe vers: {sys.modules['zemosaic_worker'].__file__}")
