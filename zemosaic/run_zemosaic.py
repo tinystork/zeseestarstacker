@@ -1,8 +1,10 @@
 # zemosaic/run_zemosaic.py
 import sys # Ajout pour sys.path et sys.modules
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
+import os
 import tkinter as tk
 from tkinter import messagebox # Nécessaire pour la messagebox d'erreur critique
+from zemosaic.core.cuda_utils import enforce_nvidia_gpu
 
 # NVIDIA GPU enforcement before importing CUDA libraries
 from .cuda_utils import enforce_nvidia_gpu
@@ -13,9 +15,12 @@ print(f"Python Executable: {sys.executable}")
 print(f"Python Version: {sys.version}")
 print(f"Chemin de travail actuel (CWD): {sys.path[0]}") # sys.path[0] est généralement le dossier du script
 
-# Détection et forçage du GPU NVIDIA éventuel
-gpu_set = enforce_nvidia_gpu()
-print("GPU NVIDIA forcé" if gpu_set else "Aucun GPU NVIDIA détecté")
+
+if enforce_nvidia_gpu():
+    print(f"GPU NVIDIA forcée (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})")
+else:
+    print("Aucun GPU NVIDIA détecté ou 'nvidia-smi' indisponible.")
+
 
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
