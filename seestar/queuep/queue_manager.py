@@ -2997,6 +2997,7 @@ class SeestarQueuedStacker:
 
                 if (
                     self.reproject_between_batches
+                    and not self.freeze_reference_wcs
                     and not self.drizzle_active_session
                     and not self.is_mosaic_run
                 ):
