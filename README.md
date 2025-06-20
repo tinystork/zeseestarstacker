@@ -353,6 +353,7 @@ zemosaic_worker.run_hierarchical_mosaic(
   and reprojected onto the reference WCS solved from the initial reference
   image. Intermediate stacks are not solved again unless `solve_batches` is
   `true`.
+
 - `freeze_reference_wcs`: when `true` the reference WCS determined from the
   first solved batch remains fixed for the whole run, preventing small drifts
   between batches when using inter-batch reprojection. This is automatically
@@ -369,12 +370,14 @@ performs a blind search centered only on the provided search radius.
 ### Inter-Batch Reprojection with Constant WCS
 
 You can reproject each stacked batch without solving them all. Enable
+
 `reproject_between_batches` and set `solve_batches` to `false` so only the
 reference image is solved once at the start. `freeze_reference_wcs` will be
 turned on automatically in this mode (unless you disable it explicitly) so the
 initial WCS is reused for every batch. Subsequent batches are reprojected using
 a new fixed-orientation grid so the image orientation stays constant and small
 rotation drifts are eliminated.
+
 
 ---
 
