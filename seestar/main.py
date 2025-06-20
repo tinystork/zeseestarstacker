@@ -40,7 +40,7 @@ try:
     #    Avoir à la fois la racine et le dossier du package peut causer des conflits.
     #    Attention : ne le supprimer que s'il n'est pas identique à project_root_dir (ne devrait pas arriver ici)
     if seestar_package_dir in sys.path and seestar_package_dir != project_root_dir:
-        try:
+from .core.cuda_utils import enforce_nvidia_gpu
             sys.path.remove(seestar_package_dir)
             logger.debug(
                 "Supprimé seestar_package_dir '%s' de sys.path pour éviter ambiguïté.",
