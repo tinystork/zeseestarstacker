@@ -4,7 +4,7 @@ import sys # Ajout pour sys.path et sys.modules
 import os
 import tkinter as tk
 from tkinter import messagebox # Nécessaire pour la messagebox d'erreur critique
-from zemosaic.core.cuda_utils import enforce_nvidia_gpu
+from .core.cuda_utils import enforce_nvidia_gpu
 
 
 # --- Impression de débogage initiale ---

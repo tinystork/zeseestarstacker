@@ -14,7 +14,7 @@ import argparse
 import logging
 
 # NVIDIA GPU enforcement before importing CUDA libraries
-from seestar.core.cuda_utils import enforce_nvidia_gpu
+from .core.cuda_utils import enforce_nvidia_gpu
 
 logger = logging.getLogger(__name__)
 
