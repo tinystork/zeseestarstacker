@@ -17,7 +17,9 @@ except ImportError:
     print("AVERT GUI: Pillow (PIL) non installé. L'icône PNG ne peut pas être chargée.")
 # --- Import du module de localisation ---
 try:
-    from locales.zemosaic_localization import ZeMosaicLocalization
+    # Use an explicit relative import so the module can be found when
+    # ``run_zemosaic.py`` is executed as a script from the project root.
+    from .locales.zemosaic_localization import ZeMosaicLocalization
     ZEMOSAIC_LOCALIZATION_AVAILABLE = True
 except ImportError as e_loc:
     ZEMOSAIC_LOCALIZATION_AVAILABLE = False
@@ -26,7 +28,9 @@ except ImportError as e_loc:
 
 # --- Configuration Import ---
 try:
-    import zemosaic_config 
+    # ``zemosaic_config`` lives inside the ``zemosaic`` package so we
+    # import it relatively to avoid relying on ``PYTHONPATH`` layout.
+    from . import zemosaic_config
     ZEMOSAIC_CONFIG_AVAILABLE = True
 except ImportError as e_config:
     ZEMOSAIC_CONFIG_AVAILABLE = False
@@ -35,7 +39,9 @@ except ImportError as e_config:
 
 # --- Worker Import ---
 try:
-    from zemosaic_worker import run_hierarchical_mosaic
+    # Same rationale here: use a relative import so running the package as a
+    # script does not fail with ``No module named 'zemosaic_worker'``.
+    from .zemosaic_worker import run_hierarchical_mosaic
     ZEMOSAIC_WORKER_AVAILABLE = True
 except ImportError as e_worker:
     ZEMOSAIC_WORKER_AVAILABLE = False
