@@ -757,6 +757,9 @@ class SeestarQueuedStacker:
         # behaviour. When ``True`` the reference WCS is only set once and
         # subsequent solves will not modify it.
         self.freeze_reference_wcs = False
+        # Control whether stacked batches are individually solved with ASTAP.
+        # This remains ``True`` by default for backwards compatibility.
+        self.solve_batches = True
 
         self.all_input_filepaths = []
         self.reference_shape = None
@@ -8347,25 +8350,53 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-        # Always attempt to solve the intermediate batch with ASTAP so that a
-        # valid WCS is present on each stacked batch file. This is required for
-        # the optional inter-batch reprojection step (performed on stacked batches).
-        # When solving fails we fall back to the
-        # reference header WCS if available.
-        luminance = (
-            stacked_np[..., 0] * 0.299
-            + stacked_np[..., 1] * 0.587
-            + stacked_np[..., 2] * 0.114
-        ).astype(np.float32)
-        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-        tmp.close()
-        fits.PrimaryHDU(
-            data=luminance, header=header
-        ).writeto(tmp.name, overwrite=True, output_verify="ignore")
-        solved_ok = self._run_astap_and_update_header(tmp.name)
-        if solved_ok:
-            solved_hdr = fits.getheader(tmp.name)
-            header.update(solved_hdr)
+        if self.solve_batches:
+            # Always attempt to solve the intermediate batch with ASTAP so that a
+            # valid WCS is present on each stacked batch file. This is required for
+            # the optional inter-batch reprojection step (performed on stacked batches).
+            # When solving fails we fall back to the reference header WCS if available.
+            luminance = (
+                stacked_np[..., 0] * 0.299
+                + stacked_np[..., 1] * 0.587
+                + stacked_np[..., 2] * 0.114
+            ).astype(np.float32)
+            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+            tmp.close()
+            fits.PrimaryHDU(
+                data=luminance, header=header
+            ).writeto(tmp.name, overwrite=True, output_verify="ignore")
+            solved_ok = self._run_astap_and_update_header(tmp.name)
+            if solved_ok:
+                solved_hdr = fits.getheader(tmp.name)
+                header.update(solved_hdr)
+            else:
+                if self.reference_header_for_wcs is not None:
+                    header.update(
+                        {
+                            k: self.reference_header_for_wcs[k]
+                            for k in [
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ]
+                            if k in self.reference_header_for_wcs
+                        }
+                    )
+                    header["NAXIS1"] = stacked_np.shape[1]
+                    header["NAXIS2"] = stacked_np.shape[0]
+                else:
+                    os.remove(tmp.name)
+                    return None, None
+            os.remove(tmp.name)
         else:
             if self.reference_header_for_wcs is not None:
                 header.update(
@@ -8390,10 +8421,6 @@ class SeestarQueuedStacker:
                 )
                 header["NAXIS1"] = stacked_np.shape[1]
                 header["NAXIS2"] = stacked_np.shape[0]
-            else:
-                os.remove(tmp.name)
-                return None, None
-        os.remove(tmp.name)
 
         final_stacked = stacked_np
         final_wht = wht_2d
@@ -9882,6 +9909,11 @@ class SeestarQueuedStacker:
         )
 
         self.reproject_between_batches = bool(reproject_between_batches)
+        # Disable solving of intermediate batches when reprojection is used and
+        # the reference WCS should remain fixed.
+        self.solve_batches = not (
+            self.reproject_between_batches and self.freeze_reference_wcs
+        )
 
         # Determine if we should keep the original input frame size when
         # reprojection between batches is enabled (to avoid changing the

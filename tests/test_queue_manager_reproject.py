@@ -523,3 +523,64 @@ def test_freeze_reference_wcs(monkeypatch, tmp_path):
 
     assert np.allclose(obj.reference_wcs_object.wcs.crval, [0, 0])
 
+
+def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+    import os
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.output_folder = str(tmp_path)
+    obj.reference_header_for_wcs = qm.fits.Header()
+    obj.reference_header_for_wcs["CRPIX1"] = 1.0
+    obj.reference_header_for_wcs["CRPIX2"] = 1.0
+    obj.reference_header_for_wcs["CRVAL1"] = 0.0
+    obj.reference_header_for_wcs["CRVAL2"] = 0.0
+    obj.reference_header_for_wcs["CTYPE1"] = "RA---TAN"
+    obj.reference_header_for_wcs["CTYPE2"] = "DEC--TAN"
+    obj.solve_batches = False
+
+    called = {"n": 0}
+
+    def fake_run_astap(self, path):
+        called["n"] += 1
+        return True
+
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+
+    hdr = qm.fits.Header()
+    data = np.zeros((4, 4, 3), dtype=np.float32)
+    wht = np.ones((4, 4), dtype=np.float32)
+
+    sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
+
+    assert called["n"] == 0
+    assert hdr["CRPIX1"] == 1.0
+    assert os.path.exists(sci)
+    assert len(wht_paths) == data.shape[2]
+

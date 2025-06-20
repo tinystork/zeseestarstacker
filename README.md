@@ -356,6 +356,8 @@ zemosaic_worker.run_hierarchical_mosaic(
 - `freeze_reference_wcs`: when set to `true` the reference WCS determined from
   the first solved batch remains fixed for the whole run, preventing small
   drifts between batches when using inter-batch reprojection.
+- `solve_batches`: disable solving of each stacked batch when set to `false`.
+  The stored reference WCS header is applied instead.
 
 `use_radec_hints` controls whether ASTAP receives the RA/DEC coordinates from
 the FITS header. This option is **disabled by default** and should only be
