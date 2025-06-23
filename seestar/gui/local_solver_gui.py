@@ -443,14 +443,6 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             side=tk.LEFT, padx=(5, 0)
         )
 
-        reproject_cb = ttk.Checkbutton(
-            main_frame,
-            text=self.tr("enable_batch_reproject", default="Enable inter-batch reprojection (requires WCS)"),
-            variable=self.reproject_between_batches_var,
-        )
-        reproject_cb.pack(anchor=tk.W, pady=(10, 0))
-        ToolTip(reproject_cb, lambda: self.tr("tooltip_enable_batch_reproject", default="Requires a working solver (ASTAP, Astrometry.net, or Ansvr)"))
-
         self.warning_label = ttk.Label(
             main_frame,
             foreground="red",

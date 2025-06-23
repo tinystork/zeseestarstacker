@@ -1186,7 +1186,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.final_keys = ["mean", "median", "winsorized_sigma_clip"]
+        self.final_keys = ["mean", "median", "winsorized_sigma_clip", "reproject"]
         self.final_key_to_label = {}
         self.final_label_to_key = {}
         for k in self.final_keys:
@@ -1194,11 +1194,16 @@ class SeestarStackerGUI:
             self.final_key_to_label[k] = label
             self.final_label_to_key[label] = k
         self.stack_final_combo["values"] = list(self.final_key_to_label.values())
-        self.stack_final_display_var.set(
-            self.final_key_to_label.get(
-                self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+        if self.reproject_between_batches_var.get():
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get("reproject", "reproject")
             )
-        )
+        else:
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get(
+                    self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+                )
+            )
 
         method_kappa_scnr_frame = ttk.Frame(self.options_frame)
         method_kappa_scnr_frame.pack(fill=tk.X, padx=0, pady=(5, 0))
@@ -2478,10 +2483,15 @@ class SeestarStackerGUI:
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("linear_fit_clip")
         if hasattr(self, "final_key_to_label"):
-            current_key = self.stack_final_combine_var.get()
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get(current_key, current_key)
-            )
+            if self.reproject_between_batches_var.get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject", "reproject")
+                )
+            else:
+                current_key = self.stack_final_combine_var.get()
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get(current_key, current_key)
+                )
         self._toggle_kappa_visibility()
 
     def _on_norm_combo_change(self, event=None):
@@ -2500,7 +2510,12 @@ class SeestarStackerGUI:
         """Update internal var when final combine selection changes."""
         display_value = self.stack_final_display_var.get()
         key = self.final_label_to_key.get(display_value, display_value)
-        self.stack_final_combine_var.set(key)
+        if key == "reproject":
+            self.reproject_between_batches_var.set(True)
+            self.stack_final_combine_var.set("mean")
+        else:
+            self.reproject_between_batches_var.set(False)
+            self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
 
     #################################################################################################################################
@@ -3466,10 +3481,15 @@ class SeestarStackerGUI:
                 self.final_key_to_label[k] = label
                 self.final_label_to_key[label] = k
             self.stack_final_combo["values"] = list(self.final_key_to_label.values())
-            current_key = self.stack_final_combine_var.get()
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get(current_key, current_key)
-            )
+            if self.reproject_between_batches_var.get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject", "reproject")
+                )
+            else:
+                current_key = self.stack_final_combine_var.get()
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get(current_key, current_key)
+                )
         # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))

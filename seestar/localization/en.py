@@ -67,6 +67,7 @@ EN_TRANSLATIONS = {
     "combine_method_mean": "Mean",
     "combine_method_median": "Median",
     "combine_method_winsorized_sigma_clip": "Winsorized Sigma Clip",
+    "combine_method_reproject": "Reproject",
     "stack_method_label": "Method:",
     "method_mean": "Mean",
     "method_median": "Median",
