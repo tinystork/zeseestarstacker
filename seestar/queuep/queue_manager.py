@@ -667,6 +667,7 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
+        self.max_hq_mem = getattr(settings, "max_hq_mem", 8 * 1024**3)
         self.drizzle_renorm_method = "none"
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
@@ -7455,6 +7456,29 @@ class SeestarQueuedStacker:
         with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
             return exe.submit(_stack_worker, stack_args).result()
 
+    def _combine_hq_by_tiles(
+        self, images_list, weights, kappa, winsor_limits, tile_h=512
+    ):
+        """Combine les mini-stacks en bandes pour limiter la RAM."""
+        H, W, _ = images_list[0].shape
+        final = np.zeros_like(images_list[0], dtype=np.float32)
+        wht = np.zeros((H, W), dtype=np.float32)
+
+        for y0 in range(0, H, tile_h):
+            y1 = min(y0 + tile_h, H)
+            cube = np.stack([img[y0:y1] for img in images_list], axis=0)
+            w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
+            stacked, _ = self._stack_winsorized_sigma(
+                cube,
+                w_cube,
+                kappa=kappa,
+                winsor_limits=winsor_limits,
+            )
+            final[y0:y1] += stacked * np.sum(w_cube, axis=0)[..., None]
+            wht[y0:y1] += np.sum(w_cube, axis=0)
+
+        return np.nan_to_num(final / np.maximum(wht[..., None], 1e-6))
+
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
     ):
@@ -8068,12 +8092,26 @@ class SeestarQueuedStacker:
         try:
             # Les `final_output_images_list` contiennent la somme(data*wht) et `final_output_weights_list` contient la somme(wht)
             # La division se fera dans _save_final_stack. Ici, on stack juste pour retourner.
-            final_sci_image_HWC = np.stack(final_output_images_list, axis=-1).astype(
-                np.float32
-            )
-            final_wht_map_HWC = np.stack(final_output_weights_list, axis=-1).astype(
-                np.float32
-            )  # Maintenant HWC
+            cube = np.stack(final_output_images_list, axis=0)
+            w_cube = np.stack(final_output_weights_list, axis=0)
+            if cube.nbytes > self.max_hq_mem:
+                self.update_progress(
+                    "HQ combine : trop de RAM, bascule en passe 2 par bandes"
+                )
+                final_sci_image_HWC = self._combine_hq_by_tiles(
+                    final_output_images_list,
+                    final_output_weights_list,
+                    kappa=self.stack_kappa_high,
+                    winsor_limits=self.winsor_limits,
+                )
+            else:
+                final_sci_image_HWC, _ = self._stack_winsorized_sigma(
+                    cube,
+                    w_cube,
+                    kappa=self.stack_kappa_high,
+                    winsor_limits=self.winsor_limits,
+                )
+            final_wht_map_HWC = np.sum(w_cube, axis=0).astype(np.float32)
 
             # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---
             # if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:

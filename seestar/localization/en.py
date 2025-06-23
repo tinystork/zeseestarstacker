@@ -63,6 +63,7 @@ EN_TRANSLATIONS = {
     "stacking_winsor_limits_label": "Winsor Limits (low,high):",
     "stacking_winsor_note": "(e.g., 0.05,0.05 for 5% each side)",
     "stacking_final_combine_label": "Final Combine:",
+    "hq_ram_limit_label": "HQ RAM limit (GB)",
     "combine_method_mean": "Mean",
     "combine_method_median": "Median",
     "stack_method_label": "Method:",

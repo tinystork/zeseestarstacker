@@ -517,6 +517,7 @@ class SeestarStackerGUI:
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
+        self.max_hq_mem_var = tk.DoubleVar(value=8)
         self.batch_size = tk.IntVar(value=10)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
@@ -1144,6 +1145,17 @@ class SeestarStackerGUI:
         )
         self.stack_final_combo.pack(side=tk.LEFT, padx=(5, 0))
         self.stack_final_combo.bind("<<ComboboxSelected>>", self._on_final_combo_change)
+
+        tk.Label(
+            final_frame,
+            text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
+        ).pack(side=tk.LEFT, padx=(10, 2))
+        tk.Spinbox(
+            final_frame,
+            from_=1, to=64, increment=1,
+            width=5,
+            textvariable=self.max_hq_mem_var,
+        ).pack(side=tk.LEFT)
 
         # Mapping between internal keys and displayed labels for normalization, weighting and final combine
         self.norm_keys = ["none", "linear_fit", "sky_mean"]
