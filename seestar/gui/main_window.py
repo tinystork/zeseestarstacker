@@ -1036,6 +1036,18 @@ class SeestarStackerGUI:
         last_browse.pack(side=tk.RIGHT)
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
         last_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+
+        zoom_frame = ttk.Frame(tab_stacking)
+        zoom_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Label(zoom_frame, text="Zoom (%)").grid(row=0, column=0, sticky=tk.W)
+        self.zoom_percent_var = tk.IntVar(value=0)
+        ttk.Combobox(
+            zoom_frame,
+            values=[0, 10, 20, 30, 40, 50],
+            textvariable=self.zoom_percent_var,
+            width=6,
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
         self.options_frame = ttk.LabelFrame(tab_stacking, text="Stacking Options")
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
 
@@ -6718,6 +6730,7 @@ class SeestarStackerGUI:
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
+            "zoom_percent": self.settings.zoom_percent,
             "use_weighting": self.settings.stack_weight_method == "quality",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
