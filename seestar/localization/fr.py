@@ -66,6 +66,7 @@ FR_TRANSLATIONS = {
     "hq_ram_limit_label": "Limite RAM HQ (Go)",
     "combine_method_mean": "Moyenne",
     "combine_method_median": "Médiane",
+    "combine_method_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "stack_method_label": "Méthode :",
     "method_mean": "Moyenne",
     "method_median": "Médiane",

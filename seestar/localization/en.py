@@ -66,6 +66,7 @@ EN_TRANSLATIONS = {
     "hq_ram_limit_label": "HQ RAM limit (GB)",
     "combine_method_mean": "Mean",
     "combine_method_median": "Median",
+    "combine_method_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "stack_method_label": "Method:",
     "method_mean": "Mean",
     "method_median": "Median",
