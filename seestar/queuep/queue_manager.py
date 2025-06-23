@@ -804,6 +804,7 @@ class SeestarQueuedStacker:
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
+        self.zoom_percent = 0
         self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"
         self.drizzle_scale = 2.0
@@ -5267,6 +5268,27 @@ class SeestarQueuedStacker:
                     )
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
+
+            zoom_pct = getattr(self, "zoom_percent", 0)
+            if isinstance(zoom_pct, (int, float)) and zoom_pct > 0:
+                factor = 1.0 + zoom_pct / 100.0
+                try:
+                    h, w = prepared_img_after_initial_proc.shape[:2]
+                    resized = cv2.resize(
+                        prepared_img_after_initial_proc,
+                        None,
+                        fx=factor,
+                        fy=factor,
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                    center = (resized.shape[1] // 2, resized.shape[0] // 2)
+                    prepared_img_after_initial_proc = cv2.getRectSubPix(
+                        resized,
+                        patchSize=(w, h),
+                        center=center,
+                    )
+                except Exception as e_zoom:
+                    logger.warning(f"Zoom ROI désactivé (erreur : {e_zoom})")
 
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
@@ -9780,6 +9802,7 @@ class SeestarQueuedStacker:
         local_solver_preference="none",
         move_stacked=False,
         partial_save_interval=1,
+        zoom_percent=0,
         *,
         save_as_float32=False,
         preserve_linear_output=False,
@@ -9953,6 +9976,7 @@ class SeestarQueuedStacker:
         self.correct_hot_pixels = bool(correct_hot_pixels)
         self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size)
+        self.zoom_percent = int(zoom_percent)
         self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
         self.weight_by_snr = bool(weight_by_snr)
