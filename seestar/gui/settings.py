@@ -173,6 +173,11 @@ class SettingsManager:
                 "batch_size",
                 tk.IntVar(value=default_values_from_code.get("batch_size", 0)),
             ).get()
+            self.max_hq_mem_gb = getattr(
+                gui_instance,
+                "max_hq_mem_var",
+                tk.DoubleVar(value=default_values_from_code.get("max_hq_mem_gb", 8)),
+            ).get()
             self.correct_hot_pixels = getattr(
                 gui_instance,
                 "correct_hot_pixels",
@@ -746,6 +751,9 @@ class SettingsManager:
             getattr(gui_instance, "stack_final_combine_var", tk.StringVar()).set(
                 self.stack_final_combine
             )
+            getattr(gui_instance, "max_hq_mem_var", tk.DoubleVar()).set(
+                self.max_hq_mem_gb
+            )
             getattr(gui_instance, "stack_method_var", tk.StringVar()).set(
                 self.stack_method
             )
@@ -1135,6 +1143,7 @@ class SettingsManager:
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
         defaults_dict["stack_final_combine"] = "mean"
+        defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
         defaults_dict["hot_pixel_threshold"] = 3.0
@@ -1456,6 +1465,21 @@ class SettingsManager:
                 messages.append(
                     f"Kappa High ('{original}') invalide, réinitialisé à {self.stack_kappa_high}"
                 )
+
+            # --- HQ RAM limit ---
+            try:
+                self.max_hq_mem_gb = float(self.max_hq_mem_gb)
+                if not (1 <= self.max_hq_mem_gb <= 64):
+                    original = self.max_hq_mem_gb
+                    self.max_hq_mem_gb = np.clip(self.max_hq_mem_gb, 1, 64)
+                    messages.append(
+                        f"Limite RAM HQ ({original}) hors plage [1,64] Go, réglée à {self.max_hq_mem_gb} Go"
+                    )
+            except (ValueError, TypeError):
+                messages.append("Limite RAM HQ invalide – 8 Go utilisée")
+                self.max_hq_mem_gb = defaults_fallback["max_hq_mem_gb"]
+
+            self.max_hq_mem = int(self.max_hq_mem_gb * 1024**3)
 
             winsor_str = str(
                 getattr(
@@ -2255,6 +2279,7 @@ class SettingsManager:
             "stack_kappa_high": float(self.stack_kappa_high),
             "stack_winsor_limits": str(self.stack_winsor_limits),
             "stack_final_combine": str(self.stack_final_combine),
+            "max_hq_mem_gb": float(self.max_hq_mem_gb),
             "stack_method": str(self.stack_method),
             "batch_size": int(self.batch_size),
             "correct_hot_pixels": bool(self.correct_hot_pixels),
