@@ -668,6 +668,7 @@ class SeestarQueuedStacker:
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
         self.max_hq_mem = getattr(settings, "max_hq_mem", 8 * 1024**3)
+        self.stack_final_combine = getattr(settings, "stack_final_combine", "mean")
         self.drizzle_renorm_method = "none"
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
@@ -802,6 +803,7 @@ class SeestarQueuedStacker:
         self.stack_kappa_low = 2.5
         self.stack_kappa_high = 2.5
         self.winsor_limits = (0.05, 0.05)
+        self.stack_final_combine = "mean"
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
@@ -7468,12 +7470,17 @@ class SeestarQueuedStacker:
             y1 = min(y0 + tile_h, H)
             cube = np.stack([img[y0:y1] for img in images_list], axis=0)
             w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
-            stacked, _ = self._stack_winsorized_sigma(
-                cube,
-                w_cube,
-                kappa=kappa,
-                winsor_limits=winsor_limits,
-            )
+            if self.stack_final_combine == "winsorized_sigma_clip":
+                stacked, _ = self._stack_winsorized_sigma(
+                    cube,
+                    w_cube,
+                    kappa=kappa,
+                    winsor_limits=winsor_limits,
+                )
+            elif self.stack_final_combine == "median":
+                stacked, _ = _stack_median(cube, w_cube)
+            else:
+                stacked, _ = _stack_mean(cube, w_cube)
             final[y0:y1] += stacked * np.sum(w_cube, axis=0)[..., None]
             wht[y0:y1] += np.sum(w_cube, axis=0)
 
@@ -8105,12 +8112,17 @@ class SeestarQueuedStacker:
                     winsor_limits=self.winsor_limits,
                 )
             else:
-                final_sci_image_HWC, _ = self._stack_winsorized_sigma(
-                    cube,
-                    w_cube,
-                    kappa=self.stack_kappa_high,
-                    winsor_limits=self.winsor_limits,
-                )
+                if self.stack_final_combine == "winsorized_sigma_clip":
+                    final_sci_image_HWC, _ = self._stack_winsorized_sigma(
+                        cube,
+                        w_cube,
+                        kappa=self.stack_kappa_high,
+                        winsor_limits=self.winsor_limits,
+                    )
+                elif self.stack_final_combine == "median":
+                    final_sci_image_HWC, _ = _stack_median(cube, w_cube)
+                else:
+                    final_sci_image_HWC, _ = _stack_mean(cube, w_cube)
             final_wht_map_HWC = np.sum(w_cube, axis=0).astype(np.float32)
 
             # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---

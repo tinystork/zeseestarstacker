@@ -1186,7 +1186,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.final_keys = ["mean", "median"]
+        self.final_keys = ["mean", "median", "winsorized_sigma_clip"]
         self.final_key_to_label = {}
         self.final_label_to_key = {}
         for k in self.final_keys:
@@ -2402,17 +2402,23 @@ class SeestarStackerGUI:
     def _toggle_kappa_visibility(self, event=None):
         """Affiche ou cache les widgets Kappa en fonction de la méthode de stacking, en utilisant grid."""
         method = None
+        final_method = None
         if hasattr(self, "stack_method_var"):
             try:
                 method = self.stack_method_var.get()
             except tk.TclError:
                 method = None
+        if hasattr(self, "stack_final_combine_var"):
+            try:
+                final_method = self.stack_final_combine_var.get()
+            except tk.TclError:
+                final_method = None
 
         show_kappa = False
         show_winsor = False
-        if method == "kappa_sigma":
+        if method == "kappa_sigma" or final_method == "winsorized_sigma_clip":
             show_kappa = True
-        elif method == "winsorized_sigma_clip":
+        if method == "winsorized_sigma_clip" or final_method == "winsorized_sigma_clip":
             show_kappa = True
             show_winsor = True
 
@@ -2495,6 +2501,7 @@ class SeestarStackerGUI:
         display_value = self.stack_final_display_var.get()
         key = self.final_label_to_key.get(display_value, display_value)
         self.stack_final_combine_var.set(key)
+        self._toggle_kappa_visibility()
 
     #################################################################################################################################
 

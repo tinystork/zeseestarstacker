@@ -1509,7 +1509,7 @@ class SettingsManager:
                 parsed = defaults_fallback["stack_winsor_limits"]
             self.stack_winsor_limits = parsed
 
-            valid_combine = ["mean", "median"]
+            valid_combine = ["mean", "median", "winsorized_sigma_clip"]
             self.stack_final_combine = str(
                 getattr(
                     self,
