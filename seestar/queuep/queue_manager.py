@@ -149,6 +149,7 @@ def _stack_worker(args):
         kappa_low,
         kappa_high,
         winsor_limits,
+        apply_rewinsor,
     ) = args
     os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -166,6 +167,7 @@ def _stack_worker(args):
             weights,
             kappa=max(kappa_low, kappa_high),
             winsor_limits=winsor_limits,
+            apply_rewinsor=apply_rewinsor,
         )
     elif mode == "kappa-sigma":
         return _stack_kappa_sigma(
@@ -7447,6 +7449,10 @@ class SeestarQueuedStacker:
         apply_rewinsor=True,
     ):
         """Run winsorized sigma clipping in a separate process."""
+        self.update_progress(
+            f"RejWinsor: kappa={kappa}, limits={winsor_limits}, apply_rewinsor={apply_rewinsor}",
+            None,
+        )
         stack_args = (
             "winsorized-sigma",
             images,
@@ -7454,9 +7460,15 @@ class SeestarQueuedStacker:
             kappa,
             kappa,
             winsor_limits,
+            apply_rewinsor,
         )
         with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
-            return exe.submit(_stack_worker, stack_args).result()
+            stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        self.update_progress(
+            f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
+            None,
+        )
+        return stacked, rejected_pct
 
     def _combine_hq_by_tiles(
         self, images_list, weights, kappa, winsor_limits, tile_h=512
