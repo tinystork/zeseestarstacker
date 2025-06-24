@@ -7463,7 +7463,12 @@ class SeestarQueuedStacker:
             apply_rewinsor,
         )
         with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
-            return exe.submit(_stack_worker, stack_args).result()
+            stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        self.update_progress(
+            f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
+            None,
+        )
+        return stacked, rejected_pct
 
     def _combine_hq_by_tiles(
         self, images_list, weights, kappa, winsor_limits, tile_h=512
