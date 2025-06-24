@@ -1,6 +1,9 @@
 # Stacking algorithms duplicated from ZeMosaic
 
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _stack_mean(images, weights=None):
@@ -73,6 +76,12 @@ def _stack_winsorized_sigma(
     apply_rewinsor=True,
 ):
     """Winsorized sigma clip stacking used by the queue manager."""
+    logger.debug(
+        "Winsorized sigma clip start: kappa=%s limits=%s apply_rewinsor=%s",
+        kappa,
+        winsor_limits,
+        apply_rewinsor,
+    )
     from scipy.stats.mstats import winsorize
     from astropy.stats import sigma_clipped_stats
 
@@ -101,5 +110,8 @@ def _stack_winsorized_sigma(
     else:
         result = np.nanmean(arr_clip, axis=0)
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
+    logger.debug("Winsorized sigma clip done: %.2f%% of pixels rejected",
+        rejected_pct,
+    )
     return result.astype(np.float32), rejected_pct
 
