@@ -9,6 +9,7 @@ from astropy.io import fits
 from astropy.utils.exceptions import AstropyWarning
 import warnings
 import json
+import concurrent.futures
 
 try:
     import snr_module
@@ -156,8 +157,8 @@ def write_log_summary(log_file_path, input_dir, options,
 # --- DANS analyse_logic.py ---
 # (Placez cette fonction au même niveau que perform_analysis, par exemple après)
 
-def apply_pending_snr_actions(results_list, snr_reject_abs_path, 
-                              delete_rejected_flag, move_rejected_flag, 
+def apply_pending_snr_actions(results_list, snr_reject_abs_path,
+                              delete_rejected_flag, move_rejected_flag,
                               log_callback, status_callback, progress_callback,
                               input_dir_abs): # Ajout input_dir_abs pour rel_path
     """
@@ -279,6 +280,52 @@ def apply_pending_snr_actions(results_list, snr_reject_abs_path,
 
 
 
+# --- Helpers for parallel processing ---
+def _snr_worker(path):
+    """Worker to compute SNR for a FITS file."""
+    result = {
+        'path': path,
+        'snr': np.nan,
+        'sky_bg': np.nan,
+        'sky_noise': np.nan,
+        'signal_pixels': 0,
+        'exposure': 'N/A',
+        'filter': 'N/A',
+        'temperature': 'N/A',
+        'error': None,
+    }
+    hdul = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', AstropyWarning)
+            hdul = fits.open(path, memmap=False, lazy_load_hdus=True)
+            if hdul and len(hdul) > 0 and hasattr(hdul[0], 'data') and hdul[0].data is not None:
+                data = hdul[0].data
+                header = hdul[0].header
+                result['exposure'] = header.get('EXPTIME', header.get('EXPOSURE', 'N/A'))
+                result['filter'] = header.get('FILTER', 'N/A')
+                result['temperature'] = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
+                snr, sky_bg, sky_noise, signal_pixels = snr_module.calculate_snr(data)
+                result.update({'snr': snr, 'sky_bg': sky_bg, 'sky_noise': sky_noise, 'signal_pixels': signal_pixels})
+            else:
+                result['error'] = 'Pas de données image valides dans HDU 0.'
+    except Exception as e:
+        result['error'] = str(e)
+    finally:
+        if hdul:
+            try:
+                hdul.close()
+            except Exception:
+                pass
+    return result
+
+
+def _trail_worker(args):
+    """Worker to run trail detection on a chunk."""
+    chunk, params = args
+    return trail_module.run_trail_detection(chunk, params)
+
+
 # --- Fonction principale d'analyse (Orchestrateur) ---
 def perform_analysis(input_dir, output_log, options, callbacks):
     """
@@ -292,6 +339,10 @@ def perform_analysis(input_dir, output_log, options, callbacks):
 
     _status("status_analysis_prep")
     start_time = time.time()
+
+    import multiprocessing
+    n_cpus = multiprocessing.cpu_count()
+    n_workers = max(1, int(n_cpus * 0.75))
 
     # --- NOUVEAU : Extraire l'option pour l'application immédiate des actions SNR ---
     apply_snr_action_immediately = options.get('apply_snr_action_immediately', True)
@@ -440,42 +491,143 @@ def perform_analysis(input_dir, output_log, options, callbacks):
 
     # --- Étape 2: Boucle Analyse SNR ---
     # ... (cette section reste identique) ...
-    all_results_list = []; _log("logic_snr_start"); snr_loop_errors = 0
-    for i, fits_file_path in enumerate(fits_files_to_process):
-        progress = ((i + 1) / total_files) * 50 # SNR jusqu'à 50%
-        try: rel_path_for_status = os.path.relpath(fits_file_path, abs_input_dir)
-        except ValueError: rel_path_for_status = os.path.basename(fits_file_path)
-        _progress(progress); _status("status_snr_start", file=rel_path_for_status, i=i+1, total=total_files)
-        result = {'file': os.path.basename(fits_file_path), 'path': fits_file_path, 'rel_path': rel_path_for_status, 
-                  'status': 'pending', 'action': 'kept', 'rejected_reason': None, 
-                  'action_comment': '', 'error_message': '', 'has_trails': False, 'num_trails': 0}
-        try:
-            if options.get('analyze_snr'):
-                exposure, filter_name, temperature = 'N/A', 'N/A', 'N/A'; snr, sky_bg, sky_noise, signal_pixels = np.nan, np.nan, np.nan, 0
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore', AstropyWarning)
+    all_results_list = []
+    _log("logic_snr_start")
+    snr_loop_errors = 0
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+            future_map = {ex.submit(_snr_worker, p): p for p in fits_files_to_process}
+            for idx, future in enumerate(concurrent.futures.as_completed(future_map)):
+                fits_file_path = future_map[future]
+                progress = ((idx + 1) / total_files) * 50
+                try:
+                    rel_path_for_status = os.path.relpath(fits_file_path, abs_input_dir)
+                except ValueError:
+                    rel_path_for_status = os.path.basename(fits_file_path)
+                _progress(progress)
+                _status("status_snr_start", file=rel_path_for_status, i=idx+1, total=total_files)
+                result_base = {
+                    'file': os.path.basename(fits_file_path),
+                    'path': fits_file_path,
+                    'rel_path': rel_path_for_status,
+                    'status': 'pending',
+                    'action': 'kept',
+                    'rejected_reason': None,
+                    'action_comment': '',
+                    'error_message': '',
+                    'has_trails': False,
+                    'num_trails': 0,
+                }
+                try:
+                    worker_res = future.result()
+                    if options.get('analyze_snr'):
+                        if worker_res.get('error'):
+                            raise Exception(worker_res['error'])
+                        snr_data = {
+                            'snr': worker_res['snr'],
+                            'sky_bg': worker_res['sky_bg'],
+                            'sky_noise': worker_res['sky_noise'],
+                            'signal_pixels': worker_res['signal_pixels'],
+                            'exposure': worker_res['exposure'],
+                            'filter': worker_res['filter'],
+                            'temperature': worker_res['temperature'],
+                        }
+                        result_base.update(snr_data)
+                        result_base['status'] = 'ok'
+                        _log("logic_snr_info", file=result_base['rel_path'], snr=worker_res['snr'], bg=worker_res['sky_bg'])
+                    else:
+                        if result_base['status'] == 'pending':
+                            result_base['status'] = 'ok'
+                except Exception as snr_e:
+                    err_msg = f"Erreur analyse SNR/FITS: {snr_e}"
+                    result_base['status'] = 'error'
+                    result_base['error_message'] = err_msg
+                    snr_loop_errors += 1
+                    _log("logic_file_error", file=result_base['rel_path'], e=err_msg)
+                all_results_list.append(result_base)
+    except Exception as pool_e:
+        _log("logic_warn_prefix", text=f"Echec pool SNR ({pool_e}), fallback séquentiel")
+        all_results_list = []
+        snr_loop_errors = 0
+        for i, fits_file_path in enumerate(fits_files_to_process):
+            progress = ((i + 1) / total_files) * 50
+            try:
+                rel_path_for_status = os.path.relpath(fits_file_path, abs_input_dir)
+            except ValueError:
+                rel_path_for_status = os.path.basename(fits_file_path)
+            _progress(progress)
+            _status("status_snr_start", file=rel_path_for_status, i=i+1, total=total_files)
+            result = {
+                'file': os.path.basename(fits_file_path),
+                'path': fits_file_path,
+                'rel_path': rel_path_for_status,
+                'status': 'pending',
+                'action': 'kept',
+                'rejected_reason': None,
+                'action_comment': '',
+                'error_message': '',
+                'has_trails': False,
+                'num_trails': 0,
+            }
+            try:
+                if options.get('analyze_snr'):
                     hdul = None
-                    try:
-                        hdul = fits.open(fits_file_path, memmap=False, lazy_load_hdus=True)
-                        if hdul and len(hdul) > 0 and hasattr(hdul[0], 'data') and hdul[0].data is not None:
-                            data = hdul[0].data; header = hdul[0].header
-                            exposure = header.get('EXPTIME', header.get('EXPOSURE', 'N/A')); filter_name = header.get('FILTER', 'N/A'); temperature = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
-                            snr, sky_bg, sky_noise, signal_pixels = snr_module.calculate_snr(data)
-                            if np.isfinite(snr) and np.isfinite(sky_bg) and np.isfinite(sky_noise):
-                                snr_data = {'snr': snr, 'sky_bg': sky_bg, 'sky_noise': sky_noise, 'signal_pixels': signal_pixels, 'exposure': exposure, 'filter': filter_name, 'temperature': temperature}
-                                result.update(snr_data); result['status'] = 'ok'; _log("logic_snr_info", file=result['rel_path'], snr=snr, bg=sky_bg)
-                            else: raise ValueError("Calcul SNR a retourné des valeurs non finies.")
-                        else: raise ValueError("Pas de données image valides dans HDU 0.")
-                    except Exception as snr_e: result['status'] = 'error'; err_msg = f"Erreur analyse SNR/FITS: {snr_e}"; result['error_message'] = err_msg; _log("logic_file_error", file=result['rel_path'], e=err_msg); snr_loop_errors += 1
-                    finally:
-                        if hdul: 
-                            try: hdul.close()
-                            except Exception as e_close: print(f"WARN: Erreur fermeture FITS {result['rel_path']}: {e_close}")
-            else: # Si pas d'analyse SNR, marquer comme OK pour la suite
-                if result['status'] == 'pending': result['status'] = 'ok' 
-        except Exception as file_e: result['status'] = 'error'; err_msg = f"Erreur traitement général: {file_e}"; result['error_message'] = err_msg; _log("logic_file_error", file=result['rel_path'], e=err_msg); snr_loop_errors += 1; print(f"\n--- Traceback Erreur Fichier (Logic) {result['rel_path']} ---"); traceback.print_exc(); print("---------------------------------------------------\n")
-        finally: all_results_list.append(result)
-    if snr_loop_errors > 0: _log("logic_warn_prefix", text=f"{snr_loop_errors} erreur(s) rencontrée(s) pendant l'analyse SNR initiale.")
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', AstropyWarning)
+                        try:
+                            hdul = fits.open(fits_file_path, memmap=False, lazy_load_hdus=True)
+                            if hdul and len(hdul) > 0 and hasattr(hdul[0], 'data') and hdul[0].data is not None:
+                                data = hdul[0].data
+                                header = hdul[0].header
+                                exposure = header.get('EXPTIME', header.get('EXPOSURE', 'N/A'))
+                                filter_name = header.get('FILTER', 'N/A')
+                                temperature = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
+                                snr, sky_bg, sky_noise, signal_pixels = snr_module.calculate_snr(data)
+                                if np.isfinite(snr) and np.isfinite(sky_bg) and np.isfinite(sky_noise):
+                                    snr_data = {
+                                        'snr': snr,
+                                        'sky_bg': sky_bg,
+                                        'sky_noise': sky_noise,
+                                        'signal_pixels': signal_pixels,
+                                        'exposure': exposure,
+                                        'filter': filter_name,
+                                        'temperature': temperature,
+                                    }
+                                    result.update(snr_data)
+                                    result['status'] = 'ok'
+                                    _log("logic_snr_info", file=result['rel_path'], snr=snr, bg=sky_bg)
+                                else:
+                                    raise ValueError("Calcul SNR a retourné des valeurs non finies.")
+                            else:
+                                raise ValueError("Pas de données image valides dans HDU 0.")
+                        except Exception as snr_e:
+                            err_msg = f"Erreur analyse SNR/FITS: {snr_e}"
+                            result['status'] = 'error'
+                            result['error_message'] = err_msg
+                            snr_loop_errors += 1
+                            _log("logic_file_error", file=result['rel_path'], e=err_msg)
+                        finally:
+                            if hdul:
+                                try:
+                                    hdul.close()
+                                except Exception as e_close:
+                                    print(f"WARN: Erreur fermeture FITS {result['rel_path']}: {e_close}")
+                else:
+                    if result['status'] == 'pending':
+                        result['status'] = 'ok'
+            except Exception as file_e:
+                err_msg = f"Erreur traitement général: {file_e}"
+                result['status'] = 'error'
+                result['error_message'] = err_msg
+                snr_loop_errors += 1
+                _log("logic_file_error", file=result['rel_path'], e=err_msg)
+                print(f"\n--- Traceback Erreur Fichier (Logic) {result['rel_path']} ---")
+                traceback.print_exc()
+                print("---------------------------------------------------\n")
+            finally:
+                all_results_list.append(result)
+    if snr_loop_errors > 0:
+        _log("logic_warn_prefix", text=f"{snr_loop_errors} erreur(s) rencontrée(s) pendant l'analyse SNR initiale.")
 
 
     # --- Étape 3: Calcul Seuil SNR ---
@@ -597,95 +749,41 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     # ... (cette section reste identique, elle utilise files_kept_for_trails
     #      qui contient maintenant aussi les fichiers marqués 'low_snr_pending_action') ...
     #      Progression de 55% à 90%
-    trail_results = {}; trail_errors = {}; trail_analysis_config = None
+    trail_results = {}
+    trail_errors = {}
+    trail_analysis_config = None
     if options.get('detect_trails') and SATDET_AVAILABLE:
-        if not TRAIL_MODULE_LOADED or not hasattr(trail_module, 'run_trail_detection'): 
+        if not TRAIL_MODULE_LOADED or not hasattr(trail_module, 'run_trail_detection'):
             _log("logic_error_prefix", text="Erreur: trail_module n'est pas chargé ou manque run_trail_detection.")
-            options['detect_trails'] = False # Désactiver pour la suite
-        elif not files_kept_for_trails: # Si aucun fichier n'est éligible pour satdet
+            options['detect_trails'] = False
+        elif not files_kept_for_trails:
             _log("logic_info_prefix", text="Aucun fichier éligible pour la détection de traînées après filtre SNR.")
         else:
-            # trail_module s'attend à un search_pattern. On va lui donner le dossier parent
-            # et il filtrera en interne si besoin, ou on lui passe la liste des fichiers éligibles
-            # si SATDET_ACCEPTS_LIST est True.
-            input_for_trail_module = None
-            if SATDET_ACCEPTS_LIST:
-                _log("logic_info_prefix", text=f"Détection traînées sur {len(files_kept_for_trails)} fichiers spécifiques.")
-                input_for_trail_module = files_kept_for_trails
-            elif SATDET_USES_SEARCHPATTERN:
-                # Utiliser le dossier parent principal si pas de liste acceptée
-                # On pourrait essayer de construire un pattern plus complexe, mais pour l'instant on garde simple.
-                # Le module trail devrait gérer les fichiers non-FITS ou les erreurs individuellement.
-                # On prend le dossier du premier fichier éligible comme base, ou l'input_dir.
-                search_base_dir = os.path.dirname(files_kept_for_trails[0]) if files_kept_for_trails else abs_input_dir
-                # Essayer de trouver une extension commune
-                common_ext = None
-                if any(f.lower().endswith('.fit') for f in files_kept_for_trails): common_ext = "*.fit"
-                elif any(f.lower().endswith('.fits') for f in files_kept_for_trails): common_ext = "*.fits"
-                elif any(f.lower().endswith('.fts') for f in files_kept_for_trails): common_ext = "*.fts"
-                
-                if common_ext:
-                    search_pattern_to_use = os.path.join(search_base_dir, common_ext)
-                    # Si récursif, on pourrait utiliser un glob plus complexe, mais satdet ne le gère pas forcément.
-                    # Pour l'instant, on se base sur le dossier d'entrée principal si récursif.
-                    if include_subfolders and search_base_dir != abs_input_dir : # Si sous-dossier et récursif
-                         # On pourrait devoir lancer satdet par sous-dossier ou lui donner une liste.
-                         # Pour l'instant, on avertit et on utilise le dossier racine.
-                         _log("logic_warn_prefix", text=f"Détection traînées en mode récursif utilise le dossier racine '{abs_input_dir}' pour satdet.")
-                         search_pattern_to_use = os.path.join(abs_input_dir, common_ext)
-
-                    input_for_trail_module = search_pattern_to_use
-                else: # Si pas d'extension commune, on ne peut pas créer de pattern simple
-                    _log("logic_warn_prefix", text="Aucune extension FITS commune trouvée pour le pattern satdet, détection traînées sur tous les fichiers du dossier.")
-                    input_for_trail_module = os.path.join(abs_input_dir, "*.*") # Fallback large
-
-            if input_for_trail_module:
-                 trail_params = options.get('trail_params', {}); trail_analysis_config = trail_params.copy()
-                 _progress('indeterminate') # Mettre la barre en mode indéterminé pour satdet
-                 status_msg_trail = f"Lancement détection traînées ({'pattern' if isinstance(input_for_trail_module, str) else 'liste'})..."
-                 _status("status_custom", text=status_msg_trail)
-                 _log("logic_info_prefix", text=f"{status_msg_trail} avec entrée: {input_for_trail_module if isinstance(input_for_trail_module, str) else str(len(input_for_trail_module)) + ' fichiers'}")
-                 
-                 try: 
-                     # Début de la progression pour satdet (de 55 à 90)
-                     def satdet_status_callback(key, **kwargs):
-                         if key == 'satdet_progress_file': # Supposons que trail_module envoie ce statut
-                             file_idx = kwargs.get('current', 0)
-                             total_s_files = kwargs.get('total', len(files_kept_for_trails) if files_kept_for_trails else 1)
-                             satdet_prog = 55 + ( (file_idx / total_s_files) * 35 ) # 35% de la barre totale
-                             _progress(min(satdet_prog, 90.0)) # Capper à 90%
-                         elif key == 'status_satdet_wait': # Le trail_module peut envoyer ça
-                             _progress('indeterminate')
-                         elif key == 'status_satdet_done': # Le trail_module peut envoyer ça
-                             _progress(90.0) # Fin de satdet
-                         _status(key, **kwargs) # Relayer les autres statuts
-
-                     trail_results, trail_errors = trail_module.run_trail_detection(input_for_trail_module, trail_params, status_callback=satdet_status_callback, log_callback=_log)
-                 except Exception as trail_e: 
-                     _log("logic_error_prefix", text=f"Erreur lors de l'appel à trail_module.run_trail_detection: {trail_e}"); traceback.print_exc()
-                     trail_errors[('FATAL_CALL_ERROR', 0)] = str(trail_e)
-                 
-                 _progress(90.0) # Assurer que la progression est à 90% après satdet
-                 if ('DEPENDENCY_ERROR', 0) in trail_errors or ('FATAL_ERROR', 0) in trail_errors or \
-                    ('IMPORT_ERROR', 0) in trail_errors or ('FATAL_CALL_ERROR', 0) in trail_errors or \
-                    ('CONFIG_ERROR', 0) in trail_errors:
-                     _log("logic_error_prefix", text="Échec critique détection traînées. Arrêt de l'analyse."); 
-                     write_log_summary(output_log, abs_input_dir, options, trail_analysis_config, trail_errors, all_results_list, selection_stats, skipped_marker_dirs_count)
-                     # Création marqueur même en cas d'erreur trail critique
-                     analysis_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                     for directory in processed_directories:
-                        marker_file_path = os.path.join(directory, marker_filename)
-                        try:
-                            with open(marker_file_path, 'w', encoding='utf-8') as mf:
-                                mf.write(f"Analyse Astro Analyzer (partielle - erreur trail) terminée pour ce dossier le: {analysis_datetime}\n")
-                            _log("logic_info_prefix", text=f"Marqueur créé (erreur trail): {os.path.relpath(marker_file_path, abs_input_dir)}")
-                        except IOError as e_marker: _log("logic_error_prefix", text=f"Impossible de créer le marqueur (erreur trail) dans {directory}: {e_marker}")
-                     return [] # Arrêter l'analyse ici
-            else: 
-                _log("logic_no_fits_satdet", path=abs_input_dir); _status("status_satdet_no_file")
-                _progress(90.0) # Si pas d'analyse trail, sauter à 90%
-    else: # Si pas de détection de traînées activée
-        _progress(90.0) # Sauter la progression de satdet
+            input_for_trail_module = files_kept_for_trails
+            trail_params = options.get('trail_params', {})
+            trail_analysis_config = trail_params.copy()
+            chunks = [input_for_trail_module[i::n_workers] for i in range(n_workers)]
+            _progress('indeterminate')
+            _status("status_custom", text="Lancement détection traînées...")
+            completed = 0
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+                    futures = {ex.submit(_trail_worker, (chunk, trail_params)): chunk for chunk in chunks if chunk}
+                    total_chunks = len(futures)
+                    for future in concurrent.futures.as_completed(futures):
+                        res, err = future.result()
+                        trail_results.update(res or {})
+                        trail_errors.update(err or {})
+                        completed += 1
+                        prog = 55 + ((completed / total_chunks) * 35)
+                        _progress(min(prog, 90.0))
+            except Exception as trail_e:
+                _log("logic_error_prefix", text=f"Erreur pool trail: {trail_e}")
+                traceback.print_exc()
+                trail_errors[('FATAL_CALL_ERROR', 0)] = str(trail_e)
+            _progress(90.0)
+    else:
+        _progress(90.0)
 
 
     # --- Étape 6: Rejet Traînées et Actions Associées ---
