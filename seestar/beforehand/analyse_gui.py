@@ -340,8 +340,9 @@ class AstroImageAnalyzerGUI:
         self.trail_param_labels = {}
         self.trail_param_entries = {}
         self.manage_markers_button = None
-        self.stack_after_analysis = False      
-        self.apply_snr_button = None 
+        self.stack_after_analysis = False
+        self.apply_snr_button = None
+        self.visual_apply_button = None
         
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -753,6 +754,8 @@ class AstroImageAnalyzerGUI:
                         self.current_snr_max = hi
                         if self.apply_snr_button:
                             self.apply_snr_button.config(state=tk.NORMAL)
+                        if self.visual_apply_button:
+                            self.visual_apply_button.config(state=tk.NORMAL)
 
                     self.snr_range_slider.on_changed(_on_slider_change)
                 else:
@@ -898,10 +901,25 @@ class AstroImageAnalyzerGUI:
                     except Exception as e_other_win:
                         print(f"  Erreur détruisant vis_window: {e_other_win}")
 
-            # Bouton Fermer et liaison fermeture fenêtre
-            close_button = ttk.Button(vis_window, text=self._("Fermer", default="Close"), command=cleanup_vis_window)
-            close_button.pack(pady=10)
-            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window) # Lier bouton X
+            # Boutons d'action en bas de la fenêtre
+            bottom_frame = ttk.Frame(vis_window)
+            bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+
+            self.visual_apply_button = ttk.Button(
+                bottom_frame,
+                text="Apply SNR Rejection",
+                state=tk.DISABLED,
+                command=self._on_visual_apply_snr
+            )
+            self.visual_apply_button.pack(side=tk.RIGHT, padx=5)
+
+            close_button = ttk.Button(
+                bottom_frame,
+                text=self._("Fermer", default="Close"),
+                command=cleanup_vis_window
+            )
+            close_button.pack(side=tk.RIGHT)
+            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window)  # Lier bouton X
 
             # Attendre que la fenêtre de visualisation soit fermée
             self.root.wait_window(vis_window)
@@ -2227,6 +2245,24 @@ class AstroImageAnalyzerGUI:
 
         if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
             self._refresh_treeview()
+
+    def _on_visual_apply_snr(self):
+        """Handler pour le bouton d'application SNR de la fenêtre de visualisation."""
+        # Reuse the existing logic
+        self.apply_pending_snr_actions_gui()
+
+        # Disable both buttons
+        if self.apply_snr_button:
+            self.apply_snr_button.config(state=tk.DISABLED)
+        if self.visual_apply_button:
+            self.visual_apply_button.config(state=tk.DISABLED)
+
+        # Disable the slider if possible
+        try:
+            if self.snr_range_slider:
+                self.snr_range_slider.set_active(False)
+        except Exception:
+            pass
 
     def run_apply_actions_thread(self, results_list, snr_reject_abs, delete_flag, move_flag, callbacks, input_dir_abs):
         """
