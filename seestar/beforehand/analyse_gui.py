@@ -433,6 +433,8 @@ class AstroImageAnalyzerGUI:
 
     def start_analysis(self):
         """Appelle la logique de lancement SANS l'option d'empiler après."""
+        if hasattr(self, 'analyze_button') and self.analyze_button:
+            self.analyze_button.config(state='disabled')
         self._launch_analysis(stack_after=False)
 
 
@@ -2081,6 +2083,8 @@ class AstroImageAnalyzerGUI:
                 self.update_status("status_custom", text=self._("Des actions SNR sont en attente.", default="Pending SNR actions.")) # Clé à ajouter à zone.py
 
         if not should_write_command:
+            if hasattr(self, 'analyze_button') and self.analyze_button:
+                self.root.after(0, lambda: self.analyze_button.config(state='normal'))
             self._set_widget_state(self.analyze_button, tk.NORMAL)
             self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
             self._set_widget_state(self.return_button, tk.NORMAL)
@@ -2128,7 +2132,8 @@ class AstroImageAnalyzerGUI:
                 self._update_log_and_vis_buttons_state()
                 if hasattr(self, 'apply_snr_button') and self.apply_snr_button:
                      self._set_widget_state(self.apply_snr_button, tk.DISABLED)
-        
+
+        self.update_status("status_analysis_done")
         print("DEBUG (analyse_gui): Appel final à gc.collect()")
         gc.collect()
         print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
