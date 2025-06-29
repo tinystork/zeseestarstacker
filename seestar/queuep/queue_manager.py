@@ -579,6 +579,16 @@ class SeestarQueuedStacker:
 
             # continuous accumulation
             self.cumulative_sum_memmap += reproj_data * reproj_wht[..., None]
+            if self.cumulative_wht_memmap.shape != reproj_wht.shape:
+                from numpy.lib.format import open_memmap
+
+                self.cumulative_wht_memmap = open_memmap(
+                    self.cumulative_wht_path,
+                    mode="w+",
+                    dtype=np.float32,
+                    shape=reproj_wht.shape,
+                )
+                self.cumulative_wht_memmap[:] = 0.0
             self.cumulative_wht_memmap += reproj_wht
             self.cumulative_sum_memmap.flush()
             self.cumulative_wht_memmap.flush()
@@ -728,6 +738,17 @@ class SeestarQueuedStacker:
         self.memmap_dtype_wht = np.float32
         self.enable_preview = False
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
+
+        # Cumulative weight map across all batches
+        from numpy.lib.format import open_memmap
+
+        seestar_root = Path(__file__).resolve().parents[1]
+        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
+        H, W = 1, 1
+        self.cumulative_wht_memmap = open_memmap(
+            self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
+        )
+        self.cumulative_wht_memmap[:] = 0.0
 
         # Options pour déplacement et sauvegarde partiels
         self.partial_save_interval = 1
@@ -11321,6 +11342,19 @@ class SeestarQueuedStacker:
         del drizzlers_batch, output_images_batch, output_weights_batch
         gc.collect()
         return out_filepath_sci, out_filepaths_wht
+
+    def finish(self):
+        """Export the cumulative weight map to a FITS file."""
+        from astropy.io import fits
+
+        if self.cumulative_wht_memmap is not None:
+            if hasattr(self.cumulative_wht_memmap, "flush"):
+                self.cumulative_wht_memmap.flush()
+            fits.writeto(
+                "cumulative_weights.fits",
+                self.cumulative_wht_memmap,
+                overwrite=True,
+            )
 
 
 ######################################################################################################################################################
