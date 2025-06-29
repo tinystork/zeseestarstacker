@@ -8979,18 +8979,30 @@ class SeestarQueuedStacker:
                     raise ValueError(
                         "Donnees de lot Drizzle final (sci/wht) manquantes."
                     )
-                sci_data_float64 = drizzle_final_sci_data.astype(np.float64)
-                wht_data_float64 = drizzle_final_wht_data.astype(np.float64)
+                sci_arr = drizzle_final_sci_data
+                if sci_arr.ndim == 4 and sci_arr.shape[0] == 1:
+                    sci_arr = sci_arr[0]
+                if sci_arr.ndim == 3 and sci_arr.shape[0] == 3:
+                    sci_arr = np.moveaxis(sci_arr, 0, -1)
+                sci_data_float64 = sci_arr.astype(np.float64)
+
+                wht_arr = drizzle_final_wht_data
+                if wht_arr.ndim == 4 and wht_arr.shape[0] == 1:
+                    wht_arr = wht_arr[0]
+                wht_data_float64 = wht_arr.astype(np.float64)
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
-                if drizzle_final_wht_data.ndim == 3:
-                    final_wht_map_for_postproc = np.mean(
-                        wht_data_clipped_positive, axis=2
-                    ).astype(np.float32)
-                else:
-                    final_wht_map_for_postproc = wht_data_clipped_positive.astype(
-                        np.float32
+
+                if wht_arr.ndim == 3:
+                    wht3d = (
+                        wht_data_clipped_positive
+                        if wht_arr.shape[-1] == 3
+                        else np.moveaxis(wht_data_clipped_positive, 0, -1)
                     )
-                wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
+                    final_wht_map_for_postproc = np.mean(wht3d, axis=2).astype(np.float32)
+                    wht_for_div = np.maximum(wht3d, 1e-9)
+                else:
+                    final_wht_map_for_postproc = wht_data_clipped_positive.astype(np.float32)
+                    wht_for_div = np.maximum(wht_data_clipped_positive[:, :, np.newaxis], 1e-9)
                 with np.errstate(divide="ignore", invalid="ignore"):
                     final_image_initial_raw = sci_data_float64 / wht_for_div
                 final_image_initial_raw = np.nan_to_num(
