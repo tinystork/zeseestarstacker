@@ -707,6 +707,7 @@ class SeestarQueuedStacker:
         self.drizzle_temp_dir = None
         self.output_filename = ""
         self.drizzle_batch_output_dir = None
+        self.classic_batch_output_dir = None
         self.final_stacked_path = None
         self.api_key = None
         self.reference_wcs_object = None
@@ -1103,6 +1104,9 @@ class SeestarQueuedStacker:
             self.drizzle_batch_output_dir = os.path.join(
                 self.output_folder, "drizzle_batch_outputs"
             )
+            self.classic_batch_output_dir = os.path.join(
+                self.output_folder, "classic_batch_outputs"
+            )
 
             # Définir le chemin du dossier memmap mais ne le créer que si nécessaire plus tard
             memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
@@ -1139,6 +1143,17 @@ class SeestarQueuedStacker:
                     except Exception as e:
                         self.update_progress(
                             f"⚠️ Erreur nettoyage {self.drizzle_batch_output_dir}: {e}"
+                        )
+                if (
+                    os.path.isdir(self.classic_batch_output_dir)
+                    and self.reproject_between_batches
+                ):
+                    try:
+                        shutil.rmtree(self.classic_batch_output_dir)
+                        os.makedirs(self.classic_batch_output_dir, exist_ok=True)
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ Erreur nettoyage {self.classic_batch_output_dir}: {e}"
                         )
             self.update_progress(f"🗄️ Dossiers prêts.")
         except OSError as e:
@@ -4036,6 +4051,7 @@ class SeestarQueuedStacker:
                 self.update_progress("🧹 Nettoyage final des fichiers temporaires...")
                 self._cleanup_drizzle_temp_files()  # Dossier des inputs Drizzle (aligned_input_*.fits)
                 self._cleanup_drizzle_batch_outputs()  # Dossier des sorties Drizzle par lot (batch_*_sci.fits, batch_*_wht_*.fits)
+                self._cleanup_classic_batch_outputs()  # Dossier des sorties Classic par lot
                 self._cleanup_mosaic_panel_stacks_temp()  # Dossier des stacks de panneaux (si ancienne logique ou tests)
                 if not self.user_requested_stop:
                     self.cleanup_temp_reference()  # Fichiers reference_image.fit/png
@@ -5029,6 +5045,30 @@ class SeestarQueuedStacker:
         # else: # Log optionnel si le dossier n'existait pas ou chemin invalide
         # if self.output_folder: # Pour éviter de logguer si c'est juste output_folder qui est None
         #    logger.debug(f"DEBUG QM [_cleanup_drizzle_batch_outputs]: Dossier {batch_output_dir} non trouvé ou invalide pour nettoyage.")
+
+    ####################################################################################################
+
+    def _cleanup_classic_batch_outputs(self):
+        """Supprime le dossier contenant les sorties intermédiaires du mode classique."""
+        if self.output_folder is None:
+            logger.debug(
+                "WARN QM [_cleanup_classic_batch_outputs]: self.output_folder non défini, nettoyage annulé."
+            )
+            return
+
+        batch_output_dir = self.classic_batch_output_dir or os.path.join(
+            self.output_folder, "classic_batch_outputs"
+        )
+        if os.path.isdir(batch_output_dir):
+            try:
+                shutil.rmtree(batch_output_dir)
+                self.update_progress(
+                    f"🧹 Dossier batches classiques supprimé: {os.path.basename(batch_output_dir)}"
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Erreur suppression dossier batches classiques ({os.path.basename(batch_output_dir)}): {e}"
+                )
 
     ####################################################################################################################
 
