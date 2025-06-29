@@ -8986,11 +8986,14 @@ class SeestarQueuedStacker:
                     final_wht_map_for_postproc = np.mean(
                         wht_data_clipped_positive, axis=2
                     ).astype(np.float32)
+                    wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
                 else:
                     final_wht_map_for_postproc = wht_data_clipped_positive.astype(
                         np.float32
                     )
-                wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
+                    wht_for_div = np.maximum(
+                        wht_data_clipped_positive[:, :, np.newaxis], 1e-9
+                    )
                 with np.errstate(divide="ignore", invalid="ignore"):
                     final_image_initial_raw = sci_data_float64 / wht_for_div
                 final_image_initial_raw = np.nan_to_num(
