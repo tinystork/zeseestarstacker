@@ -3,6 +3,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
+import multiprocessing
 import os
 import traceback
 import time
@@ -17,9 +18,7 @@ except ImportError:
     print("AVERT GUI: Pillow (PIL) non installé. L'icône PNG ne peut pas être chargée.")
 # --- Import du module de localisation ---
 try:
-    # Use an explicit relative import so the module can be found when
-    # ``run_zemosaic.py`` is executed as a script from the project root.
-    from .locales.zemosaic_localization import ZeMosaicLocalization
+    from locales.zemosaic_localization import ZeMosaicLocalization
     ZEMOSAIC_LOCALIZATION_AVAILABLE = True
 except ImportError as e_loc:
     ZEMOSAIC_LOCALIZATION_AVAILABLE = False
@@ -28,9 +27,7 @@ except ImportError as e_loc:
 
 # --- Configuration Import ---
 try:
-    # ``zemosaic_config`` lives inside the ``zemosaic`` package so we
-    # import it relatively to avoid relying on ``PYTHONPATH`` layout.
-    from . import zemosaic_config
+    import zemosaic_config 
     ZEMOSAIC_CONFIG_AVAILABLE = True
 except ImportError as e_config:
     ZEMOSAIC_CONFIG_AVAILABLE = False
@@ -39,13 +36,12 @@ except ImportError as e_config:
 
 # --- Worker Import ---
 try:
-    # Same rationale here: use a relative import so running the package as a
-    # script does not fail with ``No module named 'zemosaic_worker'``.
-    from .zemosaic_worker import run_hierarchical_mosaic
+    from zemosaic_worker import run_hierarchical_mosaic, run_hierarchical_mosaic_process
     ZEMOSAIC_WORKER_AVAILABLE = True
 except ImportError as e_worker:
     ZEMOSAIC_WORKER_AVAILABLE = False
     run_hierarchical_mosaic = None
+    run_hierarchical_mosaic_process = None
     print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
 
 
@@ -133,13 +129,10 @@ class ZeMosaicGUI:
         self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
         self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
-
-        self.solver_choice_var = tk.StringVar(value=self.config.get("solver_method", "astap"))
-        self.astrometry_local_path_var = tk.StringVar(value=self.config.get("astrometry_local_path", ""))
-        self.astrometry_api_key_var = tk.StringVar(value=self.config.get("astrometry_api_key", ""))
         
         self.is_processing = False
-        self.processing_thread = None
+        self.worker_process = None
+        self.progress_queue = None
         self.progress_bar_var = tk.DoubleVar(value=0.0)
         self.eta_var = tk.StringVar(value=self._tr("initial_eta_value", "--:--:--"))
         self.elapsed_time_var = tk.StringVar(value=self._tr("initial_elapsed_time", "00:00:00"))
@@ -169,14 +162,16 @@ class ZeMosaicGUI:
         self.final_assembly_method_var = tk.StringVar(
             value=self.config.get("final_assembly_method", self.assembly_method_keys[0])
         )
+        self.final_assembly_method_var.trace_add("write", self._on_assembly_method_change)
         
         # --- NOMBRE DE WORKERS ---
         # Utiliser 0 pour auto, comme convenu. La clé de config est "num_processing_workers".
         # Si la valeur dans config est -1 (ancienne convention pour auto), on la met à 0.
         num_workers_from_config = self.config.get("num_processing_workers", 0)
         if num_workers_from_config == -1:
-            num_workers_from_config = 0 
+            num_workers_from_config = 0
         self.num_workers_var = tk.IntVar(value=num_workers_from_config)
+        self.winsor_workers_var = tk.IntVar(value=self.config.get("winsor_worker_limit", 6))
         # --- FIN NOMBRE DE WORKERS ---
         # --- NOUVELLES VARIABLES TKINTER POUR LE ROGNAGE ---
         self.apply_master_tile_crop_var = tk.BooleanVar(
@@ -185,6 +180,11 @@ class ZeMosaicGUI:
         self.master_tile_crop_percent_var = tk.DoubleVar(
             value=self.config.get("master_tile_crop_percent", 18.0) # 18% par côté par défaut si activé
         )
+        self.use_memmap_var = tk.BooleanVar(value=self.config.get("coadd_use_memmap", False))
+        self.mm_dir_var = tk.StringVar(value=self.config.get("coadd_memmap_dir", ""))
+        self.cleanup_memmap_var = tk.BooleanVar(value=self.config.get("coadd_cleanup_memmap", True))
+        self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
+        self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
         # ---  ---
 
         self.translatable_widgets = {}
@@ -386,69 +386,34 @@ class ZeMosaicGUI:
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
 
-
-        # --- Solver Settings Frame ---
-        solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        solver_frame.pack(fill=tk.X, pady=(0,10))
-        self.translatable_widgets["solver_settings_frame_title"] = solver_frame
-
-        solver_label = ttk.Label(solver_frame, text="")
-        solver_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.translatable_widgets["solver_choice_label"] = solver_label
-
-        self.solver_combo = ttk.Combobox(solver_frame, state="readonly", width=20, textvariable=self.solver_choice_var)
-        self.solver_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.solver_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda e, c=self.solver_combo, v=self.solver_choice_var,
-                   keys=["astap", "astrometry"], p="solver":
-                (self._combo_to_key(e, c, v, keys, p), self._on_solver_choice_change())
-        )
-
-        # --- Sous-cadre ASTAP (déplacé) -----------------------------------------
-        self.astap_subframe = ttk.Frame(solver_frame)
-        self.astap_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
-
-        ttk.Label(self.astap_subframe, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = self.astap_subframe.grid_slaves(row=0,column=0)[0]
-        ttk.Entry(self.astap_subframe, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(self.astap_subframe, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = self.astap_subframe.grid_slaves(row=0,column=2)[0]
-        ttk.Label(self.astap_subframe, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = self.astap_subframe.grid_slaves(row=1,column=0)[0]
-        ttk.Entry(self.astap_subframe, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(self.astap_subframe, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = self.astap_subframe.grid_slaves(row=1,column=2)[0]
-
-        self.astrometry_subframe = ttk.Frame(solver_frame)
-        self.astrometry_subframe.grid(row=1, column=0, columnspan=3, sticky="ew")
-
-        api_label = ttk.Label(self.astrometry_subframe, text="")
-        api_label.grid(row=0, column=0, padx=5, pady=3, sticky="w")
-        self.translatable_widgets["astrometry_api_key_label"] = api_label
-        ttk.Entry(self.astrometry_subframe, textvariable=self.astrometry_api_key_var, width=40).grid(row=0, column=1, padx=5, pady=3, sticky="ew")
-
-        path_label = ttk.Label(self.astrometry_subframe, text="")
-        path_label.grid(row=1, column=0, padx=5, pady=3, sticky="w")
-        self.translatable_widgets["astrometry_local_path_label"] = path_label
-        ttk.Entry(self.astrometry_subframe, textvariable=self.astrometry_local_path_var, width=40).grid(row=1, column=1, padx=5, pady=3, sticky="ew")
-        ttk.Button(self.astrometry_subframe, text="", command=self._browse_astrometry_local_path).grid(row=1, column=2, padx=5, pady=3); self.translatable_widgets["browse_astrometry_local_path_button"] = self.astrometry_subframe.grid_slaves(row=1,column=2)[0]
-
-        self.solver_combo['values'] = []  # will be populated in _update_ui_language
-        self._on_solver_choice_change()
+        # --- ASTAP Configuration Frame ---
+        astap_cfg_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        # ... (contenu de astap_cfg_frame) ...
+        astap_cfg_frame.pack(fill=tk.X, pady=(0,10)); astap_cfg_frame.columnconfigure(1, weight=1)
+        self.translatable_widgets["astap_config_frame_title"] = astap_cfg_frame
+        ttk.Label(astap_cfg_frame, text="").grid(row=0, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_exe_label"] = astap_cfg_frame.grid_slaves(row=0,column=0)[0]
+        ttk.Entry(astap_cfg_frame, textvariable=self.astap_exe_path_var, width=60).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_exe).grid(row=0, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button"] = astap_cfg_frame.grid_slaves(row=0,column=2)[0]
+        ttk.Label(astap_cfg_frame, text="").grid(row=1, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["astap_data_dir_label"] = astap_cfg_frame.grid_slaves(row=1,column=0)[0]
+        ttk.Entry(astap_cfg_frame, textvariable=self.astap_data_dir_var, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(astap_cfg_frame, text="", command=self._browse_and_save_astap_data_dir).grid(row=1, column=2, padx=5, pady=5); self.translatable_widgets["browse_save_button_data"] = astap_cfg_frame.grid_slaves(row=1,column=2)[0]
 
         # --- Parameters Frame ---
-        self.astap_params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
-        # ... (contenu de astap_params_frame) ...
-        self.astap_params_frame.pack(fill=tk.X, pady=(0,10))
-        self.translatable_widgets["mosaic_astap_params_frame_title"] = self.astap_params_frame
-        param_row_idx = 0
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(self.astap_params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(self.astap_params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(self.astap_params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
-        ttk.Label(self.astap_params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = self.astap_params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Spinbox(self.astap_params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        params_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
+        # ... (contenu de params_frame) ...
+        params_frame.pack(fill=tk.X, pady=(0,10))
+        self.translatable_widgets["mosaic_astap_params_frame_title"] = params_frame
+        param_row_idx = 0 
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_search_radius_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0.1, to=180.0, increment=0.1, textvariable=self.astap_search_radius_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w"); param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0, to=4, increment=1, textvariable=self.astap_downsample_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_downsample_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=-25, to_=500, increment=1, textvariable=self.astap_sensitivity_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
         
         # --- Stacking Options Frame ---
         stacking_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10") 
@@ -510,6 +475,24 @@ class ZeMosaicGUI:
         self.min_radial_floor_spinbox.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w")
         min_radial_floor_note = ttk.Label(stacking_options_frame, text=""); min_radial_floor_note.grid(row=stk_opt_row, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_min_radial_floor_note"] = min_radial_floor_note; stk_opt_row += 1
 
+        # Max raw per master tile
+        self.max_raw_per_tile_label = ttk.Label(stacking_options_frame, text="")
+        self.max_raw_per_tile_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["max_raw_per_master_tile_label"] = self.max_raw_per_tile_label
+        self.max_raw_per_tile_spinbox = ttk.Spinbox(
+            stacking_options_frame,
+            from_=0,
+            to=9999,
+            increment=1,
+            textvariable=self.max_raw_per_tile_var,
+            width=8
+        )
+        self.max_raw_per_tile_spinbox.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w")
+        max_raw_note = ttk.Label(stacking_options_frame, text="")
+        max_raw_note.grid(row=stk_opt_row, column=2, padx=(10,5), pady=3, sticky="w")
+        self.translatable_widgets["max_raw_per_master_tile_note"] = max_raw_note
+        stk_opt_row += 1
+
 
         # --- AJOUT DU CADRE POUR LES OPTIONS DE PERFORMANCE (NOMBRE DE THREADS) ---
         perf_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -532,18 +515,36 @@ class ZeMosaicGUI:
             if max_spin_workers > 32: max_spin_workers = 32 # Plafonner à 32 pour éviter des valeurs trop grandes
         
         self.num_workers_spinbox = ttk.Spinbox(
-            perf_options_frame, 
+            perf_options_frame,
             from_=0,  # 0 pour auto
-            to=max_spin_workers, 
+            to=max_spin_workers,
             increment=1,
-            textvariable=self.num_workers_var, 
+            textvariable=self.num_workers_var,
             width=8 # Largeur fixe pour le spinbox
         )
         self.num_workers_spinbox.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        
+
         num_workers_note = ttk.Label(perf_options_frame, text="")
         num_workers_note.grid(row=0, column=2, padx=(10,5), pady=5, sticky="ew") # Note avec un peu plus de marge
         self.translatable_widgets["num_workers_note"] = num_workers_note
+
+        winsor_workers_label = ttk.Label(perf_options_frame, text="")
+        winsor_workers_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.translatable_widgets["winsor_workers_label"] = winsor_workers_label
+
+        self.winsor_workers_spinbox = ttk.Spinbox(
+            perf_options_frame,
+            from_=1,
+            to=16,
+            increment=1,
+            textvariable=self.winsor_workers_var,
+            width=8
+        )
+        self.winsor_workers_spinbox.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        winsor_workers_note = ttk.Label(perf_options_frame, text="")
+        winsor_workers_note.grid(row=1, column=2, padx=(10,5), pady=5, sticky="ew")
+        self.translatable_widgets["winsor_workers_note"] = winsor_workers_note
         # --- FIN CADRE OPTIONS DE PERFORMANCE ---
         # --- NOUVEAU CADRE : OPTIONS DE ROGNAGE DES TUILES MAÎTRESSES ---
         crop_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -598,6 +599,17 @@ class ZeMosaicGUI:
         self.final_assembly_method_combo = ttk.Combobox(final_assembly_options_frame, values=[], state="readonly", width=40)
         self.final_assembly_method_combo.grid(row=asm_opt_row, column=1, padx=5, pady=5, sticky="ew")
         self.final_assembly_method_combo.bind("<<ComboboxSelected>>", lambda e, c=self.final_assembly_method_combo, v=self.final_assembly_method_var, k_list=self.assembly_method_keys, p="assembly_method": self._combo_to_key(e, c, v, k_list, p)); asm_opt_row += 1
+
+        self.memmap_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_memmap_title", "Options memmap (coadd)"))
+        self.memmap_frame.pack(fill=tk.X, pady=(0,10))
+        self.memmap_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(self.memmap_frame, text=self._tr("gui_memmap_enable", "Use disk memmap"), variable=self.use_memmap_var).grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        ttk.Label(self.memmap_frame, text=self._tr("gui_memmap_dir", "Memmap Folder")).grid(row=1, column=0, sticky="e", padx=5, pady=3)
+        ttk.Entry(self.memmap_frame, textvariable=self.mm_dir_var, width=45).grid(row=1, column=1, sticky="we", padx=5, pady=3)
+        ttk.Button(self.memmap_frame, text="…", command=self._browse_mm_dir).grid(row=1, column=2, padx=5, pady=3)
+        ttk.Checkbutton(self.memmap_frame, text=self._tr("gui_memmap_cleanup", "Delete *.dat when finished"), variable=self.cleanup_memmap_var).grid(row=2, column=0, sticky="w", padx=5, pady=3)
+        ttk.Checkbutton(self.memmap_frame, text=self._tr("gui_auto_limit_frames", "Auto limit frames per master tile (system stability)"), variable=self.auto_limit_frames_var).grid(row=3, column=0, sticky="w", padx=5, pady=3, columnspan=2)
+        self._on_assembly_method_change()
         
 
         # --- Launch Button, Progress Bar, Log Frame ---
@@ -700,10 +712,6 @@ class ZeMosaicGUI:
         # --- RAFRAICHISSEMENT DU NOUVEAU COMBOBOX D'ASSEMBLAGE ---
         if hasattr(self, 'final_assembly_method_combo'):
             self._refresh_combobox(self.final_assembly_method_combo, self.final_assembly_method_var, self.assembly_method_keys, "assembly_method")
-        if hasattr(self, 'solver_combo'):
-            solver_keys = ["astap", "astrometry"]
-            self._refresh_combobox(self.solver_combo, self.solver_choice_var, solver_keys, "solver")
-            self._on_solver_choice_change()
         # ---  ---
         # Mise à jour des textes ETA et Temps Écoulé (déjà correct)
         if not self.is_processing:
@@ -728,7 +736,7 @@ class ZeMosaicGUI:
     def _update_crop_options_state(self, *args):
         """Active ou désactive le spinbox de pourcentage de rognage."""
         if not all(hasattr(self, attr) for attr in [
-            'apply_master_tile_crop_var', 
+            'apply_master_tile_crop_var',
             'crop_percent_spinbox'
         ]):
             return # Widgets pas encore prêts
@@ -741,18 +749,15 @@ class ZeMosaicGUI:
         except tk.TclError:
             pass # Widget peut avoir été détruit
 
-    def _on_solver_choice_change(self, *args):
+    def _on_assembly_method_change(self, *args):
+        method = self.final_assembly_method_var.get()
         try:
-            if self.solver_choice_var.get() == "astrometry":
-                if hasattr(self, "astrometry_subframe"):
-                    self.astrometry_subframe.grid()
-                if hasattr(self, "astap_subframe"):
-                    self.astap_subframe.grid_remove()
-            else:  # "astap"
-                if hasattr(self, "astap_subframe"):
-                    self.astap_subframe.grid()
-                if hasattr(self, "astrometry_subframe"):
-                    self.astrometry_subframe.grid_remove()
+            if method == "reproject_coadd":
+                if not self.memmap_frame.winfo_ismapped():
+                    self.memmap_frame.pack(fill=tk.X, pady=(0,10))
+            else:
+                if self.memmap_frame.winfo_ismapped():
+                    self.memmap_frame.pack_forget()
         except tk.TclError:
             pass
 
@@ -840,6 +845,11 @@ class ZeMosaicGUI:
         dir_path = filedialog.askdirectory(title=self._tr("browse_output_title", "Select Output Folder"))
         if dir_path: self.output_dir_var.set(dir_path)
 
+    def _browse_mm_dir(self):
+        dir_path = filedialog.askdirectory(title=self._tr("gui_memmap_dir", "Memmap Folder"))
+        if dir_path:
+            self.mm_dir_var.set(dir_path)
+
     def _browse_and_save_astap_exe(self):
         title = self._tr("select_astap_exe_title", "Select ASTAP Executable")
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
@@ -870,57 +880,6 @@ class ZeMosaicGUI:
     def _browse_astap_data_dir(self): # Fallback non-saving browse
         dir_path = filedialog.askdirectory(title=self._tr("select_astap_data_title_simple", "Select ASTAP Data Directory"))
         if dir_path: self.astap_data_dir_var.set(dir_path)
-
-    def _browse_astrometry_local_path(self):
-        def _log_browser(msg, level="DEBUG"):
-            print(f"DEBUG (ZeMosaicGUI _browse_astrometry_local_path) [{level}]: {msg}")
-
-        initial_dir = ""
-        current_path = self.astrometry_local_path_var.get()
-
-        if current_path:
-            if os.path.isfile(current_path):
-                initial_dir = os.path.dirname(current_path)
-            elif os.path.isdir(current_path):
-                initial_dir = current_path
-
-        if not initial_dir:
-            initial_dir = os.path.expanduser("~")
-
-        _log_browser(f"Opening file dialog (initialdir: {initial_dir})")
-        filepath_selected = filedialog.askopenfilename(
-            title=self._tr(
-                "select_astrometry_exe_or_cfg_title",
-                "Select solve-field Executable or .cfg (Cancel for Index Dir)",
-            ),
-            initialdir=initial_dir,
-            filetypes=[
-                (self._tr("configuration_files", "Configuration Files"), "*.cfg"),
-                (
-                    self._tr("executable_files", "Executable Files"),
-                    "*.*" if os.name != "nt" else "*.exe",
-                ),
-                (self._tr("all_files", "All Files"), "*.*"),
-            ],
-        )
-
-        if not filepath_selected:
-            _log_browser("No file selected. Opening directory dialog.")
-            dirpath_selected = filedialog.askdirectory(
-                title=self._tr(
-                    "select_astrometry_index_dir_title",
-                    "Select Astrometry.net Index Directory",
-                ),
-                initialdir=initial_dir,
-            )
-            if dirpath_selected:
-                _log_browser(f"Index directory selected: {dirpath_selected}")
-                self.astrometry_local_path_var.set(dirpath_selected)
-            else:
-                _log_browser("No index directory selected either.")
-        else:
-            _log_browser(f"File selected: {filepath_selected}")
-            self.astrometry_local_path_var.set(filepath_selected)
 
 
 
@@ -1150,68 +1109,25 @@ class ZeMosaicGUI:
             return
 
         # 2. VALIDATIONS (chemins, etc.)
-        if not (input_dir and os.path.isdir(input_dir)):
-            messagebox.showerror(self._tr("error_title"),
-                                 self._tr("invalid_input_folder_error"),
-                                 parent=self.root)
-            return
-
-        if not output_dir:
-            messagebox.showerror(self._tr("error_title"),
-                                 self._tr("missing_output_folder_error"),
-                                 parent=self.root)
-            return
-
-        try:
+        # ... (section de validation inchangée pour l'instant)
+        if not (input_dir and os.path.isdir(input_dir)): 
+            messagebox.showerror(self._tr("error_title"), self._tr("invalid_input_folder_error"), parent=self.root); return
+        if not output_dir: 
+            messagebox.showerror(self._tr("error_title"), self._tr("missing_output_folder_error"), parent=self.root); return
+        try: 
             os.makedirs(output_dir, exist_ok=True)
-        except OSError as e:
-            messagebox.showerror(self._tr("error_title"),
-                                 self._tr("output_folder_creation_error", error=e),
-                                 parent=self.root)
-            return
-
-        # ───── Validation ASTAP uniquement si le solveur choisi est ASTAP ─────
-        if self.solver_choice_var.get() == "astap":
-            if not (astap_exe and os.path.isfile(astap_exe)):
-                messagebox.showerror(self._tr("error_title"),
-                                     self._tr("invalid_astap_exe_error"),
-                                     parent=self.root)
+        except OSError as e: 
+            messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
+        if not (astap_exe and os.path.isfile(astap_exe)): 
+            messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
+        if not (astap_data and os.path.isdir(astap_data)): 
+            if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
+                                          self._tr("astap_data_dir_missing_or_invalid_continue_q", 
+                                                   path=astap_data,
+                                                   default_path=self.config.get("astap_data_directory_path","")),
+                                          icon='warning', parent=self.root):
                 return
-            if not (astap_data and os.path.isdir(astap_data)):
-                if not messagebox.askokcancel(
-                        self._tr("astap_data_dir_title", "ASTAP Data Directory"),
-                        self._tr("astap_data_dir_missing_or_invalid_continue_q",
-                                 path=astap_data,
-                                 default_path=self.config.get("astap_data_directory_path", "")),
-                        icon='warning',
-                        parent=self.root):
-                    return
-        # ───────────────────────────────────────────────────────────────────────
 
-        solver_choice_val = self.solver_choice_var.get()
-        astrometry_local_path_val = self.astrometry_local_path_var.get()
-        astrometry_api_key_val = self.astrometry_api_key_var.get()
-
-        self.config["solver_method"] = solver_choice_val
-        self.config["astrometry_local_path"] = astrometry_local_path_val
-        self.config["astrometry_api_key"] = astrometry_api_key_val
-        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
-            zemosaic_config.save_config(self.config)
-
-        os.environ["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = solver_choice_val
-        os.environ["ZEMOSAIC_LOCAL_ANSVR_PATH"] = astrometry_local_path_val
-        os.environ["ZEMOSAIC_ASTROMETRY_API_KEY"] = astrometry_api_key_val
-
-        solver_settings = {
-            "solver_method": solver_choice_val.lower(),  # "astap" ou "astrometry"
-            "local_ansvr_path": astrometry_local_path_val,
-            "api_key": astrometry_api_key_val,
-            "astap_path": astap_exe,
-            "astap_data_dir": astap_data,
-            "astap_search_radius": astap_radius_val,
-            "astap_downsample": astap_downsample_val,
-            "astap_sensitivity": astap_sensitivity_val,
-        }
 
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
         parsed_winsor_limits = (0.05, 0.05) 
@@ -1232,16 +1148,29 @@ class ZeMosaicGUI:
         self.launch_button.config(state=tk.DISABLED)
         self.log_text.config(state=tk.NORMAL); self.log_text.delete(1.0, tk.END); self.log_text.config(state=tk.DISABLED)
         
-        self._log_message("CHRONO_START_REQUEST", None, "CHRONO_LEVEL") 
+        self._log_message("CHRONO_START_REQUEST", None, "CHRONO_LEVEL")
         self._log_message("log_key_processing_started", level="INFO")
         # ... (autres logs d'info) ...
 
+        # -- Gestion du dossier memmap par défaut --
+        memmap_dir = self.mm_dir_var.get().strip()
+        if self.use_memmap_var.get() and not memmap_dir:
+            memmap_dir = self.output_dir_var.get().strip()
+            self.mm_dir_var.set(memmap_dir)
+            self._log_message(
+                f"[INFO] Aucun dossier memmap défini. Utilisation du dossier de sortie: {memmap_dir}",
+                level="INFO",
+            )
+
+        self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
+        self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
+        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+            zemosaic_config.save_config(self.config)
+
         worker_args = (
-            input_dir,
-            output_dir,
-            solver_settings,
+            input_dir, output_dir, astap_exe, astap_data,
+            astap_radius_val, astap_downsample_val, astap_sensitivity_val,
             cluster_thresh_val,
-            self._log_message,
             stack_norm_method,
             stack_weight_method,
             stack_reject_algo,
@@ -1259,66 +1188,94 @@ class ZeMosaicGUI:
             apply_master_tile_crop_val,
             master_tile_crop_percent_val,
             self.save_final_uint16_var.get(),
-            False
+            self.use_memmap_var.get(),
+            memmap_dir,
+            self.cleanup_memmap_var.get(),
+            self.auto_limit_frames_var.get(),
+            self.config.get("assembly_process_workers", 0),
+            self.config.get("auto_limit_memory_fraction", 0.1),
+            self.winsor_workers_var.get(),
+            self.max_raw_per_tile_var.get()
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
         
-        self.processing_thread = threading.Thread(
-            target=run_hierarchical_mosaic,
-            args=worker_args,
-            daemon=True, 
-            name="ZeMosaicWorkerThread"
+        self.progress_queue = multiprocessing.Queue()
+        self.worker_process = multiprocessing.Process(
+            target=run_hierarchical_mosaic_process,
+            args=(self.progress_queue,) + worker_args,
+            daemon=True,
+            name="ZeMosaicWorkerProcess"
         )
-        self.processing_thread.start()
-        
+        self.worker_process.start()
+
         if hasattr(self.root, 'winfo_exists') and self.root.winfo_exists():
-            self.root.after(100, self._check_processing_thread)
+            self.root.after(100, self._poll_worker_queue)
 
     
 
 
 
-    def _check_processing_thread(self):
+    def _poll_worker_queue(self):
         if not (hasattr(self.root, 'winfo_exists') and self.root.winfo_exists()):
-            if self.is_processing: self.is_processing = False
+            if self.is_processing:
+                self.is_processing = False
+                if self.worker_process and self.worker_process.is_alive():
+                    self.worker_process.terminate()
             return
-        if self.processing_thread and self.processing_thread.is_alive(): self.root.after(100, self._check_processing_thread)
-        else:
-            self._log_message("CHRONO_STOP_REQUEST", None, "CHRONO_LEVEL")
-            self.is_processing = False
-            if hasattr(self, 'launch_button') and self.launch_button.winfo_exists(): self.launch_button.config(state=tk.NORMAL)
-            if self.root.winfo_exists():
-                self._log_message("log_key_processing_finished", level="INFO")
-                success_status = True 
-                final_message = self._tr("msg_processing_completed")
-                if not success_status: final_message = self._tr("msg_processing_completed_errors")
-                messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
-                output_dir_final = self.output_dir_var.get()
-                if output_dir_final and os.path.isdir(output_dir_final):
-                    if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):
-                        try:
-                            if os.name == 'nt': os.startfile(output_dir_final)
-                            elif sys.platform == 'darwin': subprocess.Popen(['open', output_dir_final])
-                            else: subprocess.Popen(['xdg-open', output_dir_final])
-                        except Exception as e_open_dir: self._log_message(self._tr("log_key_error_opening_folder", error=e_open_dir), level="ERROR"); messagebox.showerror(self._tr("error_title"), self._tr("error_cannot_open_folder", error=e_open_dir), parent=self.root)
 
-    def _on_save_settings(self):
-        self.config["solver_method"] = self.solver_choice_var.get()
-        if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
-            zemosaic_config.save_config(self.config)
+        if self.progress_queue:
+            while True:
+                try:
+                    msg_key, prog, lvl, kwargs = self.progress_queue.get_nowait()
+                except Exception:
+                    break
+                if msg_key == "PROCESS_DONE":
+                    if self.worker_process:
+                        self.worker_process.join(timeout=0.1)
+                        self.worker_process = None
+                    continue
+                self._log_message(msg_key, prog, lvl, **kwargs)
+
+        if self.worker_process and self.worker_process.is_alive():
+            self.root.after(100, self._poll_worker_queue)
+            return
+
+        self._log_message("CHRONO_STOP_REQUEST", None, "CHRONO_LEVEL")
+        self.is_processing = False
+        if hasattr(self, 'launch_button') and self.launch_button.winfo_exists():
+            self.launch_button.config(state=tk.NORMAL)
+        if self.root.winfo_exists():
+            self._log_message("log_key_processing_finished", level="INFO")
+            final_message = self._tr("msg_processing_completed")
+            messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
+            output_dir_final = self.output_dir_var.get()
+            if output_dir_final and os.path.isdir(output_dir_final):
+                if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):
+                    try:
+                        if os.name == 'nt':
+                            os.startfile(output_dir_final)
+                        elif sys.platform == 'darwin':
+                            subprocess.Popen(['open', output_dir_final])
+                        else:
+                            subprocess.Popen(['xdg-open', output_dir_final])
+                    except Exception as e_open_dir:
+                        self._log_message(self._tr("log_key_error_opening_folder", error=e_open_dir), level="ERROR")
+                        messagebox.showerror(
+                            self._tr("error_title"),
+                            self._tr("error_cannot_open_folder", error=e_open_dir),
+                            parent=self.root,
+                        )
                         
     def _on_closing(self):
         if self.is_processing:
             if messagebox.askokcancel(self._tr("q_quit_title"), self._tr("q_quit_while_processing_msg"), icon='warning', parent=self.root):
                 self.is_processing = False
+                if self.worker_process and self.worker_process.is_alive():
+                    self.worker_process.terminate()
                 self._stop_gui_chrono()
-                self._on_save_settings()
                 self.root.destroy()
             else: return
-        else:
-            self._stop_gui_chrono()
-            self._on_save_settings()
-            self.root.destroy()
+        else: self._stop_gui_chrono(); self.root.destroy()
 
 if __name__ == '__main__':
     root_app = tk.Tk()

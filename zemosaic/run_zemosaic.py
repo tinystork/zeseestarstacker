@@ -1,40 +1,9 @@
 # zemosaic/run_zemosaic.py
-import os
 import sys  # Ajout pour sys.path et sys.modules
+import multiprocessing
+# import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import tkinter as tk
-from tkinter import messagebox
-import logging
-import traceback
-
-logger = logging.getLogger(__name__)
-
-# --- Robust PYTHONPATH Modification (mirrors seestar/main.py logic) ---
-try:
-    current_script_path = os.path.abspath(__file__)
-    zemosaic_package_dir = os.path.dirname(current_script_path)
-    project_root_dir = os.path.dirname(zemosaic_package_dir)
-
-    if project_root_dir in sys.path:
-        sys.path.remove(project_root_dir)
-    sys.path.insert(0, project_root_dir)
-
-    if zemosaic_package_dir in sys.path and zemosaic_package_dir != project_root_dir:
-        try:
-            sys.path.remove(zemosaic_package_dir)
-        except ValueError:
-            pass
-
-    if __name__ in ("__main__", "__mp_main__") and (
-        __package__ is None or __package__ == ""
-    ):
-        __package__ = os.path.basename(zemosaic_package_dir)
-except Exception as path_e:
-    logger.error("Erreur configuration sys.path/package: %s", path_e)
-    traceback.print_exc()
-# --- FIN modification PYTHONPATH ---
-
-from .core.cuda_utils import enforce_nvidia_gpu
-
+from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
 
 # --- Impression de débogage initiale ---
 print("--- run_zemosaic.py: DÉBUT DES IMPORTS ---")
@@ -42,18 +11,9 @@ print(f"Python Executable: {sys.executable}")
 print(f"Python Version: {sys.version}")
 print(f"Chemin de travail actuel (CWD): {sys.path[0]}") # sys.path[0] est généralement le dossier du script
 
-
-if enforce_nvidia_gpu():
-    print(f"GPU NVIDIA forcée (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')})")
-else:
-    print("Aucun GPU NVIDIA détecté ou 'nvidia-smi' indisponible.")
-
-
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
-    # Utilisation d'un import relatif pour fonctionner lorsque ce fichier est
-    # lancé directement depuis le dossier zemosaic.
-    from .zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+    from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
     print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI ---")
 
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
@@ -61,7 +21,7 @@ try:
         try:
             # Tenter d'importer zemosaic_worker directement pour inspecter son chemin
             # Note: Il est déjà importé par zemosaic_gui si ZEMOSAIC_WORKER_AVAILABLE est True
-            from . import zemosaic_worker
+            import zemosaic_worker 
             print(f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}")
             if 'zemosaic_worker' in sys.modules:
                  print(f"DEBUG (run_zemosaic): sys.modules['zemosaic_worker'] pointe vers: {sys.modules['zemosaic_worker'].__file__}")
@@ -129,6 +89,7 @@ def main():
     print("--- run_zemosaic.py: mainloop() terminée ---")
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     print("Lancement de ZeMosaic via run_zemosaic.py (__name__ == '__main__')...")
     main()
     print("ZeMosaic terminé (sortie de __main__).")

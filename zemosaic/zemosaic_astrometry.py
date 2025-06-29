@@ -10,7 +10,11 @@ import subprocess
 # import shutil # Plus utilisé directement si on nettoie manuellement
 import gc
 import logging
-from seestar.alignment.astrometry_solver import AstrometrySolver
+import psutil
+from concurrent.futures import ProcessPoolExecutor
+
+import multiprocessing
+
 
 logger = logging.getLogger("ZeMosaicAstrometry")
 # ... (pas besoin de reconfigurer le logger ici s'il hérite du worker)
@@ -26,51 +30,51 @@ try:
 except ImportError:
     logger.error("Astropy non installée. Certaines fonctionnalités de zemosaic_astrometry seront limitées.")
     ASTROPY_AVAILABLE_ASTROMETRY = False
-    class AstropyWCS: pass
+    class AstropyWCS: pass 
     class FITSFixedWarning(Warning): pass
     u = None
 
 
-def solve_with_astrometry_local(image_fits_path: str,
-                                original_fits_header,
-                                local_ansvr_path: str,
-                                timeout_sec: int = 180,
-                                progress_callback=None):
-    """Essaye ansvr (Astrometry local). Retourne WCS ou None."""
-    solver = AstrometrySolver(progress_callback=progress_callback)
-    settings = {
-        "local_solver_preference": "ansvr",
-        "local_ansvr_path": local_ansvr_path,
-        "ansvr_timeout_sec": timeout_sec,
-        "api_key": "",
-        "use_radec_hints": False,
-    }
-    return solver.solve(
-        image_fits_path,
-        original_fits_header,
-        settings,
-        update_header_with_solution=True,
-    )
+def _log_memory_usage(progress_callback: callable, context_message: str = ""):
+    """Logue l'utilisation mémoire du processus courant."""
+    if not progress_callback or not callable(progress_callback):
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        rss_mb = mem_info.rss / (1024 * 1024)
+        vms_mb = mem_info.vms / (1024 * 1024)
+
+        virtual_mem = psutil.virtual_memory()
+        available_ram_mb = virtual_mem.available / (1024 * 1024)
+        total_ram_mb = virtual_mem.total / (1024 * 1024)
+        percent_ram_used = virtual_mem.percent
+
+        swap_mem = psutil.swap_memory()
+        used_swap_mb = swap_mem.used / (1024 * 1024)
+        total_swap_mb = swap_mem.total / (1024 * 1024)
+        percent_swap_used = swap_mem.percent
+
+        log_msg = (
+            f"Memory Usage ({context_message}): "
+            f"Proc RSS: {rss_mb:.1f}MB, VMS: {vms_mb:.1f}MB. "
+            f"Sys RAM: Avail {available_ram_mb:.0f}MB / Total {total_ram_mb:.0f}MB ({percent_ram_used}% used). "
+            f"Sys Swap: Used {used_swap_mb:.0f}MB / Total {total_swap_mb:.0f}MB ({percent_swap_used}% used)."
+        )
+        progress_callback(log_msg, None, "DEBUG")
+    except Exception as e_mem_log:
+        progress_callback(f"Erreur lors du logging mémoire ({context_message}): {e_mem_log}", None, "WARN")
 
 
-def solve_with_astrometry_net(image_fits_path: str,
-                              original_fits_header,
-                              api_key: str,
-                              timeout_sec: int = 300,
-                              progress_callback=None):
-    """Essaye Astrometry.net Web. Retourne WCS ou None."""
-    solver = AstrometrySolver(progress_callback=progress_callback)
-    settings = {
-        "local_solver_preference": "none",
-        "api_key": api_key,
-        "astrometry_net_timeout_sec": timeout_sec,
-        "use_radec_hints": False,
-    }
-    return solver.solve(
-        image_fits_path,
-        original_fits_header,
-        settings,
-        update_header_with_solution=True,
+def _run_astap_subprocess(cmd_list: list, cwd: str, timeout_sec: int):
+    """Fonction exécutée dans un ProcessPoolExecutor pour lancer ASTAP."""
+    return subprocess.run(
+        cmd_list,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout_sec,
+        check=False,
+        cwd=cwd,
     )
 
 
@@ -299,25 +303,35 @@ def solve_with_astap(image_fits_path: str,
     astap_success = False
 
     try:
-        astap_process_result = subprocess.run(
-            cmd_list_astap,
-            capture_output=True, text=True,
-            timeout=timeout_sec, check=False,
-            cwd=current_image_dir,
-            errors='replace'
-        )
-        logger.debug(f"ASTAP return code: {astap_process_result.returncode}")
-        if astap_process_result.stdout: logger.debug(f"ASTAP stdout:\n{astap_process_result.stdout[:1000]}")
-        if astap_process_result.stderr: logger.warning(f"ASTAP stderr:\n{astap_process_result.stderr[:1000]}")
 
-        if astap_process_result.returncode == 0:
+        astap_process_result = None
+        try:
+            if not multiprocessing.current_process().daemon:
+                with ProcessPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_run_astap_subprocess, cmd_list_astap, current_image_dir, timeout_sec)
+                    astap_process_result = future.result()
+            else:
+                raise RuntimeError("daemon process")
+        except (AssertionError, RuntimeError) as e_pool:
+            if progress_callback:
+                progress_callback(f"  ASTAP Solve: ProcessPoolExecutor indisponible ({e_pool}). Lancement direct.", None, "DEBUG_DETAIL")
+            astap_process_result = _run_astap_subprocess(cmd_list_astap, current_image_dir, timeout_sec)
+
+        logger.debug(f"ASTAP return code: {astap_process_result.returncode}")
+
+        rc_astap = astap_process_result.returncode
+        del astap_process_result
+        gc.collect()
+        _log_memory_usage(progress_callback, "Après GC post-ASTAP")
+
+        if rc_astap == 0:
             if os.path.exists(expected_wcs_file_path) and os.path.getsize(expected_wcs_file_path) > 0:
                 if progress_callback: progress_callback(f"  ASTAP Solve: Résolution OK (code 0). Fichier WCS '{os.path.basename(expected_wcs_file_path)}' trouvé.", None, "INFO_DETAIL")
                 img_height = original_fits_header.get('NAXIS2', 0)
                 img_width = original_fits_header.get('NAXIS1', 0)
                 if img_height == 0 or img_width == 0:
                     try:
-                        with fits.open(image_fits_path, memmap=False) as hdul_shape:
+                        with fits.open(image_fits_path) as hdul_shape:
                             shape_from_file = hdul_shape[0].shape
                             if len(shape_from_file) >=2 :
                                 img_height = shape_from_file[-2]
@@ -342,10 +356,10 @@ def solve_with_astap(image_fits_path: str,
             else:
                 if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Code 0 mais fichier .wcs manquant/vide ('{os.path.basename(expected_wcs_file_path)}').", None, "ERROR")
         else:
-            error_msg = f"ASTAP Solve Échec (code {astap_process_result.returncode}) pour '{img_basename_log}'."
-            if astap_process_result.returncode == 1: error_msg += " (No solution found)."
-            elif astap_process_result.returncode == 2: error_msg += " (ASTAP FITS read error - vérifiez format/corruption)."
-            elif astap_process_result.returncode == 10: error_msg += " (ASTAP database not found - vérifiez -d)."
+            error_msg = f"ASTAP Solve Échec (code {rc_astap}) pour '{img_basename_log}'."
+            if rc_astap == 1: error_msg += " (No solution found)."
+            elif rc_astap == 2: error_msg += " (ASTAP FITS read error - vérifiez format/corruption)."
+            elif rc_astap == 10: error_msg += " (ASTAP database not found - vérifiez -d)."
             if progress_callback: progress_callback(f"  {error_msg}", None, "WARN")
             logger.warning(error_msg)
 

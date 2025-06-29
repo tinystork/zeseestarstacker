@@ -374,6 +374,9 @@ def crop_image_and_wcs(
             # Lorsqu'on soustrait, on soustrait le nombre de pixels rognés du côté "origine" (gauche/bas).
             new_crpix1 = cropped_wcs_obj.wcs.crpix[0] - dw
             new_crpix2 = cropped_wcs_obj.wcs.crpix[1] - dh
+            # Clamp to positive values to avoid invalid WCS after heavy cropping
+            new_crpix1 = max(new_crpix1, 1.0)
+            new_crpix2 = max(new_crpix2, 1.0)
             cropped_wcs_obj.wcs.crpix = [new_crpix1, new_crpix2]
         else:
             # Ce cas est peu probable si c'est un WCS valide, mais par sécurité.
@@ -434,12 +437,16 @@ def debayer_image(img_norm_01, bayer_pattern="GRBG", progress_callback=None):
     return color_img_rgb_uint16.astype(np.float32) / 65535.0
 
 
-def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5, progress_callback=None):
+def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5,
+                                  progress_callback=None, save_mask_path=None):
     def _log_util_hp(message, level="DEBUG_DETAIL"):
         if progress_callback and callable(progress_callback): progress_callback(f"  [ZU HotPix] {message}", None, level)
         else: print(f"  [ZU HotPix PRINTFALLBACK] {level}: {message}")
 
-    _log_util_hp(f"Début détection/correction HP. Threshold: {threshold}, Neighborhood: {neighborhood_size}", "DEBUG")
+    _log_util_hp(
+        f"Début détection/correction HP. Threshold: {threshold}, Neighborhood: {neighborhood_size}",
+        "DEBUG",
+    )
     if image is None: _log_util_hp("AVERT: Image entrée est None.", "WARN"); return None
     if not isinstance(image, np.ndarray): _log_util_hp(f"ERREUR: Entrée pas ndarray.", "ERROR"); return image 
 
@@ -451,27 +458,73 @@ def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5, pro
     _log_util_hp(f"Image {'couleur' if is_color else 'monochrome'}. Dtype original: {original_dtype}.", "DEBUG_DETAIL")
     
     try:
+        mask_accum = None
         if is_color:
+            mask_accum = np.zeros(img_float.shape, dtype=np.uint8)
             for c in range(img_float.shape[2]):
-                channel = img_float[:, :, c]; median_filtered = cv2.medianBlur(channel, neighborhood_size)
-                mean_local = cv2.blur(channel, ksize); mean_sq_local = cv2.blur(channel**2, ksize)
+                channel = img_float[:, :, c]
+                median_filtered = cv2.medianBlur(channel, neighborhood_size)
+                mean_local = cv2.blur(channel, ksize)
+                mean_sq_local = cv2.blur(channel**2, ksize)
                 std_dev_local = np.sqrt(np.maximum(mean_sq_local - mean_local**2, 0))
-                std_dev_floor = 1e-5 if np.issubdtype(channel.dtype, np.floating) else (1.0 / (np.iinfo(np.uint16).max if np.max(channel)<=1 else np.iinfo(channel.dtype).max if np.issubdtype(channel.dtype, np.integer) else (2**16-1) ) if np.max(channel)>1 else 1.0) # Simplifié
+                std_dev_floor = (
+                    1e-5
+                    if np.issubdtype(channel.dtype, np.floating)
+                    else (
+                        1.0
+                        / (
+                            np.iinfo(np.uint16).max
+                            if np.max(channel) <= 1
+                            else np.iinfo(channel.dtype).max
+                            if np.issubdtype(channel.dtype, np.integer)
+                            else (2**16 - 1)
+                        )
+                        if np.max(channel) > 1
+                        else 1.0
+                    )
+                )
                 std_dev_local_thresholded = np.maximum(std_dev_local, std_dev_floor)
                 hot_pixels_mask = channel > (median_filtered + threshold * std_dev_local_thresholded)
                 num_hot = np.sum(hot_pixels_mask)
-                if num_hot > 0: _log_util_hp(f"    Canal {c}: {num_hot} pixels chauds corrigés.", "DEBUG_DETAIL")
+                if num_hot > 0:
+                    _log_util_hp(f"    Canal {c}: {num_hot} pixels chauds corrigés.", "DEBUG_DETAIL")
                 channel[hot_pixels_mask] = median_filtered[hot_pixels_mask]
-        else: # Grayscale
+                mask_accum[..., c] = hot_pixels_mask
+        else:  # Grayscale
             median_filtered = cv2.medianBlur(img_float, neighborhood_size)
-            mean_local = cv2.blur(img_float, ksize); mean_sq_local = cv2.blur(img_float**2, ksize)
+            mean_local = cv2.blur(img_float, ksize)
+            mean_sq_local = cv2.blur(img_float**2, ksize)
             std_dev_local = np.sqrt(np.maximum(mean_sq_local - mean_local**2, 0))
-            std_dev_floor = 1e-5 if np.issubdtype(img_float.dtype, np.floating) else (1.0 / (np.iinfo(np.uint16).max if np.max(img_float)<=1 else np.iinfo(img_float.dtype).max if np.issubdtype(img_float.dtype, np.integer) else (2**16-1) ) if np.max(img_float)>1 else 1.0)
+            std_dev_floor = (
+                1e-5
+                if np.issubdtype(img_float.dtype, np.floating)
+                else (
+                    1.0
+                    / (
+                        np.iinfo(np.uint16).max
+                        if np.max(img_float) <= 1
+                        else np.iinfo(img_float.dtype).max
+                        if np.issubdtype(img_float.dtype, np.integer)
+                        else (2**16 - 1)
+                    )
+                    if np.max(img_float) > 1
+                    else 1.0
+                )
+            )
             std_dev_local_thresholded = np.maximum(std_dev_local, std_dev_floor)
             hot_pixels_mask = img_float > (median_filtered + threshold * std_dev_local_thresholded)
             num_hot = np.sum(hot_pixels_mask)
-            if num_hot > 0: _log_util_hp(f"  Image N&B: {num_hot} pixels chauds corrigés.", "DEBUG_DETAIL")
+            if num_hot > 0:
+                _log_util_hp(f"  Image N&B: {num_hot} pixels chauds corrigés.", "DEBUG_DETAIL")
             img_float[hot_pixels_mask] = median_filtered[hot_pixels_mask]
+            mask_accum = hot_pixels_mask.astype(np.uint8)
+        if save_mask_path:
+            try:
+                np.save(save_mask_path, mask_accum.astype(np.uint8))
+                _log_util_hp(f"Masque HP sauvegardé vers {os.path.basename(save_mask_path)}", "DEBUG_DETAIL")
+            except Exception as e_save:
+                _log_util_hp(f"ERREUR sauvegarde masque HP: {e_save}", "WARN")
+        del mask_accum
 
         if np.issubdtype(original_dtype, np.integer):
             d_info = np.iinfo(original_dtype)
@@ -571,9 +624,15 @@ def stretch_auto_asifits_like(img_hwc_adu, p_low=0.5, p_high=99.8,
 
     if apply_wb:
         avg_per_chan = np.mean(out, axis=(0, 1))
-        avg_per_chan /= np.max(avg_per_chan) + 1e-8
+        norm = np.max(avg_per_chan)
+        if norm > 0:
+            avg_per_chan /= norm
+        else:
+            avg_per_chan = np.ones_like(avg_per_chan)
         for c in range(3):
-            out[..., c] /= avg_per_chan[c]
+            denom = avg_per_chan[c]
+            if denom > 1e-8:
+                out[..., c] /= denom
 
     return np.clip(out, 0, 1)
 
@@ -760,12 +819,9 @@ def save_fits_image(image_data: np.ndarray,
         elif np.any(np.isfinite(image_data)): image_normalized_01 = np.full_like(image_data, 0.5, dtype=np.float32)
         
         image_clipped_01 = np.clip(image_normalized_01, 0.0, 1.0)
-        data_uint16 = (image_clipped_01 * 65535.0).astype(np.uint16)
-        data_to_write_temp = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
-        final_header_to_write['BITPIX'] = 16
-        final_header_to_write['BSCALE'] = 1
-        final_header_to_write['BZERO'] = 32768
-        _log_util_save(f"  SAVE_DEBUG: (Int16) data_to_write_temp: Range [{np.min(data_to_write_temp)}, {np.max(data_to_write_temp)}]", "WARN")
+        data_to_write_temp = (image_clipped_01 * 65535.0).astype(np.uint16)
+        final_header_to_write['BITPIX'] = 16; final_header_to_write['BSCALE'] = 1; final_header_to_write['BZERO'] = 32768
+        _log_util_save(f"  SAVE_DEBUG: (Uint16) data_to_write_temp: Range [{np.min(data_to_write_temp)}, {np.max(data_to_write_temp)}]", "WARN")
 
     data_for_hdu_cxhxw = None
     is_color = data_to_write_temp.ndim == 3 and data_to_write_temp.shape[-1] == 3
@@ -816,15 +872,7 @@ def save_fits_image(image_data: np.ndarray,
         hdul = current_fits_module.HDUList([primary_hdu_object])
         _log_util_save(f"Écriture vers '{base_output_filename}' (overwrite={overwrite})...", "DEBUG_DETAIL")
         
-        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception')
-        if final_header_to_write.get('BITPIX') == 16:
-            # Renforcer la présence de BSCALE/BZERO au cas où astropy les aurait
-            # supprimés avec des données int16.
-            with current_fits_module.open(output_path, mode="update", memmap=False) as hdul_fix:
-                hd0 = hdul_fix[0]
-                hd0.header["BSCALE"] = 1
-                hd0.header["BZERO"] = 32768
-                hdul_fix.flush()
+        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception') 
         _log_util_save(f"Sauvegarde FITS vers '{base_output_filename}' RÉUSSIE.", "INFO")
 
     except Exception as e_write:

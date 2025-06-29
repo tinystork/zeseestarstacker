@@ -30,19 +30,7 @@
     "crop_options_frame_title": "Options de Rognage des Tuiles Maîtresses",
     "apply_master_tile_crop_label": "Rogner les Bords des Tuiles Maîtresses :",
     "master_tile_crop_percent_label": "Pourcentage de Rognage par Côté (0-25%) :",
-    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",
-
-    "solver_settings_frame_title": "Paramètres du Solveur",
-    "solver_choice_label": "Solveur :",
-    "solver_astap": "ASTAP",
-    "solver_astrometry": "Astrometry",
-    "astrometry_api_key_label": "Clé API Astrometry :",
-    "astrometry_local_path_label": "Chemin Astrometry Local :",
-    "browse_astrometry_local_path_button": "Parcourir...",
-    "select_astrometry_local_title": "Sélectionner le Chemin Astrometry Local",
-    "select_astrometry_exe_or_cfg_title": "Sélectionner solve-field ou fichier .cfg (Annuler pour le Dossier d'Index)",
-    "select_astrometry_index_dir_title": "Sélectionner le Dossier d'Index Astrometry.net",
-    "configuration_files": "Fichiers de Configuration",
+    "master_tile_crop_percent_note": "(0.0 = pas de rognage)",    
 
 
     "config_warning_title": "Avertissement Configuration",
@@ -176,6 +164,9 @@
     "clusterstacks_info_start": "ClusterStacks : Groupement de {num_files} fichiers bruts (seuil fin : {threshold}°)...",
     "clusterstacks_warn_no_centers": "ClusterStacks AVERT : Aucun centre céleste valide trouvé pour le groupement.",
     "clusterstacks_info_finished": "ClusterStacks : {num_groups} stacks Seestar (groupes fins) formés.",
+    "clusterstacks_info_groups_split_auto_limit": "Limite auto activée : groupes divisés de {original} à {new}, max {limit} images (exemple {shape})",
+    "clusterstacks_info_groups_split_manual_limit": "Limite manuelle appliquée : groupes divisés de {original} à {new}, limite {limit} images",
+    "clusterstacks_warn_auto_limit_failed": "Échec estimation limite auto : {error}",
     
     "getwcs_error_utils_unavailable": "GetWCS_Pretreat ERREUR : Module zemosaic_utils non disponible.",
     "getwcs_error_load_failed": "GetWCS_Pretreat ERREUR : Échec chargement de '{filename}'.",
@@ -186,6 +177,7 @@
     "getwcs_warn_header_wcs_read_failed": "GetWCS_Pretreat AVERT : Échec lecture WCS du header FITS de '{filename}' : {error}. Tentative ASTAP.",
     "getwcs_info_astap_solved": "GetWCS_Pretreat : ASTAP a résolu '{filename}'.",
     "getwcs_warn_astap_failed": "GetWCS_Pretreat AVERT : ASTAP n'a PAS résolu '{filename}'.",
+    "getwcs_error_astap_tempfile_write_failed": "GetWCS_Pretreat ERREUR : Échec d'écriture du FITS temporaire pour ASTAP pour '{filename}' : {error}.",
     "getwcs_warn_no_header_wcs_astap_unavailable": "GetWCS_Pretreat AVERT : Pas de WCS dans header et ASTAP non disponible/utilisé pour '{filename}'.",
     "getwcs_error_final_wcs_invalid": "GetWCS_Pretreat ERREUR : WCS final pour '{filename}' non valide ou non céleste.",
     "getwcs_error_set_pixel_shape_final": "GetWCS_Pretreat ERREUR : Échec de la définition du pixel_shape final : {error}.",
@@ -295,7 +287,21 @@
     "performance_options_frame_title": "Options de Performance",
     "num_workers_label": "Threads de Traitement :",
     "num_workers_note": "(0 = auto, basé sur les cœurs CPU)",
-    "stacking_min_radial_floor_label": "Plancher Poids Radial Min (0.0-0.5) :", 
-    "stacking_min_radial_floor_note": "(0.0 = pas de plancher)"              
-    
+    "winsor_workers_label": "Limite workers Winsor :",
+    "winsor_workers_note": "(1-16, rejet parallèle par canal)",
+    "stacking_min_radial_floor_label": "Plancher Poids Radial Min (0.0-0.5) :",
+    "stacking_min_radial_floor_note": "(0.0 = pas de plancher)",
+    "gui_memmap_title": "Options memmap (coadd)",
+    "gui_memmap_enable": "Utiliser memmap disque",
+    "gui_memmap_dir": "Dossier memmap",
+    "gui_memmap_cleanup": "Supprimer les *.dat à la fin",
+    "gui_auto_limit_frames": "Limiter automatiquement les images par master tile (stabilité système)",
+    "max_raw_per_master_tile_label": "Brutes max par master-tuile",
+    "max_raw_per_master_tile_note": "0 = automatique (calculé). Valeur positive = nombre maximum d'images brutes par master-tuile.",
+    "reject_winsor_info_channel_progress": "Winsorized Sigma Clip : traitement du canal {channel}...",
+    "reject_winsor_info_mono_progress": "Winsorized Sigma Clip : traitement image monochrome...",
+
+    "assemble_error_invalid_final_shape_inc": "ERREUR assemblage incrémental : dimensions finales invalides {shape}.",
+    "assemble_warn_swapped_final_shape_inc": "AVERTISSEMENT assemblage incrémental : dimensions fournies {provided} inversées, attendu {expected}. Correction automatique.",
+    "assemble_error_mismatch_final_shape_inc": "ERREUR assemblage incrémental : dimensions fournies {provided} incompatibles avec la grille {expected}."
 }
