@@ -8992,6 +8992,7 @@ class SeestarQueuedStacker:
                 wht_data_float64 = wht_arr.astype(np.float64)
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
 
+
                 if wht_arr.ndim == 3:
                     wht3d = (
                         wht_data_clipped_positive
@@ -9003,6 +9004,7 @@ class SeestarQueuedStacker:
                 else:
                     final_wht_map_for_postproc = wht_data_clipped_positive.astype(np.float32)
                     wht_for_div = np.maximum(wht_data_clipped_positive[:, :, np.newaxis], 1e-9)
+
                 with np.errstate(divide="ignore", invalid="ignore"):
                     final_image_initial_raw = sci_data_float64 / wht_for_div
                 final_image_initial_raw = np.nan_to_num(
