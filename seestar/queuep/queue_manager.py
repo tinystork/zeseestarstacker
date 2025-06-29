@@ -8982,9 +8982,14 @@ class SeestarQueuedStacker:
                 sci_data_float64 = drizzle_final_sci_data.astype(np.float64)
                 wht_data_float64 = drizzle_final_wht_data.astype(np.float64)
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
-                final_wht_map_for_postproc = np.mean(
-                    wht_data_clipped_positive, axis=2
-                ).astype(np.float32)
+                if drizzle_final_wht_data.ndim == 3:
+                    final_wht_map_for_postproc = np.mean(
+                        wht_data_clipped_positive, axis=2
+                    ).astype(np.float32)
+                else:
+                    final_wht_map_for_postproc = wht_data_clipped_positive.astype(
+                        np.float32
+                    )
                 wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
                 with np.errstate(divide="ignore", invalid="ignore"):
                     final_image_initial_raw = sci_data_float64 / wht_for_div
