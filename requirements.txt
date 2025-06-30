@@ -9,6 +9,7 @@
 numpy                    # Fundamental numerical operations
 scipy                    # Scientific library (dependency for skimage, maybe acstools)
 astropy                  # Core astronomy package (includes ccdproc)
+astroquery               # Required for Astrometry.net plate solving
 
 # --- Image Processing & Alignment ---
 opencv-python  # OpenCV for image operations (cv2)

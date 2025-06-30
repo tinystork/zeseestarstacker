@@ -80,7 +80,7 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 *   **Python:** 3.8 or higher recommended.
 *   **Required Packages:** Listed in `requirements.txt`. Install them using pip:
     ```bash
-    pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
+    pip install numpy opencv-python astropy astroquery astroalign tqdm matplotlib Pillow scikit-image
     ```
     *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation. If you plan to run the unit tests that exercise this feature, install it (included in `requirements-test.txt`).
 
@@ -89,7 +89,7 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 *   **Python :** 3.8 ou supérieur recommandé.
 *   **Packages Requis :** Listés dans `requirements.txt`. Installez-les avec pip :
     ```bash
-    pip install numpy opencv-python astropy astroalign tqdm matplotlib Pillow scikit-image
+    pip install numpy opencv-python astropy astroquery astroalign tqdm matplotlib Pillow scikit-image
     ```
     *   *(Optionnel)* installez `psutil` pour activer la journalisation mémoire et l'estimation automatique de la taille des lots. Si vous prévoyez d'exécuter les tests unitaires utilisant cette fonctionnalité, installez-le (inclus dans `requirements-test.txt`).
 
