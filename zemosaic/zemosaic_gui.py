@@ -313,19 +313,22 @@ class ZeMosaicGUI:
             # print(f"WARN _combo_to_key: Clé non trouvée pour l'affichage '{displayed_text}' et le préfixe '{tr_prefix}'. tk_var non modifié.")
 
     def _update_solver_frames(self, *args):
-        """Show or hide solver-specific frames based on selection."""
+        """Show or hide solver-specific frames based on the selected solver."""
         choice = self.solver_choice_var.get()
+
         if choice == "ASTAP":
-            self.astap_cfg_frame.grid()
-            self.astap_params_frame.grid()
+            # These frames use the ``pack`` geometry manager, so we must
+            # repack them when showing and use ``pack_forget`` to hide them.
+            self.astap_cfg_frame.pack(fill=tk.X, pady=(0, 10))
+            self.astap_params_frame.pack(fill=tk.X, pady=(0, 10))
             self.astrometry_frame.grid_remove()
         elif choice == "ASTROMETRY":
-            self.astap_cfg_frame.grid_remove()
-            self.astap_params_frame.grid_remove()
+            self.astap_cfg_frame.pack_forget()
+            self.astap_params_frame.pack_forget()
             self.astrometry_frame.grid()
         else:
-            self.astap_cfg_frame.grid_remove()
-            self.astap_params_frame.grid_remove()
+            self.astap_cfg_frame.pack_forget()
+            self.astap_params_frame.pack_forget()
             self.astrometry_frame.grid_remove()
 
 # Dans la classe ZeMosaicGUI de zemosaic_gui.py
