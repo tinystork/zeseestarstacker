@@ -10,6 +10,26 @@ import cv2
 from scipy.ndimage import gaussian_filter
 # ConvexHull n'est pas utilisé dans ce fichier
 
+_logger = logging.getLogger(__name__)
+_original_showwarning = warnings.showwarning
+
+# -------------------------------------------------------------
+# Filter the flood of "is not a flux-conserving kernel" warnings
+warnings.filterwarnings(
+    action="once",                                   # show only first
+    message=r".*is not a flux-conserving kernel\.$", # any kernel name
+    module=r"drizzle\.resample"
+)
+
+# Optional: log that first (now unique) occurrence via the project logger
+def _relay_first_warning(message, category, filename, lineno, file=None, line=None):
+    if ("is not a flux-conserving kernel" in str(message)
+            and category is RuntimeWarning):
+        _logger.warning(str(message))
+    _original_showwarning(message, category, filename, lineno, file, line)
+warnings.showwarning = _relay_first_warning
+# -------------------------------------------------------------
+
 logger = logging.getLogger(__name__)
 # ConvexHull n'est pas utilisé dans ce fichier
 
