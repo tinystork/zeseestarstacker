@@ -256,28 +256,30 @@ def solve_with_astrometry(
     settings: dict | None,
     progress_callback=None,
 ):
-    """Attempt plate solving via Astrometry.net using the seestar solver."""
+    """Attempt plate solving via the Astrometry.net service."""
 
     if not ASTROMETRY_SOLVER_AVAILABLE:
         return None
 
     try:
-        from seestar.alignment import astrometry_solver as asolver
+        from . import zemosaic_astrometry
     except Exception:
         return None
 
     solver_dict = settings or {}
-    mapped_settings = {
-        "api_key": solver_dict.get("api_key", ""),
-        "astrometry_net_timeout_sec": solver_dict.get("timeout"),
-    }
+    api_key = solver_dict.get("api_key", "")
+    timeout = solver_dict.get("timeout")
+    down = solver_dict.get("downsample")
 
     try:
-        return asolver.solve_image_wcs(
+        return zemosaic_astrometry.solve_with_astrometry_net(
             image_fits_path,
             fits_header,
-            mapped_settings,
-            update_header_with_solution=True,
+            api_key=api_key,
+            timeout_sec=timeout or 60,
+            downsample_factor=down,
+            update_original_header_in_place=True,
+            progress_callback=progress_callback,
         )
     except Exception as e:
         _log_and_callback(

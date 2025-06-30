@@ -133,7 +133,10 @@ class ZeMosaicGUI:
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
 
         # --- Solver Settings ---
-        self.solver_settings = SolverSettings()
+        try:
+            self.solver_settings = SolverSettings.load_default()
+        except Exception:
+            self.solver_settings = SolverSettings()
         self.solver_choice_var = tk.StringVar(value=self.solver_settings.solver_choice)
         self.solver_choice_var.trace_add("write", self._update_solver_frames)
         self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
@@ -1161,6 +1164,10 @@ class ZeMosaicGUI:
             self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
             self.solver_settings.timeout = self.astrometry_timeout_var.get()
             self.solver_settings.downsample = self.astrometry_downsample_var.get()
+            try:
+                self.solver_settings.save_default()
+            except Exception:
+                pass
 
             # --- RÉCUPÉRATION DES NOUVELLES VALEURS POUR LE ROGNAGE ---
             apply_master_tile_crop_val = self.apply_master_tile_crop_var.get()

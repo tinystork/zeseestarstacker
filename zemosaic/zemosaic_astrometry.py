@@ -404,3 +404,85 @@ def solve_with_astap(image_fits_path: str,
 
 
 
+
+def solve_with_astrometry_net(image_fits_path: str,
+                               original_fits_header: fits.Header,
+                               api_key: str,
+                               timeout_sec: int = 60,
+                               scale_est_arcsec_per_pix: float | None = None,
+                               scale_tolerance_percent: float = 20.0,
+                               downsample_factor: int | None = None,
+                               update_original_header_in_place: bool = False,
+                               progress_callback: callable = None):
+    """Solve WCS using the astrometry.net web service."""
+    if not (ASTROPY_AVAILABLE_ASTROMETRY and AstrometryNet and AstropyWCS):
+        if progress_callback:
+            progress_callback("Astrometry.net solve unavailable (missing deps).", None, "ERROR")
+        return None
+    if not os.path.isfile(image_fits_path) or not api_key:
+        return None
+
+    img_basename_log = os.path.basename(image_fits_path)
+    if progress_callback:
+        progress_callback(f"Astrometry.net solve start for '{img_basename_log}'", None, "INFO_DETAIL")
+
+    ast = AstrometryNet()
+    ast.api_key = api_key
+    if timeout_sec:
+        try:
+            ast.TIMEOUT = timeout_sec
+        except Exception:
+            pass
+
+    solve_args = {}
+    if scale_est_arcsec_per_pix:
+        try:
+            est = float(scale_est_arcsec_per_pix)
+            tol = float(scale_tolerance_percent)
+            solve_args["scale_units"] = "arcsecperpix"
+            solve_args["scale_lower"] = est * (1.0 - tol / 100.0)
+            solve_args["scale_upper"] = est * (1.0 + tol / 100.0)
+        except Exception:
+            pass
+
+    temp_path = None
+    try:
+        with fits.open(image_fits_path, memmap=False) as hdul:
+            data = hdul[0].data
+        if data is None:
+            return None
+        if downsample_factor and isinstance(downsample_factor, int) and downsample_factor > 1:
+            data = data[::downsample_factor, ::downsample_factor]
+        header_tmp = fits.Header()
+        header_tmp["SIMPLE"] = True
+        header_tmp["BITPIX"] = 16
+        header_tmp["NAXIS"] = 2
+        header_tmp["NAXIS1"] = data.shape[1]
+        header_tmp["NAXIS2"] = data.shape[0]
+        fd, temp_path = tempfile.mkstemp(suffix=".fits")
+        os.close(fd)
+        fits.writeto(temp_path, data.astype("int16"), header=header_tmp, overwrite=True)
+        wcs_header = ast.solve_from_image(temp_path, solve_timeout=timeout_sec, **solve_args)
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"Astrometry.net error: {e}", None, "WARN")
+        wcs_header = None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+    if not isinstance(wcs_header, fits.Header):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = AstropyWCS(wcs_header)
+    except Exception:
+        return None
+
+    if wcs_obj and wcs_obj.is_celestial and update_original_header_in_place and original_fits_header is not None:
+        _update_fits_header_with_wcs_za(original_fits_header, wcs_obj, solver_name="AstrometryNet", progress_callback=progress_callback)
+
+    return wcs_obj
