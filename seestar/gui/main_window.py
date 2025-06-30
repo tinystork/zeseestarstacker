@@ -5754,7 +5754,15 @@ class SeestarStackerGUI:
             header_final = None
             preview_load_error_msg = None
 
-            if final_stack_path and os.path.exists(final_stack_path):
+            if cosmetic_01_data_for_preview_from_backend is not None:
+                self.logger.info(
+                    "    [PF_S4] Utilisation des données de prévisualisation fournies par le backend."
+                )
+                data_final = cosmetic_01_data_for_preview_from_backend
+                header_final = (
+                    final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
+                )
+            elif final_stack_path and os.path.exists(final_stack_path):
                 try:
                     data_final, header_final = load_and_validate_fits(final_stack_path)
                     self.logger.info(
