@@ -6029,11 +6029,13 @@ class SeestarQueuedStacker:
         aux objets Drizzle persistants. Met à jour l'aperçu après chaque image (ou lot).
         Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full_EXTENDED_DEBUG_ULTRA
         """
-        # --- LIGNE DE PRINT ULTRA-CRITIQUE ET UNIQUE ---
-        print(
-            f"\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) - Lot #{current_batch_num} - Fichiers: {len(batch_temp_filepaths_list)} ========"
+        # Log de début de méthode
+        logger.debug(
+            "\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: %s) - Lot #%d - Fichiers: %d ========",
+            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
+            current_batch_num,
+            len(batch_temp_filepaths_list),
         )
-        # --- FIN LIGNE DE PRINT ULTRA-CRITIQUE ---
 
         num_files_in_batch = len(batch_temp_filepaths_list)
         logger.debug(
@@ -6271,8 +6273,14 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"        Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})"
                 )
-                print(
-                    f"ULTRA-DEBUG: Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})"
+                logger.debug(
+                    "ULTRA-DEBUG: Pixmap initial (origin=0) X range %.2f-%.2f vs [0,%d]; Y range %.2f-%.2f vs [0,%d)",
+                    min_x_initial,
+                    max_x_initial,
+                    width_out - 1,
+                    min_y_initial,
+                    max_y_initial,
+                    height_out - 1,
                 )
 
                 # RECALCUL AVEC origin=1 SI HORS BORNES (et correction en 0-based)
@@ -6288,7 +6296,7 @@ class SeestarQueuedStacker:
                     logger.debug(
                         "      WARN [ProcIncrDrizLoop]: Pixmap initial (origin=0) en dehors de la plage attendue. Recalcul avec origin=1."
                     )
-                    print(
+                    logger.debug(
                         "ULTRA-DEBUG: Pixmap initial (origin=0) is OUT OF BOUNDS. Recalculating with origin=1..."
                     )
                     (
@@ -6303,8 +6311,10 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap ajusté (1-based vers 0-based) après recalcul avec origin=1."
                     )
-                    print(
-                        f"ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x={np.nanmin(final_x_output_pixels):.2f}, min_y={np.nanmin(final_y_output_pixels):.2f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x=%.2f, min_y=%.2f",
+                        np.nanmin(final_x_output_pixels),
+                        np.nanmin(final_y_output_pixels),
                     )
                     # --- FIN FIX CRITIQUE ---
 
@@ -6316,7 +6326,7 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection (post-correction). Nettoyage..."
                     )
-                    print(f"ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
+                    logger.debug("ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
                     final_x_output_pixels = np.nan_to_num(
                         final_x_output_pixels, nan=0.0, posinf=0.0, neginf=0.0
                     )  # Utilisez 0.0 pour les valeurs numériques
@@ -6358,11 +6368,19 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"      Output Grid (width, height) for comparison: ({width_out}, {height_out})"
                 )
-                print(
-                    f"ULTRA-DEBUG: Final Pixmap X stats (post-clip): min={min_x_final:.2f}, max={max_x_final:.2f}, mean={np.nanmean(pix_x_final):.2f}, std={np.nanstd(pix_x_final):.2f}"
+                logger.debug(
+                    "ULTRA-DEBUG: Final Pixmap X stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
+                    min_x_final,
+                    max_x_final,
+                    np.nanmean(pix_x_final),
+                    np.nanstd(pix_x_final),
                 )
-                print(
-                    f"ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min={min_y_final:.2f}, max={max_y_final:.2f}, mean={np.nanmean(pix_y_final):.2f}, std={np.nanstd(pix_y_final):.2f}"
+                logger.debug(
+                    "ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
+                    min_y_final,
+                    max_y_final,
+                    np.nanmean(pix_y_final),
+                    np.nanstd(pix_y_final),
                 )
 
                 # Vérification critique des bornes du pixmap final
@@ -6386,7 +6404,7 @@ class SeestarQueuedStacker:
                     logger.warning(
                         "        WARN: All pixmap points map to (or very close to) a single output pixel! This indicates a severe WCS issue or extreme input image data where all points are projected to the same output pixel. No significant image will be drizzled."
                     )
-                    print(
+                    logger.debug(
                         "ULTRA-DEBUG: WARNING: Pixmap is 'flat' - all points map to a single output pixel!"
                     )
 
@@ -6473,8 +6491,14 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} CALLING add_image - data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, pixfrac={self.drizzle_pixfrac}, input_shape_hw={input_shape_hw_current_file}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d CALLING add_image - data range %.3g-%.3g, exptime=%.2f, pixfrac=%.2f, input_shape_hw=%s",
+                        ch_idx,
+                        np.min(channel_data_2d),
+                        np.max(channel_data_2d),
+                        exptime_for_drizzle_add,
+                        self.drizzle_pixfrac,
+                        input_shape_hw_current_file,
                     )
 
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
@@ -6486,8 +6510,11 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} SCI_SUM BEFORE add_image: {sci_sum_before:.3f}"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state BEFORE add_image: out_wht_sum={wht_sum_before:.3f}, out_img_sum={sci_sum_before:.3f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d Drizzle Obj state BEFORE add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
+                        ch_idx,
+                        wht_sum_before,
+                        sci_sum_before,
                     )
 
                     # L'appel CRITIQUE à add_image
@@ -6502,9 +6529,12 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} RETURNED from add_image: nskip={nskip}, nmiss={nmiss}"
                     )  # Log des retours de add_image
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} add_image RETURNED: nskip={nskip}, nmiss={nmiss}"
-                    )  # Print direct pour nskip/nmiss
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d add_image RETURNED: nskip=%d, nmiss=%d",
+                        ch_idx,
+                        nskip,
+                        nmiss,
+                    )
 
                     wht_sum_after = float(np.sum(driz_obj.out_wht))
                     sci_sum_after = float(np.sum(driz_obj.out_img))
@@ -6514,8 +6544,11 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_sum_after:.3f} (Change: {sci_sum_after - sci_sum_before:.3f})"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state AFTER add_image: out_wht_sum={wht_sum_after:.3f}, out_img_sum={sci_sum_after:.3f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d Drizzle Obj state AFTER add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
+                        ch_idx,
+                        wht_sum_after,
+                        sci_sum_after,
                     )
 
                     # Vérification des assertions (maintenues)
@@ -6544,8 +6577,10 @@ class SeestarQueuedStacker:
                     f"ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Échec fichier '{current_filename_for_log}': {e_file}",
                     exc_info=True,
                 )
-                print(
-                    f"ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '{current_filename_for_log}': {e_file}"
+                logger.debug(
+                    "ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '%s': %s",
+                    current_filename_for_log,
+                    e_file,
                 )
 
             finally:
@@ -6687,36 +6722,46 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"    DEBUG QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
                 )
-                print(
-                    f"ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
+                logger.debug(
+                    "ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): %.3f-%.3f",
+                    np.min(preview_data_HWC_final),
+                    np.max(preview_data_HWC_final),
                 )
             else:
                 logger.debug(
                     f"    WARN QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Impossible de mettre à jour l'aperçu Driz Incr VRAI (callback ou objets Drizzle manquants)."
                 )
-                print(
-                    f"ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI."
+                logger.debug(
+                    "ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI."
                 )
         except Exception as e_prev:
             logger.error(
                 f"    ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}",
                 exc_info=True,
             )
-            print(f"ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: {e_prev}")
+            logger.debug(
+                "ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: %s",
+                e_prev,
+            )
 
         # --- NETTOYAGE DES FICHIERS TEMPORAIRES DU LOT ---
         if self.perform_cleanup:
             logger.debug(
                 f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Nettoyage fichiers temp lot #{current_batch_num}..."
             )
-            print(f"ULTRA-DEBUG: Nettoyage fichiers temp lot #{current_batch_num}...")
+            logger.debug(
+                "ULTRA-DEBUG: Nettoyage fichiers temp lot #%d...",
+                current_batch_num,
+            )
             self._cleanup_batch_temp_files(batch_temp_filepaths_list)
 
         logger.debug(
             f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n"
         )
-        print(
-            f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n"
+        logger.debug(
+            "======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #%d - %s) ========",
+            current_batch_num,
+            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
         )
 
     #################################################################################################################################################

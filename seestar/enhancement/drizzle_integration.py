@@ -3,33 +3,37 @@ import os
 import traceback
 import warnings
 import gc
+import logging
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 import cv2
 from scipy.ndimage import gaussian_filter
 # ConvexHull n'est pas utilisé dans ce fichier
 
+logger = logging.getLogger(__name__)
+# ConvexHull n'est pas utilisé dans ce fichier
+
 try:
     import colour_demosaicing
     _DEBAYER_AVAILABLE = True
-    print("DEBUG DrizzleIntegration: Found colour_demosaicing.")
+    logger.debug("DEBUG DrizzleIntegration: Found colour_demosaicing.")
 except ImportError:
     _DEBAYER_AVAILABLE = False
-    print("WARNING DrizzleIntegration: colour-demosaicing library not found.")
+    logger.warning("WARNING DrizzleIntegration: colour-demosaicing library not found.")
     class colour_demosaicing: # Factice
         @staticmethod
         def demosaicing_CFA_Bayer_Malvar2004(data, pattern):
-            print("ERROR: colour_demosaicing not available for demosaicing.")
+            logger.error("ERROR: colour_demosaicing not available for demosaicing.")
             return data
 
 try:
     from drizzle.resample import Drizzle
     _OO_DRIZZLE_AVAILABLE = True
-    print("DEBUG DrizzleIntegration: Imported drizzle.resample.Drizzle")
+    logger.debug("DEBUG DrizzleIntegration: Imported drizzle.resample.Drizzle")
 except ImportError:
     _OO_DRIZZLE_AVAILABLE = False
-    Drizzle = None # Pour éviter NameError si Drizzle non importé
-    print("ERROR DrizzleIntegration: Cannot import drizzle.resample.Drizzle class")
+    Drizzle = None  # Pour éviter NameError si Drizzle non importé
+    logger.error("ERROR DrizzleIntegration: Cannot import drizzle.resample.Drizzle class")
 
 # try: # Pas besoin de SeestarQueuedStacker ici
 #     from ..queuep.queue_manager import SeestarQueuedStacker 
@@ -43,7 +47,7 @@ def _load_drizzle_temp_file(filepath): # Nom corrigé
     try:
         with fits.open(filepath, memmap=False) as hdul:
             if not hdul or not hdul[0].is_image or hdul[0].data is None: 
-                # print(f"DEBUG _load_drizzle_temp_file: HDU invalide pour {filepath}")
+                # logger.debug(f"DEBUG _load_drizzle_temp_file: HDU invalide pour {filepath}")
                 return None, None, None
             hdu = hdul[0]; data = hdu.data; header = hdu.header
             data_hxwx3 = None
@@ -51,10 +55,10 @@ def _load_drizzle_temp_file(filepath): # Nom corrigé
                 if data.shape[2] == 3: data_hxwx3 = data.astype(np.float32)
                 elif data.shape[0] == 3: data_hxwx3 = np.moveaxis(data, 0, -1).astype(np.float32)
                 else: 
-                    # print(f"DEBUG _load_drizzle_temp_file: Shape 3D inattendue {data.shape} pour {filepath}")
+                    # logger.debug(f"DEBUG _load_drizzle_temp_file: Shape 3D inattendue {data.shape} pour {filepath}")
                     return None, None, None
             else: 
-                # print(f"DEBUG _load_drizzle_temp_file: Données non 3D {data.ndim}D pour {filepath}")
+                # logger.debug(f"DEBUG _load_drizzle_temp_file: Données non 3D {data.ndim}D pour {filepath}")
                 return None, None, None
             wcs = None
             try:
@@ -64,20 +68,20 @@ def _load_drizzle_temp_file(filepath): # Nom corrigé
                 if wcs_hdr.is_celestial: wcs = wcs_hdr
             except Exception: pass
             if wcs is None: 
-                # print(f"DEBUG _load_drizzle_temp_file: WCS non trouvé/valide pour {filepath}")
+                # logger.debug(f"DEBUG _load_drizzle_temp_file: WCS non trouvé/valide pour {filepath}")
                 return None, None, None
             return data_hxwx3, wcs, header
     except FileNotFoundError: 
-        # print(f"DEBUG _load_drizzle_temp_file: Fichier non trouvé {filepath}")
+        # logger.debug(f"DEBUG _load_drizzle_temp_file: Fichier non trouvé {filepath}")
         return None, None, None
     except Exception as e: 
-        print(f"ERREUR _load_drizzle_temp_file pour {filepath}: {e}")
+        logger.debug(f"ERREUR _load_drizzle_temp_file pour {filepath}: {e}")
         traceback.print_exc(limit=1); return None, None, None
 
 def _create_wcs_from_header(header): # Nom corrigé
     required_keys = ['NAXIS1', 'NAXIS2', 'RA', 'DEC', 'FOCALLEN', 'XPIXSZ', 'YPIXSZ']
     if not all(key in header for key in required_keys): 
-        # print(f"DEBUG _create_wcs_from_header: Clés manquantes { [k for k in required_keys if k not in header] }")
+        # logger.debug(f"DEBUG _create_wcs_from_header: Clés manquantes { [k for k in required_keys if k not in header] }")
         return None
     try:
         naxis1 = int(header['NAXIS1']); naxis2 = int(header['NAXIS2'])
@@ -106,11 +110,11 @@ def _create_wcs_from_header(header): # Nom corrigé
         w.wcs.pc = np.array([[1.0, 0.0], [0.0, 1.0]]) # Matrice de rotation (identité ici)
         return w
     except Exception as e_wcs_create: 
-        print(f"ERREUR _create_wcs_from_header: {e_wcs_create}")
+        logger.debug(f"ERREUR _create_wcs_from_header: {e_wcs_create}")
         return None
 
 def _load_fits_data_wcs_debayered(filepath, bayer_pattern='GRBG'): # Nom corrigé
-    # print(f"DEBUG _load_fits_data_wcs_debayered: Tentative chargement {filepath}")
+    # logger.debug(f"DEBUG _load_fits_data_wcs_debayered: Tentative chargement {filepath}")
     try:
         with fits.open(filepath, memmap=False) as hdul:
             hdu = None; header = None
@@ -118,7 +122,7 @@ def _load_fits_data_wcs_debayered(filepath, bayer_pattern='GRBG'): # Nom corrig�
                 if h_item.is_image and h_item.data is not None and h_item.data.ndim == 2:
                     hdu = h_item; break
             if hdu is None: 
-                # print(f"DEBUG _load_fits_data_wcs_debayered: Aucune HDU 2D image valide dans {filepath}")
+                # logger.debug(f"DEBUG _load_fits_data_wcs_debayered: Aucune HDU 2D image valide dans {filepath}")
                 return None, None, None
             
             bayer_data = hdu.data; header = hdu.header
@@ -134,10 +138,10 @@ def _load_fits_data_wcs_debayered(filepath, bayer_pattern='GRBG'): # Nom corrig�
                     if rgb_image.ndim != 3 or rgb_image.shape[2] != 3: 
                         raise ValueError(f"Debayer a retourné une shape inattendue: {rgb_image.shape}")
                 except Exception as e_debayer:
-                    print(f"ERREUR Debayer dans _load_fits_data_wcs_debayered pour {filepath}: {e_debayer}")
+                    logger.debug(f"ERREUR Debayer dans _load_fits_data_wcs_debayered pour {filepath}: {e_debayer}")
                     return None, None, None # Échec du debayering
             else: 
-                print(f"WARN _load_fits_data_wcs_debayered: Bibliothèque colour_demosaicing non dispo pour {filepath}.")
+                logger.debug(f"WARN _load_fits_data_wcs_debayered: Bibliothèque colour_demosaicing non dispo pour {filepath}.")
                 return None, None, None # Pas de debayering possible
             
             wcs = None
@@ -153,16 +157,16 @@ def _load_fits_data_wcs_debayered(filepath, bayer_pattern='GRBG'): # Nom corrig�
                 if wcs_gen and wcs_gen.is_celestial: wcs = wcs_gen
             
             if not wcs: 
-                # print(f"DEBUG _load_fits_data_wcs_debayered: WCS non trouvé/généré pour {filepath}")
+                # logger.debug(f"DEBUG _load_fits_data_wcs_debayered: WCS non trouvé/généré pour {filepath}")
                 return None, None, None # WCS est essentiel
             
             return rgb_image.astype(np.float32), wcs, header
             
     except FileNotFoundError: 
-        # print(f"DEBUG _load_fits_data_wcs_debayered: Fichier non trouvé {filepath}")
+        # logger.debug(f"DEBUG _load_fits_data_wcs_debayered: Fichier non trouvé {filepath}")
         return None, None, None
     except Exception as e_load: 
-        print(f"ERREUR _load_fits_data_wcs_debayered pour {filepath}: {e_load}")
+        logger.debug(f"ERREUR _load_fits_data_wcs_debayered pour {filepath}: {e_load}")
         traceback.print_exc(limit=1); return None, None, None
 
 # === CLASSE DrizzleProcessor ===
@@ -172,7 +176,7 @@ class DrizzleProcessor:
     """
     def __init__(self, scale_factor=2.0, pixfrac=1.0, kernel='square', fillval="0.0", final_wht_threshold=0.001):
         if not _OO_DRIZZLE_AVAILABLE or Drizzle is None:
-            print("ERREUR DrizzleProcessor: Classe Drizzle (drizzle.resample.Drizzle) non disponible.")
+            logger.debug("ERREUR DrizzleProcessor: Classe Drizzle (drizzle.resample.Drizzle) non disponible.")
             raise ImportError("Classe Drizzle (drizzle.resample.Drizzle) non disponible. Veuillez installer 'drizzle'.")
 
         self.scale_factor = float(max(1.0, scale_factor))
@@ -182,7 +186,7 @@ class DrizzleProcessor:
         self.fillval = str(fillval) 
         self.final_wht_threshold = float(np.clip(final_wht_threshold, 0.0, 1.0))
         
-        print(f"DEBUG DrizzleProcessor Initialized (using drizzle.resample.Drizzle): "
+        logger.debug(f"DEBUG DrizzleProcessor Initialized (using drizzle.resample.Drizzle): "
               f"ScaleFactor(info)={self.scale_factor}, Pixfrac={self.pixfrac}, Kernel='{self.kernel}', "
               f"Fillval='{self.fillval}', FinalWHTThresh={self.final_wht_threshold}")
 
@@ -207,12 +211,12 @@ class DrizzleProcessor:
         """
         # --- 0. Initialisation et Logs de Début ---
         if not progress_callback: 
-            progress_callback = lambda msg, prog=None: print(f"DrizzleProc LOG: {msg}" + (f" ({prog}%)" if prog is not None else ""))
+            progress_callback = lambda msg, prog=None: logger.debug(f"DrizzleProc LOG: {msg}" + (f" ({prog}%)" if prog is not None else ""))
         
-        print(f"DEBUG DrizzleProcessor.apply_drizzle (V_Inspector_API_FINAL_Corrected): Appelée avec {len(input_file_paths)} fichiers.")
-        print(f"  -> use_local_alignment_logic: {use_local_alignment_logic}")
-        print(f"  -> anchor_wcs_for_local fourni: {'Oui' if anchor_wcs_for_local else 'Non'}")
-        print(f"  -> Shape de sortie CIBLE (H,W): {output_shape_2d_hw}, WCS de sortie fourni: {'Oui' if output_wcs else 'Non'}")
+        logger.debug(f"DEBUG DrizzleProcessor.apply_drizzle (V_Inspector_API_FINAL_Corrected): Appelée avec {len(input_file_paths)} fichiers.")
+        logger.debug(f"  -> use_local_alignment_logic: {use_local_alignment_logic}")
+        logger.debug(f"  -> anchor_wcs_for_local fourni: {'Oui' if anchor_wcs_for_local else 'Non'}")
+        logger.debug(f"  -> Shape de sortie CIBLE (H,W): {output_shape_2d_hw}, WCS de sortie fourni: {'Oui' if output_wcs else 'Non'}")
 
         # --- 1. Vérifications Préliminaires des Arguments ---
         if not _OO_DRIZZLE_AVAILABLE or Drizzle is None: 
@@ -246,7 +250,7 @@ class DrizzleProcessor:
                 )
                 drizzlers_by_channel.append(driz_ch)
             progress_callback("Drizzle: Initialisation Drizzle terminée.", None)
-            print(f"DEBUG DrizzleProcessor (V_Inspector_API_FINAL_Corrected): Initialisation des Drizzlers OK. "
+            logger.debug(f"DEBUG DrizzleProcessor (V_Inspector_API_FINAL_Corrected): Initialisation des Drizzlers OK. "
                   f"Kernel='{self.kernel}', Fillval='{self.fillval}', Pixfrac (pour add_image)='{self.pixfrac}'")
         except Exception as e_init_driz:
             progress_callback(f"Drizzle ERREUR: Initialisation Drizzle échouée: {e_init_driz}", 0)
@@ -273,7 +277,7 @@ class DrizzleProcessor:
                 # (Cette partie est cruciale et doit être correcte pour que la suite fonctionne)
                 with fits.open(file_path, memmap=False) as hdul:
                     if not hdul or len(hdul) == 0 or hdul[0].data is None:
-                        print(f"    WARN (DrizzleProcessor): FITS invalide/vide pour {file_path}. Ignoré."); continue
+                        logger.debug(f"    WARN (DrizzleProcessor): FITS invalide/vide pour {file_path}. Ignoré."); continue
                     
                     data_loaded = hdul[0].data # Peut être HWC, CHW, ou HW
                     input_header = hdul[0].header
@@ -298,10 +302,10 @@ class DrizzleProcessor:
                 y_in_coords_flat, x_in_coords_flat = np.indices(input_shape_hw).reshape(2, -1)
 
                 # --- 3.B Calcul du Pixmap (Unifié) ---
-                print(f"    DEBUG (DrizzleProcessor): Calcul Pixmap pour {os.path.basename(file_path)} - Mode Local: {use_local_alignment_logic}")
+                logger.debug(f"    DEBUG (DrizzleProcessor): Calcul Pixmap pour {os.path.basename(file_path)} - Mode Local: {use_local_alignment_logic}")
                 if use_local_alignment_logic: # Mosaïque avec alignement local (utilise ancre WCS et matrice M)
                     if anchor_wcs_for_local is None: 
-                        print(f"      ERREUR (DrizzleProcessor Local): WCS ancre manquant pour {file_path}. Ignoré."); continue
+                        logger.debug(f"      ERREUR (DrizzleProcessor Local): WCS ancre manquant pour {file_path}. Ignoré."); continue
                     
                     # La matrice M doit être dans le header du fichier d'entrée (file_path)
                     # car _save_drizzle_input_temp ne la sauvegarde pas.
@@ -320,7 +324,7 @@ class DrizzleProcessor:
                     M21 = input_header.get('M21', None); M22 = input_header.get('M22', None); M23 = input_header.get('M23', None)
 
                     if not all(v is not None for v in [M11, M12, M13, M21, M22, M23]):
-                        print(f"      ERREUR (DrizzleProcessor Local): Matrice M incomplète/manquante dans header de {file_path}. Ignoré."); continue
+                        logger.debug(f"      ERREUR (DrizzleProcessor Local): Matrice M incomplète/manquante dans header de {file_path}. Ignoré."); continue
                     M_matrix = np.array([[M11,M12,M13],[M21,M22,M23]], dtype=np.float32)
                                         
                     pts_orig_N12 = np.dstack((x_in_coords_flat, y_in_coords_flat)).astype(np.float32).reshape(-1,1,2)
@@ -336,18 +340,18 @@ class DrizzleProcessor:
                     except Exception: input_wcs_for_drizzle_std = None
                     
                     if input_wcs_for_drizzle_std is None: 
-                        print(f"      ERREUR (DrizzleProcessor Standard): WCS invalide pour {file_path}. Ignoré."); continue
+                        logger.debug(f"      ERREUR (DrizzleProcessor Standard): WCS invalide pour {file_path}. Ignoré."); continue
                     
                     sky_ra_deg, sky_dec_deg = input_wcs_for_drizzle_std.all_pix2world(x_in_coords_flat, y_in_coords_flat, 0)
 
                 # Projection sur la grille Drizzle de sortie finale (output_wcs)
                 if not (np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))):
-                    print(f"      WARN (DrizzleProcessor): Coordonnées célestes non finies pour {file_path} avant projection sur grille Drizzle. Ignoré."); continue
+                    logger.debug(f"      WARN (DrizzleProcessor): Coordonnées célestes non finies pour {file_path} avant projection sur grille Drizzle. Ignoré."); continue
 
                 final_x_output_pixels, final_y_output_pixels = output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
 
                 if not (np.all(np.isfinite(final_x_output_pixels)) and np.all(np.isfinite(final_y_output_pixels))):
-                    print(f"      WARN (DrizzleProcessor): Pixmap contient des NaN/Inf pour {file_path} après projection sur grille Drizzle. Tentative de nettoyage.");
+                    logger.debug(f"      WARN (DrizzleProcessor): Pixmap contient des NaN/Inf pour {file_path} après projection sur grille Drizzle. Tentative de nettoyage.");
                     # Remplacer les NaN/Inf par une valeur hors champ (ex: très négative) que Drizzle pourrait ignorer
                     final_x_output_pixels = np.nan_to_num(final_x_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
                     final_y_output_pixels = np.nan_to_num(final_y_output_pixels, nan=-1e9, posinf=-1e9, neginf=-1e9)
@@ -359,13 +363,13 @@ class DrizzleProcessor:
                 
                 # --- LOG DEBUG PIXMAP ---
                 if current_pixmap_for_drizzle is not None:
-                    print(f"      DEBUG PIXMAP File {i+1}: Shape={current_pixmap_for_drizzle.shape}, Dtype={current_pixmap_for_drizzle.dtype}")
-                    if np.isnan(current_pixmap_for_drizzle).any(): print(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES NaN !") # Ne devrait plus arriver avec nan_to_num
-                    if np.isinf(current_pixmap_for_drizzle).any(): print(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES INF !") # Idem
-                    print(f"      DEBUG PIXMAP File {i+1} X Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,0]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,0]):.2f}")
-                    print(f"      DEBUG PIXMAP File {i+1} Y Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,1]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,1]):.2f}")
+                    logger.debug(f"      DEBUG PIXMAP File {i+1}: Shape={current_pixmap_for_drizzle.shape}, Dtype={current_pixmap_for_drizzle.dtype}")
+                    if np.isnan(current_pixmap_for_drizzle).any(): logger.debug(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES NaN !") # Ne devrait plus arriver avec nan_to_num
+                    if np.isinf(current_pixmap_for_drizzle).any(): logger.debug(f"      WARN PIXMAP File {i+1}: CONTIENT ENCORE DES INF !") # Idem
+                    logger.debug(f"      DEBUG PIXMAP File {i+1} X Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,0]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,0]):.2f}")
+                    logger.debug(f"      DEBUG PIXMAP File {i+1} Y Coords: Min={np.nanmin(current_pixmap_for_drizzle[...,1]):.2f}, Max={np.nanmax(current_pixmap_for_drizzle[...,1]):.2f}")
                 else:
-                    print(f"      WARN PIXMAP File {i+1}: current_pixmap_for_drizzle EST NONE APRÈS CALCUL.")
+                    logger.debug(f"      WARN PIXMAP File {i+1}: current_pixmap_for_drizzle EST NONE APRÈS CALCUL.")
                 # --- FIN LOG DEBUG PIXMAP ---
 
             except Exception as e_pixmap_calc:
@@ -374,7 +378,7 @@ class DrizzleProcessor:
                 continue 
 
             if current_pixmap_for_drizzle is None: 
-                print(f"    ERREUR (DrizzleProcessor): Pixmap final est None pour {file_path}. Ignoré."); continue
+                logger.debug(f"    ERREUR (DrizzleProcessor): Pixmap final est None pour {file_path}. Ignoré."); continue
 
             # --- 3.C Ajouter l'image à chaque Drizzler de canal ---
             exptime_to_pass_to_add_image = exposure_time # Utiliser le temps d'expo lu du header
@@ -386,9 +390,9 @@ class DrizzleProcessor:
                     channel_data_2d[~np.isfinite(channel_data_2d)] = 0.0
                 
                 if i < 3 or (i+1) % 50 == 0 or i == len(input_file_paths) -1 : 
-                    print(f"    LOG Drizzle.add_image: F={os.path.basename(file_path)} Ch={ch_idx}")
-                    print(f"      Data Range: [{np.min(channel_data_2d):.3f}-{np.max(channel_data_2d):.3f}], Mean: {np.mean(channel_data_2d):.3f}")
-                    print(f"      >> exptime: {exptime_to_pass_to_add_image:.2f}, in_units: '{in_units_to_pass_to_add_image}', pixfrac: {self.pixfrac:.2f}")
+                    logger.debug(f"    LOG Drizzle.add_image: F={os.path.basename(file_path)} Ch={ch_idx}")
+                    logger.debug(f"      Data Range: [{np.min(channel_data_2d):.3f}-{np.max(channel_data_2d):.3f}], Mean: {np.mean(channel_data_2d):.3f}")
+                    logger.debug(f"      >> exptime: {exptime_to_pass_to_add_image:.2f}, in_units: '{in_units_to_pass_to_add_image}', pixfrac: {self.pixfrac:.2f}")
 
                 drizzlers_by_channel[ch_idx].add_image(
                     data=channel_data_2d, 
@@ -408,15 +412,15 @@ class DrizzleProcessor:
             final_sci_image_hxwxc = np.stack(out_images_by_channel, axis=-1).astype(np.float32) 
             final_wht_map_hxwxc = np.stack(out_weights_by_channel, axis=-1).astype(np.float32)
             # progress_callback("Drizzle: Combinaison canaux terminée.", None) # Peut être trop verbeux
-            print(f"DEBUG DrizzleProcessor: SCI brut (après Drizzle) - Shape: {final_sci_image_hxwxc.shape}, Range: [{np.min(final_sci_image_hxwxc):.3g}-{np.max(final_sci_image_hxwxc):.3g}], Mean: {np.mean(final_sci_image_hxwxc):.3g}")
-            print(f"DEBUG DrizzleProcessor: WHT brut (après Drizzle) - Shape: {final_wht_map_hxwxc.shape}, Range: [{np.min(final_wht_map_hxwxc):.2g}-{np.max(final_wht_map_hxwxc):.2g}], Mean: {np.mean(final_wht_map_hxwxc):.2g}")
+            logger.debug(f"DEBUG DrizzleProcessor: SCI brut (après Drizzle) - Shape: {final_sci_image_hxwxc.shape}, Range: [{np.min(final_sci_image_hxwxc):.3g}-{np.max(final_sci_image_hxwxc):.3g}], Mean: {np.mean(final_sci_image_hxwxc):.3g}")
+            logger.debug(f"DEBUG DrizzleProcessor: WHT brut (après Drizzle) - Shape: {final_wht_map_hxwxc.shape}, Range: [{np.min(final_wht_map_hxwxc):.2g}-{np.max(final_wht_map_hxwxc):.2g}], Mean: {np.mean(final_wht_map_hxwxc):.2g}")
 
             final_sci_image_hxwxc = np.nan_to_num(final_sci_image_hxwxc, nan=0.0, posinf=0.0, neginf=0.0)
             final_wht_map_hxwxc = np.nan_to_num(final_wht_map_hxwxc, nan=0.0, posinf=0.0, neginf=0.0)
             final_wht_map_hxwxc = np.maximum(final_wht_map_hxwxc, 0.0) 
 
             if self.final_wht_threshold > 1e-9: # Si un seuil significatif est appliqué
-                print(f"DEBUG DrizzleProcessor: Application du seuil WHT final (relatif: {self.final_wht_threshold * 100:.2f}%).")
+                logger.debug(f"DEBUG DrizzleProcessor: Application du seuil WHT final (relatif: {self.final_wht_threshold * 100:.2f}%).")
                 if final_wht_map_hxwxc.size > 0 :
                     mean_wht_raw_2d = np.mean(final_wht_map_hxwxc, axis=2).astype(np.float32)
                     
@@ -426,31 +430,31 @@ class DrizzleProcessor:
                     min_dim_wht = min(mean_wht_raw_2d.shape) if mean_wht_raw_2d.ndim == 2 and mean_wht_raw_2d.size > 0 else 0
                     if min_dim_wht > 0 and min_dim_wht <= gaussian_sigma_for_wht_smoothing * 4 : 
                         effective_sigma = max(1.0, min_dim_wht / 8.0)
-                        print(f"   -> WARN: Sigma lissage WHT ({gaussian_sigma_for_wht_smoothing}) grand pour shape {mean_wht_raw_2d.shape}. Ajusté à {effective_sigma:.1f}.")
+                        logger.debug(f"   -> WARN: Sigma lissage WHT ({gaussian_sigma_for_wht_smoothing}) grand pour shape {mean_wht_raw_2d.shape}. Ajusté à {effective_sigma:.1f}.")
                         gaussian_sigma_for_wht_smoothing = effective_sigma
                     
                     if min_dim_wht > 0 : # S'assurer qu'on a une image à lisser
-                        print(f"   -> Lissage WHT moyenne avec sigma={gaussian_sigma_for_wht_smoothing:.1f}...")
+                        logger.debug(f"   -> Lissage WHT moyenne avec sigma={gaussian_sigma_for_wht_smoothing:.1f}...")
                         smoothed_mean_wht_2d = gaussian_filter(mean_wht_raw_2d, sigma=gaussian_sigma_for_wht_smoothing)
                         max_overall_smoothed_wht = np.max(smoothed_mean_wht_2d)
 
                         if max_overall_smoothed_wht > 1e-9: 
                             wht_cutoff_value_absolute = self.final_wht_threshold * max_overall_smoothed_wht
-                            print(f"   -> Seuil WHT absolu (sur WHT lissé max {max_overall_smoothed_wht:.2g}): {wht_cutoff_value_absolute:.3g}")
+                            logger.debug(f"   -> Seuil WHT absolu (sur WHT lissé max {max_overall_smoothed_wht:.2g}): {wht_cutoff_value_absolute:.3g}")
                             low_wht_mask_smooth_2d = smoothed_mean_wht_2d < wht_cutoff_value_absolute
                             num_masked_pixels = np.sum(low_wht_mask_smooth_2d); total_pixels = low_wht_mask_smooth_2d.size
                             percent_masked = (num_masked_pixels / total_pixels) * 100 if total_pixels > 0 else 0
-                            print(f"   -> Masque WHT bas (lissé) créé. {num_masked_pixels}/{total_pixels} pixels ({percent_masked:.1f}%) seront mis à zéro.")
+                            logger.debug(f"   -> Masque WHT bas (lissé) créé. {num_masked_pixels}/{total_pixels} pixels ({percent_masked:.1f}%) seront mis à zéro.")
                             for c_idx in range(num_output_channels):
                                 final_sci_image_hxwxc[low_wht_mask_smooth_2d, c_idx] = 0.0 
-                            print(f"   -> Masque WHT bas (lissé) appliqué à l'image science.")
-                        else: print("   -> WARN: Max WHT lissé proche de zéro. Pas de masquage WHT.")
-                    else: print("   -> WARN: Carte WHT moyenne vide ou 1D après moyenne. Pas de lissage/masquage.")
-                else: print("   -> WARN: Carte de poids finale vide. Pas de masquage WHT.")
+                            logger.debug(f"   -> Masque WHT bas (lissé) appliqué à l'image science.")
+                        else: logger.debug("   -> WARN: Max WHT lissé proche de zéro. Pas de masquage WHT.")
+                    else: logger.debug("   -> WARN: Carte WHT moyenne vide ou 1D après moyenne. Pas de lissage/masquage.")
+                else: logger.debug("   -> WARN: Carte de poids finale vide. Pas de masquage WHT.")
             else:
-                print("DEBUG DrizzleProcessor: Seuil WHT final est <= 0 (ou non significatif). Aucun masquage de faible poids appliqué.")
+                logger.debug("DEBUG DrizzleProcessor: Seuil WHT final est <= 0 (ou non significatif). Aucun masquage de faible poids appliqué.")
             
-            print(f"DEBUG DrizzleProcessor (V_Inspector_API_FINAL_Corrected).apply_drizzle: Retourne images.")
+            logger.debug(f"DEBUG DrizzleProcessor (V_Inspector_API_FINAL_Corrected).apply_drizzle: Retourne images.")
             return final_sci_image_hxwxc, final_wht_map_hxwxc
 
         except Exception as e_final_stack:
