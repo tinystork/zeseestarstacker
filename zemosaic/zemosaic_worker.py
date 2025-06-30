@@ -288,6 +288,42 @@ def solve_with_astrometry(
         return None
 
 
+def solve_with_ansvr(
+    image_fits_path: str,
+    fits_header,
+    settings: dict | None,
+    progress_callback=None,
+):
+    """Attempt plate solving using a local ansvr installation."""
+
+    if not ASTROMETRY_SOLVER_AVAILABLE:
+        return None
+
+    try:
+        from . import zemosaic_astrometry
+    except Exception:
+        return None
+
+    solver_dict = settings or {}
+    path = solver_dict.get("ansvr_path") or solver_dict.get("astrometry_local_path") or solver_dict.get("local_ansvr_path")
+    timeout = solver_dict.get("ansvr_timeout") or solver_dict.get("timeout")
+
+    try:
+        return zemosaic_astrometry.solve_with_ansvr(
+            image_fits_path,
+            fits_header,
+            ansvr_config_path=path or "",
+            timeout_sec=timeout or 120,
+            update_original_header_in_place=True,
+            progress_callback=progress_callback,
+        )
+    except Exception as e:
+        _log_and_callback(
+            f"Ansvr solve error: {e}", prog=None, lvl="WARN", callback=progress_callback
+        )
+        return None
+
+
 def reproject_tile_to_mosaic(tile_path: str, tile_wcs, mosaic_wcs, mosaic_shape_hw,
                              feather: bool = True,
                              apply_crop: bool = False,
@@ -730,6 +766,31 @@ def get_wcs_and_pretreat_raw_file(
                     )
                     if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
                         _pcb_local("Astrometry failed; fallback to ASTAP", lvl="INFO")
+                        _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
+                        wcs_brute = zemosaic_astrometry.solve_with_astap(
+                            image_fits_path=temp_fits,
+                            original_fits_header=header_orig,
+                            astap_exe_path=astap_exe_path,
+                            astap_data_dir=astap_data_dir,
+                            search_radius_deg=astap_search_radius,
+                            downsample_factor=astap_downsample,
+                            sensitivity=astap_sensitivity,
+                            timeout_sec=astap_timeout_seconds,
+                            update_original_header_in_place=True,
+                            progress_callback=progress_callback,
+                        )
+                    if wcs_brute:
+                        _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
+                elif solver_choice_effective == "ANSVR":
+                    _pcb_local("GetWCS: using ANSVR", lvl="DEBUG")
+                    wcs_brute = solve_with_ansvr(
+                        temp_fits,
+                        header_orig,
+                        solver_settings or {},
+                        progress_callback,
+                    )
+                    if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
+                        _pcb_local("Ansvr failed; fallback to ASTAP", lvl="INFO")
                         _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
                         wcs_brute = zemosaic_astrometry.solve_with_astap(
                             image_fits_path=temp_fits,

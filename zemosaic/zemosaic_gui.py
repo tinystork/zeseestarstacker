@@ -329,6 +329,10 @@ class ZeMosaicGUI:
             self.astap_cfg_frame.pack_forget()
             self.astap_params_frame.pack_forget()
             self.astrometry_frame.grid()
+        elif choice == "ANSVR":
+            self.astap_cfg_frame.pack_forget()
+            self.astap_params_frame.pack_forget()
+            self.astrometry_frame.grid_remove()
         else:
             self.astap_cfg_frame.pack_forget()
             self.astap_params_frame.pack_forget()
@@ -455,8 +459,13 @@ class ZeMosaicGUI:
         solver_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(solver_frame, text=self._tr("solver_choice_label", "Solver:"))\
             .grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.solver_combo = ttk.Combobox(solver_frame, textvariable=self.solver_choice_var,
-                                         values=["ASTAP", "ASTROMETRY", "NONE"], state="readonly", width=15)
+        self.solver_combo = ttk.Combobox(
+            solver_frame,
+            textvariable=self.solver_choice_var,
+            values=["ASTAP", "ASTROMETRY", "ANSVR", "NONE"],
+            state="readonly",
+            width=15,
+        )
         self.solver_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
         self.solver_combo.bind("<<ComboboxSelected>>", lambda e: self._update_solver_frames())
 

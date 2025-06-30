@@ -7,6 +7,7 @@ import time
 import tempfile
 import traceback
 import subprocess
+import shutil
 import gc
 import logging
 import psutil
@@ -412,6 +413,101 @@ def solve_with_astap(image_fits_path: str,
     else:
         if progress_callback: progress_callback(f"ASTAP Solve: Pas de WCS final pour {img_basename_log}.", None, "WARN")
     return wcs_solved_obj
+
+
+def solve_with_ansvr(
+    image_fits_path: str,
+    original_fits_header: fits.Header,
+    ansvr_config_path: str,
+    timeout_sec: int = 120,
+    update_original_header_in_place: bool = False,
+    progress_callback: callable = None,
+):
+    """Solve WCS using a local ansvr installation."""
+
+    _pcb = (
+        lambda msg, lvl="INFO": progress_callback(msg, None, lvl)
+        if progress_callback
+        else None
+    )
+
+    if not (ASTROPY_AVAILABLE_ASTROMETRY and AstropyWCS):
+        if _pcb:
+            _pcb("Ansvr solve unavailable (missing deps).", "ERROR")
+        return None
+
+    if not (image_fits_path and os.path.isfile(image_fits_path) and ansvr_config_path):
+        if _pcb:
+            _pcb("Ansvr solve input invalid or path missing.", "ERROR")
+        return None
+
+    tmp_dir = tempfile.mkdtemp(prefix="ansvr_")
+    output_fits = os.path.join(tmp_dir, "solution.new")
+
+    cmd = [
+        "solve-field",
+        "--no-plots",
+        "--overwrite",
+        "--config",
+        ansvr_config_path,
+        "--dir",
+        tmp_dir,
+        "--new-fits",
+        output_fits,
+        image_fits_path,
+    ]
+
+    if original_fits_header:
+        ra = original_fits_header.get("RA", original_fits_header.get("CRVAL1"))
+        dec = original_fits_header.get("DEC", original_fits_header.get("CRVAL2"))
+        if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
+            cmd.extend(["--ra", str(ra), "--dec", str(dec)])
+
+    if _pcb:
+        _pcb(f"Ansvr: cmd={' '.join(cmd)}", "DEBUG")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except Exception as e_run:
+        if _pcb:
+            _pcb(f"Ansvr: execution error {e_run}", "ERROR")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    if result.returncode != 0 or not os.path.exists(output_fits):
+        if _pcb:
+            _pcb("Ansvr: solve-field failed", "WARN")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    try:
+        with fits.open(output_fits, memmap=False) as hdul:
+            wcs_header = hdul[0].header
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = AstropyWCS(wcs_header, naxis=2)
+    except Exception as e_parse:
+        if _pcb:
+            _pcb(f"Ansvr: parse error {e_parse}", "ERROR")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    if wcs_obj and wcs_obj.is_celestial and update_original_header_in_place and original_fits_header is not None:
+        _update_fits_header_with_wcs_za(
+            original_fits_header,
+            wcs_obj,
+            solver_name="Ansvr",
+            progress_callback=progress_callback,
+        )
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return wcs_obj
 
 
 
