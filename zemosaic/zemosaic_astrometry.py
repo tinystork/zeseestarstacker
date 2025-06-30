@@ -4,10 +4,9 @@ import os
 import numpy as np
 import warnings
 import time
-# import tempfile # Plus utilisé directement si on nettoie manuellement
+import tempfile
 import traceback
 import subprocess
-# import shutil # Plus utilisé directement si on nettoie manuellement
 import gc
 import logging
 import psutil
@@ -30,9 +29,21 @@ try:
 except ImportError:
     logger.error("Astropy non installée. Certaines fonctionnalités de zemosaic_astrometry seront limitées.")
     ASTROPY_AVAILABLE_ASTROMETRY = False
-    class AstropyWCS: pass 
+    class AstropyWCS: pass
     class FITSFixedWarning(Warning): pass
     u = None
+
+# --- Dépendances pour Astrometry.net web ---
+ASTROQUERY_AVAILABLE_ASTROMETRY = False
+AstrometryNet = None
+try:
+    from astroquery.astrometry_net import AstrometryNet as _AstrometryNetClass
+    AstrometryNet = _AstrometryNetClass
+    ASTROQUERY_AVAILABLE_ASTROMETRY = True
+except Exception:
+    logger.warning(
+        "AstrometrySolver: astroquery non installée. Plate-solving web Astrometry.net désactivé."
+    )
 
 
 def _log_memory_usage(progress_callback: callable, context_message: str = ""):
@@ -405,67 +416,155 @@ def solve_with_astap(image_fits_path: str,
 
 
 
-def solve_with_astrometry_net(image_fits_path: str,
-                               original_fits_header: fits.Header,
-                               api_key: str,
-                               timeout_sec: int = 60,
-                               scale_est_arcsec_per_pix: float | None = None,
-                               scale_tolerance_percent: float = 20.0,
-                               downsample_factor: int | None = None,
-                               update_original_header_in_place: bool = False,
-                               progress_callback: callable = None):
+def solve_with_astrometry_net(
+    image_fits_path: str,
+    original_fits_header: fits.Header,
+    api_key: str,
+    timeout_sec: int = 60,
+    scale_est_arcsec_per_pix: float | None = None,
+    scale_tolerance_percent: float = 20.0,
+    downsample_factor: int | None = None,
+    update_original_header_in_place: bool = False,
+    progress_callback: callable = None,
+):
     """Solve WCS using the astrometry.net web service."""
-    if not (ASTROPY_AVAILABLE_ASTROMETRY and AstrometryNet and AstropyWCS):
-        if progress_callback:
-            progress_callback("Astrometry.net solve unavailable (missing deps).", None, "ERROR")
+
+    _pcb = (
+        lambda msg, lvl="INFO": progress_callback(msg, None, lvl)
+        if progress_callback
+        else None
+    )
+
+    if not (
+        ASTROPY_AVAILABLE_ASTROMETRY
+        and ASTROQUERY_AVAILABLE_ASTROMETRY
+        and AstrometryNet
+        and AstropyWCS
+    ):
+        if _pcb:
+            _pcb("Astrometry.net solve unavailable (missing deps).", "ERROR")
         return None
+
     if not os.path.isfile(image_fits_path) or not api_key:
+        if _pcb:
+            _pcb("Astrometry.net solve input invalid or API key missing.", "ERROR")
         return None
 
     img_basename_log = os.path.basename(image_fits_path)
-    if progress_callback:
-        progress_callback(f"Astrometry.net solve start for '{img_basename_log}'", None, "INFO_DETAIL")
+    if _pcb:
+        _pcb(f"WebANET: Début solving pour '{img_basename_log}'", "INFO_DETAIL")
 
     ast = AstrometryNet()
     ast.api_key = api_key
-    if timeout_sec:
+    original_timeout = None
+    if timeout_sec and timeout_sec > 0:
         try:
+            original_timeout = getattr(ast, "TIMEOUT", None)
             ast.TIMEOUT = timeout_sec
-        except Exception:
-            pass
-
-    solve_args = {}
-    if scale_est_arcsec_per_pix:
-        try:
-            est = float(scale_est_arcsec_per_pix)
-            tol = float(scale_tolerance_percent)
-            solve_args["scale_units"] = "arcsecperpix"
-            solve_args["scale_lower"] = est * (1.0 - tol / 100.0)
-            solve_args["scale_upper"] = est * (1.0 + tol / 100.0)
-        except Exception:
-            pass
+            if _pcb:
+                _pcb(f"WebANET: Timeout configuré à {timeout_sec}s", "DEBUG")
+        except Exception as e:
+            if _pcb:
+                _pcb(f"WebANET: Erreur configuration timeout: {e}", "WARN")
 
     temp_path = None
+    wcs_header = None
     try:
         with fits.open(image_fits_path, memmap=False) as hdul:
             data = hdul[0].data
+
         if data is None:
+            if _pcb:
+                _pcb("WebANET: Données image manquantes", "ERROR")
             return None
+
+        if not np.all(np.isfinite(data)):
+            data = np.nan_to_num(data)
+
+        if data.ndim == 3 and data.shape[0] == 3:
+            data = np.moveaxis(data, 0, -1)
+            data = np.sum(
+                data * np.array([0.299, 0.587, 0.114], dtype=np.float32).reshape(1, 1, 3),
+                axis=2,
+            )
+
         if downsample_factor and isinstance(downsample_factor, int) and downsample_factor > 1:
             data = data[::downsample_factor, ::downsample_factor]
+
+        min_v, max_v = np.min(data), np.max(data)
+        norm_float = (data - min_v) / (max_v - min_v) if max_v > min_v else np.zeros_like(data)
+        data_uint16 = (np.clip(norm_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+        data_int16 = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
+
         header_tmp = fits.Header()
         header_tmp["SIMPLE"] = True
         header_tmp["BITPIX"] = 16
+        header_tmp["BSCALE"] = 1
+        header_tmp["BZERO"] = 32768
         header_tmp["NAXIS"] = 2
-        header_tmp["NAXIS1"] = data.shape[1]
-        header_tmp["NAXIS2"] = data.shape[0]
-        fd, temp_path = tempfile.mkstemp(suffix=".fits")
-        os.close(fd)
-        fits.writeto(temp_path, data.astype("int16"), header=header_tmp, overwrite=True)
-        wcs_header = ast.solve_from_image(temp_path, solve_timeout=timeout_sec, **solve_args)
+        header_tmp["NAXIS1"] = data_int16.shape[1]
+        header_tmp["NAXIS2"] = data_int16.shape[0]
+        for key in ["OBJECT", "DATE-OBS", "EXPTIME", "FILTER", "INSTRUME", "TELESCOP"]:
+            if original_fits_header and key in original_fits_header:
+                header_tmp[key] = original_fits_header[key]
+
+        with tempfile.NamedTemporaryFile(suffix=".fits", delete=False, mode="wb") as tf:
+            temp_path = tf.name
+        fits.writeto(
+            temp_path,
+            data_int16,
+            header=header_tmp,
+            overwrite=True,
+            output_verify="silentfix",
+        )
+
+        if header_tmp.get("BITPIX") == 16:
+            with fits.open(temp_path, mode="update", memmap=False) as hdul_fix:
+                hd0 = hdul_fix[0]
+                hd0.header["BSCALE"] = 1
+                hd0.header["BZERO"] = 32768
+                hdul_fix.flush()
+
+        solve_args = {
+            "allow_commercial_use": "n",
+            "allow_modifications": "n",
+            "publicly_visible": "n",
+        }
+
+        if scale_est_arcsec_per_pix and scale_est_arcsec_per_pix > 0:
+            try:
+                est_val = float(scale_est_arcsec_per_pix)
+                tol_val = float(scale_tolerance_percent)
+                solve_args["scale_units"] = "arcsecperpix"
+                solve_args["scale_lower"] = est_val * (1.0 - tol_val / 100.0)
+                solve_args["scale_upper"] = est_val * (1.0 + tol_val / 100.0)
+                if _pcb:
+                    _pcb(
+                        f"WebANET: Échelle contraint [{solve_args['scale_lower']:.2f}-{solve_args['scale_upper']:.2f}] asec/pix",
+                        "DEBUG",
+                    )
+            except Exception as e:
+                if _pcb:
+                    _pcb(f"WebANET: Erreur config échelle: {e}", "WARN")
+
+        if _pcb:
+            _pcb("WebANET: Soumission du job...", "INFO")
+
+        wcs_header = ast.solve_from_image(temp_path, **solve_args)
+
+        if _pcb:
+            if wcs_header:
+                _pcb("WebANET: Solving RÉUSSI", "INFO")
+            else:
+                _pcb("WebANET: Solving ÉCHOUÉ", "WARN")
+
     except Exception as e:
-        if progress_callback:
-            progress_callback(f"Astrometry.net error: {e}", None, "WARN")
+        if _pcb:
+            msg = f"WebANET: ERREUR solving: {e}"
+            if "timeout" in str(e).lower():
+                _pcb(msg, "ERROR")
+            else:
+                _pcb(msg, "ERROR")
         wcs_header = None
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -473,16 +572,35 @@ def solve_with_astrometry_net(image_fits_path: str,
                 os.remove(temp_path)
             except Exception:
                 pass
+        if original_timeout is not None:
+            try:
+                ast.TIMEOUT = original_timeout
+            except Exception:
+                pass
+
     if not isinstance(wcs_header, fits.Header):
         return None
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FITSFixedWarning)
             wcs_obj = AstropyWCS(wcs_header)
-    except Exception:
+    except Exception as e:
+        if _pcb:
+            _pcb(f"WebANET: ERREUR conversion WCS: {e}", "ERROR")
         return None
 
-    if wcs_obj and wcs_obj.is_celestial and update_original_header_in_place and original_fits_header is not None:
-        _update_fits_header_with_wcs_za(original_fits_header, wcs_obj, solver_name="AstrometryNet", progress_callback=progress_callback)
+    if (
+        wcs_obj
+        and wcs_obj.is_celestial
+        and update_original_header_in_place
+        and original_fits_header is not None
+    ):
+        _update_fits_header_with_wcs_za(
+            original_fits_header,
+            wcs_obj,
+            solver_name="AstrometryNet",
+            progress_callback=progress_callback,
+        )
 
     return wcs_obj
