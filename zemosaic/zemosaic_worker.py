@@ -721,10 +721,16 @@ def get_wcs_and_pretreat_raw_file(
         else:
             try:
                 if solver_choice_effective == "ASTROMETRY":
-                    _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astrometry pour '{filename}'.", lvl="DEBUG_DETAIL")
-                    wcs_brute = solve_with_astrometry(temp_fits, header_orig, solver_settings or {}, progress_callback)
+                    _pcb_local("GetWCS: using ASTROMETRY", lvl="DEBUG")
+                    wcs_brute = solve_with_astrometry(
+                        temp_fits,
+                        header_orig,
+                        solver_settings or {},
+                        progress_callback,
+                    )
                     if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
-                        _pcb_local("getwcs_warn_astrometry_failed_try_astap", lvl="INFO_DETAIL", filename=filename)
+                        _pcb_local("Astrometry failed; fallback to ASTAP", lvl="INFO")
+                        _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
                         wcs_brute = zemosaic_astrometry.solve_with_astap(
                             image_fits_path=temp_fits,
                             original_fits_header=header_orig,
@@ -740,7 +746,7 @@ def get_wcs_and_pretreat_raw_file(
                     if wcs_brute:
                         _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
                 else:
-                    _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
+                    _pcb_local("GetWCS: using ASTAP", lvl="DEBUG")
                     wcs_brute = zemosaic_astrometry.solve_with_astap(
                         image_fits_path=temp_fits,
                         original_fits_header=header_orig,
