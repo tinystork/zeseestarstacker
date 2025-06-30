@@ -551,6 +551,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Lecture du paramètre d'utilisation du GPU ---
+            self.use_gpu = getattr(
+                gui_instance,
+                "use_gpu_var",
+                tk.BooleanVar(value=default_values_from_code.get("use_gpu", False)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): self.use_gpu lu (attribut UI ou défaut): {self.use_gpu}"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Lecture du setting d'utilisation des solveurs tiers ---
             self.use_third_party_solver = getattr(
                 gui_instance,
@@ -1002,6 +1013,15 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Application du paramètre use_gpu à l'UI ---
+            getattr(gui_instance, "use_gpu_var", tk.BooleanVar()).set(
+                self.use_gpu
+            )
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): use_gpu appliqué à l'UI (valeur: {self.use_gpu})"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Application du toggle use_third_party_solver ---
             getattr(gui_instance, "use_third_party_solver_var", tk.BooleanVar()).set(
                 self.use_third_party_solver
@@ -1197,6 +1217,13 @@ class SettingsManager:
         )
         # --- FIN NOUVEAU ---
 
+        # --- NOUVEAU : Paramètre global d'utilisation du GPU ---
+        defaults_dict["use_gpu"] = False
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'use_gpu'={defaults_dict['use_gpu']}"
+        )
+        # --- FIN NOUVEAU ---
+
         # --- Nouveau : activation/désactivation solveurs tiers ---
         defaults_dict["use_third_party_solver"] = True
         logger.debug(
@@ -1225,6 +1252,7 @@ class SettingsManager:
         defaults_dict["mosaic_settings"] = {
             "kernel": "square",
             "pixfrac": 0.8,
+            "use_gpu": False,
             "fillval": "0.0",
             "wht_threshold": 0.01,
             "alignment_mode": "local_fast_fallback",
@@ -1988,6 +2016,22 @@ class SettingsManager:
                 self.preserve_linear_output = current_preserve_val
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Validation du paramètre use_gpu ---
+            logger.debug("    -> Validating use_gpu...")
+            current_use_gpu = getattr(
+                self,
+                "use_gpu",
+                defaults_fallback["use_gpu"],
+            )
+            if not isinstance(current_use_gpu, bool):
+                messages.append(
+                    f"Option 'Use GPU' ('{current_use_gpu}') invalide, réinitialisée à {defaults_fallback['use_gpu']}."
+                )
+                self.use_gpu = defaults_fallback["use_gpu"]
+            else:
+                self.use_gpu = current_use_gpu
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Validation du toggle use_third_party_solver ---
             logger.debug("    -> Validating use_third_party_solver...")
             current_use_solver_val = getattr(
@@ -2322,6 +2366,9 @@ class SettingsManager:
             "save_final_as_float32": bool(
                 getattr(self, "save_final_as_float32", False)
             ),
+            # --- FIN NOUVEAU ---
+            # --- NOUVEAU : Sauvegarde du paramètre use_gpu ---
+            "use_gpu": bool(getattr(self, "use_gpu", False)),
             # --- FIN NOUVEAU ---
             # --- NOUVEAU : Sauvegarde du setting preserve_linear_output ---
             "preserve_linear_output": bool(

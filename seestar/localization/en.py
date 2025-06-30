@@ -24,6 +24,7 @@ EN_TRANSLATIONS = {
     "drizzle_radio_incremental": "Incremental (Disk Saving)",
     "drizzle_kernel_label": "Kernel:",
     "drizzle_pixfrac_label": "Pixfrac:",
+    "drizzle_use_gpu_label": "Use GPU",
     "drizzle_wht_threshold_label": "WHT Threshold%:",
     # --- Control Tabs ---
     "tab_stacking": "Stacking",
@@ -286,6 +287,7 @@ EN_TRANSLATIONS = {
     "mosaic_drizzle_options_frame": "Mosaic Drizzle Options",
     "mosaic_drizzle_kernel_label": "Kernel:",
     "mosaic_drizzle_pixfrac_label": "Pixfrac:",
+    "mosaic_drizzle_use_gpu_label": "Use GPU",
     "mosaic_invalid_kernel": "Invalid Drizzle kernel selected.",
     "mosaic_invalid_pixfrac": "Invalid Pixfrac value. Must be between 0.01 and 1.0.",
     "mosaic_api_key_frame": "Astrometry.net API Key (Required for Mosaic)",

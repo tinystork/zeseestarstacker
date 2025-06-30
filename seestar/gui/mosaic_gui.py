@@ -37,6 +37,7 @@ class MosaicSettingsWindow(tk.Toplevel):
         # Ces variables pour les options Drizzle Mosaïque doivent être définies ici
         self.local_drizzle_kernel_var = tk.StringVar(value=self.settings.get('kernel', 'square'))
         self.local_drizzle_pixfrac_var = tk.DoubleVar(value=float(self.settings.get('pixfrac', 0.8)))
+        self.local_use_gpu_var = tk.BooleanVar(value=bool(self.settings.get('use_gpu', False)))
         self.local_drizzle_fillval_var = tk.StringVar(value=str(self.settings.get('fillval', '0.0')))
         initial_wht_storage_value = float(self.settings.get('wht_threshold', 0.01))
         self.local_drizzle_wht_thresh_storage_var = tk.DoubleVar(value=initial_wht_storage_value)
@@ -372,6 +373,12 @@ class MosaicSettingsWindow(tk.Toplevel):
                   text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), # Clé existante
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=2.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        self.use_gpu_check = ttk.Checkbutton(
+            pixfrac_frame,
+            text=self.parent_gui.tr("mosaic_drizzle_use_gpu_label", default="Use GPU"),
+            variable=self.local_use_gpu_var,
+        )
+        self.use_gpu_check.pack(side=tk.LEFT, padx=5)
         
         fillval_frame = ttk.Frame(self.drizzle_options_frame, padding=5); fillval_frame.pack(fill=tk.X)
         ttk.Label(fillval_frame, 
@@ -730,8 +737,9 @@ class MosaicSettingsWindow(tk.Toplevel):
             'fastalign_dao_thr_sig': getattr(self, 'fa_dao_thr_sig_var', tk.DoubleVar(value=8.0)).get(),
             'fastalign_dao_max_stars': getattr(self, 'fa_dao_max_stars_var', tk.DoubleVar(value=750.0)).get(),
             
-            'kernel': self.local_drizzle_kernel_var.get(), 
+            'kernel': self.local_drizzle_kernel_var.get(),
             'pixfrac': self.local_drizzle_pixfrac_var.get(),
+            'use_gpu': self.local_use_gpu_var.get(),
             'fillval': self.local_drizzle_fillval_var.get(),
             'wht_threshold': self.local_drizzle_wht_thresh_storage_var.get(),
             
