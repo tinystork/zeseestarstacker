@@ -1,9 +1,10 @@
 import importlib.util
 import io
 import sys
-import types
 import warnings
+import contextlib
 from pathlib import Path
+import types
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -12,27 +13,23 @@ spec = importlib.util.spec_from_file_location(
 drizzle_integration = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = drizzle_integration
 spec.loader.exec_module(drizzle_integration)
+sys.path.insert(0, str(ROOT / "seestar" / "enhancement"))
 
 
-def test_kernel_warning_filtered():
-    spec.loader.exec_module(drizzle_integration)
+def test_kernel_warning_is_filtered():
+    # reload to ensure filter is set
+    import drizzle_integration as di
+    importlib.reload(di)
 
     fake_mod = types.ModuleType("drizzle.resample")
-    fake_mod.__dict__["__name__"] = "drizzle.resample"
     exec(
         "import warnings\n"
-        "def trigger():\n"
+        "def emit():\n"
         "    warnings.warn(\"Kernel 'whatever' is not a flux-conserving kernel.\", RuntimeWarning)",
         fake_mod.__dict__,
     )
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.filterwarnings(
-            action="ignore",
-            message=r".*is not a flux-conserving kernel\.$",
-            module=r"drizzle\.resample",
-        )
-        fake_mod.trigger()
-        fake_mod.trigger()
-
-    assert sum("flux-conserving kernel" in str(rec.message) for rec in w) == 0, "warning not filtered"
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        fake_mod.emit()
+    assert captured.getvalue() == "", "Warning was not filtered!"
