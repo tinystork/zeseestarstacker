@@ -3525,21 +3525,25 @@ class SeestarQueuedStacker:
                                     self._send_eta_update()
                                     if self.drizzle_active_session:
                                         if self.drizzle_mode == "Incremental":
-                                            self._process_incremental_drizzle_batch(
-                                                current_batch_items_with_masks_for_stack_batch,
-                                                self.stacked_batches_count,
-                                                self.total_batches_estimated,
-                                            )
+                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                                                driz_exec.submit(
+                                                    self._process_incremental_drizzle_batch,
+                                                    current_batch_items_with_masks_for_stack_batch,
+                                                    self.stacked_batches_count,
+                                                    self.total_batches_estimated,
+                                                ).result()
                                         elif self.drizzle_mode == "Final":
-                                            (
-                                                batch_sci_p,
-                                                batch_wht_p_list,
-                                            ) = self._process_and_save_drizzle_batch(
-                                                current_batch_items_with_masks_for_stack_batch,
-                                                self.drizzle_output_wcs,
-                                                self.drizzle_output_shape_hw,
-                                                self.stacked_batches_count,
-                                            )
+                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                                                (
+                                                    batch_sci_p,
+                                                    batch_wht_p_list,
+                                                ) = driz_exec.submit(
+                                                    self._process_and_save_drizzle_batch,
+                                                    current_batch_items_with_masks_for_stack_batch,
+                                                    self.drizzle_output_wcs,
+                                                    self.drizzle_output_shape_hw,
+                                                    self.stacked_batches_count,
+                                                ).result()
                                             if batch_sci_p and batch_wht_p_list:
                                                 self.intermediate_drizzle_batch_files.append(
                                                     (batch_sci_p, batch_wht_p_list)
@@ -3806,15 +3810,17 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle (mode Final) du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        (
-                            batch_sci_path,
-                            batch_wht_paths,
-                        ) = self._process_and_save_drizzle_batch(
-                            current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
-                            self.drizzle_output_wcs,
-                            self.drizzle_output_shape_hw,
-                            self.stacked_batches_count,
-                        )
+                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                            (
+                                batch_sci_path,
+                                batch_wht_paths,
+                            ) = driz_exec.submit(
+                                self._process_and_save_drizzle_batch,
+                                current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
+                                self.drizzle_output_wcs,
+                                self.drizzle_output_shape_hw,
+                                self.stacked_batches_count,
+                            ).result()
                         if batch_sci_path and batch_wht_paths:
                             self.intermediate_drizzle_batch_files.append(
                                 (batch_sci_path, batch_wht_paths)
@@ -3828,11 +3834,13 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle Incr. VRAI du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        self._process_incremental_drizzle_batch(  # Utilise la version V_True_Incremental_Driz
-                            current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
-                            self.stacked_batches_count,
-                            self.total_batches_estimated,
-                        )
+                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                            driz_exec.submit(
+                                self._process_incremental_drizzle_batch,  # Utilise la version V_True_Incremental_Driz
+                                current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
+                                self.stacked_batches_count,
+                                self.total_batches_estimated,
+                            ).result()
 
                     self._move_to_stacked(self._current_batch_paths)
                     self._save_partial_stack()
