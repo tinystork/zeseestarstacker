@@ -284,6 +284,7 @@ FR_TRANSLATIONS = {
     "cannot_open_folder_command_not_found": "Impossible d'ouvrir le dossier. Commande système non trouvée pour votre OS.",
     "error_opening_unaligned_folder": "Une erreur est survenue lors de l'ouverture du dossier des non-alignés :",
     "error_opening_unaligned_folder_short": "Erreur ouverture dossier non-alignés.",
+    "tooltip_drizzle_renorm_disabled": "La renormalisation du flux est désactivée car la correction de double normalisation est active.",
     # --- Weighting Info Display ---
     "Weighting": "Pondération",  # Clé pour label 'WGHT_ON'
     "W. Metrics": "Métr. Poids",  # Clé pour label 'WGHT_MET'
