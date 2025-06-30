@@ -951,11 +951,12 @@ def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
 
 def _reject_outliers_winsorized_sigma_clip(
     stacked_array_NHDWC: np.ndarray,
-    winsor_limits_tuple: tuple[float, float], # (low_cut_fraction, high_cut_fraction), ex: (0.05, 0.05)
+    winsor_limits_tuple: tuple[float, float],  # (low_cut_fraction, high_cut_fraction)
     sigma_low: float,
     sigma_high: float,
     progress_callback: callable = None,
-    max_workers: int = 1
+    max_workers: int = 1,
+    apply_rewinsor: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Rejette les outliers en utilisant un Winsorized Sigma Clip.
@@ -969,7 +970,10 @@ def _reject_outliers_winsorized_sigma_clip(
         sigma_low: Nombre de sigmas pour le seuil inférieur de rejet.
         sigma_high: Nombre de sigmas pour le seuil supérieur de rejet.
         progress_callback: Fonction de callback pour les logs.
-        max_workers: Nombre maximum de travailleurs parallèles pour la winsorisation.\n            Typiquement issu de ``run_cfg.winsor_worker_limit``.
+        max_workers: Nombre maximum de travailleurs parallèles pour la winsorisation.
+            Typiquement issu de ``run_cfg.winsor_worker_limit``.
+        apply_rewinsor: Si True, remplace les pixels rejetés par les valeurs winsorisées
+            ("rewinsorisation"). Sinon, les pixels rejetés restent NaN.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: 
@@ -999,6 +1003,8 @@ def _reject_outliers_winsorized_sigma_clip(
     # Copie des données originales pour y insérer les NaN pour les pixels rejetés
     output_data_with_nans = stacked_array_NHDWC.astype(np.float32, copy=True) # Travailler sur float32
     rejection_mask_final = np.ones_like(stacked_array_NHDWC, dtype=bool) # True = garder
+    winsorized_channels = None
+    winsorized_data = None
 
     is_color = stacked_array_NHDWC.ndim == 4 and stacked_array_NHDWC.shape[-1] == 3
     num_images_in_stack = stacked_array_NHDWC.shape[0]
@@ -1094,8 +1100,17 @@ def _reject_outliers_winsorized_sigma_clip(
 
     total_rejected_pixels = np.sum(~rejection_mask_final)
     _pcb("reject_winsor_info_finished", lvl="INFO_DETAIL", num_rejected=total_rejected_pixels)
-    
-    return output_data_with_nans, rejection_mask_final
+
+    output_data_final = output_data_with_nans
+    if apply_rewinsor:
+        if is_color:
+            wins_stack = np.stack(winsorized_channels, axis=-1)
+        else:
+            wins_stack = winsorized_data
+        output_data_final = output_data_with_nans.copy()
+        np.copyto(output_data_final, wins_stack, where=np.isnan(output_data_with_nans))
+
+    return output_data_final, rejection_mask_final
 
 def _reject_outliers_linear_fit_clip(
     stacked_array_NHDWC: np.ndarray,
@@ -1120,7 +1135,7 @@ def _reject_outliers_linear_fit_clip(
 
     Returns:
         tuple[np.ndarray, np.ndarray]:
-            - output_data_with_nans: Les données originales avec NaN où les pixels sont rejetés.
+            - output_data_with_nans ou réwinsorisé selon ``apply_rewinsor``.
             - rejection_mask: Masque booléen (True où les pixels sont gardés).
     """
     _pcb = lambda msg_key, lvl="INFO_DETAIL", **kwargs: \
