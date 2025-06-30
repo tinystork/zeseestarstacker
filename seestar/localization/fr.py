@@ -24,6 +24,7 @@ FR_TRANSLATIONS = {
     "drizzle_radio_incremental": "Incrémental (Éco. Disque)",
     "drizzle_kernel_label": "Noyau :",
     "drizzle_pixfrac_label": "Pixfrac :",
+    "drizzle_use_gpu_label": "Utiliser le GPU",
     # --- Onglets Contrôles ---
     "tab_stacking": "Empilement",
     "tab_preview": "Aperçu",
@@ -303,6 +304,7 @@ FR_TRANSLATIONS = {
     "mosaic_drizzle_options_frame": "Options Drizzle Mosaïque",
     "mosaic_drizzle_kernel_label": "Noyau :",
     "mosaic_drizzle_pixfrac_label": "Pixfrac :",
+    "mosaic_drizzle_use_gpu_label": "Utiliser le GPU",
     "mosaic_invalid_kernel": "Noyau Drizzle sélectionné invalide.",
     "mosaic_invalid_pixfrac": "Valeur Pixfrac invalide. Doit être entre 0.01 et 1.0.",
     "mosaic_mode_enabled_log": "Mode mosaïque ACTIVÉ.",

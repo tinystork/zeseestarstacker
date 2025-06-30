@@ -535,6 +535,7 @@ class SeestarStackerGUI:
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
+        self.use_gpu_var = tk.BooleanVar(value=False)
 
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
@@ -675,6 +676,7 @@ class SeestarStackerGUI:
                 # Pixfrac Drizzle
                 getattr(self, "drizzle_pixfrac_label", None),
                 getattr(self, "drizzle_pixfrac_spinbox", None),
+                getattr(self, "use_gpu_check", None),
                 # --- FIN DES NOUVELLES LIGNES ---
             ]
 
@@ -1385,6 +1387,12 @@ class SeestarStackerGUI:
             format="%.2f",
         )
         self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        self.use_gpu_check = ttk.Checkbutton(
+            pixfrac_frame,
+            text=self.tr("drizzle_use_gpu_label", default="Use GPU"),
+            variable=self.use_gpu_var,
+        )
+        self.use_gpu_check.pack(side=tk.LEFT, padx=5)
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction")
         self.hp_frame.pack(fill=tk.X, pady=5, padx=5)
         hp_check_frame = ttk.Frame(self.hp_frame)
@@ -3102,6 +3110,7 @@ class SeestarStackerGUI:
             "drizzle_mode_label": "drizzle_mode_label",
             "drizzle_kernel_label": "drizzle_kernel_label",
             "drizzle_pixfrac_label": "drizzle_pixfrac_label",
+            "drizzle_use_gpu_label": "drizzle_use_gpu_label",
             "drizzle_wht_threshold_label": "drizzle_wht_label",
             "hot_pixel_threshold": "hot_pixel_threshold_label",
             "neighborhood_size": "neighborhood_size_label",
@@ -6715,6 +6724,21 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing..."
         )
+
+        # Propager l'option GPU au backend
+        try:
+            import cv2
+
+            self.queued_stacker.use_gpu = bool(self.settings.use_gpu)
+            self.queued_stacker.use_cuda = bool(
+                self.settings.use_gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0
+            )
+            if hasattr(self.queued_stacker, "aligner") and self.queued_stacker.aligner:
+                self.queued_stacker.aligner.use_cuda = self.queued_stacker.use_cuda
+        except Exception:
+            self.queued_stacker.use_gpu = False
+            self.queued_stacker.use_cuda = False
+
         start_proc_kwargs = {
             "input_dir": self.settings.input_folder,
             "output_dir": self.settings.output_folder,
