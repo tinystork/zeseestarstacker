@@ -250,22 +250,40 @@ def astap_paths_valid(astap_exe_path: str, astap_data_dir: str) -> bool:
     )
 
 
-def solve_with_astrometry(image_fits_path: str, fits_header, settings: dict | None, progress_callback=None):
+def solve_with_astrometry(
+    image_fits_path: str,
+    fits_header,
+    settings: dict | None,
+    progress_callback=None,
+):
     """Attempt plate solving via Astrometry.net using the seestar solver."""
+
     if not ASTROMETRY_SOLVER_AVAILABLE:
         return None
+
     try:
-        from seestar.alignment.astrometry_solver import solve_image_wcs
+        from seestar.alignment import astrometry_solver as asolver
     except Exception:
         return None
+
+    solver_dict = settings or {}
+    mapped_settings = {
+        "api_key": solver_dict.get("api_key", ""),
+        "astrometry_net_timeout_sec": solver_dict.get("timeout"),
+    }
+
     try:
-        return solve_image_wcs(image_fits_path, fits_header, settings or {}, update_header_with_solution=True)
+        return asolver.solve_image_wcs(
+            image_fits_path,
+            fits_header,
+            mapped_settings,
+            update_header_with_solution=True,
+        )
     except Exception as e:
         _log_and_callback(
             f"Astrometry solve error: {e}", prog=None, lvl="WARN", callback=progress_callback
         )
         return None
-        time.sleep(0.1)
 
 
 def reproject_tile_to_mosaic(tile_path: str, tile_wcs, mosaic_wcs, mosaic_shape_hw,
