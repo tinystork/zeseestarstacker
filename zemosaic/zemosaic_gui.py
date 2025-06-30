@@ -44,6 +44,8 @@ except ImportError as e_worker:
     run_hierarchical_mosaic_process = None
     print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
 
+from .solver_settings import SolverSettings
+
 
 
 class ZeMosaicGUI:
@@ -129,6 +131,13 @@ class ZeMosaicGUI:
         self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
         self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
         self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
+
+        # --- Solver Settings ---
+        self.solver_settings = SolverSettings()
+        self.solver_choice_var = tk.StringVar(value=self.solver_settings.solver_choice)
+        self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
+        self.astrometry_timeout_var = tk.IntVar(value=self.solver_settings.timeout)
+        self.astrometry_downsample_var = tk.IntVar(value=self.solver_settings.downsample)
         
         self.is_processing = False
         self.worker_process = None
@@ -188,8 +197,9 @@ class ZeMosaicGUI:
         # ---  ---
 
         self.translatable_widgets = {}
-        
-        self._build_ui() 
+
+        self._build_ui()
+        self._toggle_astrometry_widgets()
         self.root.after_idle(self._update_ui_language) # Déplacé après _build_ui pour que les widgets existent
         #self.root.after_idle(self._update_assembly_dependent_options) # En prévision d'un forçage de combinaisons 
         self.root.after_idle(self._update_rejection_params_state) # Déjà présent, garder
@@ -300,6 +310,13 @@ class ZeMosaicGUI:
                         self._update_rejection_params_state()
         # else:
             # print(f"WARN _combo_to_key: Clé non trouvée pour l'affichage '{displayed_text}' et le préfixe '{tr_prefix}'. tk_var non modifié.")
+
+    def _toggle_astrometry_widgets(self):
+        """Show or hide Astrometry.net options based on solver choice."""
+        if self.solver_choice_var.get() == "ASTAP":
+            self.astrometry_frame.grid_remove()
+        else:
+            self.astrometry_frame.grid()
 
 # Dans la classe ZeMosaicGUI de zemosaic_gui.py
 
@@ -414,7 +431,35 @@ class ZeMosaicGUI:
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
-        
+
+        # --- Solver Selection Frame ---
+        solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("solver_frame_title", "Plate Solver"), padding="10")
+        solver_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(solver_frame, text=self._tr("solver_choice_label", "Solver:"))\
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.solver_combo = ttk.Combobox(solver_frame, textvariable=self.solver_choice_var,
+                                         values=["ASTAP", "ASTROMETRY", "NONE"], state="readonly", width=15)
+        self.solver_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.solver_combo.bind("<<ComboboxSelected>>", lambda e: self._toggle_astrometry_widgets())
+
+        self.astrometry_frame = ttk.LabelFrame(solver_frame, text=self._tr("astrometry_group_title", "Astrometry.net"), padding="5")
+        self.astrometry_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=(5, 0), sticky="ew")
+        self.astrometry_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.astrometry_frame, text=self._tr("api_key_label", "API Key:"))\
+            .grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        ttk.Entry(self.astrometry_frame, textvariable=self.astrometry_api_key_var)\
+            .grid(row=0, column=1, padx=5, pady=3, sticky="ew")
+        ttk.Label(self.astrometry_frame, text=self._tr("timeout_label", "Timeout (s):"))\
+            .grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        ttk.Spinbox(self.astrometry_frame, from_=10, to=300, textvariable=self.astrometry_timeout_var, width=8)\
+            .grid(row=1, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(self.astrometry_frame, text=self._tr("downsample_label", "Blind-solve Downsample:"))\
+            .grid(row=2, column=0, padx=5, pady=3, sticky="w")
+        ttk.Spinbox(self.astrometry_frame, from_=1, to=8, textvariable=self.astrometry_downsample_var, width=8)\
+            .grid(row=2, column=1, padx=5, pady=3, sticky="w")
+
+        self._toggle_astrometry_widgets()
+
         # --- Stacking Options Frame ---
         stacking_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10") 
         # ... (contenu de stacking_options_frame avec Normalisation, Pondération, Rejet, Combinaison, Pondération Radiale, Plancher Poids Radial) ...
@@ -1096,6 +1141,11 @@ class ZeMosaicGUI:
             
             final_assembly_method_val = self.final_assembly_method_var.get()
             num_base_workers_gui_val = self.num_workers_var.get()
+
+            self.solver_settings.solver_choice = self.solver_choice_var.get()
+            self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
+            self.solver_settings.timeout = self.astrometry_timeout_var.get()
+            self.solver_settings.downsample = self.astrometry_downsample_var.get()
 
             # --- RÉCUPÉRATION DES NOUVELLES VALEURS POUR LE ROGNAGE ---
             apply_master_tile_crop_val = self.apply_master_tile_crop_var.get()
