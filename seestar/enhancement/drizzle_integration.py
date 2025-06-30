@@ -503,6 +503,25 @@ class DrizzleIntegrator:
             np.float32
         )
 
+    def cumulative_preview(self) -> np.ndarray:
+        """Return the current drizzle stack normalised to ``[0,1]``.
+
+        The returned array shares no memory with the internal accumulators and
+        is always ``float32``. The integrator state is unchanged.
+
+        Returns
+        -------
+        np.ndarray
+            Normalised cumulative drizzle image.
+        """
+
+        if self._sci_accum is None or self._wht_accum is None:
+            raise ValueError("No images added")
+
+        return (self._sci_accum / np.maximum(self._wht_accum, 1e-9)).astype(
+            np.float32, copy=False
+        )
+
     def finalize(self) -> np.ndarray:
         """Return the stacked image after optional renormalization."""
         if self._sci_accum is None or self._wht_accum is None:
