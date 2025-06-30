@@ -4,29 +4,33 @@ Intègre la prévisualisation avancée et le traitement en file d'attente via Qu
 (Version Révisée: Ajout dossiers avant start, Log amélioré, Bouton Ouvrir Sortie)
 """
 
-import os
-import tkinter as tk
-from tkinter import ttk, messagebox, font as tkFont
-import threading
-import time
-import numpy as np
-from astropy.io import fits
-import traceback
+import gc
+import logging
 import math
+import os
 import platform  # NOUVEL import
 import subprocess  # NOUVEL import
-import gc  #
-from pathlib import Path
-from PIL import Image, ImageTk
-from .ui_utils import ToolTip
 
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys  # Pour sys.executable
 
 # ----------------------------------------------------
 import tempfile  # <-- AJOUTÉ
-import logging
+import threading
+import time
+import tkinter as tk
+import traceback
+from pathlib import Path
+from tkinter import font as tkFont
+from tkinter import messagebox, ttk
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageTk
+
 from zemosaic import zemosaic_config
+
+from .ui_utils import ToolTip
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +63,14 @@ except Exception as gen_err:
 # Print separator to clearly show the start of queued stacker import logs
 logger.debug("-" * 20)
 # Seestar imports
-from ..core.image_processing import load_and_validate_fits, debayer_image
+from ..core.image_processing import debayer_image, load_and_validate_fits
 from ..localization import Localization
 from .local_solver_gui import LocalSolverSettingsWindow
 from .mosaic_gui import MosaicSettingsWindow
 
 try:
     # Import tools for preview adjustments and auto calculations
-    from ..tools.stretch import StretchPresets, ColorCorrection
+    from ..tools.stretch import ColorCorrection, StretchPresets
     from ..tools.stretch import apply_auto_stretch as calculate_auto_stretch
     from ..tools.stretch import apply_auto_white_balance as calculate_auto_wb
 
@@ -124,10 +128,10 @@ except ImportError as tool_err:
 
 # GUI Component Imports
 from .file_handling import FileHandlingManager
+from .histogram_widget import HistogramWidget
 from .preview import PreviewManager
 from .progress import ProgressManager
 from .settings import SettingsManager
-from .histogram_widget import HistogramWidget
 
 
 class SeestarStackerGUI:
@@ -684,6 +688,15 @@ class SeestarStackerGUI:
                 if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists():
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
+
+            if getattr(self.settings, "drizzle_double_norm_fix", True):
+                if (
+                    getattr(self, "drizzle_renorm_combo", None)
+                    and self.drizzle_renorm_combo.winfo_exists()
+                ):
+                    self.drizzle_renorm_combo.config(state=tk.DISABLED)
+                    if getattr(self, "drizzle_renorm_label", None):
+                        self.drizzle_renorm_label.config(state=tk.DISABLED)
 
                     # --- Logique Optionnelle (pour plus tard) : Désactivation spécifique au mode ---
                     # Si Drizzle est activé ET que le mode est Incrémental ET que le widget est lié à une option non pertinente
@@ -3312,6 +3325,7 @@ class SeestarStackerGUI:
             # NOUVEAU : Tooltip pour la nouvelle Checkbutton
             ("save_as_float32_check", "tooltip_save_as_float32"),
             ("preserve_linear_output_check", "tooltip_preserve_linear_output"),
+            ("drizzle_renorm_combo", "tooltip_drizzle_renorm_disabled"),
         ]
 
         tooltip_created_count = 0

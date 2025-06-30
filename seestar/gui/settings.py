@@ -4,11 +4,12 @@ de pondération qualité et Drizzle.
 """
 
 import json
+import logging
 import os
 import tkinter as tk
-import numpy as np
 import traceback
-import logging
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -1167,6 +1168,7 @@ class SettingsManager:
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
         defaults_dict["drizzle_renorm"] = "max"
+        defaults_dict["drizzle_double_norm_fix"] = True
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
         defaults_dict["apply_chroma_correction"] = True
@@ -1197,9 +1199,9 @@ class SettingsManager:
         defaults_dict["low_wht_soften_px"] = 128
 
         # --- NOUVEAU : Paramètre de sauvegarde float32 ---
-        defaults_dict["save_final_as_float32"] = (
-            False  # Défaut à False (donc uint16 après mise à l'échelle par défaut)
-        )
+        defaults_dict[
+            "save_final_as_float32"
+        ] = False  # Défaut à False (donc uint16 après mise à l'échelle par défaut)
         logger.debug(
             f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}"
         )
@@ -2300,6 +2302,9 @@ class SettingsManager:
             "drizzle_kernel": str(self.drizzle_kernel),
             "drizzle_pixfrac": float(self.drizzle_pixfrac),
             "drizzle_renorm": str(self.drizzle_renorm),
+            "drizzle_double_norm_fix": bool(
+                getattr(self, "drizzle_double_norm_fix", True)
+            ),
             "mosaic_mode_active": bool(self.mosaic_mode_active),
             "mosaic_settings": (
                 self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {}
