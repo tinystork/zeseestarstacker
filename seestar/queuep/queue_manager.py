@@ -6666,31 +6666,17 @@ class SeestarQueuedStacker:
             if self.preview_callback and self.incremental_drizzle_objects:
                 avg_img_channels_preview = []
                 # IMPORTANT: driz_obj.out_img contient SCI*WHT, driz_obj.out_wht contient WHT
-                # Pour obtenir l'image moyenne, il faut diviser SCI*WHT par WHT.
+                # Utiliser drizzle_finalize pour obtenir l'image moyennée.
                 for c in range(num_output_channels):
                     driz_obj = self.incremental_drizzle_objects[c]
 
-                    # Obtenir les données et poids cumulatifs
                     sci_accum = driz_obj.out_img.astype(np.float32)
                     wht_accum = driz_obj.out_wht.astype(np.float32)
 
-                    # Éviter la division par zéro
-                    wht_safe = np.maximum(wht_accum, 1e-9)
-
-                    # Calculer l'image moyenne pour l'aperçu
-                    preview_channel_data = np.zeros_like(sci_accum)
-                    valid_pixels = (
-                        wht_safe > 1e-8
-                    )  # Masque pour les pixels où il y a eu contribution
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        preview_channel_data[valid_pixels] = (
-                            sci_accum[valid_pixels] / wht_safe[valid_pixels]
-                        )
+                    preview_channel_data = drizzle_finalize(sci_accum, wht_accum)
 
                     avg_img_channels_preview.append(
-                        np.nan_to_num(
-                            preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0
-                        )
+                        np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0)
                     )
 
                 preview_data_HWC_raw = np.stack(avg_img_channels_preview, axis=-1)
