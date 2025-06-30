@@ -238,6 +238,33 @@ def _wait_for_memmap_files(prefixes, timeout=10.0):
             return
         if time.time() - start > timeout:
             raise RuntimeError(f"Memmap file not ready after {timeout}s: {prefix}")
+
+
+def astap_paths_valid(astap_exe_path: str, astap_data_dir: str) -> bool:
+    """Return True if ASTAP executable and data directory look valid."""
+    return (
+        astap_exe_path
+        and os.path.isfile(astap_exe_path)
+        and astap_data_dir
+        and os.path.isdir(astap_data_dir)
+    )
+
+
+def solve_with_astrometry(image_fits_path: str, fits_header, settings: dict | None, progress_callback=None):
+    """Attempt plate solving via Astrometry.net using the seestar solver."""
+    if not ASTROMETRY_SOLVER_AVAILABLE:
+        return None
+    try:
+        from seestar.alignment.astrometry_solver import solve_image_wcs
+    except Exception:
+        return None
+    try:
+        return solve_image_wcs(image_fits_path, fits_header, settings or {}, update_header_with_solution=True)
+    except Exception as e:
+        _log_and_callback(
+            f"Astrometry solve error: {e}", prog=None, lvl="WARN", callback=progress_callback
+        )
+        return None
         time.sleep(0.1)
 
 
@@ -536,11 +563,18 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     _log_and_callback("clusterstacks_info_finished", num_groups=len(groups), level="INFO", callback=progress_callback)
     return groups
 
-def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_data_dir: str,
-                                  astap_search_radius: float, astap_downsample: int,
-                                  astap_sensitivity: int, astap_timeout_seconds: int,
-                                  progress_callback: callable,
-                                  hotpix_mask_dir: str | None = None):
+def get_wcs_and_pretreat_raw_file(
+    file_path: str,
+    astap_exe_path: str,
+    astap_data_dir: str,
+    astap_search_radius: float,
+    astap_downsample: int,
+    astap_sensitivity: int,
+    astap_timeout_seconds: int,
+    progress_callback: callable,
+    hotpix_mask_dir: str | None = None,
+    solver_settings: dict | None = None,
+):
     filename = os.path.basename(file_path)
     # Utiliser une fonction helper pour les logs internes à cette fonction si _log_and_callback
     # est trop lié à la structure de run_hierarchical_mosaic
@@ -647,68 +681,72 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
             
+    solver_choice_effective = (solver_settings or {}).get("solver_choice", "ASTAP")
     if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
-        _pcb_local(
-            f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.",
-            lvl="DEBUG_DETAIL",
-        )
-
-        tempdir_astap = tempfile.mkdtemp(prefix="astap_")
+        tempdir_solver = tempfile.mkdtemp(prefix="solver_")
         basename = os.path.splitext(filename)[0]
-        temp_fits = os.path.join(tempdir_astap, f"{basename}_minimal.fits")
+        temp_fits = os.path.join(tempdir_solver, f"{basename}_minimal.fits")
         try:
-            fits.writeto(
-                temp_fits,
-                img_data_raw_adu,
-                header=header_orig,
-                overwrite=True,
-            )
+            fits.writeto(temp_fits, img_data_raw_adu, header=header_orig, overwrite=True)
         except Exception as e_tmp_write:
-            _pcb_local(
-                "getwcs_error_astap_tempfile_write_failed",
-                lvl="ERROR",
-                filename=filename,
-                error=str(e_tmp_write),
-            )
-            logger.error(
-                f"Erreur écriture FITS temporaire ASTAP pour {filename}:",
-                exc_info=True,
-            )
+            _pcb_local("getwcs_error_astap_tempfile_write_failed", lvl="ERROR", filename=filename, error=str(e_tmp_write))
+            logger.error(f"Erreur écriture FITS temporaire solver pour {filename}:", exc_info=True)
             del img_data_raw_adu
             gc.collect()
             try:
-                shutil.rmtree(tempdir_astap)
+                shutil.rmtree(tempdir_solver)
             except Exception:
                 pass
             wcs_brute = None
         else:
             try:
-                wcs_brute = zemosaic_astrometry.solve_with_astap(
-                    image_fits_path=temp_fits,
-                    original_fits_header=header_orig,
-                    astap_exe_path=astap_exe_path,
-                    astap_data_dir=astap_data_dir,
-                    search_radius_deg=astap_search_radius,
-                    downsample_factor=astap_downsample,
-                    sensitivity=astap_sensitivity,
-                    timeout_sec=astap_timeout_seconds,
-                    update_original_header_in_place=True,
-                    progress_callback=progress_callback,
-                )
-                if wcs_brute:
-                    _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
+                if solver_choice_effective == "ASTROMETRY":
+                    _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astrometry pour '{filename}'.", lvl="DEBUG_DETAIL")
+                    wcs_brute = solve_with_astrometry(temp_fits, header_orig, solver_settings or {}, progress_callback)
+                    if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
+                        _pcb_local("getwcs_warn_astrometry_failed_try_astap", lvl="INFO_DETAIL", filename=filename)
+                        wcs_brute = zemosaic_astrometry.solve_with_astap(
+                            image_fits_path=temp_fits,
+                            original_fits_header=header_orig,
+                            astap_exe_path=astap_exe_path,
+                            astap_data_dir=astap_data_dir,
+                            search_radius_deg=astap_search_radius,
+                            downsample_factor=astap_downsample,
+                            sensitivity=astap_sensitivity,
+                            timeout_sec=astap_timeout_seconds,
+                            update_original_header_in_place=True,
+                            progress_callback=progress_callback,
+                        )
+                    if wcs_brute:
+                        _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
                 else:
-                    _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
-            except Exception as e_astap_call:
-                _pcb_local("getwcs_error_astap_exception", lvl="ERROR", filename=filename, error=str(e_astap_call))
-                logger.error(f"Erreur ASTAP pour {filename}", exc_info=True)
+                    _pcb_local(f"    WCS non trouvé/valide dans header. Appel solve_with_astap pour '{filename}'.", lvl="DEBUG_DETAIL")
+                    wcs_brute = zemosaic_astrometry.solve_with_astap(
+                        image_fits_path=temp_fits,
+                        original_fits_header=header_orig,
+                        astap_exe_path=astap_exe_path,
+                        astap_data_dir=astap_data_dir,
+                        search_radius_deg=astap_search_radius,
+                        downsample_factor=astap_downsample,
+                        sensitivity=astap_sensitivity,
+                        timeout_sec=astap_timeout_seconds,
+                        update_original_header_in_place=True,
+                        progress_callback=progress_callback,
+                    )
+                    if wcs_brute:
+                        _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
+                    else:
+                        _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
+            except Exception as e_solver_call:
+                _pcb_local("getwcs_error_astap_exception", lvl="ERROR", filename=filename, error=str(e_solver_call))
+                logger.error(f"Erreur solver pour {filename}", exc_info=True)
                 wcs_brute = None
             finally:
                 del img_data_raw_adu
                 gc.collect()
                 try:
                     os.remove(temp_fits)
-                    os.rmdir(tempdir_astap)
+                    os.rmdir(tempdir_solver)
                 except Exception:
                     pass
     elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
@@ -733,7 +771,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
         
         if wcs_brute and wcs_brute.is_celestial: # Re-vérifier après la tentative de set_pixel_shape
             _pcb_local("getwcs_info_pretreatment_wcs_ok", lvl="DEBUG", filename=filename)
-            return img_data_processed_adu, wcs_brute, header_orig
+            return img_data_processed_adu, wcs_brute, header_orig, hp_mask_path
         # else: tombe dans le bloc de déplacement ci-dessous
 
     # Si on arrive ici, c'est que wcs_brute est None ou non céleste
@@ -765,7 +803,7 @@ def get_wcs_and_pretreat_raw_file(file_path: str, astap_exe_path: str, astap_dat
             
     if img_data_processed_adu is not None: del img_data_processed_adu 
     gc.collect()
-    return None, None, None
+    return None, None, None, None
 
 
 
@@ -1632,7 +1670,8 @@ def run_hierarchical_mosaic(
     auto_limit_frames_per_master_tile_config: bool,
     auto_limit_memory_fraction_config: float,
     winsor_worker_limit_config: int,
-    max_raw_per_master_tile_config: int
+    max_raw_per_master_tile_config: int,
+    solver_settings: dict | None = None
 ):
     """
     Orchestre le traitement de la mosaïque hiérarchique.
@@ -1764,7 +1803,8 @@ def run_hierarchical_mosaic(
                     astap_sensitivity_config,
                     180,
                     progress_callback,
-                    temp_image_cache_dir
+                    temp_image_cache_dir,
+                    solver_settings
                 ): f_path for f_path in batch
             }
 
