@@ -487,6 +487,22 @@ class DrizzleIntegrator:
             self._wht_accum += wht
         self._n_images += 1
 
+    def current_preview(self) -> np.ndarray:
+        """Return a float32 normalised copy of the current stack.
+
+        Returns:
+            np.ndarray: Normalised drizzle accumulation.
+
+        Raises:
+            ValueError: If no images were added yet.
+        """
+        if self._sci_accum is None or self._wht_accum is None:
+            raise ValueError("No images added")
+
+        return (self._sci_accum / np.maximum(self._wht_accum, 1e-9)).astype(
+            np.float32
+        )
+
     def finalize(self) -> np.ndarray:
         """Return the stacked image after optional renormalization."""
         if self._sci_accum is None or self._wht_accum is None:
