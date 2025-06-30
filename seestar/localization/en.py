@@ -367,7 +367,6 @@ EN_TRANSLATIONS = {
     "cannot_open_folder_command_not_found": "Could not open folder. System command not found for your OS.",
     "error_opening_unaligned_folder": "An error occurred while trying to open the unaligned files folder:",
     "error_opening_unaligned_folder_short": "Error opening unaligned files folder.",
-    "tooltip_drizzle_renorm_disabled": "Flux renormalisation is disabled because the double-normalisation fix is active.",
     # --- Section Feathering ---
     "feathering_frame_title": "Feathering (Weight Map Smoothing)",
     "apply_feathering_label": "Enable Feathering by Weight Map",

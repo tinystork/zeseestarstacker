@@ -295,13 +295,6 @@ class SettingsManager:
                     value=default_values_from_code.get("drizzle_pixfrac", 1.0)
                 ),
             ).get()
-            self.drizzle_renorm = getattr(
-                gui_instance,
-                "drizzle_renorm_var",
-                tk.StringVar(
-                    value=default_values_from_code.get("drizzle_renorm", "max")
-                ),
-            ).get()
             self.astrometry_api_key = (
                 getattr(
                     gui_instance,
@@ -866,15 +859,6 @@ class SettingsManager:
             getattr(gui_instance, "drizzle_pixfrac_var", tk.DoubleVar()).set(
                 self.drizzle_pixfrac
             )
-            getattr(gui_instance, "drizzle_renorm_var", tk.StringVar()).set(
-                self.drizzle_renorm
-            )
-            if hasattr(gui_instance, "drizzle_renorm_key_to_label"):
-                gui_instance.drizzle_renorm_display_var.set(
-                    gui_instance.drizzle_renorm_key_to_label.get(
-                        self.drizzle_renorm, self.drizzle_renorm
-                    )
-                )
 
             setattr(gui_instance, "mosaic_mode_active", bool(self.mosaic_mode_active))
             setattr(
@@ -1167,7 +1151,6 @@ class SettingsManager:
         defaults_dict["drizzle_mode"] = "Final"
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
-        defaults_dict["drizzle_renorm"] = "max"
         defaults_dict["drizzle_double_norm_fix"] = True
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
@@ -1689,18 +1672,7 @@ class SettingsManager:
                     f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}"
                 )
 
-            valid_renorm = ["none", "max", "n_images"]
-            current_renorm = getattr(
-                self, "drizzle_renorm", defaults_fallback["drizzle_renorm"]
-            )
-            if current_renorm not in valid_renorm:
-                original = current_renorm
-                self.drizzle_renorm = defaults_fallback["drizzle_renorm"]
-                messages.append(
-                    f"Option Renormalize flux ('{original}') invalide, réinitialisée à '{self.drizzle_renorm}'"
-                )
-            else:
-                self.drizzle_renorm = current_renorm
+
 
             # --- SCNR Final Validation ---
             # ... (inchangé) ...
@@ -2301,7 +2273,6 @@ class SettingsManager:
             "drizzle_mode": str(self.drizzle_mode),
             "drizzle_kernel": str(self.drizzle_kernel),
             "drizzle_pixfrac": float(self.drizzle_pixfrac),
-            "drizzle_renorm": str(self.drizzle_renorm),
             "drizzle_double_norm_fix": bool(
                 getattr(self, "drizzle_double_norm_fix", True)
             ),
