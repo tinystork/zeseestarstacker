@@ -3860,7 +3860,7 @@ class SeestarStackerGUI:
 
     def update_preview_from_stacker(
         self,
-        stack_data,
+        preview_array,
         stack_header,
         stack_name,
         img_count,
@@ -3874,8 +3874,8 @@ class SeestarStackerGUI:
         if threading.current_thread() is not threading.main_thread():
             self.root.after(
                 0,
-                lambda sd=stack_data, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
-                    sd, sh, sn, ic, ti, cb, tb
+                lambda pa=preview_array, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
+                    pa, sh, sn, ic, ti, cb, tb
                 ),
             )
             return
@@ -3885,8 +3885,8 @@ class SeestarStackerGUI:
             self.logger.info(
                 "  [update_preview] Verrou final actif. Mise à jour des données uniquement."
             )
-            if stack_data is not None:
-                self.current_preview_data = stack_data.copy()
+            if preview_array is not None:
+                self.current_preview_data = preview_array.copy()
                 self.current_stack_header = (
                     stack_header.copy() if stack_header else None
                 )
@@ -3897,13 +3897,13 @@ class SeestarStackerGUI:
                 self.refresh_preview(recalculate_histogram=True)
             return
 
-        if stack_data is None:
+        if preview_array is None:
             self.logger.info(
                 "[DEBUG-GUI] update_preview_from_stacker: Received None stack_data. Skipping visual update."
             )
             return
 
-        self.current_preview_data = stack_data.copy()
+        self.current_preview_data = preview_array.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
         self.preview_total_imgs = total_imgs
@@ -3932,44 +3932,12 @@ class SeestarStackerGUI:
             self.logger.debug(
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
             )
-            # --- Dynamic auto-stretch for incremental drizzle ---
-            if (
-                getattr(self, "drizzle_mode_var", None)
-                and self.drizzle_mode_var.get() == "Incremental"
-            ):
-                try:
-                    data = self.current_preview_data
-                    if data is not None:
-                        # Analyse basic stats without locking the UI
-                        d_min = float(np.nanmin(data))
-                        d_max = float(np.nanmax(data))
-                        bp_ui = self.preview_black_point.get()
-                        wp_ui = self.preview_white_point.get()
-
-                        # Re-stretch if brightest pixel is under 80 % of WP
-                        # OR more than 60 % pixels lie below BP
-                        need_autostretch = (
-                            d_max < 0.8 * wp_ui
-                            or np.mean(data < bp_ui) > 0.60
-                        )
-                        if need_autostretch:
-                            self.logger.info(
-                                "[Drizzle-Preview] Dynamic auto-stretch triggered "
-                                f"(min={d_min:.4f}, max={d_max:.4f}, "
-                                f"BP={bp_ui:.4f}, WP={wp_ui:.4f})"
-                            )
-                            self.apply_auto_stretch()  # recalculates BP/WP & refreshes
-                        else:
-                            self.refresh_preview()  # keep current stretch
-                    else:
-                        self.refresh_preview()
-                except Exception as err:
-                    # Fallback to safe behaviour
-                    self.logger.error(f"Dynamic auto-stretch failed: {err}")
-                    self.refresh_preview()
-            else:
-                # Non-drizzle modes keep existing behaviour
-                self.refresh_preview()
+            if self.drizzle_mode_var.get() == "Incremental":
+                self.current_preview_data = preview_array
+                self.apply_auto_stretch()
+                return
+            # Non-drizzle modes keep existing behaviour
+            self.refresh_preview()
 
         if self.current_stack_header:
             try:
