@@ -684,7 +684,6 @@ class SeestarQueuedStacker:
         )
         self.max_hq_mem = getattr(settings, "max_hq_mem", 8 * 1024**3)
         self.stack_final_combine = getattr(settings, "stack_final_combine", "mean")
-        self.drizzle_renorm_method = "none"
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -813,12 +812,6 @@ class SeestarQueuedStacker:
                 # When using inter-batch reprojection we want to keep the
                 # reference WCS stable after the first solve.
                 self.freeze_reference_wcs = self.reproject_between_batches
-                self.drizzle_renorm_method = str(
-                    getattr(settings, "drizzle_renorm", "none")
-                )
-                logger.debug(
-                    f"  -> Méthode de renormalisation drizzle: {self.drizzle_renorm_method}"
-                )
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -9472,16 +9465,6 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee."
             )
-            try:
-                renormalize_fits(
-                    fits_path,
-                    getattr(self, "drizzle_renorm_method", "none"),
-                    getattr(self, "images_in_cumulative_stack", 0),
-                )
-            except Exception as ren_err:
-                self.update_progress(
-                    f"   ⚠️ Renormalisation échouée: {ren_err}", "WARN"
-                )
         except Exception as save_err:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}")
             self.final_stacked_path = None

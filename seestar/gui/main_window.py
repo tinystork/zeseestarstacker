@@ -535,8 +535,6 @@ class SeestarStackerGUI:
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
-        self.drizzle_renorm_var = tk.StringVar(value="max")
-        self.drizzle_renorm_display_var = tk.StringVar()
 
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
@@ -677,8 +675,6 @@ class SeestarStackerGUI:
                 # Pixfrac Drizzle
                 getattr(self, "drizzle_pixfrac_label", None),
                 getattr(self, "drizzle_pixfrac_spinbox", None),
-                getattr(self, "drizzle_renorm_label", None),
-                getattr(self, "drizzle_renorm_combo", None),
                 # --- FIN DES NOUVELLES LIGNES ---
             ]
 
@@ -689,21 +685,7 @@ class SeestarStackerGUI:
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
 
-            if getattr(self.settings, "drizzle_double_norm_fix", True):
-                if (
-                    getattr(self, "drizzle_renorm_combo", None)
-                    and self.drizzle_renorm_combo.winfo_exists()
-                ):
-                    self.drizzle_renorm_combo.config(state=tk.DISABLED)
-                    if getattr(self, "drizzle_renorm_label", None):
-                        self.drizzle_renorm_label.config(state=tk.DISABLED)
 
-                    # --- Logique Optionnelle (pour plus tard) : Désactivation spécifique au mode ---
-                    # Si Drizzle est activé ET que le mode est Incrémental ET que le widget est lié à une option non pertinente
-                    # if global_drizzle_enabled and self.drizzle_mode_var.get() == "Incremental":
-                    #     if widget in [widget_echelle_1, widget_echelle_2, ...]: # Liste des widgets à désactiver en mode incrémental
-                    #         widget.config(state=tk.DISABLED)
-                    #     # Sinon (widget pertinent ou mode final), il garde l'état 'state' défini plus haut
 
         except tk.TclError:
             # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
@@ -1403,37 +1385,6 @@ class SeestarStackerGUI:
             format="%.2f",
         )
         self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
-        renorm_frame = ttk.Frame(self.drizzle_options_frame)
-        renorm_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
-        self.drizzle_renorm_label = ttk.Label(
-            renorm_frame,
-            text=self.tr("drizzle_renorm_label", default="Renormalize flux"),
-        )
-        self.drizzle_renorm_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.drizzle_renorm_combo = ttk.Combobox(
-            renorm_frame,
-            textvariable=self.drizzle_renorm_display_var,
-            state="readonly",
-            width=12,
-        )
-        self.drizzle_renorm_combo.pack(side=tk.LEFT, padx=5)
-        self.drizzle_renorm_keys = ["none", "max", "n_images"]
-        self.drizzle_renorm_key_to_label = {
-            "none": "None",
-            "max": "Max weight",
-            "n_images": "# images",
-        }
-        self.drizzle_renorm_label_to_key = {
-            v: k for k, v in self.drizzle_renorm_key_to_label.items()
-        }
-        self.drizzle_renorm_combo["values"] = list(
-            self.drizzle_renorm_key_to_label.values()
-        )
-        self.drizzle_renorm_display_var.set(
-            self.drizzle_renorm_key_to_label.get(
-                self.drizzle_renorm_var.get(), self.drizzle_renorm_var.get()
-            )
-        )
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction")
         self.hp_frame.pack(fill=tk.X, pady=5, padx=5)
         hp_check_frame = ttk.Frame(self.hp_frame)
@@ -3325,7 +3276,6 @@ class SeestarStackerGUI:
             # NOUVEAU : Tooltip pour la nouvelle Checkbutton
             ("save_as_float32_check", "tooltip_save_as_float32"),
             ("preserve_linear_output_check", "tooltip_preserve_linear_output"),
-            ("drizzle_renorm_combo", "tooltip_drizzle_renorm_disabled"),
         ]
 
         tooltip_created_count = 0
@@ -6796,7 +6746,6 @@ class SeestarStackerGUI:
             "drizzle_mode": self.settings.drizzle_mode,
             "drizzle_kernel": self.settings.drizzle_kernel,
             "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-            "drizzle_renorm": self.settings.drizzle_renorm,
             "apply_chroma_correction": self.settings.apply_chroma_correction,
             "apply_final_scnr": self.settings.apply_final_scnr,
             "final_scnr_target_channel": self.settings.final_scnr_target_channel,
