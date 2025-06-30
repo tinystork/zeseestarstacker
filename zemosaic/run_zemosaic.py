@@ -1,6 +1,7 @@
 # zemosaic/run_zemosaic.py
 import sys  # Ajout pour sys.path et sys.modules
 import multiprocessing
+import os
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
@@ -11,9 +12,17 @@ print(f"Python Executable: {sys.executable}")
 print(f"Python Version: {sys.version}")
 print(f"Chemin de travail actuel (CWD): {sys.path[0]}") # sys.path[0] est généralement le dossier du script
 
+# S'assurer que le dossier parent est dans sys.path afin que les imports relatifs
+# dans les modules du package fonctionnent même lorsque ce script est exécuté
+# directement.
+_package_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_package_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
-    from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+    from zemosaic.zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
     print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI ---")
 
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
@@ -21,7 +30,7 @@ try:
         try:
             # Tenter d'importer zemosaic_worker directement pour inspecter son chemin
             # Note: Il est déjà importé par zemosaic_gui si ZEMOSAIC_WORKER_AVAILABLE est True
-            import zemosaic_worker 
+            import zemosaic_worker
             print(f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}")
             if 'zemosaic_worker' in sys.modules:
                  print(f"DEBUG (run_zemosaic): sys.modules['zemosaic_worker'] pointe vers: {sys.modules['zemosaic_worker'].__file__}")
