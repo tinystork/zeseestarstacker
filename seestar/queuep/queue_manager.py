@@ -9394,6 +9394,7 @@ class SeestarQueuedStacker:
             "[s] Approx total exposure",
         )
         # Propagate basic pointing information if absent
+
         if "RA" not in final_header:
             if "CRVAL1" in final_header:
                 final_header["RA"] = (
@@ -9420,6 +9421,7 @@ class SeestarQueuedStacker:
                     if "DEC" in self.reference_header_for_wcs.comments
                     else "[deg] Pointing DEC from reference header",
                 )
+
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):
             base_name = self.output_filename.strip()
