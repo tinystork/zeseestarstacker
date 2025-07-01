@@ -740,7 +740,7 @@ def get_wcs_and_pretreat_raw_file(
     solver_choice_effective = (solver_settings or {}).get("solver_choice", "ASTAP")
     api_key_len = len((solver_settings or {}).get("api_key", ""))
     _pcb_local(
-        f"Solver choice effective: {solver_choice_effective}, API key length={api_key_len}",
+        f"Solver choice effective={solver_choice_effective}",
         lvl="DEBUG_DETAIL",
     )
     if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
@@ -2489,7 +2489,7 @@ def run_hierarchical_mosaic(
 
 
 #--- Worker process helper ---
-def run_hierarchical_mosaic_process(progress_queue, *args, **kwargs):
+def run_hierarchical_mosaic_process(progress_queue, *args, solver_settings_dict=None, **kwargs):
     """Execute :func:`run_hierarchical_mosaic` in a separate process.
 
     Parameters are identical to :func:`run_hierarchical_mosaic` **except** for
@@ -2506,7 +2506,7 @@ def run_hierarchical_mosaic_process(progress_queue, *args, **kwargs):
     full_args = args[:8] + (queue_callback,) + args[8:]
 
     try:
-        run_hierarchical_mosaic(*full_args, **kwargs)
+        run_hierarchical_mosaic(*full_args, solver_settings=solver_settings_dict, **kwargs)
     except Exception as e_proc:
         progress_queue.put(("PROCESS_ERROR", None, "ERROR", {"error": str(e_proc)}))
     finally:
