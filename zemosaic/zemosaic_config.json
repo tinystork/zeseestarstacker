@@ -28,7 +28,7 @@
     "auto_limit_frames_per_master_tile": true,
     "auto_limit_memory_fraction": 0.1,
     "winsor_worker_limit": 8,
-    "max_raw_per_master_tile": 0,
+    "max_raw_per_master_tile": 20,
     "apply_master_tile_crop": true,
     "master_tile_crop_percent": 18.0
 }

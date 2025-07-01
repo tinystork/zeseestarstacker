@@ -1,0 +1,10 @@
+numpy
+astropy
+reproject
+astroalign
+opencv-python-headless
+tk
+psutil
+Photutils
+zarr>=2
+packaging
