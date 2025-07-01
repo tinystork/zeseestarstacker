@@ -330,7 +330,17 @@ solver_settings = {
 }
 
 zemosaic_worker.run_hierarchical_mosaic(
-    "INPUT_DIR", "OUTPUT_DIR", solver_settings, cluster_threshold=0.5, ...
+    "INPUT_DIR",
+    "OUTPUT_DIR",
+    astap_exe_path=solver_settings["astap_path"],
+    astap_data_dir_param=solver_settings["astap_data_dir"],
+    astap_search_radius_config=solver_settings.get("astap_search_radius", 3.0),
+    astap_downsample_config=solver_settings.get("astap_downsample", 2),
+    astap_sensitivity_config=solver_settings.get("astap_sensitivity", 100),
+    cluster_threshold_config=0.5,
+    progress_callback=cli_progress,
+    ...,  # other stacking/assembly options
+    solver_settings=solver_settings,
 )
 ```
 
