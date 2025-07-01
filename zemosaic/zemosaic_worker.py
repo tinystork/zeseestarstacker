@@ -2600,7 +2600,7 @@ if __name__ == "__main__":
         astap_search_radius_config=cfg.get("astap_default_search_radius", 3.0),
         astap_downsample_config=cfg.get("astap_default_downsample", 2),
         astap_sensitivity_config=cfg.get("astap_default_sensitivity", 100),
-        cluster_threshold_config=cfg.get("cluster_threshold", 0.08),
+        cluster_threshold_config=cfg.get("cluster_threshold", 0.5),
         progress_callback=None,
         stack_norm_method=cfg.get("stacking_normalize_method", "linear_fit"),
         stack_weight_method=cfg.get("stacking_weighting_method", "noise_variance"),
