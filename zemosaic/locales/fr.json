@@ -18,6 +18,7 @@
     "astap_downsample_note": "(0=auto, 1=2x2, 2=4x4...)",
     "astap_sensitivity_label": "Sensibilité ASTAP (-sens) :",
     "astap_sensitivity_note": "(ex: 100, plus grand = plus sensible)",
+    "force_lum_label": "Convertir en Luminance (mono) :",
     "panel_clustering_threshold_label": "Seuil Clustering Panneaux (deg) :",
     "launch_button": "Lancer la Mosaïque Hiérarchique",
     "log_frame_title": "Logs de Traitement",

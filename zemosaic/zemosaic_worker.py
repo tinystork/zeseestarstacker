@@ -325,6 +325,35 @@ def solve_with_ansvr(
         return None
 
 
+def _prepare_image_for_astap(data: np.ndarray, force_lum: bool = False) -> np.ndarray:
+    """Normalize image layout for ASTAP.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Raw image data.
+    force_lum : bool
+        If True and ``data`` is 3-D, the channels are averaged to produce a mono image.
+
+    Returns
+    -------
+    np.ndarray
+        Array formatted in CHW order or 2-D monochrome.
+    """
+
+    if force_lum and data.ndim == 3:
+        return data.mean(axis=0).astype(data.dtype)
+    if data.ndim == 2:
+        return data
+    if data.ndim == 3 and data.shape[-1] in (3, 4):
+        return np.moveaxis(data, -1, 0)
+    if data.ndim == 3 and data.shape[0] in (3, 4):
+        return data
+    if data.ndim == 3:
+        return data.sum(axis=0)
+    return data
+
+
 def reproject_tile_to_mosaic(tile_path: str, tile_wcs, mosaic_wcs, mosaic_shape_hw,
                              feather: bool = True,
                              apply_crop: bool = False,
@@ -646,10 +675,10 @@ def get_wcs_and_pretreat_raw_file(
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
         return None, None, None, None
         
-    img_data_raw_adu, header_orig = zemosaic_utils.load_and_validate_fits(
-        file_path, 
-        normalize_to_float32=False, 
-        attempt_fix_nonfinite=True, 
+    img_data_raw_adu, header_orig, info = zemosaic_utils.load_and_validate_fits(
+        file_path,
+        normalize_to_float32=False,
+        attempt_fix_nonfinite=True,
         progress_callback=progress_callback
     )
 
@@ -749,7 +778,9 @@ def get_wcs_and_pretreat_raw_file(
         basename = os.path.splitext(filename)[0]
         temp_fits = os.path.join(tempdir_solver, f"{basename}_minimal.fits")
         try:
-            fits.writeto(temp_fits, img_data_raw_adu, header=header_orig, overwrite=True)
+            force_lum = bool((solver_settings or {}).get("force_lum", False))
+            img_norm = _prepare_image_for_astap(img_data_raw_adu, force_lum=force_lum)
+            zemosaic_utils.save_numpy_to_fits(img_norm, header_orig, temp_fits, axis_order="CHW")
         except Exception as e_tmp_write:
             _pcb_local("getwcs_error_astap_tempfile_write_failed", lvl="ERROR", filename=filename, error=str(e_tmp_write))
             logger.error(f"Erreur écriture FITS temporaire solver pour {filename}:", exc_info=True)

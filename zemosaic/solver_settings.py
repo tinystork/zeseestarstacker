@@ -15,6 +15,7 @@ class SolverSettings:
     api_key: str = ""
     timeout: int = 60
     downsample: int = 2
+    force_lum: bool = False
 
     @staticmethod
     def default_path() -> Path:

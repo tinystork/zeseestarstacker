@@ -147,6 +147,7 @@ class ZeMosaicGUI:
         self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
         self.astrometry_timeout_var = tk.IntVar(value=self.solver_settings.timeout)
         self.astrometry_downsample_var = tk.IntVar(value=self.solver_settings.downsample)
+        self.force_lum_var = tk.BooleanVar(value=self.solver_settings.force_lum)
         
         self.is_processing = False
         self.worker_process = None
@@ -458,6 +459,9 @@ class ZeMosaicGUI:
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        param_row_idx += 1
+        ttk.Label(params_frame, text=self._tr("force_lum_label", "Convert to Luminance (mono):")).grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["force_lum_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Checkbutton(params_frame, variable=self.force_lum_var).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
 
         # --- Solver Selection Frame ---
         solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("solver_frame_title", "Plate Solver"), padding="10")
@@ -1178,6 +1182,7 @@ class ZeMosaicGUI:
             self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
             self.solver_settings.timeout = self.astrometry_timeout_var.get()
             self.solver_settings.downsample = self.astrometry_downsample_var.get()
+            self.solver_settings.force_lum = bool(self.force_lum_var.get())
             try:
                 self.solver_settings.save_default()
             except Exception:
