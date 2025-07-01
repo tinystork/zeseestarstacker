@@ -625,16 +625,39 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     if not (ASTROPY_AVAILABLE and SkyCoord and u): _log_and_callback("clusterstacks_error_astropy_unavailable", level="ERROR", callback=progress_callback); return []
     if not all_raw_files_with_info: _log_and_callback("clusterstacks_warn_no_raw_info", level="WARN", callback=progress_callback); return []
     _log_and_callback("clusterstacks_info_start", num_files=len(all_raw_files_with_info), threshold=stack_threshold_deg, level="INFO", callback=progress_callback)
-    panel_centers_sky = []; panel_data_for_clustering = []
+    panel_centers_sky = []
+    panel_data_for_clustering = []
     for i, info in enumerate(all_raw_files_with_info):
-        wcs_obj = info['wcs']
-        if not (wcs_obj and wcs_obj.is_celestial): continue
+        wcs_obj = info["wcs"]
+        if not (wcs_obj and wcs_obj.is_celestial):
+            continue
+        center_world = None
         try:
-            if wcs_obj.pixel_shape: center_world = wcs_obj.pixel_to_world(wcs_obj.pixel_shape[0]/2.0, wcs_obj.pixel_shape[1]/2.0)
-            elif hasattr(wcs_obj.wcs, 'crval'): center_world = SkyCoord(ra=wcs_obj.wcs.crval[0]*u.deg, dec=wcs_obj.wcs.crval[1]*u.deg, frame='icrs')
-            else: continue
-            panel_centers_sky.append(center_world); panel_data_for_clustering.append(info)
-        except Exception: continue
+            if wcs_obj.pixel_shape:
+                x0 = wcs_obj.pixel_shape[0] / 2.0
+                y0 = wcs_obj.pixel_shape[1] / 2.0
+                center_world = wcs_obj.pixel_to_world(x0, y0)
+                if not (
+                    np.isfinite(center_world.ra.deg)
+                    and np.isfinite(center_world.dec.deg)
+                ):
+                    center_world = None
+        except Exception:
+            center_world = None
+        if center_world is None and hasattr(wcs_obj.wcs, "crval"):
+            try:
+                center_world = SkyCoord(
+                    ra=wcs_obj.wcs.crval[0] * u.deg,
+                    dec=wcs_obj.wcs.crval[1] * u.deg,
+                    frame="icrs",
+                )
+            except Exception:
+                center_world = None
+        if center_world is not None:
+            panel_centers_sky.append(center_world)
+            panel_data_for_clustering.append(info)
+        else:
+            continue
     if not panel_centers_sky: _log_and_callback("clusterstacks_warn_no_centers", level="WARN", callback=progress_callback); return []
     groups = []; assigned_mask = [False] * len(panel_centers_sky)
     for i in range(len(panel_centers_sky)):
