@@ -2178,9 +2178,6 @@ def run_hierarchical_mosaic(
         ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups)
     }
 
-    # Wait for all master-tile tasks to finish before processing results
-    executor_ph3.shutdown(wait=True)
-
     for future in as_completed(future_to_group_index):
 
             group_index_original = future_to_group_index[future]
@@ -2212,6 +2209,8 @@ def run_hierarchical_mosaic(
             total_eta_sec_ph3 = eta_phase3_sec + (100 - current_progress_in_run_percent_ph3) * time_per_percent_point_global_ph3
             update_gui_eta(total_eta_sec_ph3)
 
+    # Toutes les futures sont terminées → fermeture propre
+    executor_ph3.shutdown(wait=True)
 
     master_tiles_results_list = [master_tiles_results_list_temp[i] for i in sorted(master_tiles_results_list_temp.keys())]
     del master_tiles_results_list_temp; gc.collect()
