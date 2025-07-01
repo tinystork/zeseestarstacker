@@ -1287,7 +1287,6 @@ class ZeMosaicGUI:
             self.cleanup_memmap_var.get(),
             self.config.get("assembly_process_workers", 0),
             self.auto_limit_frames_var.get(),
-            self.config.get("auto_limit_memory_fraction", 0.1),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
             asdict(self.solver_settings)
