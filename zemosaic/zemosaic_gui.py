@@ -1284,9 +1284,10 @@ class ZeMosaicGUI:
         self.progress_queue = multiprocessing.Queue()
         self.worker_process = multiprocessing.Process(
             target=run_hierarchical_mosaic_process,
-            args=(self.progress_queue,) + worker_args,
+            args=(self.progress_queue,) + worker_args[:-1],
+            kwargs={"solver_settings_dict": worker_args[-1]},
             daemon=True,
-            name="ZeMosaicWorkerProcess"
+            name="ZeMosaicWorkerProcess",
         )
         self.worker_process.start()
 
