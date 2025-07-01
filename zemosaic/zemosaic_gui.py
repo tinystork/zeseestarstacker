@@ -1235,6 +1235,9 @@ class ZeMosaicGUI:
                 return
         
         # 4. DÉMARRAGE du traitement
+        # Remise à zéro du compteur master-tiles
+        if hasattr(self, "master_tile_count_var"):
+            self.master_tile_count_var.set("")
         self.is_processing = True
         self.launch_button.config(state=tk.DISABLED)
         self.log_text.config(state=tk.NORMAL); self.log_text.delete(1.0, tk.END); self.log_text.config(state=tk.DISABLED)
@@ -1341,6 +1344,9 @@ class ZeMosaicGUI:
             self._log_message("log_key_processing_finished", level="INFO")
             final_message = self._tr("msg_processing_completed")
             messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
+            # Nettoyage du compteur master-tiles affiché
+            if hasattr(self, "master_tile_count_var"):
+                self.master_tile_count_var.set("")
             output_dir_final = self.output_dir_var.get()
             if output_dir_final and os.path.isdir(output_dir_final):
                 if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):
