@@ -636,7 +636,11 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
         return None, None
 
 
-def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: callable):
+def cluster_seestar_stacks(
+    all_raw_files_with_info: list,
+    stack_threshold_deg: float,
+    progress_callback: Callable,
+):
     """Group raw files captured by the Seestar based on their WCS position."""
 
     if not (ASTROPY_AVAILABLE and SkyCoord and u):
@@ -663,32 +667,46 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
         callback=progress_callback,
     )
 
-    panel_centers_sky = []
+    panel_centers_sky: list[SkyCoord] = []
     panel_data_for_clustering = []
+    zero_coord = SkyCoord(0 * u.deg, 0 * u.deg, frame="icrs")
 
     for info in all_raw_files_with_info:
         wcs_obj = info["wcs"]
         if not (wcs_obj and wcs_obj.is_celestial):
             continue
+
+        center_world: SkyCoord | None = None
         try:
+            # ① Attempt to compute using pixel center
             if wcs_obj.pixel_shape:
-                center_world = wcs_obj.pixel_to_world(
-                    wcs_obj.pixel_shape[0] / 2.0,
-                    wcs_obj.pixel_shape[1] / 2.0,
-                )
-            elif hasattr(wcs_obj.wcs, "crval"):
+                x0 = wcs_obj.pixel_shape[0] / 2.0
+                y0 = wcs_obj.pixel_shape[1] / 2.0
+                tmp = wcs_obj.pixel_to_world(x0, y0)
+                if np.isfinite(tmp.ra.deg) and np.isfinite(tmp.dec.deg):
+                    center_world = tmp
+        except Exception:
+            pass
+
+        # ② Fallback via CRVAL when pixel center failed
+        if center_world is None and hasattr(wcs_obj.wcs, "crval"):
+            try:
                 center_world = SkyCoord(
                     ra=wcs_obj.wcs.crval[0] * u.deg,
                     dec=wcs_obj.wcs.crval[1] * u.deg,
                     frame="icrs",
                 )
-            else:
-                continue
-            panel_centers_sky.append(center_world)
-            panel_data_for_clustering.append(info)
-        except Exception:
-            # Ignore files with problematic WCS information
+            except Exception:
+                center_world = None
+
+        if (
+            center_world is None
+            or center_world.separation(zero_coord).deg < 1e-3
+        ):
             continue
+
+        panel_centers_sky.append(center_world)
+        panel_data_for_clustering.append(info)
 
     if not panel_centers_sky:
         _log_and_callback(
@@ -704,6 +722,7 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     for i in range(len(panel_centers_sky)):
         if assigned_mask[i]:
             continue
+
         current_group_infos = [panel_data_for_clustering[i]]
         assigned_mask[i] = True
         current_group_center_seed = panel_centers_sky[i]
