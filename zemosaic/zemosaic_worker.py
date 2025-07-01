@@ -1873,7 +1873,6 @@ def run_hierarchical_mosaic(
     coadd_cleanup_memmap_config: bool,
     assembly_process_workers_config: int,
     auto_limit_frames_per_master_tile_config: bool,
-    auto_limit_memory_fraction_config: float,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
     solver_settings: dict | None = None
@@ -2182,8 +2181,7 @@ def run_hierarchical_mosaic(
             limit = max(
                 1,
                 int(
-                    (available_bytes * auto_limit_memory_fraction_config)
-                    // (expected_workers * bytes_per_frame * 6)
+                    available_bytes // (expected_workers * bytes_per_frame * 6)
                 ),
             )
             if manual_limit > 0:
