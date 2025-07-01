@@ -738,6 +738,9 @@ def get_wcs_and_pretreat_raw_file(
     _pcb_local = lambda msg_key, lvl="DEBUG", **kwargs: \
         progress_callback(msg_key, None, lvl, **kwargs) if progress_callback else print(f"GETWCS_LOG {lvl}: {msg_key} {kwargs}")
 
+    if solver_settings is None:
+        solver_settings = {}
+
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 
     hp_mask_path = None
@@ -746,12 +749,18 @@ def get_wcs_and_pretreat_raw_file(
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
         return None, None, None, None
         
-    img_data_raw_adu, header_orig, info = zemosaic_utils.load_and_validate_fits(
+    res_load = zemosaic_utils.load_and_validate_fits(
         file_path,
         normalize_to_float32=False,
         attempt_fix_nonfinite=True,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
     )
+    if isinstance(res_load, tuple):
+        img_data_raw_adu = res_load[0]
+        header_orig = res_load[1] if len(res_load) > 1 else None
+    else:
+        img_data_raw_adu = res_load
+        header_orig = None
 
     if img_data_raw_adu is None or header_orig is None:
         _pcb_local("getwcs_error_load_failed", lvl="ERROR", filename=filename)
