@@ -1,5 +1,6 @@
 numpy
 astropy
+astroquery
 reproject
 astroalign
 opencv-python-headless

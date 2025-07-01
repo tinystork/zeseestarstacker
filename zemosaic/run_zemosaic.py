@@ -1,6 +1,7 @@
 # zemosaic/run_zemosaic.py
 import sys  # Ajout pour sys.path et sys.modules
 import multiprocessing
+import os
 # import reproject # L'import direct ici n'est pas crucial, mais ne fait pas de mal
 import tkinter as tk
 from tkinter import messagebox  # Nécessaire pour la messagebox d'erreur critique
@@ -11,26 +12,50 @@ print(f"Python Executable: {sys.executable}")
 print(f"Python Version: {sys.version}")
 print(f"Chemin de travail actuel (CWD): {sys.path[0]}") # sys.path[0] est généralement le dossier du script
 
+# S'assurer que le dossier parent est dans sys.path afin que les imports relatifs
+# dans les modules du package fonctionnent même lorsque ce script est exécuté
+# directement.
+_package_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_package_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 # Essayer d'importer la classe GUI et la variable de disponibilité du worker
 try:
-    from zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
+    from zemosaic.zemosaic_gui import ZeMosaicGUI, ZEMOSAIC_WORKER_AVAILABLE
     print("--- run_zemosaic.py: Import de zemosaic_gui RÉUSSI ---")
 
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
     if ZEMOSAIC_WORKER_AVAILABLE:
         try:
-            # Tenter d'importer zemosaic_worker directement pour inspecter son chemin
-            # Note: Il est déjà importé par zemosaic_gui si ZEMOSAIC_WORKER_AVAILABLE est True
-            import zemosaic_worker 
-            print(f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}")
-            if 'zemosaic_worker' in sys.modules:
-                 print(f"DEBUG (run_zemosaic): sys.modules['zemosaic_worker'] pointe vers: {sys.modules['zemosaic_worker'].__file__}")
+            # Importer le worker via le package pour que ses imports relatifs fonctionnent
+            from zemosaic import zemosaic_worker
+            print(
+                f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}"
+            )
+            if 'zemosaic.zemosaic_worker' in sys.modules:
+                print(
+                    "DEBUG (run_zemosaic): sys.modules['zemosaic.zemosaic_worker'] pointe vers: "
+                    f"{sys.modules['zemosaic.zemosaic_worker'].__file__}"
+                )
+            elif 'zemosaic_worker' in sys.modules:
+                # Importe sous l'ancien nom si déjà présent
+                print(
+                    "DEBUG (run_zemosaic): module importé sous le nom 'zemosaic_worker', fichier: "
+                    f"{sys.modules['zemosaic_worker'].__file__}"
+                )
             else:
-                print("DEBUG (run_zemosaic): zemosaic_worker n'est pas dans sys.modules après import direct (étrange).")
+                print(
+                    "DEBUG (run_zemosaic): zemosaic_worker n'est pas dans sys.modules après import direct (étrange)."
+                )
         except ImportError as e_worker_direct:
-            print(f"ERREUR (run_zemosaic): Échec de l'import direct de zemosaic_worker pour débogage: {e_worker_direct}")
+            print(
+                f"ERREUR (run_zemosaic): Échec de l'import direct de zemosaic_worker pour débogage: {e_worker_direct}"
+            )
         except AttributeError:
-            print(f"ERREUR (run_zemosaic): zemosaic_worker importé mais n'a pas d'attribut __file__ (très étrange).")
+            print(
+                "ERREUR (run_zemosaic): zemosaic_worker importé mais n'a pas d'attribut __file__ (très étrange)."
+            )
 
 except ImportError as e:
     print(f"ERREUR CRITIQUE (run_zemosaic): Impossible d'importer ZeMosaicGUI depuis zemosaic_gui.py: {e}")
