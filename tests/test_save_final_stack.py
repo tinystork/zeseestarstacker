@@ -367,3 +367,26 @@ def test_save_final_stack_classic_reproject_crop(tmp_path):
     assert np.array_equal(saved.astype(np.float32), data[1:3, 1:3])
     assert header["CRPIX1"] == 1.0
     assert header["CRPIX2"] == 1.0
+
+
+def test_save_final_stack_adds_radec(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.drizzle_active_session = True
+    obj.drizzle_mode = "Final"
+    obj.preserve_linear_output = True
+    obj.drizzle_output_wcs = make_wcs()
+
+    data = np.ones((2, 2), dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=True,
+    )
+
+    hdr = fits.getheader(obj.final_stacked_path)
+    assert "RA" in hdr and "DEC" in hdr
+    assert np.isclose(hdr["RA"], hdr["CRVAL1"])
+    assert np.isclose(hdr["DEC"], hdr["CRVAL2"])

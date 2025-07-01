@@ -9393,6 +9393,17 @@ class SeestarQueuedStacker:
             round(self.total_exposure_seconds, 2),
             "[s] Approx total exposure",
         )
+        # Propagate basic pointing information if absent
+        if "RA" not in final_header and "CRVAL1" in final_header:
+            final_header["RA"] = (
+                float(final_header["CRVAL1"]),
+                "[deg] Approx pointing RA from WCS",
+            )
+        if "DEC" not in final_header and "CRVAL2" in final_header:
+            final_header["DEC"] = (
+                float(final_header["CRVAL2"]),
+                "[deg] Approx pointing DEC from WCS",
+            )
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):
             base_name = self.output_filename.strip()
