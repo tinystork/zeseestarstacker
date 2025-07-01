@@ -550,6 +550,8 @@ def solve_with_astrometry_net(
             )
         return None
 
+    if not api_key:
+        api_key = os.environ.get("ASTROMETRY_API_KEY", "")
     if not os.path.isfile(image_fits_path) or not api_key:
         if _pcb:
             path_ok = os.path.isfile(image_fits_path)
@@ -666,6 +668,7 @@ def solve_with_astrometry_net(
         if _pcb:
             _pcb("WebANET: Soumission du job...", "INFO")
 
+            _pcb("WebANET: Contacting nova.astrometry.net", "DEBUG")
         wcs_header = ast.solve_from_image(temp_path, **solve_args)
 
         if _pcb:
@@ -681,6 +684,7 @@ def solve_with_astrometry_net(
                 _pcb(msg, "ERROR")
             else:
                 _pcb(msg, "ERROR")
+        logger.error("Astrometry.net solve exception", exc_info=True)
         wcs_header = None
     finally:
         if temp_path and os.path.exists(temp_path):
