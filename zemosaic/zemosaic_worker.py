@@ -633,17 +633,17 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
             continue
         center_world = None
         try:
+            # ① Tentative via le centre du tableau
             if wcs_obj.pixel_shape:
                 x0 = wcs_obj.pixel_shape[0] / 2.0
                 y0 = wcs_obj.pixel_shape[1] / 2.0
-                center_world = wcs_obj.pixel_to_world(x0, y0)
-                if not (
-                    np.isfinite(center_world.ra.deg)
-                    and np.isfinite(center_world.dec.deg)
-                ):
-                    center_world = None
+                tmp = wcs_obj.pixel_to_world(x0, y0)
+                if np.isfinite(tmp.ra.deg) and np.isfinite(tmp.dec.deg):
+                    center_world = tmp
         except Exception:
-            center_world = None
+            pass
+
+        # ② Repli via CRVAL si ① a échoué ou rendu NaN
         if center_world is None and hasattr(wcs_obj.wcs, "crval"):
             try:
                 center_world = SkyCoord(
@@ -1838,9 +1838,13 @@ def run_hierarchical_mosaic(
                 eta_str = f"{h:02d}:{m:02d}:{s:02d}"
             pcb(f"ETA_UPDATE:{eta_str}", prog=None, lvl="ETA_LEVEL") 
 
-    # Threshold for grouping Seestar stacks is provided by the GUI
-    # through ``cluster_threshold_config`` ("Panel Clustering Threshold (deg)")
-    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = cluster_threshold_config
+    # Seuil de clustering : si l'utilisateur passe 0 ou une valeur négative,
+    # on retombe sur la valeur historique 0.08 deg (≈ ½ FOV Seestar).
+    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = (
+        cluster_threshold_config
+        if cluster_threshold_config and cluster_threshold_config > 0
+        else 0.08
+    )
     PROGRESS_WEIGHT_PHASE1_RAW_SCAN = 30; PROGRESS_WEIGHT_PHASE2_CLUSTERING = 5
     PROGRESS_WEIGHT_PHASE3_MASTER_TILES = 35; PROGRESS_WEIGHT_PHASE4_GRID_CALC = 5
     PROGRESS_WEIGHT_PHASE5_ASSEMBLY = 15; PROGRESS_WEIGHT_PHASE6_SAVE = 8
