@@ -44,6 +44,7 @@ except ImportError as e_worker:
     run_hierarchical_mosaic_process = None
     print(f"ERREUR (zemosaic_gui): 'run_hierarchical_mosaic' non trouvé: {e_worker}")
 
+from dataclasses import asdict
 from .solver_settings import SolverSettings
 
 
@@ -1277,7 +1278,7 @@ class ZeMosaicGUI:
             self.config.get("auto_limit_memory_fraction", 0.1),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
-            self.solver_settings.__dict__
+            asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
         
