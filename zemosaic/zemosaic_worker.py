@@ -1856,6 +1856,7 @@ def run_hierarchical_mosaic(
                 eta_str = f"{h:02d}:{m:02d}:{s:02d}"
             pcb(f"ETA_UPDATE:{eta_str}", prog=None, lvl="ETA_LEVEL") 
 
+
     # Seuil de clustering : valeur de repli à 0.08° si l'option est absente ou non positive
     try:
         cluster_threshold = float(cluster_threshold_config or 0)
@@ -1863,6 +1864,7 @@ def run_hierarchical_mosaic(
         cluster_threshold = 0
     SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = (
         cluster_threshold if cluster_threshold > 0 else 0.08
+
     )
     PROGRESS_WEIGHT_PHASE1_RAW_SCAN = 30; PROGRESS_WEIGHT_PHASE2_CLUSTERING = 5
     PROGRESS_WEIGHT_PHASE3_MASTER_TILES = 35; PROGRESS_WEIGHT_PHASE4_GRID_CALC = 5
