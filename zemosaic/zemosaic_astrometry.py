@@ -599,12 +599,27 @@ def solve_with_astrometry_net(
         if not np.all(np.isfinite(data)):
             data = np.nan_to_num(data)
 
-        if data.ndim == 3 and data.shape[0] == 3:
-            data = np.moveaxis(data, 0, -1)
-            data = np.sum(
-                data * np.array([0.299, 0.587, 0.114], dtype=np.float32).reshape(1, 1, 3),
-                axis=2,
-            )
+        if data.ndim == 3:
+            # Convert color images to a single channel luminance image expected by
+            # astrometry.net.  Some FITS files store the RGB channels in the first
+            # axis (3, H, W) while others use the last axis (H, W, 3).  Handle both
+            # cases gracefully.
+            if data.shape[0] == 3:
+                data = np.moveaxis(data, 0, -1)
+
+            if data.shape[-1] == 3:
+                data = np.sum(
+                    data
+                    * np.array([0.299, 0.587, 0.114], dtype=np.float32).reshape(
+                        1, 1, 3
+                    ),
+                    axis=2,
+                )
+            else:
+                # Fallback: take the first plane if the dimensionality is
+                # unexpected.  This avoids passing a 3D array to photutils which
+                # would raise an error.
+                data = data[..., 0]
 
         if downsample_factor and isinstance(downsample_factor, int) and downsample_factor > 1:
             data = data[::downsample_factor, ::downsample_factor]
