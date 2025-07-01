@@ -554,9 +554,14 @@ def solve_with_astrometry_net(
         if _pcb:
             path_ok = os.path.isfile(image_fits_path)
             key_len = len(api_key) if isinstance(api_key, str) else 0
+
+            preview = (
+                f"{api_key[:4]}..." if isinstance(api_key, str) and key_len > 4 else api_key
+            )
             _pcb(
-                f"Astrometry.net solve input invalid or API key missing. "
-                f"Path ok={path_ok} Key len={key_len}",
+                "Astrometry.net solve input invalid or API key missing. "
+                f"Path ok={path_ok} Key len={key_len} Preview='{preview}'",
+
                 "ERROR",
             )
         return None

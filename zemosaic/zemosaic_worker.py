@@ -738,6 +738,11 @@ def get_wcs_and_pretreat_raw_file(
             wcs_brute = None
             
     solver_choice_effective = (solver_settings or {}).get("solver_choice", "ASTAP")
+    api_key_len = len((solver_settings or {}).get("api_key", ""))
+    _pcb_local(
+        f"Solver choice effective: {solver_choice_effective}, API key length={api_key_len}",
+        lvl="DEBUG_DETAIL",
+    )
     if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
         tempdir_solver = tempfile.mkdtemp(prefix="solver_")
         basename = os.path.splitext(filename)[0]
