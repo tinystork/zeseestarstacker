@@ -390,3 +390,20 @@ def test_save_final_stack_adds_radec(tmp_path):
     assert "RA" in hdr and "DEC" in hdr
     assert np.isclose(hdr["RA"], hdr["CRVAL1"])
     assert np.isclose(hdr["DEC"], hdr["CRVAL2"])
+
+
+
+def test_save_final_stack_radec_from_reference_header(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.cumulative_sum_memmap = np.ones((2, 2, 3), dtype=np.float32)
+    obj.cumulative_wht_memmap = np.ones((2, 2), dtype=np.float32)
+    obj.reference_header_for_wcs = fits.Header()
+    obj.reference_header_for_wcs["RA"] = 12.34
+    obj.reference_header_for_wcs["DEC"] = 56.78
+
+    qm.SeestarQueuedStacker._save_final_stack(obj)
+
+    hdr = fits.getheader(obj.final_stacked_path)
+    assert np.isclose(hdr["RA"], 12.34)
+    assert np.isclose(hdr["DEC"], 56.78)
+
