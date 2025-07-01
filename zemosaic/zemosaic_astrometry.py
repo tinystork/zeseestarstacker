@@ -538,12 +538,30 @@ def solve_with_astrometry_net(
         and AstropyWCS
     ):
         if _pcb:
-            _pcb("Astrometry.net solve unavailable (missing deps).", "ERROR")
+            missing = []
+            if not (ASTROPY_AVAILABLE_ASTROMETRY and AstropyWCS):
+                missing.append("astropy")
+            if not (ASTROQUERY_AVAILABLE_ASTROMETRY and AstrometryNet):
+                missing.append("astroquery")
+            joined = ", ".join(missing) if missing else "unknown"
+            _pcb(
+                f"Astrometry.net solve unavailable (missing deps: {joined}).",
+                "ERROR",
+            )
         return None
 
     if not os.path.isfile(image_fits_path) or not api_key:
         if _pcb:
-            _pcb("Astrometry.net solve input invalid or API key missing.", "ERROR")
+            path_ok = os.path.isfile(image_fits_path)
+            key_len = len(api_key) if isinstance(api_key, str) else 0
+            preview = (
+                f"{api_key[:4]}..." if isinstance(api_key, str) and key_len > 4 else api_key
+            )
+            _pcb(
+                "Astrometry.net solve input invalid or API key missing. "
+                f"Path ok={path_ok} Key len={key_len} Preview='{preview}'",
+                "ERROR",
+            )
         return None
 
     img_basename_log = os.path.basename(image_fits_path)
