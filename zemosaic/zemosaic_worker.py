@@ -2520,17 +2520,6 @@ def run_hierarchical_mosaic(
 
 
 
-
-#--- Worker process helper ---
-def run_hierarchical_mosaic_process(progress_queue, *args, solver_settings_dict=None, **kwargs):
-    """Execute :func:`run_hierarchical_mosaic` in a separate process.
-
-    Parameters are identical to :func:`run_hierarchical_mosaic` **except** for
-    ``progress_callback`` which is automatically provided so the caller should
-    omit it. Any log message produced by the worker will be sent back through
-    ``progress_queue``.
-    """
-
     def queue_callback(message_key_or_raw, progress_value=None, level="INFO", **cb_kwargs):
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
@@ -2594,39 +2583,4 @@ if __name__ == "__main__":
         except Exception:
             solver_cfg = SolverSettings().__dict__
 
-    run_hierarchical_mosaic(
-        input_folder=args.input_folder,
-        output_folder=args.output_folder,
-        astap_exe_path=cfg.get("astap_executable_path", ""),
-        astap_data_dir_param=cfg.get("astap_data_directory_path", ""),
-        astap_search_radius_config=cfg.get("astap_default_search_radius", 3.0),
-        astap_downsample_config=cfg.get("astap_default_downsample", 2),
-        astap_sensitivity_config=cfg.get("astap_default_sensitivity", 100),
-        cluster_threshold_config=cfg.get("cluster_threshold", 0.5),
-        progress_callback=None,
-        stack_norm_method=cfg.get("stacking_normalize_method", "linear_fit"),
-        stack_weight_method=cfg.get("stacking_weighting_method", "noise_variance"),
-        stack_reject_algo=cfg.get("stacking_rejection_algorithm", "winsorized_sigma_clip"),
-        stack_kappa_low=cfg.get("stacking_kappa_low", 3.0),
-        stack_kappa_high=cfg.get("stacking_kappa_high", 3.0),
-        parsed_winsor_limits=(0.05, 0.05),
-        stack_final_combine=cfg.get("stacking_final_combine_method", "mean"),
-        apply_radial_weight_config=cfg.get("apply_radial_weight", False),
-        radial_feather_fraction_config=cfg.get("radial_feather_fraction", 0.8),
-        radial_shape_power_config=cfg.get("radial_shape_power", 2.0),
-        min_radial_weight_floor_config=cfg.get("min_radial_weight_floor", 0.0),
-        final_assembly_method_config=cfg.get("final_assembly_method", "reproject_coadd"),
-        num_base_workers_config=cfg.get("num_processing_workers", 0),
-        apply_master_tile_crop_config=cfg.get("apply_master_tile_crop", True),
-        master_tile_crop_percent_config=cfg.get("master_tile_crop_percent", 18.0),
-        save_final_as_uint16_config=cfg.get("save_final_as_uint16", False),
-        coadd_use_memmap_config=args.coadd_use_memmap or cfg.get("coadd_use_memmap", False),
-        coadd_memmap_dir_config=args.coadd_memmap_dir or cfg.get("coadd_memmap_dir", None),
-        coadd_cleanup_memmap_config=args.coadd_cleanup_memmap if args.coadd_cleanup_memmap else cfg.get("coadd_cleanup_memmap", True),
-        assembly_process_workers_config=args.assembly_process_workers if args.assembly_process_workers is not None else cfg.get("assembly_process_workers", 0),
-        auto_limit_frames_per_master_tile_config=(not args.no_auto_limit_frames) and cfg.get("auto_limit_frames_per_master_tile", True),
-        auto_limit_memory_fraction_config=cfg.get("auto_limit_memory_fraction", 0.2),
-        winsor_worker_limit_config=args.winsor_workers if args.winsor_workers is not None else cfg.get("winsor_worker_limit", 2),
-        max_raw_per_master_tile_config=args.max_raw_per_master_tile if args.max_raw_per_master_tile is not None else cfg.get("max_raw_per_master_tile", 0),
-        solver_settings=solver_cfg,
-    )
+  
