@@ -2538,18 +2538,22 @@ def run_hierarchical_mosaic(
     pcb("run_success_processing_completed", prog=current_global_progress, lvl="SUCCESS", duration=f"{total_duration_sec:.2f}")
     gc.collect(); _log_memory_usage(progress_callback, "Fin Run Hierarchical Mosaic (après GC final)")
     logger.info(f"===== Run Hierarchical Mosaic COMPLETED in {total_duration_sec:.2f}s =====")
+################################################################################
+################################################################################
+####
 
-####################################################################################################################################################################
-
-
+def run_hierarchical_mosaic_process(
+    progress_queue,
+    *args,
+    solver_settings_dict=None,
+    **kwargs,
+):
+    """Wrapper for running :func:`run_hierarchical_mosaic` in a separate process."""
 
     def queue_callback(message_key_or_raw, progress_value=None, level="INFO", **cb_kwargs):
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
-    # Insert the queue callback at the expected position for progress_callback
-    # (after ``cluster_threshold_config`` and before stacking parameters).
     full_args = args[:8] + (queue_callback,) + args[8:]
-
     try:
         run_hierarchical_mosaic(*full_args, solver_settings=solver_settings_dict, **kwargs)
     except Exception as e_proc:
