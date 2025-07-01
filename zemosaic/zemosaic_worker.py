@@ -266,6 +266,21 @@ def astap_paths_valid(astap_exe_path: str, astap_data_dir: str) -> bool:
     )
 
 
+def _write_header_to_fits(file_path: str, header_obj, pcb=None):
+    """Safely update ``file_path`` FITS header with ``header_obj`` if possible."""
+    if not (ASTROPY_AVAILABLE and fits):
+        return
+    try:
+        with fits.open(file_path, mode="update", memmap=False) as hdul:
+            hdul[0].header.update(header_obj)
+            hdul.flush()
+        if pcb:
+            pcb("getwcs_info_header_written", lvl="DEBUG_DETAIL", filename=os.path.basename(file_path))
+    except Exception as e_update:
+        if pcb:
+            pcb("getwcs_warn_header_write_failed", lvl="WARN", filename=os.path.basename(file_path), error=str(e_update))
+
+
 def solve_with_astrometry(
     image_fits_path: str,
     fits_header,
@@ -636,7 +651,7 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
         return None, None
 
 
-def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: Callable):
+def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: callable):
     """Group raw files captured by the Seestar based on their WCS position."""
 
     if not (ASTROPY_AVAILABLE and SkyCoord and u):
@@ -647,7 +662,13 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
         _log_and_callback("clusterstacks_warn_no_raw_info", level="WARN", callback=progress_callback)
         return []
 
-    _log_and_callback("clusterstacks_info_start", num_files=len(all_raw_files_with_info), threshold=stack_threshold_deg, level="INFO", callback=progress_callback)
+    _log_and_callback(
+        "clusterstacks_info_start",
+        num_files=len(all_raw_files_with_info),
+        threshold=stack_threshold_deg,
+        level="INFO",
+        callback=progress_callback,
+    )
 
     panel_centers_sky = []
     panel_data_for_clustering = []
@@ -945,6 +966,7 @@ def get_wcs_and_pretreat_raw_file(
         
         if wcs_brute and wcs_brute.is_celestial: # Re-vérifier après la tentative de set_pixel_shape
             _pcb_local("getwcs_info_pretreatment_wcs_ok", lvl="DEBUG", filename=filename)
+            _write_header_to_fits(file_path, header_orig, _pcb_local)
             return img_data_processed_adu, wcs_brute, header_orig, hp_mask_path
         # else: tombe dans le bloc de déplacement ci-dessous
 
