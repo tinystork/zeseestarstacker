@@ -36,7 +36,11 @@ except ImportError as e_config:
 
 # --- Worker Import ---
 try:
-    from zemosaic_worker import run_hierarchical_mosaic, run_hierarchical_mosaic_process
+    # Import worker from the same package so relative imports inside it work
+    from .zemosaic_worker import (
+        run_hierarchical_mosaic,
+        run_hierarchical_mosaic_process,
+    )
     ZEMOSAIC_WORKER_AVAILABLE = True
 except ImportError as e_worker:
     ZEMOSAIC_WORKER_AVAILABLE = False
