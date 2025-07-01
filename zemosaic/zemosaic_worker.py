@@ -129,13 +129,28 @@ ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
 # ... (imports et logger configuré comme avant) ...
 
 # --- Helper pour log et callback ---
-def _log_and_callback(message_key_or_raw, progress_value=None, level="INFO", callback=None, **kwargs):
+def _log_and_callback(
+    message_key_or_raw,
+    progress_value=None,
+    level="INFO",
+    callback=None,
+    **kwargs,
+):
     """
     Helper pour loguer un message et appeler le callback GUI.
     - Si level est INFO, WARN, ERROR, SUCCESS, message_key_or_raw est traité comme une clé.
     - Sinon (DEBUG, ETA_LEVEL, etc.), message_key_or_raw est loggué tel quel.
     - Les **kwargs sont passés pour le formatage si message_key_or_raw est une clé.
     """
+    # Support backwards compatibility for lvl/prog keyword aliases
+    if "lvl" in kwargs and level == "INFO":
+        level = kwargs.pop("lvl")
+    elif "lvl" in kwargs:
+        level = kwargs.pop("lvl")
+    if "prog" in kwargs and progress_value is None:
+        progress_value = kwargs.pop("prog")
+    elif "prog" in kwargs:
+        progress_value = kwargs.pop("prog")
     log_level_map = {
         "INFO": logging.INFO, "DEBUG": logging.DEBUG, "DEBUG_DETAIL": logging.DEBUG,
         "WARN": logging.WARNING, "ERROR": logging.ERROR, "SUCCESS": logging.INFO,
@@ -627,23 +642,24 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
     _log_and_callback("clusterstacks_info_start", num_files=len(all_raw_files_with_info), threshold=stack_threshold_deg, level="INFO", callback=progress_callback)
     panel_centers_sky = []
     panel_data_for_clustering = []
+    zero_coord = SkyCoord(0 * u.deg, 0 * u.deg, frame="icrs")
     for i, info in enumerate(all_raw_files_with_info):
         wcs_obj = info["wcs"]
         if not (wcs_obj and wcs_obj.is_celestial):
             continue
         center_world = None
         try:
+            # ① Tentative via le centre du tableau
             if wcs_obj.pixel_shape:
                 x0 = wcs_obj.pixel_shape[0] / 2.0
                 y0 = wcs_obj.pixel_shape[1] / 2.0
-                center_world = wcs_obj.pixel_to_world(x0, y0)
-                if not (
-                    np.isfinite(center_world.ra.deg)
-                    and np.isfinite(center_world.dec.deg)
-                ):
-                    center_world = None
+                tmp = wcs_obj.pixel_to_world(x0, y0)
+                if np.isfinite(tmp.ra.deg) and np.isfinite(tmp.dec.deg):
+                    center_world = tmp
         except Exception:
-            center_world = None
+            pass
+
+        # ② Repli via CRVAL si ① a échoué ou rendu NaN
         if center_world is None and hasattr(wcs_obj.wcs, "crval"):
             try:
                 center_world = SkyCoord(
@@ -653,11 +669,13 @@ def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: f
                 )
             except Exception:
                 center_world = None
-        if center_world is not None:
-            panel_centers_sky.append(center_world)
-            panel_data_for_clustering.append(info)
-        else:
+        if (
+            center_world is None
+            or center_world.separation(zero_coord).deg < 1e-3
+        ):
             continue
+        panel_centers_sky.append(center_world)
+        panel_data_for_clustering.append(info)
     if not panel_centers_sky: _log_and_callback("clusterstacks_warn_no_centers", level="WARN", callback=progress_callback); return []
     groups = []; assigned_mask = [False] * len(panel_centers_sky)
     for i in range(len(panel_centers_sky)):
@@ -1838,9 +1856,14 @@ def run_hierarchical_mosaic(
                 eta_str = f"{h:02d}:{m:02d}:{s:02d}"
             pcb(f"ETA_UPDATE:{eta_str}", prog=None, lvl="ETA_LEVEL") 
 
-    # Threshold for grouping Seestar stacks is provided by the GUI
-    # through ``cluster_threshold_config`` ("Panel Clustering Threshold (deg)")
-    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = cluster_threshold_config
+    # Seuil de clustering : valeur de repli à 0.08° si l'option est absente ou non positive
+    try:
+        cluster_threshold = float(cluster_threshold_config or 0)
+    except (TypeError, ValueError):
+        cluster_threshold = 0
+    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = (
+        cluster_threshold if cluster_threshold > 0 else 0.08
+    )
     PROGRESS_WEIGHT_PHASE1_RAW_SCAN = 30; PROGRESS_WEIGHT_PHASE2_CLUSTERING = 5
     PROGRESS_WEIGHT_PHASE3_MASTER_TILES = 35; PROGRESS_WEIGHT_PHASE4_GRID_CALC = 5
     PROGRESS_WEIGHT_PHASE5_ASSEMBLY = 15; PROGRESS_WEIGHT_PHASE6_SAVE = 8
