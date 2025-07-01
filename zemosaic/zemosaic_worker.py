@@ -1815,7 +1815,9 @@ def run_hierarchical_mosaic(
                 eta_str = f"{h:02d}:{m:02d}:{s:02d}"
             pcb(f"ETA_UPDATE:{eta_str}", prog=None, lvl="ETA_LEVEL") 
 
-    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = 0.08
+    # Threshold for grouping Seestar stacks is provided by the GUI
+    # through ``cluster_threshold_config`` ("Panel Clustering Threshold (deg)")
+    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = cluster_threshold_config
     PROGRESS_WEIGHT_PHASE1_RAW_SCAN = 30; PROGRESS_WEIGHT_PHASE2_CLUSTERING = 5
     PROGRESS_WEIGHT_PHASE3_MASTER_TILES = 35; PROGRESS_WEIGHT_PHASE4_GRID_CALC = 5
     PROGRESS_WEIGHT_PHASE5_ASSEMBLY = 15; PROGRESS_WEIGHT_PHASE6_SAVE = 8
