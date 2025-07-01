@@ -14,6 +14,13 @@ import uuid
 import multiprocessing
 from typing import Callable
 
+try:
+    from solver_settings import SolverSettings
+    SOLVER_SETTINGS_AVAILABLE = True
+except Exception:
+    SolverSettings = None
+    SOLVER_SETTINGS_AVAILABLE = False
+
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 # BrokenProcessPool moved under concurrent.futures.process in modern Python
 from concurrent.futures.process import BrokenProcessPool
@@ -2547,6 +2554,13 @@ if __name__ == "__main__":
         except Exception:
             pass
 
+    solver_settings = None
+    if SOLVER_SETTINGS_AVAILABLE and SolverSettings is not None:
+        try:
+            solver_settings = SolverSettings.load_default().__dict__
+        except Exception:
+            solver_settings = None
+
     run_hierarchical_mosaic(
         input_folder=args.input_folder,
         output_folder=args.output_folder,
@@ -2581,4 +2595,5 @@ if __name__ == "__main__":
         auto_limit_memory_fraction_config=cfg.get("auto_limit_memory_fraction", 0.2),
         winsor_worker_limit_config=args.winsor_workers if args.winsor_workers is not None else cfg.get("winsor_worker_limit", 2),
         max_raw_per_master_tile_config=args.max_raw_per_master_tile if args.max_raw_per_master_tile is not None else cfg.get("max_raw_per_master_tile", 0),
+        solver_settings=solver_settings,
     )
