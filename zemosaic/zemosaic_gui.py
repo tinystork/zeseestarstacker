@@ -36,7 +36,11 @@ except ImportError as e_config:
 
 # --- Worker Import ---
 try:
-    from zemosaic_worker import run_hierarchical_mosaic, run_hierarchical_mosaic_process
+    # Import worker from the same package so relative imports inside it work
+    from .zemosaic_worker import (
+        run_hierarchical_mosaic,
+        run_hierarchical_mosaic_process,
+    )
     ZEMOSAIC_WORKER_AVAILABLE = True
 except ImportError as e_worker:
     ZEMOSAIC_WORKER_AVAILABLE = False
@@ -1272,8 +1276,8 @@ class ZeMosaicGUI:
             self.use_memmap_var.get(),
             memmap_dir,
             self.cleanup_memmap_var.get(),
-            self.auto_limit_frames_var.get(),
             self.config.get("assembly_process_workers", 0),
+            self.auto_limit_frames_var.get(),
             self.config.get("auto_limit_memory_fraction", 0.1),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),

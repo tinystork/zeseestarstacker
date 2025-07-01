@@ -28,18 +28,34 @@ try:
     # Vérifier le module zemosaic_worker si la GUI dit qu'il est disponible
     if ZEMOSAIC_WORKER_AVAILABLE:
         try:
-            # Tenter d'importer zemosaic_worker directement pour inspecter son chemin
-            # Note: Il est déjà importé par zemosaic_gui si ZEMOSAIC_WORKER_AVAILABLE est True
-            import zemosaic_worker
-            print(f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}")
-            if 'zemosaic_worker' in sys.modules:
-                 print(f"DEBUG (run_zemosaic): sys.modules['zemosaic_worker'] pointe vers: {sys.modules['zemosaic_worker'].__file__}")
+            # Importer le worker via le package pour que ses imports relatifs fonctionnent
+            from zemosaic import zemosaic_worker
+            print(
+                f"DEBUG (run_zemosaic): zemosaic_worker chargé depuis: {zemosaic_worker.__file__}"
+            )
+            if 'zemosaic.zemosaic_worker' in sys.modules:
+                print(
+                    "DEBUG (run_zemosaic): sys.modules['zemosaic.zemosaic_worker'] pointe vers: "
+                    f"{sys.modules['zemosaic.zemosaic_worker'].__file__}"
+                )
+            elif 'zemosaic_worker' in sys.modules:
+                # Importe sous l'ancien nom si déjà présent
+                print(
+                    "DEBUG (run_zemosaic): module importé sous le nom 'zemosaic_worker', fichier: "
+                    f"{sys.modules['zemosaic_worker'].__file__}"
+                )
             else:
-                print("DEBUG (run_zemosaic): zemosaic_worker n'est pas dans sys.modules après import direct (étrange).")
+                print(
+                    "DEBUG (run_zemosaic): zemosaic_worker n'est pas dans sys.modules après import direct (étrange)."
+                )
         except ImportError as e_worker_direct:
-            print(f"ERREUR (run_zemosaic): Échec de l'import direct de zemosaic_worker pour débogage: {e_worker_direct}")
+            print(
+                f"ERREUR (run_zemosaic): Échec de l'import direct de zemosaic_worker pour débogage: {e_worker_direct}"
+            )
         except AttributeError:
-            print(f"ERREUR (run_zemosaic): zemosaic_worker importé mais n'a pas d'attribut __file__ (très étrange).")
+            print(
+                "ERREUR (run_zemosaic): zemosaic_worker importé mais n'a pas d'attribut __file__ (très étrange)."
+            )
 
 except ImportError as e:
     print(f"ERREUR CRITIQUE (run_zemosaic): Impossible d'importer ZeMosaicGUI depuis zemosaic_gui.py: {e}")

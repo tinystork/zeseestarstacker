@@ -113,6 +113,7 @@ try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.in
 except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
+from .solver_settings import SolverSettings
 
 # Exposed compatibility flag expected by some tests
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
@@ -2535,6 +2536,8 @@ if __name__ == "__main__":
                         help="Process workers for Winsorized rejection (1-16)")
     parser.add_argument("--max-raw-per-master-tile", type=int, default=None,
                         help="Cap raw frames per master tile (0=auto)")
+    parser.add_argument("--solver-settings", default=None,
+                        help="Path to solver settings JSON")
     args = parser.parse_args()
 
     cfg = {}
@@ -2546,6 +2549,18 @@ if __name__ == "__main__":
                 cfg.update(json.load(f))
         except Exception:
             pass
+
+    solver_cfg = {}
+    if args.solver_settings:
+        try:
+            solver_cfg = SolverSettings.load(args.solver_settings).__dict__
+        except Exception:
+            solver_cfg = {}
+    else:
+        try:
+            solver_cfg = SolverSettings.load_default().__dict__
+        except Exception:
+            solver_cfg = SolverSettings().__dict__
 
     run_hierarchical_mosaic(
         input_folder=args.input_folder,
@@ -2581,4 +2596,5 @@ if __name__ == "__main__":
         auto_limit_memory_fraction_config=cfg.get("auto_limit_memory_fraction", 0.2),
         winsor_worker_limit_config=args.winsor_workers if args.winsor_workers is not None else cfg.get("winsor_worker_limit", 2),
         max_raw_per_master_tile_config=args.max_raw_per_master_tile if args.max_raw_per_master_tile is not None else cfg.get("max_raw_per_master_tile", 0),
+        solver_settings=solver_cfg,
     )
