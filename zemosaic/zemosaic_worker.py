@@ -637,57 +637,95 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
 
 
 def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: callable):
-    if not (ASTROPY_AVAILABLE and SkyCoord and u): _log_and_callback("clusterstacks_error_astropy_unavailable", level="ERROR", callback=progress_callback); return []
-    if not all_raw_files_with_info: _log_and_callback("clusterstacks_warn_no_raw_info", level="WARN", callback=progress_callback); return []
-    _log_and_callback("clusterstacks_info_start", num_files=len(all_raw_files_with_info), threshold=stack_threshold_deg, level="INFO", callback=progress_callback)
+    """Group raw files captured by the Seestar based on their WCS position."""
+
+    if not (ASTROPY_AVAILABLE and SkyCoord and u):
+        _log_and_callback(
+            "clusterstacks_error_astropy_unavailable",
+            level="ERROR",
+            callback=progress_callback,
+        )
+        return []
+
+    if not all_raw_files_with_info:
+        _log_and_callback(
+            "clusterstacks_warn_no_raw_info",
+            level="WARN",
+            callback=progress_callback,
+        )
+        return []
+
+    _log_and_callback(
+        "clusterstacks_info_start",
+        num_files=len(all_raw_files_with_info),
+        threshold=stack_threshold_deg,
+        level="INFO",
+        callback=progress_callback,
+    )
+
     panel_centers_sky = []
     panel_data_for_clustering = []
-    zero_coord = SkyCoord(0 * u.deg, 0 * u.deg, frame="icrs")
-    for i, info in enumerate(all_raw_files_with_info):
+
+    for info in all_raw_files_with_info:
         wcs_obj = info["wcs"]
         if not (wcs_obj and wcs_obj.is_celestial):
             continue
-        center_world = None
         try:
-            # ① Tentative via le centre du tableau
             if wcs_obj.pixel_shape:
-                x0 = wcs_obj.pixel_shape[0] / 2.0
-                y0 = wcs_obj.pixel_shape[1] / 2.0
-                tmp = wcs_obj.pixel_to_world(x0, y0)
-                if np.isfinite(tmp.ra.deg) and np.isfinite(tmp.dec.deg):
-                    center_world = tmp
-        except Exception:
-            pass
-
-        # ② Repli via CRVAL si ① a échoué ou rendu NaN
-        if center_world is None and hasattr(wcs_obj.wcs, "crval"):
-            try:
+                center_world = wcs_obj.pixel_to_world(
+                    wcs_obj.pixel_shape[0] / 2.0,
+                    wcs_obj.pixel_shape[1] / 2.0,
+                )
+            elif hasattr(wcs_obj.wcs, "crval"):
                 center_world = SkyCoord(
                     ra=wcs_obj.wcs.crval[0] * u.deg,
                     dec=wcs_obj.wcs.crval[1] * u.deg,
                     frame="icrs",
                 )
-            except Exception:
-                center_world = None
-        if (
-            center_world is None
-            or center_world.separation(zero_coord).deg < 1e-3
-        ):
+            else:
+                continue
+            panel_centers_sky.append(center_world)
+            panel_data_for_clustering.append(info)
+        except Exception:
+            # Ignore files with problematic WCS information
             continue
-        panel_centers_sky.append(center_world)
-        panel_data_for_clustering.append(info)
-    if not panel_centers_sky: _log_and_callback("clusterstacks_warn_no_centers", level="WARN", callback=progress_callback); return []
-    groups = []; assigned_mask = [False] * len(panel_centers_sky)
+
+    if not panel_centers_sky:
+        _log_and_callback(
+            "clusterstacks_warn_no_centers",
+            level="WARN",
+            callback=progress_callback,
+        )
+        return []
+
+    groups = []
+    assigned_mask = [False] * len(panel_centers_sky)
+
     for i in range(len(panel_centers_sky)):
-        if assigned_mask[i]: continue
-        current_group_infos = [panel_data_for_clustering[i]]; assigned_mask[i] = True
+        if assigned_mask[i]:
+            continue
+        current_group_infos = [panel_data_for_clustering[i]]
+        assigned_mask[i] = True
         current_group_center_seed = panel_centers_sky[i]
+
         for j in range(i + 1, len(panel_centers_sky)):
-            if assigned_mask[j]: continue
-            if current_group_center_seed.separation(panel_centers_sky[j]).deg < stack_threshold_deg:
-                current_group_infos.append(panel_data_for_clustering[j]); assigned_mask[j] = True
+            if assigned_mask[j]:
+                continue
+            if (
+                current_group_center_seed.separation(panel_centers_sky[j]).deg
+                < stack_threshold_deg
+            ):
+                current_group_infos.append(panel_data_for_clustering[j])
+                assigned_mask[j] = True
+
         groups.append(current_group_infos)
-    _log_and_callback("clusterstacks_info_finished", num_groups=len(groups), level="INFO", callback=progress_callback)
+
+    _log_and_callback(
+        "clusterstacks_info_finished",
+        num_groups=len(groups),
+        level="INFO",
+        callback=progress_callback,
+    )
     return groups
 
 def get_wcs_and_pretreat_raw_file(
