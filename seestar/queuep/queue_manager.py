@@ -9393,6 +9393,33 @@ class SeestarQueuedStacker:
             round(self.total_exposure_seconds, 2),
             "[s] Approx total exposure",
         )
+        # Propagate basic pointing information if absent
+        if "RA" not in final_header:
+            if "CRVAL1" in final_header:
+                final_header["RA"] = (
+                    float(final_header["CRVAL1"]),
+                    "[deg] Approx pointing RA from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "RA" in self.reference_header_for_wcs:
+                final_header["RA"] = (
+                    float(self.reference_header_for_wcs["RA"]),
+                    self.reference_header_for_wcs.comments["RA"]
+                    if "RA" in self.reference_header_for_wcs.comments
+                    else "[deg] Pointing RA from reference header",
+                )
+        if "DEC" not in final_header:
+            if "CRVAL2" in final_header:
+                final_header["DEC"] = (
+                    float(final_header["CRVAL2"]),
+                    "[deg] Approx pointing DEC from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "DEC" in self.reference_header_for_wcs:
+                final_header["DEC"] = (
+                    float(self.reference_header_for_wcs["DEC"]),
+                    self.reference_header_for_wcs.comments["DEC"]
+                    if "DEC" in self.reference_header_for_wcs.comments
+                    else "[deg] Pointing DEC from reference header",
+                )
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):
             base_name = self.output_filename.strip()
