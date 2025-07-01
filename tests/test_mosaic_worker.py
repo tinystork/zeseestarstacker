@@ -608,7 +608,7 @@ def test_use_sidecar_wcs(monkeypatch, tmp_path):
             data = np.ones((2, 2), dtype=np.float32)
             hdr = fits.Header()
             hdr["BITPIX"] = 16
-            return data, hdr
+            return data, hdr, {"axis_order_original": "HWC"}
 
         @staticmethod
         def debayer_image(img, pattern, progress_callback=None):
