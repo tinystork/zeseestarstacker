@@ -1651,6 +1651,8 @@ def assemble_final_mosaic_reproject_coadd(
     solver_settings: dict | None = None,
     solver_instance=None,
     use_gpu: bool = False,
+
+
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1668,6 +1670,7 @@ def assemble_final_mosaic_reproject_coadd(
         zemosaic_utils.cpu_reproject_and_coadd = reproject_and_coadd
     except Exception:
         pass
+
 
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1797,15 +1800,19 @@ def assemble_final_mosaic_reproject_coadd(
     coverage = None
     try:
         for ch in range(n_channels):
+
             data_list = [arr[..., ch] for arr, _w in input_data_all_tiles_HWC_processed]
             wcs_list = [wcs for _arr, wcs in input_data_all_tiles_HWC_processed]
+
             chan_mosaic, chan_cov = reproject_and_coadd_wrapper(
                 data_list=data_list,
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
+
                 output_projection=output_header,
                 use_gpu=use_gpu,
                 cpu_func=reproject_and_coadd,
+
                 reproject_function=reproject_interp,
                 combine_function="mean",
                 **reproj_kwargs,
@@ -2480,6 +2487,7 @@ def run_hierarchical_mosaic(
         if not reproject_coadd_available: 
             pcb("run_error_phase5_reproject_coadd_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
+
         if use_gpu_phase5 and gpu_is_available():
             try:
                 import cupy
@@ -2522,6 +2530,7 @@ def run_hierarchical_mosaic(
                 crop_percent=master_tile_crop_percent_config,
                 use_gpu=use_gpu_phase5,
             )
+
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
 
