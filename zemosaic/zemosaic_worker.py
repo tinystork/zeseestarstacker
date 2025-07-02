@@ -112,6 +112,7 @@ try:
     from zemosaic_utils import (
         gpu_assemble_final_mosaic_reproject_coadd,
         gpu_assemble_final_mosaic_incremental,
+        reproject_and_coadd_wrapper,
     )
     ZEMOSAIC_UTILS_AVAILABLE = True
     logger.info("Module 'zemosaic_utils' importé.")
@@ -1587,14 +1588,15 @@ def assemble_final_mosaic_incremental(
 def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, output_shape_hw, match_bg, mm_sum_prefix=None, mm_cov_prefix=None):
     """Worker function to run reproject_and_coadd in a separate process."""
     from astropy.wcs import WCS
-    from reproject.mosaicking import reproject_and_coadd
     from reproject import reproject_interp
     import numpy as np
 
     final_wcs = WCS(output_wcs_header)
-    prepared_inputs = []
+    data_list = []
+    wcs_list = []
     for arr, hdr in channel_data_list:
-        prepared_inputs.append((arr, WCS(hdr)))
+        data_list.append(arr)
+        wcs_list.append(WCS(hdr))
 
 
 
@@ -1617,7 +1619,15 @@ def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, ou
     if bg_kw:
         kwargs[bg_kw] = match_bg
 
-    stacked, coverage = reproject_and_coadd(prepared_inputs, **kwargs)
+    stacked, coverage = reproject_and_coadd_wrapper(
+        data_list=data_list,
+        wcs_list=wcs_list,
+        shape_out=output_shape_hw,
+        output_projection=final_wcs,
+        use_gpu=False,
+        cpu_func=reproject_and_coadd,
+        **kwargs,
+    )
 
     if mm_sum_prefix and mm_cov_prefix:
         _wait_for_memmap_files([mm_sum_prefix, mm_cov_prefix])
@@ -1640,6 +1650,7 @@ def assemble_final_mosaic_reproject_coadd(
     re_solve_cropped_tiles: bool = False,
     solver_settings: dict | None = None,
     solver_instance=None,
+    use_gpu: bool = False,
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1651,6 +1662,12 @@ def assemble_final_mosaic_reproject_coadd(
         f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    # Ensure wrapper uses the possibly monkeypatched CPU implementation
+    try:
+        zemosaic_utils.cpu_reproject_and_coadd = reproject_and_coadd
+    except Exception:
+        pass
 
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1780,13 +1797,15 @@ def assemble_final_mosaic_reproject_coadd(
     coverage = None
     try:
         for ch in range(n_channels):
-            channel_inputs = [
-                (arr[..., ch], wcs) for arr, wcs in input_data_all_tiles_HWC_processed
-            ]
-            chan_mosaic, chan_cov = reproject_and_coadd(
-                channel_inputs,
-                output_header,
-                final_output_shape_hw,
+            data_list = [arr[..., ch] for arr, _w in input_data_all_tiles_HWC_processed]
+            wcs_list = [wcs for _arr, wcs in input_data_all_tiles_HWC_processed]
+            chan_mosaic, chan_cov = reproject_and_coadd_wrapper(
+                data_list=data_list,
+                wcs_list=wcs_list,
+                shape_out=final_output_shape_hw,
+                output_projection=output_header,
+                use_gpu=use_gpu,
+                cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
                 **reproj_kwargs,
@@ -2489,6 +2508,7 @@ def run_hierarchical_mosaic(
                     match_bg=True,
                     apply_crop=apply_master_tile_crop_config,
                     crop_percent=master_tile_crop_percent_config,
+                    use_gpu=False,
                 )
         else:
             final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
@@ -2500,6 +2520,7 @@ def run_hierarchical_mosaic(
                 match_bg=True,
                 apply_crop=apply_master_tile_crop_config,
                 crop_percent=master_tile_crop_percent_config,
+                use_gpu=use_gpu_phase5,
             )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
