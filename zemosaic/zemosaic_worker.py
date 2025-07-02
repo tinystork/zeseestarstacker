@@ -1588,14 +1588,15 @@ def assemble_final_mosaic_incremental(
 def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, output_shape_hw, match_bg, mm_sum_prefix=None, mm_cov_prefix=None):
     """Worker function to run reproject_and_coadd in a separate process."""
     from astropy.wcs import WCS
-    from reproject.mosaicking import reproject_and_coadd
     from reproject import reproject_interp
     import numpy as np
 
     final_wcs = WCS(output_wcs_header)
-    prepared_inputs = []
+    data_list = []
+    wcs_list = []
     for arr, hdr in channel_data_list:
-        prepared_inputs.append((arr, WCS(hdr)))
+        data_list.append(arr)
+        wcs_list.append(WCS(hdr))
 
 
 
@@ -1618,7 +1619,15 @@ def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, ou
     if bg_kw:
         kwargs[bg_kw] = match_bg
 
-    stacked, coverage = reproject_and_coadd(prepared_inputs, **kwargs)
+    stacked, coverage = reproject_and_coadd_wrapper(
+        data_list=data_list,
+        wcs_list=wcs_list,
+        shape_out=output_shape_hw,
+        output_projection=final_wcs,
+        use_gpu=False,
+        cpu_func=reproject_and_coadd,
+        **kwargs,
+    )
 
     if mm_sum_prefix and mm_cov_prefix:
         _wait_for_memmap_files([mm_sum_prefix, mm_cov_prefix])
@@ -1642,7 +1651,8 @@ def assemble_final_mosaic_reproject_coadd(
     solver_settings: dict | None = None,
     solver_instance=None,
     use_gpu: bool = False,
-    gpu_id: int = 0,
+
+
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1655,12 +1665,12 @@ def assemble_final_mosaic_reproject_coadd(
         lvl="DEBUG_DETAIL",
     )
 
-    if use_gpu:
-        try:
-            import cupy
-            cupy.cuda.Device(gpu_id).use()
-        except Exception:
-            pass
+    # Ensure wrapper uses the possibly monkeypatched CPU implementation
+    try:
+        zemosaic_utils.cpu_reproject_and_coadd = reproject_and_coadd
+    except Exception:
+        pass
+
 
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1790,15 +1800,19 @@ def assemble_final_mosaic_reproject_coadd(
     coverage = None
     try:
         for ch in range(n_channels):
-            data_list = [arr[..., ch] for arr, _ in input_data_all_tiles_HWC_processed]
-            wcs_list = [wcs for _, wcs in input_data_all_tiles_HWC_processed]
+
+            data_list = [arr[..., ch] for arr, _w in input_data_all_tiles_HWC_processed]
+            wcs_list = [wcs for _arr, wcs in input_data_all_tiles_HWC_processed]
+
             chan_mosaic, chan_cov = reproject_and_coadd_wrapper(
                 data_list=data_list,
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
-                use_gpu=use_gpu,
-                cpu_function=reproject_and_coadd,
+
                 output_projection=output_header,
+                use_gpu=use_gpu,
+                cpu_func=reproject_and_coadd,
+
                 reproject_function=reproject_interp,
                 combine_function="mean",
                 **reproj_kwargs,
@@ -2473,18 +2487,50 @@ def run_hierarchical_mosaic(
         if not reproject_coadd_available: 
             pcb("run_error_phase5_reproject_coadd_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
-        final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
-            final_output_wcs=final_output_wcs,
-            final_output_shape_hw=final_output_shape_hw,
-            progress_callback=progress_callback,
-            n_channels=3,
-            match_bg=True,
-            apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config,
-            use_gpu=use_gpu_phase5,
-            gpu_id=gpu_id_phase5,
-        )
+
+        if use_gpu_phase5 and gpu_is_available():
+            try:
+                import cupy
+                try:
+                    cupy.cuda.Device(gpu_id_phase5).use()
+                except Exception:
+                    pass
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                )
+            except Exception as e_gpu:
+                logger.warning("GPU reproject_coadd failed, falling back to CPU: %s", e_gpu)
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    use_gpu=False,
+                )
+        else:
+            final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                final_output_wcs=final_output_wcs,
+                final_output_shape_hw=final_output_shape_hw,
+                progress_callback=progress_callback,
+                n_channels=3,
+                match_bg=True,
+                apply_crop=apply_master_tile_crop_config,
+                crop_percent=master_tile_crop_percent_config,
+                use_gpu=use_gpu_phase5,
+            )
+
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
 
