@@ -954,7 +954,24 @@ def save_fits_image(image_data: np.ndarray,
         gc.collect() # gc doit être importé en haut du fichier zemosaic_utils.py
 
 
+def gpu_assemble_final_mosaic_reproject_coadd(*args, **kwargs):
+    """GPU accelerated final mosaic assembly (reproject & coadd).
+
+    This is a placeholder implementation. A full version would mirror the
+    NumPy implementation using CuPy arrays and CUDA kernels while minimizing
+    data transfers between host and device.
+    """
+    raise NotImplementedError("GPU implementation not available")
+
+
+def gpu_assemble_final_mosaic_incremental(*args, **kwargs):
+    """GPU accelerated incremental mosaic assembly placeholder."""
+    raise NotImplementedError("GPU implementation not available")
+
+
+
 
 
 
 #####################################################################################################################
+

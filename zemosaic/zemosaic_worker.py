@@ -107,13 +107,32 @@ zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 CALC_GRID_OPTIMIZED_AVAILABLE = False
 _calculate_final_mosaic_grid_optimized = None
 
-try: import zemosaic_utils; ZEMOSAIC_UTILS_AVAILABLE = True; logger.info("Module 'zemosaic_utils' importé.")
+try:
+    import zemosaic_utils
+    from zemosaic_utils import (
+        gpu_assemble_final_mosaic_reproject_coadd,
+        gpu_assemble_final_mosaic_incremental,
+    )
+    ZEMOSAIC_UTILS_AVAILABLE = True
+    logger.info("Module 'zemosaic_utils' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
 try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.info("Module 'zemosaic_astrometry' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 from .solver_settings import SolverSettings
+
+try:
+    import cupy
+    def gpu_is_available():
+        try:
+            return cupy.is_available()
+        except Exception:
+            return False
+except Exception:  # pragma: no cover - cupy not installed
+    cupy = None
+    def gpu_is_available():
+        return False
 
 # Exposed compatibility flag expected by some tests
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
@@ -1875,6 +1894,7 @@ def run_hierarchical_mosaic(
     auto_limit_frames_per_master_tile_config: bool,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
+    use_gpu_phase5: bool = False,
     solver_settings: dict | None = None
 ):
     """
@@ -2388,38 +2408,88 @@ def run_hierarchical_mosaic(
             pcb("run_error_phase5_inc_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_incremental", prog=base_progress_phase5, lvl="INFO")
         inc_memmap_dir = temp_master_tile_storage_dir or output_folder
-        final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
-            final_output_wcs=final_output_wcs,
-            final_output_shape_hw=final_output_shape_hw,
-            progress_callback=progress_callback,
-            n_channels=3,
-            apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config,
-            processing_threads=assembly_process_workers_config,
-            memmap_dir=inc_memmap_dir,
-            cleanup_memmap=True,
-            # --- FIN PASSAGE ---
-        )
+        if use_gpu_phase5 and gpu_is_available():
+            try:
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_incremental(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    processing_threads=assembly_process_workers_config,
+                    memmap_dir=inc_memmap_dir,
+                    cleanup_memmap=True,
+                )
+            except Exception as e_gpu:
+                logger.warning("GPU incremental assembly failed, falling back to CPU: %s", e_gpu)
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    processing_threads=assembly_process_workers_config,
+                    memmap_dir=inc_memmap_dir,
+                    cleanup_memmap=True,
+                )
+        else:
+            final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
+                master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                final_output_wcs=final_output_wcs,
+                final_output_shape_hw=final_output_shape_hw,
+                progress_callback=progress_callback,
+                n_channels=3,
+                apply_crop=apply_master_tile_crop_config,
+                crop_percent=master_tile_crop_percent_config,
+                processing_threads=assembly_process_workers_config,
+                memmap_dir=inc_memmap_dir,
+                cleanup_memmap=True,
+            )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_incremental"
         log_key_phase5_finished = "run_info_phase5_finished_incremental"
     else: # Méthode Reproject & Coadd
         if not reproject_coadd_available: 
             pcb("run_error_phase5_reproject_coadd_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
-        final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly, 
-            final_output_wcs=final_output_wcs, 
-            final_output_shape_hw=final_output_shape_hw,
-            progress_callback=progress_callback,
-            n_channels=3, 
-            match_bg=True,
-            # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
-            apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config,
-            # Memmap options removed for compatibility with standard reproject
-            # --- FIN PASSAGE ---
-        )
+        if use_gpu_phase5 and gpu_is_available():
+            try:
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                )
+            except Exception as e_gpu:
+                logger.warning("GPU reproject_coadd failed, falling back to CPU: %s", e_gpu)
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                )
+        else:
+            final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                final_output_wcs=final_output_wcs,
+                final_output_shape_hw=final_output_shape_hw,
+                progress_callback=progress_callback,
+                n_channels=3,
+                match_bg=True,
+                apply_crop=apply_master_tile_crop_config,
+                crop_percent=master_tile_crop_percent_config,
+            )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
 
