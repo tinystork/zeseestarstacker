@@ -138,6 +138,8 @@ except Exception:  # pragma: no cover - cupy not installed
 # Exposed compatibility flag expected by some tests
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
 
+# progress_callback(stage: str, current: int, total: int)
+
 
 
 
@@ -1480,6 +1482,10 @@ def assemble_final_mosaic_incremental(
                 future_map[future] = tile_idx
 
             processed = 0
+            total_steps = len(future_map)
+            start_time_iter = time.time()
+            last_time = start_time_iter
+            step_times = []
             for fut in as_completed(future_map):
                 idx = future_map[fut]
                 try:
@@ -1543,6 +1549,14 @@ def assemble_final_mosaic_incremental(
                         tiles_since_flush = 0
 
                 processed += 1
+                now = time.time()
+                step_times.append(now - last_time)
+                last_time = now
+                if progress_callback:
+                    try:
+                        progress_callback("phase5_incremental", processed, total_steps)
+                    except Exception:
+                        pass
                 if processed % 10 == 0 or processed == len(master_tile_fits_with_wcs_list):
                     pcb_asm(
                         "assemble_progress_tiles_processed_inc",
@@ -1566,6 +1580,17 @@ def assemble_final_mosaic_incremental(
         weight_data = hwei[0].data.astype(np.float32)
         mosaic = np.zeros_like(sum_data, dtype=np.float32)
         np.divide(sum_data, weight_data[..., None], out=mosaic, where=weight_data[..., None] > 0)
+
+    if step_times:
+        avg_step = sum(step_times) / len(step_times)
+        total_elapsed = time.time() - start_time_iter
+        pcb_asm(
+            "assemble_debug_incremental_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
 
     pcb_asm("assemble_info_finished_incremental", prog=None, lvl="INFO", shape=str(mosaic.shape))
 
@@ -1799,6 +1824,10 @@ def assemble_final_mosaic_reproject_coadd(
     mosaic_channels = []
     coverage = None
     try:
+        total_steps = n_channels
+        start_time_loop = time.time()
+        last_time = start_time_loop
+        step_times = []
         for ch in range(n_channels):
 
             data_list = [arr[..., ch] for arr, _w in input_data_all_tiles_HWC_processed]
@@ -1820,6 +1849,14 @@ def assemble_final_mosaic_reproject_coadd(
             mosaic_channels.append(chan_mosaic.astype(np.float32))
             if coverage is None:
                 coverage = chan_cov.astype(np.float32)
+            now = time.time()
+            step_times.append(now - last_time)
+            last_time = now
+            if progress_callback:
+                try:
+                    progress_callback("phase5_reproject", ch + 1, total_steps)
+                except Exception:
+                    pass
     except Exception as e_reproject:
         _pcb("assemble_error_reproject_coadd_call_failed", lvl="ERROR", error=str(e_reproject))
         logger.error(
@@ -1829,6 +1866,16 @@ def assemble_final_mosaic_reproject_coadd(
         return None, None
 
     mosaic_data = np.stack(mosaic_channels, axis=-1)
+    if step_times:
+        avg_step = sum(step_times) / len(step_times)
+        total_elapsed = time.time() - start_time_loop
+        _pcb(
+            "assemble_debug_reproject_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
     if re_solve_cropped_tiles and solver_instance is not None and hdr_for_output is not None:
         try:
             fits.writeto("final_mosaic.fits", mosaic_data.astype(np.float32), hdr_for_output, overwrite=True)
@@ -2313,8 +2360,12 @@ def run_hierarchical_mosaic(
         ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups)
     }
 
-    for future in as_completed(future_to_group_index):
+    start_time_loop_ph3 = time.time()
+    last_time_loop_ph3 = start_time_loop_ph3
+    step_times_ph3 = []
 
+    for future in as_completed(future_to_group_index):
+            
             group_index_original = future_to_group_index[future]
             tiles_processed_count_ph3 += 1
             
@@ -2323,6 +2374,15 @@ def run_hierarchical_mosaic(
             # --- FIN ENVOI MISE À JOUR ---
             
             prog_step_phase3 = base_progress_phase3 + int(PROGRESS_WEIGHT_PHASE3_MASTER_TILES * (tiles_processed_count_ph3 / max(1, num_seestar_stacks_to_process)))
+            if progress_callback:
+                try:
+                    progress_callback("phase3_master_tiles", tiles_processed_count_ph3, num_seestar_stacks_to_process)
+                except Exception:
+                    pass
+
+            now = time.time()
+            step_times_ph3.append(now - last_time_loop_ph3)
+            last_time_loop_ph3 = now
             try:
                 mt_result_path, mt_result_wcs = future.result()
                 if mt_result_path and mt_result_wcs: 
@@ -2349,11 +2409,21 @@ def run_hierarchical_mosaic(
 
     master_tiles_results_list = [master_tiles_results_list_temp[i] for i in sorted(master_tiles_results_list_temp.keys())]
     del master_tiles_results_list_temp; gc.collect()
-    if not master_tiles_results_list: 
+    if not master_tiles_results_list:
         pcb("run_error_phase3_no_master_tiles_created", prog=(base_progress_phase3 + PROGRESS_WEIGHT_PHASE3_MASTER_TILES), lvl="ERROR"); return
-    
+
     current_global_progress = base_progress_phase3 + PROGRESS_WEIGHT_PHASE3_MASTER_TILES
-    _log_memory_usage(progress_callback, "Fin Phase 3"); 
+    _log_memory_usage(progress_callback, "Fin Phase 3");
+    if step_times_ph3:
+        avg_step = sum(step_times_ph3) / len(step_times_ph3)
+        total_elapsed = time.time() - start_time_loop_ph3
+        pcb(
+            "phase3_debug_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
     pcb("run_info_phase3_finished_from_cache", prog=current_global_progress, lvl="INFO", num_master_tiles=len(master_tiles_results_list))
     
     # Assurer que le compteur final est bien affiché (au cas où la dernière itération n'aurait pas été exactement le total)
@@ -2377,7 +2447,9 @@ def run_hierarchical_mosaic(
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
     wcs_list_for_final_grid = []; shapes_list_for_final_grid_hw = []
-    for mt_path_iter,mt_wcs_iter in master_tiles_results_list:
+    start_time_loop_ph4 = time.time(); last_time_loop_ph4 = start_time_loop_ph4; step_times_ph4 = []
+    total_steps_ph4 = len(master_tiles_results_list)
+    for idx_loop, (mt_path_iter,mt_wcs_iter) in enumerate(master_tiles_results_list, 1):
         # ... (logique de récupération shape, inchangée) ...
         if not (mt_path_iter and os.path.exists(mt_path_iter) and mt_wcs_iter and mt_wcs_iter.is_celestial): pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path")); continue
         try:
@@ -2397,13 +2469,30 @@ def run_hierarchical_mosaic(
                         except Exception as e_set_ps: pcb("run_warn_phase4_failed_set_pixel_shape", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter), error=str(e_set_ps))
             if h_mt_loc > 0 and w_mt_loc > 0: shapes_list_for_final_grid_hw.append((int(h_mt_loc),int(w_mt_loc))); wcs_list_for_final_grid.append(mt_wcs_iter)
             else: pcb("run_warn_phase4_zero_dimensions_tile", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter))
+            now = time.time(); step_times_ph4.append(now - last_time_loop_ph4); last_time_loop_ph4 = now
+            if progress_callback:
+                try:
+                    progress_callback("phase4_grid", idx_loop, total_steps_ph4)
+                except Exception:
+                    pass
         except Exception as e_read_tile_shape: pcb("run_error_phase4_reading_tile_shape", prog=None, lvl="ERROR", path=os.path.basename(mt_path_iter), error=str(e_read_tile_shape)); logger.error(f"Erreur lecture shape tuile {os.path.basename(mt_path_iter)}:", exc_info=True); continue
     if not wcs_list_for_final_grid or not shapes_list_for_final_grid_hw or len(wcs_list_for_final_grid) != len(shapes_list_for_final_grid_hw): pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
     final_mosaic_drizzle_scale = 1.0 
     final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(wcs_list_for_final_grid, shapes_list_for_final_grid_hw, final_mosaic_drizzle_scale, progress_callback)
     if not final_output_wcs or not final_output_shape_hw: pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
     current_global_progress = base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC
-    _log_memory_usage(progress_callback, "Fin Phase 4"); pcb("run_info_phase4_finished", prog=current_global_progress, lvl="INFO", shape=final_output_shape_hw, crval=final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A')
+    _log_memory_usage(progress_callback, "Fin Phase 4");
+    if step_times_ph4:
+        avg_step = sum(step_times_ph4) / len(step_times_ph4)
+        total_elapsed = time.time() - start_time_loop_ph4
+        pcb(
+            "phase4_debug_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
+    pcb("run_info_phase4_finished", prog=current_global_progress, lvl="INFO", shape=final_output_shape_hw, crval=final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A')
 
 # --- Phase 5 (Assemblage Final) ---
     base_progress_phase5 = current_global_progress
@@ -2724,7 +2813,34 @@ def run_hierarchical_mosaic_process(
 ):
     """Wrapper for running :func:`run_hierarchical_mosaic` in a separate process."""
 
-    def queue_callback(message_key_or_raw, progress_value=None, level="INFO", **cb_kwargs):
+    # progress_callback(stage: str, current: int, total: int)
+
+    def queue_callback(*cb_args, **cb_kwargs):
+        """Proxy callback used inside the worker process.
+
+        It supports both legacy logging calls and the new progress
+        reporting style ``progress_callback(stage, current, total)``.
+
+        Legacy calls are forwarded unchanged as
+        ``(message_key_or_raw, progress_value, level, kwargs)`` tuples.
+        Stage updates are sent with ``"STAGE_PROGRESS"`` as the message key.
+        """
+        if (
+            len(cb_args) == 3
+            and not cb_kwargs
+            and isinstance(cb_args[0], str)
+            and isinstance(cb_args[1], int)
+            and isinstance(cb_args[2], int)
+        ):
+            stage, current, total = cb_args
+            progress_queue.put(("STAGE_PROGRESS", stage, current, {"total": total}))
+            return
+
+        message_key_or_raw = cb_args[0] if cb_args else ""
+        progress_value = cb_args[1] if len(cb_args) > 1 else None
+        level = cb_args[2] if len(cb_args) > 2 else cb_kwargs.pop("level", "INFO")
+        if "lvl" in cb_kwargs:
+            level = cb_kwargs.pop("lvl")
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
     full_args = args[:8] + (queue_callback,) + args[8:]

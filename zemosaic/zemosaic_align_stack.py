@@ -903,7 +903,11 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
     output_data_with_nans = stacked_array_NHDWC.copy()
 
     if stacked_array_NHDWC.ndim == 4: # Couleur (N, H, W, C)
-        for c in range(stacked_array_NHDWC.shape[3]):
+        total_steps = stacked_array_NHDWC.shape[3]
+        start_time = time.time()
+        last_time = start_time
+        step_times = []
+        for c in range(total_steps):
             channel_data = stacked_array_NHDWC[..., c]
             try: 
                 _, median_ch, stddev_ch = sigma_clipped_stats_func(channel_data, sigma_lower=sigma_low, sigma_upper=sigma_high, axis=0, maxiters=5)
@@ -913,6 +917,14 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
             channel_rejection_this_iter = (channel_data < lower_bound) | (channel_data > upper_bound)
             rejection_mask[..., c] = ~channel_rejection_this_iter
             output_data_with_nans[channel_rejection_this_iter, c] = np.nan
+            now = time.time()
+            step_times.append(now - last_time)
+            last_time = now
+            if progress_callback:
+                try:
+                    progress_callback("stack_kappa", c + 1, total_steps)
+                except Exception:
+                    pass
     elif stacked_array_NHDWC.ndim == 3: # Monochrome (N, H, W)
         try: _, median_img, stddev_img = sigma_clipped_stats_func(stacked_array_NHDWC, sigma_lower=sigma_low, sigma_upper=sigma_high, axis=0, maxiters=5)
         except TypeError: _, median_img, stddev_img = sigma_clipped_stats_func(stacked_array_NHDWC, sigma=max(sigma_low, sigma_high), axis=0, maxiters=5)
@@ -920,6 +932,11 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
         stats_rejection_this_iter = (stacked_array_NHDWC < lower_bound) | (stacked_array_NHDWC > upper_bound)
         rejection_mask = ~stats_rejection_this_iter
         output_data_with_nans[stats_rejection_this_iter] = np.nan
+        if progress_callback:
+            try:
+                progress_callback("stack_kappa", 1, 1)
+            except Exception:
+                pass
     else:
         _pcb("stackhelper_error_kappa_sigma_unexpected_shape", lvl="ERROR", shape=stacked_array_NHDWC.shape)
         return stacked_array_NHDWC, rejection_mask
@@ -947,10 +964,14 @@ def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
 
     if max_workers <= 1 or len(args_list) <= 1:
         results = []
+        start_time = time.time()
+        last_time = start_time
         for idx, a in enumerate(args_list, start=1):
             results.append(_apply_winsor_single(a))
             if progress_callback:
-                progress_callback(idx, len(args_list))
+                now = time.time()
+                progress_callback("stack_winsorized", idx, len(args_list))
+                last_time = now
         return results
 
     results = [None] * len(args_list)
@@ -965,12 +986,18 @@ def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
         futures = {exe.submit(_apply_winsor_single, a): i for i, a in enumerate(args_list)}
         total = len(futures)
         done = 0
+        start_time = time.time()
+        last_time = start_time
+        step_times = []
         for fut in as_completed(futures):
             idx = futures[fut]
             results[idx] = fut.result()
             done += 1
             if progress_callback:
-                progress_callback(done, total)
+                now = time.time()
+                step_times.append(now - last_time)
+                last_time = now
+                progress_callback("stack_winsorized", done, total)
 
     return results
 
@@ -1049,6 +1076,11 @@ def _reject_outliers_winsorized_sigma_clip(
 
             def prog_cb(done, total):
                 _pcb("reject_winsor_info_channel_progress", lvl="INFO_DETAIL", channel=done)
+                if progress_callback:
+                    try:
+                        progress_callback("stack_winsorized", done, total)
+                    except Exception:
+                        pass
 
             winsorized_channels = parallel_rejwinsor(orig_channels, winsor_limits_tuple,
                                                      max_workers=max_workers, progress_callback=prog_cb)
