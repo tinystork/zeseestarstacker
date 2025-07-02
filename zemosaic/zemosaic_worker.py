@@ -2061,6 +2061,11 @@ def run_hierarchical_mosaic(
     else:
         for v in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
             os.environ.pop(v, None)
+
+    # Determine final GPU usage flag only if a valid NVIDIA GPU is selected
+    use_gpu_phase5_flag = (
+        use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available()
+    )
     def _compute_phase_workers(base_workers: int, num_tasks: int, ratio: float = DEFAULT_PHASE_WORKER_RATIO) -> int:
         workers = max(1, int(base_workers * ratio))
         if num_tasks > 0:
@@ -2578,7 +2583,7 @@ def run_hierarchical_mosaic(
             pcb("run_error_phase5_inc_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_incremental", prog=base_progress_phase5, lvl="INFO")
         inc_memmap_dir = temp_master_tile_storage_dir or output_folder
-        if use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available():
+        if use_gpu_phase5_flag:
             try:
                 import cupy
                 cupy.cuda.Device(0).use()
@@ -2628,7 +2633,7 @@ def run_hierarchical_mosaic(
             pcb("run_error_phase5_reproject_coadd_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
 
-        if use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available():
+        if use_gpu_phase5_flag:
             try:
                 import cupy
                 cupy.cuda.Device(0).use()
@@ -2665,7 +2670,7 @@ def run_hierarchical_mosaic(
                 match_bg=True,
                 apply_crop=apply_master_tile_crop_config,
                 crop_percent=master_tile_crop_percent_config,
-                use_gpu=use_gpu_phase5,
+                use_gpu=use_gpu_phase5_flag,
             )
 
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
