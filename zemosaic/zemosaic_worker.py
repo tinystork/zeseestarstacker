@@ -13,6 +13,7 @@ import glob
 import uuid
 import multiprocessing
 from typing import Callable
+from types import SimpleNamespace
 
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 # BrokenProcessPool moved under concurrent.futures.process in modern Python
@@ -122,6 +123,14 @@ except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 from .solver_settings import SolverSettings
+
+# Optional configuration import for GPU toggle
+try:
+    import zemosaic_config
+    ZEMOSAIC_CONFIG_AVAILABLE = True
+except Exception:
+    zemosaic_config = None  # type: ignore
+    ZEMOSAIC_CONFIG_AVAILABLE = False
 
 import importlib.util
 
@@ -1078,7 +1087,15 @@ def create_master_tile(
     Transmet toutes les options de stacking, y compris la pondération radiale.
     """
     pcb_tile = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
-    func_id_log_base = "mastertile" 
+    # Load persistent configuration to forward GPU preference
+    if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+        try:
+            zconfig = SimpleNamespace(**zemosaic_config.load_config())
+        except Exception:
+            zconfig = SimpleNamespace()
+    else:
+        zconfig = SimpleNamespace()
+    func_id_log_base = "mastertile"
 
     pcb_tile(f"{func_id_log_base}_info_creation_started_from_cache", prog=None, lvl="INFO", 
              num_raw=len(seestar_stack_group_info), tile_id=tile_id)
@@ -1178,24 +1195,44 @@ def create_master_tile(
     pcb_tile(f"{func_id_log_base}_info_stacking_started", prog=None, lvl="DEBUG_DETAIL", 
              num_to_stack=len(valid_aligned_images), tile_id=tile_id) # Les options sont loggées au début
     
-    master_tile_stacked_HWC = zemosaic_align_stack.stack_aligned_images(
-        aligned_image_data_list=valid_aligned_images, 
-        normalize_method=stack_norm_method,
-        weighting_method=stack_weight_method,
-        rejection_algorithm=stack_reject_algo,
-        final_combine_method=stack_final_combine,
-        sigma_clip_low=stack_kappa_low,
-        sigma_clip_high=stack_kappa_high,
-        winsor_limits=parsed_winsor_limits,
-        minimum_signal_adu_target=0.0,
-        # --- TRANSMISSION DES NOUVEAUX PARAMÈTRES ---
-        apply_radial_weight=apply_radial_weight,
-        radial_feather_fraction=radial_feather_fraction,
-        radial_shape_power=radial_shape_power,
-        winsor_max_workers=winsor_pool_workers,
-        # --- FIN TRANSMISSION ---
-        progress_callback=progress_callback
-    )
+    if stack_reject_algo == "winsorized_sigma_clip":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_winsorized_sigma_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            kappa=stack_kappa_low,
+            winsor_limits=parsed_winsor_limits,
+            apply_rewinsor=True,
+        )
+    elif stack_reject_algo == "kappa_sigma":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_kappa_sigma_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            sigma_low=stack_kappa_low,
+            sigma_high=stack_kappa_high,
+        )
+    elif stack_reject_algo == "linear_fit_clip":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_linear_fit_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            sigma=stack_kappa_high,
+        )
+    else:
+        master_tile_stacked_HWC = zemosaic_align_stack.stack_aligned_images(
+            aligned_image_data_list=valid_aligned_images,
+            normalize_method=stack_norm_method,
+            weighting_method=stack_weight_method,
+            rejection_algorithm=stack_reject_algo,
+            final_combine_method=stack_final_combine,
+            sigma_clip_low=stack_kappa_low,
+            sigma_clip_high=stack_kappa_high,
+            winsor_limits=parsed_winsor_limits,
+            minimum_signal_adu_target=0.0,
+            apply_radial_weight=apply_radial_weight,
+            radial_feather_fraction=radial_feather_fraction,
+            radial_shape_power=radial_shape_power,
+            winsor_max_workers=winsor_pool_workers,
+            progress_callback=progress_callback,
+        )
     
     del valid_aligned_images; gc.collect() # valid_aligned_images a été passé par valeur (copie de la liste)
                                           # mais les arrays NumPy à l'intérieur sont passés par référence.
