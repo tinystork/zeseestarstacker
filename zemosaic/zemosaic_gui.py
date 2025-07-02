@@ -12,7 +12,7 @@ import sys
 
 try:
     import wmi
-except Exception:  # pragma: no cover - wmi may be unavailable on non Windows
+except ImportError:  # pragma: no cover - wmi may be unavailable on non Windows
     wmi = None
 
 try:
@@ -115,27 +115,39 @@ class ZeMosaicGUI:
                 "num_processing_workers": 0 # 0 pour auto, anciennement -1
             }
 
-        # --- GPU Detection (iGPU + dGPU) ---
-        w = wmi.WMI() if wmi else None
-        controllers = [c.Name for c in w.Win32_VideoController()] if w else []
-        nv_cuda_names = []
-        if cupy:
+        # --- GPU Detection helper ---
+        def _detect_gpus():
+            controllers = []
+            if wmi:
+                try:
+                    obj = wmi.WMI()
+                    controllers = [c.Name for c in obj.Win32_VideoController()]
+                except Exception:
+                    controllers = []
+
+            nv_cuda = []
             try:
+                import cupy
+                from cupy.cuda.runtime import getDeviceCount, getDeviceProperties
                 for i in range(getDeviceCount()):
                     name = getDeviceProperties(i)["name"]
                     if isinstance(name, bytes):
                         name = name.decode()
-                    nv_cuda_names.append(name)
+                    nv_cuda.append(name)
             except Exception:
-                pass
-        self._gpus = []
-        if controllers:
-            for name in controllers:
-                cuda_id = nv_cuda_names.index(name) if name in nv_cuda_names else None
-                self._gpus.append((name, cuda_id))
-        else:
-            # fallback single entry if no controller info
-            self._gpus = [("CPU", None)]
+                nv_cuda = []
+
+            def _simplify(n):
+                return n.lower().replace("laptop gpu", "").strip()
+
+            simple_cuda = [_simplify(n) for n in nv_cuda]
+            gpus = []
+            for disp in controllers:
+                simp = _simplify(disp)
+                idx = simple_cuda.index(simp) if simp in simple_cuda else None
+                gpus.append((disp, idx))
+            gpus.insert(0, ("CPU (no GPU)", None))
+            return gpus
 
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
@@ -239,7 +251,10 @@ class ZeMosaicGUI:
         self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
         self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
         self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
-        self.gpu_selector_var = tk.StringVar(value=self.config.get("gpu_selector", self._gpus[0][0] if self._gpus else ""))
+        self._gpus = _detect_gpus()
+        self.gpu_selector_var = tk.StringVar(
+            value=self.config.get("gpu_selector", self._gpus[0][0] if self._gpus else "")
+        )
         # ---  ---
 
         self.translatable_widgets = {}
@@ -720,26 +735,30 @@ class ZeMosaicGUI:
         gpu_chk = ttk.Checkbutton(
             final_assembly_options_frame,
             text=self._tr("use_gpu_phase5", "Use NVIDIA GPU for Phase 5"),
-            variable=self.use_gpu_phase5_var
+            variable=self.use_gpu_phase5_var,
         )
         gpu_chk.grid(row=asm_opt_row, column=0, sticky="w", padx=5, pady=3, columnspan=2)
-        gpu_row = asm_opt_row + 1
         asm_opt_row += 1
 
-        ttk.Label(final_assembly_options_frame, text=self._tr("gpu_selector_label", "GPU selector:")).grid(row=gpu_row, column=0, sticky="e", padx=5, pady=2)
-        values = [name for name, _ in self._gpus]
+        ttk.Label(
+            final_assembly_options_frame,
+            text=self._tr("gpu_selector_label", "GPU selector:")
+        ).grid(row=asm_opt_row, column=0, sticky="e", padx=5, pady=2)
+        names = [d for d, _ in self._gpus]
+        self.gpu_selector_var.set(names[0] if names else "")
         self.gpu_selector_cb = ttk.Combobox(
             final_assembly_options_frame,
             textvariable=self.gpu_selector_var,
-            values=values,
+            values=names,
             state="readonly",
             width=30,
         )
-        self.gpu_selector_cb.grid(row=gpu_row, column=1, sticky="w", padx=5, pady=2)
-        self.gpu_selector_cb.grid_remove()
-        self._gpu_selector_label = final_assembly_options_frame.grid_slaves(row=gpu_row, column=0)[0]
+        self.gpu_selector_cb.grid(row=asm_opt_row, column=1, sticky="w", padx=5, pady=2)
+        self._gpu_selector_label = final_assembly_options_frame.grid_slaves(row=asm_opt_row, column=0)[0]
         self.translatable_widgets["gpu_selector_label"] = self._gpu_selector_label
         self._gpu_selector_label.grid_remove()
+        self.gpu_selector_cb.grid_remove()
+        asm_opt_row += 1
 
         def on_gpu_check(*_):
             if self.use_gpu_phase5_var.get():
@@ -1362,15 +1381,16 @@ class ZeMosaicGUI:
 
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
+
         self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
         sel = self.gpu_selector_var.get()
         gpu_id = None
-        for name, cid in self._gpus:
-            if name == sel:
-                gpu_id = cid
+        for disp, idx in self._gpus:
+            if disp == sel:
+                self.config["gpu_selector"] = disp
+                self.config["gpu_id_phase5"] = idx
+                gpu_id = idx
                 break
-        self.config["gpu_selector"] = sel
-        self.config["gpu_id_phase5"] = gpu_id
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
             zemosaic_config.save_config(self.config)
 
