@@ -204,6 +204,7 @@ class ZeMosaicGUI:
         self.cleanup_memmap_var = tk.BooleanVar(value=self.config.get("coadd_cleanup_memmap", True))
         self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
         self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
+        self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
         # ---  ---
 
         self.translatable_widgets = {}
@@ -680,6 +681,13 @@ class ZeMosaicGUI:
         self.final_assembly_method_combo = ttk.Combobox(final_assembly_options_frame, values=[], state="readonly", width=40)
         self.final_assembly_method_combo.grid(row=asm_opt_row, column=1, padx=5, pady=5, sticky="ew")
         self.final_assembly_method_combo.bind("<<ComboboxSelected>>", lambda e, c=self.final_assembly_method_combo, v=self.final_assembly_method_var, k_list=self.assembly_method_keys, p="assembly_method": self._combo_to_key(e, c, v, k_list, p)); asm_opt_row += 1
+        gpu_chk = ttk.Checkbutton(
+            final_assembly_options_frame,
+            text=self._tr("use_gpu_phase5", "Use NVIDIA GPU for Phase 5"),
+            variable=self.use_gpu_phase5_var
+        )
+        gpu_chk.grid(row=asm_opt_row, column=0, sticky="w", padx=5, pady=5)
+        asm_opt_row += 1
 
         self.memmap_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_memmap_title", "Options memmap (coadd)"))
         self.memmap_frame.pack(fill=tk.X, pady=(0,10))
@@ -1258,6 +1266,7 @@ class ZeMosaicGUI:
 
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
+        self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
             zemosaic_config.save_config(self.config)
 
@@ -1289,6 +1298,7 @@ class ZeMosaicGUI:
             self.auto_limit_frames_var.get(),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
+            self.use_gpu_phase5_var.get(),
             asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )

@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "auto_limit_frames_per_master_tile": True,
     "winsor_worker_limit": 4,
     "max_raw_per_master_tile": 0,
+    "use_gpu_phase5": False,
     # --- CLES POUR LE ROGNAGE DES MASTER TUILES ---
     "apply_master_tile_crop": True,       # Désactivé par défaut
     "master_tile_crop_percent": 18.0      # Pourcentage par côté si activé (ex: 10%)

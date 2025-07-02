@@ -309,4 +309,5 @@
     "assemble_error_invalid_final_shape_inc": "Incremental assembly ERROR: invalid final output shape {shape}.",
     "assemble_warn_swapped_final_shape_inc": "Incremental assembly WARNING: provided dimensions {provided} were swapped, expected {expected}. Automatically corrected.",
     "assemble_error_mismatch_final_shape_inc": "Incremental assembly ERROR: provided dimensions {provided} do not match mosaic grid {expected}."
+    "use_gpu_phase5": "Use NVIDIA GPU for Phase 5"
 }

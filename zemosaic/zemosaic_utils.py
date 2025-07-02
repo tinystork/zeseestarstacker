@@ -958,3 +958,22 @@ def save_fits_image(image_data: np.ndarray,
 
 
 #####################################################################################################################
+def gpu_is_available() -> bool:
+    """Return True if CuPy can access a CUDA device."""
+    try:
+        import cupy
+        return cupy.cuda.is_available()
+    except Exception:
+        return False
+
+
+def gpu_assemble_final_mosaic_reproject_coadd(*args, **kwargs):
+    """GPU-accelerated version of assemble_final_mosaic_reproject_coadd."""
+    # TODO: implement with CuPy
+    return None, None
+
+
+def gpu_assemble_final_mosaic_incremental(*args, **kwargs):
+    """GPU-accelerated version of assemble_final_mosaic_incremental."""
+    # TODO: implement with CuPy
+    return None, None

@@ -109,6 +109,18 @@ _calculate_final_mosaic_grid_optimized = None
 
 try: import zemosaic_utils; ZEMOSAIC_UTILS_AVAILABLE = True; logger.info("Module 'zemosaic_utils' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
+try:
+    from zemosaic_utils import (
+        gpu_assemble_final_mosaic_reproject_coadd,
+        gpu_assemble_final_mosaic_incremental,
+        gpu_is_available,
+    )
+    GPU_UTILS_AVAILABLE = True
+except Exception:
+    gpu_assemble_final_mosaic_reproject_coadd = None
+    gpu_assemble_final_mosaic_incremental = None
+    gpu_is_available = lambda: False
+    GPU_UTILS_AVAILABLE = False
 try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.info("Module 'zemosaic_astrometry' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
 try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.info("Module 'zemosaic_align_stack' importé.")
@@ -1313,6 +1325,7 @@ def assemble_final_mosaic_incremental(
     processing_threads: int = 0,
     memmap_dir: str | None = None,
     cleanup_memmap: bool = True,
+    use_gpu_phase5: bool = False,
 ):
     """Assemble les master tiles par co-addition sur disque."""
     FLUSH_BATCH_SIZE = 10  # nombre de tuiles entre chaque flush sur le memmap
@@ -1325,6 +1338,18 @@ def assemble_final_mosaic_incremental(
         f"ASM_INC: Début. Options rognage - Appliquer: {apply_crop}, %: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    if use_gpu_phase5 and GPU_UTILS_AVAILABLE and gpu_is_available():
+        pcb_asm("ASM_INC: Using GPU", lvl="INFO")
+        try:
+            return gpu_assemble_final_mosaic_incremental(
+                master_tile_fits_with_wcs_list,
+                final_output_wcs,
+                final_output_shape_hw,
+                progress_callback,
+            )
+        except Exception as e_gpu:
+            pcb_asm("ASM_INC: GPU fallback", lvl="WARN", error=str(e_gpu))
 
     if not (REPROJECT_AVAILABLE and reproject_interp and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1621,6 +1646,7 @@ def assemble_final_mosaic_reproject_coadd(
     re_solve_cropped_tiles: bool = False,
     solver_settings: dict | None = None,
     solver_instance=None,
+    use_gpu_phase5: bool = False,
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1632,6 +1658,18 @@ def assemble_final_mosaic_reproject_coadd(
         f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    if use_gpu_phase5 and GPU_UTILS_AVAILABLE and gpu_is_available():
+        _pcb("ASM_REPROJ_COADD: Using GPU", lvl="INFO")
+        try:
+            return gpu_assemble_final_mosaic_reproject_coadd(
+                master_tile_fits_with_wcs_list,
+                final_output_wcs,
+                final_output_shape_hw,
+                progress_callback,
+            )
+        except Exception as e_gpu:
+            _pcb("ASM_REPROJ_COADD: GPU fallback", lvl="WARN", error=str(e_gpu))
 
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1875,6 +1913,7 @@ def run_hierarchical_mosaic(
     auto_limit_frames_per_master_tile_config: bool,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
+    use_gpu_phase5_config: bool = False,
     solver_settings: dict | None = None
 ):
     """
@@ -2399,6 +2438,7 @@ def run_hierarchical_mosaic(
             processing_threads=assembly_process_workers_config,
             memmap_dir=inc_memmap_dir,
             cleanup_memmap=True,
+            use_gpu_phase5=use_gpu_phase5_config,
             # --- FIN PASSAGE ---
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_incremental"
@@ -2419,6 +2459,7 @@ def run_hierarchical_mosaic(
             crop_percent=master_tile_crop_percent_config,
             # Memmap options removed for compatibility with standard reproject
             # --- FIN PASSAGE ---
+            use_gpu_phase5=use_gpu_phase5_config,
         )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
