@@ -123,16 +123,16 @@ try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 from .solver_settings import SolverSettings
 
-try:
-    import cupy
-    def gpu_is_available():
-        try:
-            return cupy.is_available()
-        except Exception:
-            return False
-except Exception:  # pragma: no cover - cupy not installed
-    cupy = None
-    def gpu_is_available():
+import importlib.util
+
+def gpu_is_available() -> bool:
+    """Return True if CuPy and a CUDA device are available."""
+    if importlib.util.find_spec("cupy") is None:
+        return False
+    try:
+        import cupy
+        return cupy.is_available()
+    except Exception:
         return False
 
 # Exposed compatibility flag expected by some tests
@@ -2011,12 +2011,16 @@ def run_hierarchical_mosaic(
         import os
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id_phase5)
-        if gpu_is_available():
-            try:
-                import cupy
-                cupy.cuda.Device(gpu_id_phase5).use()
-            except Exception:
-                pass
+        try:
+            import cupy
+            cupy.cuda.Device(0).use()
+            assert cupy.cuda.getDeviceCount() == 1
+            logger.info(
+                "\u2192 Cupy initialis\u00e9 sur : %s",
+                cupy.cuda.getDeviceProperties(0)["name"],
+            )
+        except Exception as e_init_gpu:
+            logger.warning("Initialisation GPU echou\u00e9e: %s", e_init_gpu)
 
     def _compute_phase_workers(base_workers: int, num_tasks: int, ratio: float = DEFAULT_PHASE_WORKER_RATIO) -> int:
         workers = max(1, int(base_workers * ratio))
@@ -2538,7 +2542,7 @@ def run_hierarchical_mosaic(
         if use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available():
             try:
                 import cupy
-                cupy.cuda.Device(gpu_id_phase5).use()
+                cupy.cuda.Device(0).use()
                 final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_incremental(
                     master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
                     final_output_wcs=final_output_wcs,
@@ -2588,7 +2592,7 @@ def run_hierarchical_mosaic(
         if use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available():
             try:
                 import cupy
-                cupy.cuda.Device(gpu_id_phase5).use()
+                cupy.cuda.Device(0).use()
                 final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_reproject_coadd(
                     master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
                     final_output_wcs=final_output_wcs,

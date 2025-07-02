@@ -9,14 +9,11 @@ import cv2
 import warnings
 import traceback
 import gc
+import importlib.util
 
 # --- GPU/CUDA Availability ----------------------------------------------------
-try:
-    import cupy as cp
-    from cupyx.scipy.ndimage import map_coordinates
-    GPU_AVAILABLE = True
-except Exception:  # pragma: no cover - CuPy not installed
-    GPU_AVAILABLE = False
+GPU_AVAILABLE = importlib.util.find_spec("cupy") is not None
+map_coordinates = None  # Lazily imported when needed
 
 from reproject.mosaicking import reproject_and_coadd as cpu_reproject_and_coadd
 
@@ -983,6 +980,7 @@ def gpu_assemble_final_mosaic_incremental(*args, **kwargs):
 
 def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
     """Simplified GPU implementation using CuPy."""
+    import cupy as cp
     data_gpu = [cp.asarray(d) for d in data_list]
     mosaic_gpu = cp.zeros(shape_out, dtype=cp.float32)
     weight_gpu = cp.zeros(shape_out, dtype=cp.float32)
@@ -1024,6 +1022,7 @@ def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
     arrays. The implementation here is schematic and should be replaced with a
     real CUDA accelerated routine.
     """
+    import cupy as cp
     data_gpu = [cp.asarray(d) for d in data_list]
     mosaic_gpu = cp.zeros(shape_out, dtype=cp.float32)
     weight_gpu = cp.zeros(shape_out, dtype=cp.float32)
