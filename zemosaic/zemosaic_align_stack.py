@@ -63,6 +63,32 @@ try:
 except ImportError:
     print("AVERT (zemosaic_align_stack): Scipy non disponible. Winsorized Sigma Clip non fonctionnel.")
 
+def _winsorize_axis0_numpy(arr: np.ndarray, limits: tuple[float, float]) -> np.ndarray:
+    """Vectorized winsorization along the stack axis using NumPy.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Array of shape (N, H, W) or (N, H, W, C) to winsorize along axis 0.
+    limits : tuple[float, float]
+        Fractions of data to clip on the low and high end respectively.
+
+    Returns
+    -------
+    np.ndarray
+        Winsorized array with the same shape as ``arr``.
+    """
+    low, high = limits
+    arr = arr.astype(np.float32, copy=False)
+    result = arr.copy()
+    if low > 0:
+        lower = np.quantile(arr, low, axis=0)
+        result = np.maximum(result, lower)
+    if high > 0:
+        upper = np.quantile(arr, 1.0 - high, axis=0)
+        result = np.minimum(result, upper)
+    return result
+
 ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = False
 make_radial_weight_map_func = None
 try:
@@ -911,7 +937,8 @@ def _apply_winsor_single(args):
     across the entire stack.
     """
     arr, limits = args
-    return np.asarray(winsorize_func(arr, limits, axis=0))
+    # NumPy-based vectorized winsorization for efficiency
+    return _winsorize_axis0_numpy(arr, limits)
 
 
 def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
