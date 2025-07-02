@@ -11,6 +11,17 @@ import subprocess
 import sys
 
 try:
+    import wmi
+except Exception:  # pragma: no cover - wmi may be unavailable on non Windows
+    wmi = None
+
+try:
+    import cupy
+    from cupy.cuda.runtime import getDeviceProperties, getDeviceCount
+except Exception:  # pragma: no cover - cupy might be missing
+    cupy = None
+
+try:
     from PIL import Image, ImageTk # Importe depuis Pillow
     PILLOW_AVAILABLE_FOR_ICON = True
 except ImportError:
@@ -103,6 +114,28 @@ class ZeMosaicGUI:
                 "final_assembly_method": "reproject_coadd",
                 "num_processing_workers": 0 # 0 pour auto, anciennement -1
             }
+
+        # --- GPU Detection (iGPU + dGPU) ---
+        w = wmi.WMI() if wmi else None
+        controllers = [c.Name for c in w.Win32_VideoController()] if w else []
+        nv_cuda_names = []
+        if cupy:
+            try:
+                for i in range(getDeviceCount()):
+                    name = getDeviceProperties(i)["name"]
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    nv_cuda_names.append(name)
+            except Exception:
+                pass
+        self._gpus = []
+        if controllers:
+            for name in controllers:
+                cuda_id = nv_cuda_names.index(name) if name in nv_cuda_names else None
+                self._gpus.append((name, cuda_id))
+        else:
+            # fallback single entry if no controller info
+            self._gpus = [("CPU", None)]
 
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
@@ -206,7 +239,7 @@ class ZeMosaicGUI:
         self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
         self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
         self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
-        self.gpu_id_phase5_var = tk.IntVar(value=self.config.get("gpu_id_phase5", 0))
+        self.gpu_selector_var = tk.StringVar(value=self.config.get("gpu_selector", self._gpus[0][0] if self._gpus else ""))
         # ---  ---
 
         self.translatable_widgets = {}
@@ -693,39 +726,28 @@ class ZeMosaicGUI:
         gpu_row = asm_opt_row + 1
         asm_opt_row += 1
 
-        self._gpu_label = ttk.Label(final_assembly_options_frame, text=self._tr("gpu_index_label", "GPU index:"))
-        self.translatable_widgets["gpu_index_label"] = self._gpu_label
-        self._gpu_spin = ttk.Spinbox(
+        ttk.Label(final_assembly_options_frame, text=self._tr("gpu_selector_label", "GPU selector:")).grid(row=gpu_row, column=0, sticky="e", padx=5, pady=2)
+        values = [name for name, _ in self._gpus]
+        self.gpu_selector_cb = ttk.Combobox(
             final_assembly_options_frame,
-            textvariable=self.gpu_id_phase5_var,
-            from_=0,
-            to=0,
-            width=3,
-            state="readonly"
+            textvariable=self.gpu_selector_var,
+            values=values,
+            state="readonly",
+            width=30,
         )
+        self.gpu_selector_cb.grid(row=gpu_row, column=1, sticky="w", padx=5, pady=2)
+        self.gpu_selector_cb.grid_remove()
+        self._gpu_selector_label = final_assembly_options_frame.grid_slaves(row=gpu_row, column=0)[0]
+        self.translatable_widgets["gpu_selector_label"] = self._gpu_selector_label
+        self._gpu_selector_label.grid_remove()
 
         def on_gpu_check(*_):
             if self.use_gpu_phase5_var.get():
-                try:
-                    import cupy
-                    ngpu = cupy.cuda.runtime.getDeviceCount()
-                except Exception:
-                    ngpu = 0
-                if ngpu > 0:
-                    self._gpu_spin.config(from_=0, to=ngpu-1)
-                else:
-                    self.use_gpu_phase5_var.set(False)
-                    tk.messagebox.showwarning(
-                        self._tr("no_gpu_title", "GPU not detected"),
-                        self._tr("no_gpu_msg", "No NVIDIA GPU detected. Falling back to CPU."),
-                    )
-                    return
-
-                self._gpu_label.grid(row=gpu_row, column=0, sticky="e", padx=5, pady=2)
-                self._gpu_spin.grid(row=gpu_row, column=1, sticky="w", padx=5, pady=2)
+                self._gpu_selector_label.grid()
+                self.gpu_selector_cb.grid()
             else:
-                self._gpu_label.grid_remove()
-                self._gpu_spin.grid_remove()
+                self._gpu_selector_label.grid_remove()
+                self.gpu_selector_cb.grid_remove()
 
         self.use_gpu_phase5_var.trace_add("write", on_gpu_check)
         on_gpu_check()
@@ -1341,7 +1363,14 @@ class ZeMosaicGUI:
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
         self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
-        self.config["gpu_id_phase5"] = self.gpu_id_phase5_var.get()
+        sel = self.gpu_selector_var.get()
+        gpu_id = None
+        for name, cid in self._gpus:
+            if name == sel:
+                gpu_id = cid
+                break
+        self.config["gpu_selector"] = sel
+        self.config["gpu_id_phase5"] = gpu_id
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
             zemosaic_config.save_config(self.config)
 
@@ -1374,7 +1403,7 @@ class ZeMosaicGUI:
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
             self.use_gpu_phase5_var.get(),
-            self.gpu_id_phase5_var.get(),
+            gpu_id,
             asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )

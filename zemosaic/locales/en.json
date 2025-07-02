@@ -290,7 +290,7 @@
     "assembly_method_reproject_coadd": "Reproject & Coadd (High Memory, Best Quality)",
     "assembly_method_incremental": "Incremental (Lower Memory, Good for Large Sets)",
     "use_gpu_phase5": "Use NVIDIA GPU for Phase 5",
-    "gpu_index_label": "GPU index:",
+    "gpu_selector_label": "GPU selector:",
     "no_gpu_title": "GPU not detected",
     "no_gpu_msg": "No NVIDIA GPU detected. Falling back to CPU.",
     "performance_options_frame_title": "Performance Options",
