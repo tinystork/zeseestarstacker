@@ -2045,11 +2045,22 @@ def run_hierarchical_mosaic(
     ALIGNMENT_PHASE_WORKER_RATIO = 0.5  # Limit aggressive phases to 50% of base workers
 
     if use_gpu_phase5 and gpu_id_phase5 is not None:
-        import os
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id_phase5)
-
-
+        try:
+            import cupy
+            cupy.cuda.Device(0).use()
+        except Exception as e:
+            pcb(
+                "run_error_gpu_init_failed",
+                prog=None,
+                lvl="ERROR",
+                error=str(e),
+            )
+            use_gpu_phase5 = False
+    else:
+        for v in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
+            os.environ.pop(v, None)
     def _compute_phase_workers(base_workers: int, num_tasks: int, ratio: float = DEFAULT_PHASE_WORKER_RATIO) -> int:
         workers = max(1, int(base_workers * ratio))
         if num_tasks > 0:
