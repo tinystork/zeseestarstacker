@@ -1,6 +1,13 @@
 # zemosaic_align_stack.py
 
 import numpy as np
+
+try:
+    import cupy as cp  # type: ignore
+    GPU_AVAILABLE = True
+except Exception:  # pragma: no cover - cupy not installed
+    cp = None  # type: ignore
+    GPU_AVAILABLE = False
 import traceback
 import gc
 import logging  # Added for logger fallback
@@ -97,6 +104,104 @@ try:
     ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
 except ImportError as e_util_rad:
         print(f"AVERT (zemosaic_align_stack): Radial weighting: Erreur import make_radial_weight_map: {e_util_rad}")
+
+# --- Import des méthodes de stack CPU provenant du projet Seestar ---
+cpu_stack_winsorized = None
+cpu_stack_kappa = None
+cpu_stack_linear = None
+try:
+    import importlib.util, os, pathlib
+    _sm_path = pathlib.Path(__file__).resolve().parents[1] / 'seestar' / 'core' / 'stack_methods.py'
+    spec = importlib.util.spec_from_file_location('seestar_stack_methods', _sm_path)
+    _sm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_sm)  # type: ignore
+    cpu_stack_winsorized = _sm._stack_winsorized_sigma
+    cpu_stack_kappa = _sm._stack_kappa_sigma
+    cpu_stack_linear = _sm._stack_linear_fit_clip
+except Exception as e_import_stack:
+    print(f"AVERT (zemosaic_align_stack): Import stack methods failed: {e_import_stack}")
+
+# --- Implementations GPU simplifiées des méthodes de stack ---
+def gpu_stack_winsorized(frames, *, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    low_q = cp.quantile(arr, winsor_limits[0], axis=0)
+    high_q = cp.quantile(arr, 1.0 - winsor_limits[1], axis=0)
+    arr_w = cp.clip(arr, low_q, high_q)
+    mean = cp.nanmean(arr_w, axis=0)
+    std = cp.nanstd(arr_w, axis=0)
+    mask = cp.abs(arr - mean) < kappa * std
+    if apply_rewinsor:
+        arr_clip = cp.where(mask, arr, arr_w)
+    else:
+        arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def gpu_stack_kappa(frames, *, sigma_low=3.0, sigma_high=3.0):
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    med = cp.nanmedian(arr, axis=0)
+    std = cp.nanstd(arr, axis=0)
+    low = med - sigma_low * std
+    high = med + sigma_high * std
+    mask = (arr >= low) & (arr <= high)
+    arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def gpu_stack_linear(frames, *, sigma=3.0):
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    med = cp.nanmedian(arr, axis=0)
+    resid = arr - med
+    med_r = cp.nanmedian(resid, axis=0)
+    std_r = cp.nanstd(resid, axis=0)
+    mask = cp.abs(resid - med_r) <= sigma * std_r
+    arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def stack_winsorized_sigma_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU winsorized sigma clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_winsorized(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU winsorized clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_winsorized:
+        return cpu_stack_winsorized(frames, **kwargs)
+    raise RuntimeError("CPU stack_winsorized function unavailable")
+
+
+def stack_kappa_sigma_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU kappa-sigma clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_kappa(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU kappa clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_kappa:
+        return cpu_stack_kappa(frames, **kwargs)
+    raise RuntimeError("CPU stack_kappa function unavailable")
+
+
+def stack_linear_fit_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU linear fit clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_linear(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU linear clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_linear:
+        return cpu_stack_linear(frames, **kwargs)
+    raise RuntimeError("CPU stack_linear function unavailable")
 
 
 # Fallback logger for cases where progress_callback might not be available
