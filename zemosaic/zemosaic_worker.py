@@ -1895,6 +1895,7 @@ def run_hierarchical_mosaic(
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
     use_gpu_phase5: bool = False,
+    gpu_id_phase5: int = 0,
     solver_settings: dict | None = None
 ):
     """
@@ -2410,6 +2411,11 @@ def run_hierarchical_mosaic(
         inc_memmap_dir = temp_master_tile_storage_dir or output_folder
         if use_gpu_phase5 and gpu_is_available():
             try:
+                import cupy
+                try:
+                    cupy.cuda.Device(gpu_id_phase5).use()
+                except Exception:
+                    pass
                 final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_incremental(
                     master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
                     final_output_wcs=final_output_wcs,
@@ -2457,6 +2463,11 @@ def run_hierarchical_mosaic(
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
         if use_gpu_phase5 and gpu_is_available():
             try:
+                import cupy
+                try:
+                    cupy.cuda.Device(gpu_id_phase5).use()
+                except Exception:
+                    pass
                 final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_reproject_coadd(
                     master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
                     final_output_wcs=final_output_wcs,

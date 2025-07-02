@@ -205,6 +205,7 @@ class ZeMosaicGUI:
         self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
         self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
         self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
+        self.gpu_id_phase5_var = tk.IntVar(value=self.config.get("gpu_id_phase5", 0))
         # ---  ---
 
         self.translatable_widgets = {}
@@ -688,7 +689,45 @@ class ZeMosaicGUI:
             variable=self.use_gpu_phase5_var
         )
         gpu_chk.grid(row=asm_opt_row, column=0, sticky="w", padx=5, pady=3, columnspan=2)
+        gpu_row = asm_opt_row + 1
         asm_opt_row += 1
+
+        self._gpu_label = ttk.Label(final_assembly_options_frame, text=self._tr("gpu_index_label", "GPU index:"))
+        self.translatable_widgets["gpu_index_label"] = self._gpu_label
+        self._gpu_spin = ttk.Spinbox(
+            final_assembly_options_frame,
+            textvariable=self.gpu_id_phase5_var,
+            from_=0,
+            to=0,
+            width=3,
+            state="readonly"
+        )
+
+        def on_gpu_check(*_):
+            if self.use_gpu_phase5_var.get():
+                try:
+                    import cupy
+                    ngpu = cupy.cuda.runtime.getDeviceCount()
+                except Exception:
+                    ngpu = 0
+                if ngpu > 0:
+                    self._gpu_spin.config(from_=0, to=ngpu-1)
+                else:
+                    self.use_gpu_phase5_var.set(False)
+                    tk.messagebox.showwarning(
+                        self._tr("no_gpu_title", "GPU not detected"),
+                        self._tr("no_gpu_msg", "No NVIDIA GPU detected. Falling back to CPU."),
+                    )
+                    return
+
+                self._gpu_label.grid(row=gpu_row, column=0, sticky="e", padx=5, pady=2)
+                self._gpu_spin.grid(row=gpu_row, column=1, sticky="w", padx=5, pady=2)
+            else:
+                self._gpu_label.grid_remove()
+                self._gpu_spin.grid_remove()
+
+        self.use_gpu_phase5_var.trace_add("write", on_gpu_check)
+        on_gpu_check()
 
         self.memmap_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_memmap_title", "Options memmap (coadd)"))
         self.memmap_frame.pack(fill=tk.X, pady=(0,10))
@@ -1268,6 +1307,7 @@ class ZeMosaicGUI:
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
         self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
+        self.config["gpu_id_phase5"] = self.gpu_id_phase5_var.get()
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
             zemosaic_config.save_config(self.config)
 
@@ -1300,6 +1340,7 @@ class ZeMosaicGUI:
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
             self.use_gpu_phase5_var.get(),
+            self.gpu_id_phase5_var.get(),
             asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
