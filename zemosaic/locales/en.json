@@ -289,6 +289,7 @@
     "final_assembly_method_label": "Assembly Method:",
     "assembly_method_reproject_coadd": "Reproject & Coadd (High Memory, Best Quality)",
     "assembly_method_incremental": "Incremental (Lower Memory, Good for Large Sets)",
+    "use_gpu_phase5": "Use NVIDIA GPU for Phase 5",
     "performance_options_frame_title": "Performance Options",
     "num_workers_label": "Processing Threads:",
     "num_workers_note": "(0 = auto, based on CPU cores)",

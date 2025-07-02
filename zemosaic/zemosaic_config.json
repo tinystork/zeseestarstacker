@@ -16,6 +16,7 @@
     "apply_radial_weight": false,
     "radial_feather_fraction": 0.8,
     "radial_shape_power": 2.0,
+    "use_gpu_phase5": false,
     "final_assembly_method": "reproject_coadd",
     "solver_method": "ansvr",
     "astrometry_local_path": "",

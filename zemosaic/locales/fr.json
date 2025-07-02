@@ -284,6 +284,7 @@
     "final_assembly_method_label": "Méthode d'Assemblage :",
     "assembly_method_reproject_coadd": "Reproject & Coadd (Haute Mémoire, Meilleure Qualité)",
     "assembly_method_incremental": "Incrémental (Basse Mémoire, Bon pour Grands Ensembles)",
+    "use_gpu_phase5": "Utiliser GPU NVIDIA pour la phase 5",
 
     "performance_options_frame_title": "Options de Performance",
     "num_workers_label": "Threads de Traitement :",

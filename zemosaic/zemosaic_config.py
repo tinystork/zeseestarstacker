@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "apply_radial_weight": False,
     "radial_feather_fraction": 0.8,
     "radial_shape_power": 2.0,
+    "use_gpu_phase5": False,
     "final_assembly_method": "reproject_coadd", # Options: "reproject_coadd", "incremental",
     "solver_method": "ansvr",
     "astrometry_local_path": "",
