@@ -3,13 +3,9 @@
 import numpy as np
 import logging
 from astropy.wcs import WCS
+import importlib.util
 
-try:
-    import cupy as cp  # type: ignore
-    _cupy_available = cp.cuda.is_available()
-except Exception:
-    cp = None  # type: ignore
-    _cupy_available = False
+_cupy_available = importlib.util.find_spec("cupy") is not None
 
 from .reprojection import reproject_to_reference_wcs
 
@@ -42,7 +38,11 @@ def initialize_master(
     if use_gpu is None:
         use_gpu = _cupy_available
 
-    xp = cp if use_gpu and _cupy_available else np
+    xp = np
+    cp = None
+    if use_gpu and _cupy_available:
+        import cupy as cp  # type: ignore
+        xp = cp
 
     if batch_img is None or batch_cov is None:
         raise ValueError("batch_img and batch_cov are required")
@@ -56,13 +56,13 @@ def initialize_master(
     )
 
     reproj_img = reproject_to_reference_wcs(
-        cp.asnumpy(batch_img_f) if xp is cp else batch_img_f,
+        cp.asnumpy(batch_img_f) if cp is not None else batch_img_f,
         batch_wcs,
         ref_wcs,
         target_shape,
     )
     reproj_cov = reproject_to_reference_wcs(
-        cp.asnumpy(batch_cov_f) if xp is cp else batch_cov_f,
+        cp.asnumpy(batch_cov_f) if cp is not None else batch_cov_f,
         batch_wcs,
         ref_wcs,
         target_shape,
@@ -80,7 +80,7 @@ def initialize_master(
     master_sum = xp.asarray(master_sum, dtype=xp.float32)
     master_cov = xp.asarray(master_cov, dtype=xp.float32)
 
-    if xp is cp:
+    if cp is not None:
         master_sum = cp.asnumpy(master_sum)
         master_cov = cp.asnumpy(master_cov)
 
@@ -110,7 +110,11 @@ def reproject_and_combine(
     if use_gpu is None:
         use_gpu = _cupy_available
 
-    xp = cp if use_gpu and _cupy_available else np
+    xp = np
+    cp = None
+    if use_gpu and _cupy_available:
+        import cupy as cp  # type: ignore
+        xp = cp
 
     reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
     reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
@@ -137,7 +141,7 @@ def reproject_and_combine(
     master_cov = xp.nan_to_num(master_cov, nan=0.0, posinf=0.0, neginf=0.0)
 
     print(xp.nanmin(master_cov), xp.nanmax(master_cov))
-    if xp is cp:
+    if cp is not None:
         master_sum = cp.asnumpy(master_sum)
         master_cov = cp.asnumpy(master_cov)
     return master_sum.astype(np.float32), master_cov.astype(np.float32)
