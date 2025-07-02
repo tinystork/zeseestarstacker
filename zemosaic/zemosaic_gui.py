@@ -157,6 +157,7 @@ class ZeMosaicGUI:
         self.elapsed_time_var = tk.StringVar(value=self._tr("initial_elapsed_time", "00:00:00"))
         self._chrono_start_time = None
         self._chrono_after_id = None
+        self._stage_times = {}
         
         self.current_language_var = tk.StringVar(value=self.localizer.language_code)
         self.current_language_var.trace_add("write", self._on_language_change)
@@ -1180,6 +1181,39 @@ class ZeMosaicGUI:
             except tk.TclError: pass
         self._chrono_after_id = None
         print("DEBUG GUI: Chronomètre arrêté.")
+
+    def on_worker_progress(self, stage: str, current: int, total: int):
+        """Handle progress updates for a specific processing stage."""
+        if stage not in self._stage_times:
+            self._stage_times[stage] = {
+                'start': time.monotonic(),
+                'last': time.monotonic(),
+                'steps': []
+            }
+        else:
+            now = time.monotonic()
+            last = self._stage_times[stage]['last']
+            self._stage_times[stage]['steps'].append(now - last)
+            self._stage_times[stage]['last'] = now
+
+        percent = (current / total * 100.0) if total else 0.0
+        try:
+            if hasattr(self, 'progress_bar_var'):
+                self.progress_bar_var.set(percent)
+        except tk.TclError:
+            pass
+
+        times = self._stage_times[stage]
+        if times['steps']:
+            avg = sum(times['steps']) / len(times['steps'])
+            remaining = max(0.0, (total - current) * avg)
+            h, rem = divmod(int(remaining), 3600)
+            m, s = divmod(rem, 60)
+            try:
+                if hasattr(self, 'eta_var') and self.eta_var:
+                    self.eta_var.set(f"{h:02d}:{m:02d}:{s:02d}")
+            except tk.TclError:
+                pass
         
 
 
@@ -1376,6 +1410,10 @@ class ZeMosaicGUI:
                     msg_key, prog, lvl, kwargs = self.progress_queue.get_nowait()
                 except Exception:
                     break
+                if msg_key == "STAGE_PROGRESS":
+                    stage, cur, tot = prog, lvl, kwargs.get('total', 0)
+                    self.on_worker_progress(stage, cur, tot)
+                    continue
                 if msg_key == "PROCESS_DONE":
                     if self.worker_process:
                         self.worker_process.join(timeout=0.1)
