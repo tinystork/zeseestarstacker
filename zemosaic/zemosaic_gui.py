@@ -147,6 +147,7 @@ class ZeMosaicGUI:
         self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
         self.astrometry_timeout_var = tk.IntVar(value=self.solver_settings.timeout)
         self.astrometry_downsample_var = tk.IntVar(value=self.solver_settings.downsample)
+        self.force_lum_var = tk.BooleanVar(value=self.solver_settings.force_lum)
         
         self.is_processing = False
         self.worker_process = None
@@ -458,6 +459,9 @@ class ZeMosaicGUI:
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        param_row_idx += 1
+        ttk.Label(params_frame, text=self._tr("force_lum_label", "Convert to Luminance (mono):")).grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["force_lum_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Checkbutton(params_frame, variable=self.force_lum_var).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
 
         # --- Solver Selection Frame ---
         solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("solver_frame_title", "Plate Solver"), padding="10")
@@ -1178,6 +1182,7 @@ class ZeMosaicGUI:
             self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
             self.solver_settings.timeout = self.astrometry_timeout_var.get()
             self.solver_settings.downsample = self.astrometry_downsample_var.get()
+            self.solver_settings.force_lum = bool(self.force_lum_var.get())
             try:
                 self.solver_settings.save_default()
             except Exception:
@@ -1230,6 +1235,9 @@ class ZeMosaicGUI:
                 return
         
         # 4. DÉMARRAGE du traitement
+        # Remise à zéro du compteur master-tiles
+        if hasattr(self, "master_tile_count_var"):
+            self.master_tile_count_var.set("")
         self.is_processing = True
         self.launch_button.config(state=tk.DISABLED)
         self.log_text.config(state=tk.NORMAL); self.log_text.delete(1.0, tk.END); self.log_text.config(state=tk.DISABLED)
@@ -1279,7 +1287,6 @@ class ZeMosaicGUI:
             self.cleanup_memmap_var.get(),
             self.config.get("assembly_process_workers", 0),
             self.auto_limit_frames_var.get(),
-            self.config.get("auto_limit_memory_fraction", 0.1),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
             asdict(self.solver_settings)
@@ -1336,6 +1343,9 @@ class ZeMosaicGUI:
             self._log_message("log_key_processing_finished", level="INFO")
             final_message = self._tr("msg_processing_completed")
             messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
+            # Nettoyage du compteur master-tiles affiché
+            if hasattr(self, "master_tile_count_var"):
+                self.master_tile_count_var.set("")
             output_dir_final = self.output_dir_var.get()
             if output_dir_final and os.path.isdir(output_dir_final):
                 if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):

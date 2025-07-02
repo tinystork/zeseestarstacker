@@ -129,13 +129,28 @@ ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
 # ... (imports et logger configuré comme avant) ...
 
 # --- Helper pour log et callback ---
-def _log_and_callback(message_key_or_raw, progress_value=None, level="INFO", callback=None, **kwargs):
+def _log_and_callback(
+    message_key_or_raw,
+    progress_value=None,
+    level="INFO",
+    callback=None,
+    **kwargs,
+):
     """
     Helper pour loguer un message et appeler le callback GUI.
     - Si level est INFO, WARN, ERROR, SUCCESS, message_key_or_raw est traité comme une clé.
     - Sinon (DEBUG, ETA_LEVEL, etc.), message_key_or_raw est loggué tel quel.
     - Les **kwargs sont passés pour le formatage si message_key_or_raw est une clé.
     """
+    # Support backwards compatibility for lvl/prog keyword aliases
+    if "lvl" in kwargs and level == "INFO":
+        level = kwargs.pop("lvl")
+    elif "lvl" in kwargs:
+        level = kwargs.pop("lvl")
+    if "prog" in kwargs and progress_value is None:
+        progress_value = kwargs.pop("prog")
+    elif "prog" in kwargs:
+        progress_value = kwargs.pop("prog")
     log_level_map = {
         "INFO": logging.INFO, "DEBUG": logging.DEBUG, "DEBUG_DETAIL": logging.DEBUG,
         "WARN": logging.WARNING, "ERROR": logging.ERROR, "SUCCESS": logging.INFO,
@@ -251,6 +266,21 @@ def astap_paths_valid(astap_exe_path: str, astap_data_dir: str) -> bool:
     )
 
 
+def _write_header_to_fits(file_path: str, header_obj, pcb=None):
+    """Safely update ``file_path`` FITS header with ``header_obj`` if possible."""
+    if not (ASTROPY_AVAILABLE and fits):
+        return
+    try:
+        with fits.open(file_path, mode="update", memmap=False) as hdul:
+            hdul[0].header.update(header_obj)
+            hdul.flush()
+        if pcb:
+            pcb("getwcs_info_header_written", lvl="DEBUG_DETAIL", filename=os.path.basename(file_path))
+    except Exception as e_update:
+        if pcb:
+            pcb("getwcs_warn_header_write_failed", lvl="WARN", filename=os.path.basename(file_path), error=str(e_update))
+
+
 def solve_with_astrometry(
     image_fits_path: str,
     fits_header,
@@ -323,6 +353,35 @@ def solve_with_ansvr(
             f"Ansvr solve error: {e}", prog=None, lvl="WARN", callback=progress_callback
         )
         return None
+
+
+def _prepare_image_for_astap(data: np.ndarray, force_lum: bool = False) -> np.ndarray:
+    """Normalize image layout for ASTAP.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Raw image data.
+    force_lum : bool
+        If True and ``data`` is 3-D, the channels are averaged to produce a mono image.
+
+    Returns
+    -------
+    np.ndarray
+        Array formatted in CHW order or 2-D monochrome.
+    """
+
+    if force_lum and data.ndim == 3:
+        return data.mean(axis=0).astype(data.dtype)
+    if data.ndim == 2:
+        return data
+    if data.ndim == 3 and data.shape[-1] in (3, 4):
+        return np.moveaxis(data, -1, 0)
+    if data.ndim == 3 and data.shape[0] in (3, 4):
+        return data
+    if data.ndim == 3:
+        return data.sum(axis=0)
+    return data
 
 
 def reproject_tile_to_mosaic(tile_path: str, tile_wcs, mosaic_wcs, mosaic_shape_hw,
@@ -593,30 +652,71 @@ def _calculate_final_mosaic_grid(panel_wcs_list: list, panel_shapes_hw_list: lis
 
 
 def cluster_seestar_stacks(all_raw_files_with_info: list, stack_threshold_deg: float, progress_callback: callable):
-    if not (ASTROPY_AVAILABLE and SkyCoord and u): _log_and_callback("clusterstacks_error_astropy_unavailable", level="ERROR", callback=progress_callback); return []
-    if not all_raw_files_with_info: _log_and_callback("clusterstacks_warn_no_raw_info", level="WARN", callback=progress_callback); return []
-    _log_and_callback("clusterstacks_info_start", num_files=len(all_raw_files_with_info), threshold=stack_threshold_deg, level="INFO", callback=progress_callback)
-    panel_centers_sky = []; panel_data_for_clustering = []
+    """Group raw files captured by the Seestar based on their WCS position."""
+
+    if not (ASTROPY_AVAILABLE and SkyCoord and u):
+        _log_and_callback("clusterstacks_error_astropy_unavailable", level="ERROR", callback=progress_callback)
+        return []
+
+    if not all_raw_files_with_info:
+        _log_and_callback("clusterstacks_warn_no_raw_info", level="WARN", callback=progress_callback)
+        return []
+
+    _log_and_callback(
+        "clusterstacks_info_start",
+        num_files=len(all_raw_files_with_info),
+        threshold=stack_threshold_deg,
+        level="INFO",
+        callback=progress_callback,
+    )
+
+    panel_centers_sky = []
+    panel_data_for_clustering = []
+
     for i, info in enumerate(all_raw_files_with_info):
-        wcs_obj = info['wcs']
-        if not (wcs_obj and wcs_obj.is_celestial): continue
+        wcs_obj = info["wcs"]
+        if not (wcs_obj and wcs_obj.is_celestial):
+            continue
         try:
-            if wcs_obj.pixel_shape: center_world = wcs_obj.pixel_to_world(wcs_obj.pixel_shape[0]/2.0, wcs_obj.pixel_shape[1]/2.0)
-            elif hasattr(wcs_obj.wcs, 'crval'): center_world = SkyCoord(ra=wcs_obj.wcs.crval[0]*u.deg, dec=wcs_obj.wcs.crval[1]*u.deg, frame='icrs')
-            else: continue
-            panel_centers_sky.append(center_world); panel_data_for_clustering.append(info)
-        except Exception: continue
-    if not panel_centers_sky: _log_and_callback("clusterstacks_warn_no_centers", level="WARN", callback=progress_callback); return []
-    groups = []; assigned_mask = [False] * len(panel_centers_sky)
+            if wcs_obj.pixel_shape:
+                center_world = wcs_obj.pixel_to_world(
+                    wcs_obj.pixel_shape[0] / 2.0,
+                    wcs_obj.pixel_shape[1] / 2.0,
+                )
+            elif hasattr(wcs_obj.wcs, "crval"):
+                center_world = SkyCoord(
+                    ra=wcs_obj.wcs.crval[0] * u.deg,
+                    dec=wcs_obj.wcs.crval[1] * u.deg,
+                    frame="icrs",
+                )
+            else:
+                continue
+            panel_centers_sky.append(center_world)
+            panel_data_for_clustering.append(info)
+        except Exception:
+            continue
+
+    if not panel_centers_sky:
+        _log_and_callback("clusterstacks_warn_no_centers", level="WARN", callback=progress_callback)
+        return []
+
+    groups = []
+    assigned_mask = [False] * len(panel_centers_sky)
+
     for i in range(len(panel_centers_sky)):
-        if assigned_mask[i]: continue
-        current_group_infos = [panel_data_for_clustering[i]]; assigned_mask[i] = True
+        if assigned_mask[i]:
+            continue
+        current_group_infos = [panel_data_for_clustering[i]]
+        assigned_mask[i] = True
         current_group_center_seed = panel_centers_sky[i]
         for j in range(i + 1, len(panel_centers_sky)):
-            if assigned_mask[j]: continue
+            if assigned_mask[j]:
+                continue
             if current_group_center_seed.separation(panel_centers_sky[j]).deg < stack_threshold_deg:
-                current_group_infos.append(panel_data_for_clustering[j]); assigned_mask[j] = True
+                current_group_infos.append(panel_data_for_clustering[j])
+                assigned_mask[j] = True
         groups.append(current_group_infos)
+
     _log_and_callback("clusterstacks_info_finished", num_groups=len(groups), level="INFO", callback=progress_callback)
     return groups
 
@@ -638,6 +738,9 @@ def get_wcs_and_pretreat_raw_file(
     _pcb_local = lambda msg_key, lvl="DEBUG", **kwargs: \
         progress_callback(msg_key, None, lvl, **kwargs) if progress_callback else print(f"GETWCS_LOG {lvl}: {msg_key} {kwargs}")
 
+    if solver_settings is None:
+        solver_settings = {}
+
     _pcb_local(f"GetWCS_Pretreat: Début pour '{filename}'.", lvl="DEBUG_DETAIL") # Niveau DEBUG_DETAIL pour être moins verbeux
 
     hp_mask_path = None
@@ -646,12 +749,18 @@ def get_wcs_and_pretreat_raw_file(
         _pcb_local("getwcs_error_utils_unavailable", lvl="ERROR")
         return None, None, None, None
         
-    img_data_raw_adu, header_orig = zemosaic_utils.load_and_validate_fits(
-        file_path, 
-        normalize_to_float32=False, 
-        attempt_fix_nonfinite=True, 
-        progress_callback=progress_callback
+    res_load = zemosaic_utils.load_and_validate_fits(
+        file_path,
+        normalize_to_float32=False,
+        attempt_fix_nonfinite=True,
+        progress_callback=progress_callback,
     )
+    if isinstance(res_load, tuple):
+        img_data_raw_adu = res_load[0]
+        header_orig = res_load[1] if len(res_load) > 1 else None
+    else:
+        img_data_raw_adu = res_load
+        header_orig = None
 
     if img_data_raw_adu is None or header_orig is None:
         _pcb_local("getwcs_error_load_failed", lvl="ERROR", filename=filename)
@@ -749,7 +858,9 @@ def get_wcs_and_pretreat_raw_file(
         basename = os.path.splitext(filename)[0]
         temp_fits = os.path.join(tempdir_solver, f"{basename}_minimal.fits")
         try:
-            fits.writeto(temp_fits, img_data_raw_adu, header=header_orig, overwrite=True)
+            force_lum = bool((solver_settings or {}).get("force_lum", False))
+            img_norm = _prepare_image_for_astap(img_data_raw_adu, force_lum=force_lum)
+            zemosaic_utils.save_numpy_to_fits(img_norm, header_orig, temp_fits, axis_order="CHW")
         except Exception as e_tmp_write:
             _pcb_local("getwcs_error_astap_tempfile_write_failed", lvl="ERROR", filename=filename, error=str(e_tmp_write))
             logger.error(f"Erreur écriture FITS temporaire solver pour {filename}:", exc_info=True)
@@ -864,6 +975,7 @@ def get_wcs_and_pretreat_raw_file(
         
         if wcs_brute and wcs_brute.is_celestial: # Re-vérifier après la tentative de set_pixel_shape
             _pcb_local("getwcs_info_pretreatment_wcs_ok", lvl="DEBUG", filename=filename)
+            _write_header_to_fits(file_path, header_orig, _pcb_local)
             return img_data_processed_adu, wcs_brute, header_orig, hp_mask_path
         # else: tombe dans le bloc de déplacement ci-dessous
 
@@ -1761,7 +1873,6 @@ def run_hierarchical_mosaic(
     coadd_cleanup_memmap_config: bool,
     assembly_process_workers_config: int,
     auto_limit_frames_per_master_tile_config: bool,
-    auto_limit_memory_fraction_config: float,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
     solver_settings: dict | None = None
@@ -1784,7 +1895,16 @@ def run_hierarchical_mosaic(
                 eta_str = f"{h:02d}:{m:02d}:{s:02d}"
             pcb(f"ETA_UPDATE:{eta_str}", prog=None, lvl="ETA_LEVEL") 
 
-    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = 0.08
+
+    # Seuil de clustering : valeur de repli à 0.08° si l'option est absente ou non positive
+    try:
+        cluster_threshold = float(cluster_threshold_config or 0)
+    except (TypeError, ValueError):
+        cluster_threshold = 0
+    SEESTAR_STACK_CLUSTERING_THRESHOLD_DEG = (
+        cluster_threshold if cluster_threshold > 0 else 0.08
+
+    )
     PROGRESS_WEIGHT_PHASE1_RAW_SCAN = 30; PROGRESS_WEIGHT_PHASE2_CLUSTERING = 5
     PROGRESS_WEIGHT_PHASE3_MASTER_TILES = 35; PROGRESS_WEIGHT_PHASE4_GRID_CALC = 5
     PROGRESS_WEIGHT_PHASE5_ASSEMBLY = 15; PROGRESS_WEIGHT_PHASE6_SAVE = 8
@@ -2061,8 +2181,7 @@ def run_hierarchical_mosaic(
             limit = max(
                 1,
                 int(
-                    (available_bytes * auto_limit_memory_fraction_config)
-                    // (expected_workers * bytes_per_frame * 6)
+                    available_bytes // (expected_workers * bytes_per_frame * 6)
                 ),
             )
             if manual_limit > 0:
@@ -2147,9 +2266,6 @@ def run_hierarchical_mosaic(
         ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups)
     }
 
-    # Wait for all master-tile tasks to finish before processing results
-    executor_ph3.shutdown(wait=True)
-
     for future in as_completed(future_to_group_index):
 
             group_index_original = future_to_group_index[future]
@@ -2181,6 +2297,8 @@ def run_hierarchical_mosaic(
             total_eta_sec_ph3 = eta_phase3_sec + (100 - current_progress_in_run_percent_ph3) * time_per_percent_point_global_ph3
             update_gui_eta(total_eta_sec_ph3)
 
+    # Toutes les futures sont terminées → fermeture propre
+    executor_ph3.shutdown(wait=True)
 
     master_tiles_results_list = [master_tiles_results_list_temp[i] for i in sorted(master_tiles_results_list_temp.keys())]
     del master_tiles_results_list_temp; gc.collect()
@@ -2483,29 +2601,22 @@ def run_hierarchical_mosaic(
     pcb("run_success_processing_completed", prog=current_global_progress, lvl="SUCCESS", duration=f"{total_duration_sec:.2f}")
     gc.collect(); _log_memory_usage(progress_callback, "Fin Run Hierarchical Mosaic (après GC final)")
     logger.info(f"===== Run Hierarchical Mosaic COMPLETED in {total_duration_sec:.2f}s =====")
+################################################################################
+################################################################################
+####
 
-####################################################################################################################################################################
-
-
-
-
-#--- Worker process helper ---
-def run_hierarchical_mosaic_process(progress_queue, *args, solver_settings_dict=None, **kwargs):
-    """Execute :func:`run_hierarchical_mosaic` in a separate process.
-
-    Parameters are identical to :func:`run_hierarchical_mosaic` **except** for
-    ``progress_callback`` which is automatically provided so the caller should
-    omit it. Any log message produced by the worker will be sent back through
-    ``progress_queue``.
-    """
+def run_hierarchical_mosaic_process(
+    progress_queue,
+    *args,
+    solver_settings_dict=None,
+    **kwargs,
+):
+    """Wrapper for running :func:`run_hierarchical_mosaic` in a separate process."""
 
     def queue_callback(message_key_or_raw, progress_value=None, level="INFO", **cb_kwargs):
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
-    # Insert the queue callback at the expected position for progress_callback
-    # (after ``cluster_threshold_config`` and before stacking parameters).
     full_args = args[:8] + (queue_callback,) + args[8:]
-
     try:
         run_hierarchical_mosaic(*full_args, solver_settings=solver_settings_dict, **kwargs)
     except Exception as e_proc:
@@ -2562,39 +2673,4 @@ if __name__ == "__main__":
         except Exception:
             solver_cfg = SolverSettings().__dict__
 
-    run_hierarchical_mosaic(
-        input_folder=args.input_folder,
-        output_folder=args.output_folder,
-        astap_exe_path=cfg.get("astap_executable_path", ""),
-        astap_data_dir_param=cfg.get("astap_data_directory_path", ""),
-        astap_search_radius_config=cfg.get("astap_default_search_radius", 3.0),
-        astap_downsample_config=cfg.get("astap_default_downsample", 2),
-        astap_sensitivity_config=cfg.get("astap_default_sensitivity", 100),
-        cluster_threshold_config=cfg.get("cluster_threshold", 0.08),
-        progress_callback=None,
-        stack_norm_method=cfg.get("stacking_normalize_method", "linear_fit"),
-        stack_weight_method=cfg.get("stacking_weighting_method", "noise_variance"),
-        stack_reject_algo=cfg.get("stacking_rejection_algorithm", "winsorized_sigma_clip"),
-        stack_kappa_low=cfg.get("stacking_kappa_low", 3.0),
-        stack_kappa_high=cfg.get("stacking_kappa_high", 3.0),
-        parsed_winsor_limits=(0.05, 0.05),
-        stack_final_combine=cfg.get("stacking_final_combine_method", "mean"),
-        apply_radial_weight_config=cfg.get("apply_radial_weight", False),
-        radial_feather_fraction_config=cfg.get("radial_feather_fraction", 0.8),
-        radial_shape_power_config=cfg.get("radial_shape_power", 2.0),
-        min_radial_weight_floor_config=cfg.get("min_radial_weight_floor", 0.0),
-        final_assembly_method_config=cfg.get("final_assembly_method", "reproject_coadd"),
-        num_base_workers_config=cfg.get("num_processing_workers", 0),
-        apply_master_tile_crop_config=cfg.get("apply_master_tile_crop", True),
-        master_tile_crop_percent_config=cfg.get("master_tile_crop_percent", 18.0),
-        save_final_as_uint16_config=cfg.get("save_final_as_uint16", False),
-        coadd_use_memmap_config=args.coadd_use_memmap or cfg.get("coadd_use_memmap", False),
-        coadd_memmap_dir_config=args.coadd_memmap_dir or cfg.get("coadd_memmap_dir", None),
-        coadd_cleanup_memmap_config=args.coadd_cleanup_memmap if args.coadd_cleanup_memmap else cfg.get("coadd_cleanup_memmap", True),
-        assembly_process_workers_config=args.assembly_process_workers if args.assembly_process_workers is not None else cfg.get("assembly_process_workers", 0),
-        auto_limit_frames_per_master_tile_config=(not args.no_auto_limit_frames) and cfg.get("auto_limit_frames_per_master_tile", True),
-        auto_limit_memory_fraction_config=cfg.get("auto_limit_memory_fraction", 0.2),
-        winsor_worker_limit_config=args.winsor_workers if args.winsor_workers is not None else cfg.get("winsor_worker_limit", 2),
-        max_raw_per_master_tile_config=args.max_raw_per_master_tile if args.max_raw_per_master_tile is not None else cfg.get("max_raw_per_master_tile", 0),
-        solver_settings=solver_cfg,
-    )
+  
