@@ -2011,16 +2011,7 @@ def run_hierarchical_mosaic(
         import os
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id_phase5)
-        try:
-            import cupy
-            cupy.cuda.Device(0).use()
-            assert cupy.cuda.getDeviceCount() == 1
-            logger.info(
-                "\u2192 Cupy initialis\u00e9 sur : %s",
-                cupy.cuda.getDeviceProperties(0)["name"],
-            )
-        except Exception as e_init_gpu:
-            logger.warning("Initialisation GPU echou\u00e9e: %s", e_init_gpu)
+
 
     def _compute_phase_workers(base_workers: int, num_tasks: int, ratio: float = DEFAULT_PHASE_WORKER_RATIO) -> int:
         workers = max(1, int(base_workers * ratio))
