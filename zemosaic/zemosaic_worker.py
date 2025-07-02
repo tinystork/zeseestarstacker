@@ -1894,6 +1894,7 @@ def run_hierarchical_mosaic(
     auto_limit_frames_per_master_tile_config: bool,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
+    gpu_id_phase5: int = 0,
     use_gpu_phase5: bool = False,
     solver_settings: dict | None = None
 ):
@@ -2381,6 +2382,12 @@ def run_hierarchical_mosaic(
 # --- Phase 5 (Assemblage Final) ---
     base_progress_phase5 = current_global_progress
     USE_INCREMENTAL_ASSEMBLY = (final_assembly_method_config == "incremental")
+    if use_gpu_phase5 and gpu_is_available():
+        try:
+            import cupy
+            cupy.cuda.Device(gpu_id_phase5).use()
+        except Exception:
+            pass
     _log_memory_usage(progress_callback, f"Début Phase 5 (Méthode: {final_assembly_method_config}, Rognage MT Appliqué: {apply_master_tile_crop_config}, %Rognage: {master_tile_crop_percent_config if apply_master_tile_crop_config else 'N/A'})") # Log mis à jour
     
     valid_master_tiles_for_assembly = []
