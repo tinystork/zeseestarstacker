@@ -285,7 +285,7 @@
     "assembly_method_reproject_coadd": "Reproject & Coadd (Haute Mémoire, Meilleure Qualité)",
     "assembly_method_incremental": "Incrémental (Basse Mémoire, Bon pour Grands Ensembles)",
     "use_gpu_phase5": "Utiliser GPU NVIDIA pour la phase 5",
-    "gpu_index_label": "Index GPU :",
+    "gpu_selector_label": "Sélecteur de GPU :",
     "no_gpu_title": "GPU non détecté",
     "no_gpu_msg": "Aucun GPU NVIDIA détecté. Repli CPU activé.",
 
