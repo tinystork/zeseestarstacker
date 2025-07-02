@@ -1,13 +1,9 @@
 # zemosaic_align_stack.py
 
 import numpy as np
+import importlib.util
 
-try:
-    import cupy as cp  # type: ignore
-    GPU_AVAILABLE = True
-except Exception:  # pragma: no cover - cupy not installed
-    cp = None  # type: ignore
-    GPU_AVAILABLE = False
+GPU_AVAILABLE = importlib.util.find_spec("cupy") is not None
 import traceback
 import gc
 import logging  # Added for logger fallback
@@ -123,6 +119,7 @@ except Exception as e_import_stack:
 
 # --- Implementations GPU simplifiées des méthodes de stack ---
 def gpu_stack_winsorized(frames, *, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
+    import cupy as cp
     arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
     low_q = cp.quantile(arr, winsor_limits[0], axis=0)
     high_q = cp.quantile(arr, 1.0 - winsor_limits[1], axis=0)
@@ -140,6 +137,7 @@ def gpu_stack_winsorized(frames, *, kappa=3.0, winsor_limits=(0.05, 0.05), apply
 
 
 def gpu_stack_kappa(frames, *, sigma_low=3.0, sigma_high=3.0):
+    import cupy as cp
     arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
     med = cp.nanmedian(arr, axis=0)
     std = cp.nanstd(arr, axis=0)
@@ -153,6 +151,7 @@ def gpu_stack_kappa(frames, *, sigma_low=3.0, sigma_high=3.0):
 
 
 def gpu_stack_linear(frames, *, sigma=3.0):
+    import cupy as cp
     arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
     med = cp.nanmedian(arr, axis=0)
     resid = arr - med

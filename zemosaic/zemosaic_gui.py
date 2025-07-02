@@ -15,11 +15,12 @@ try:
 except ImportError:  # pragma: no cover - wmi may be unavailable on non Windows
     wmi = None
 
-try:
-    import cupy
-    from cupy.cuda.runtime import getDeviceProperties, getDeviceCount
-except Exception:  # pragma: no cover - cupy might be missing
-    cupy = None
+import importlib.util
+
+CUPY_AVAILABLE = importlib.util.find_spec("cupy") is not None
+cupy = None
+getDeviceProperties = None
+getDeviceCount = None
 
 try:
     from PIL import Image, ImageTk # Importe depuis Pillow
