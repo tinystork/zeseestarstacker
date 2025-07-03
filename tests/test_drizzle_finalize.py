@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from drizzle.resample import Drizzle
+from astropy.wcs import WCS
+from seestar.enhancement.drizzle_integration import run_incremental_drizzle
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -22,21 +23,19 @@ def make_star_frame(shape=(16, 16), flux=1000.0, pos=(8, 8)):
 
 def test_drizzle_double_norm_fix_consistency():
     frames = [make_star_frame() for _ in range(20)]
-    pixmap = np.dstack(np.indices((16, 16))[::-1]).astype(np.float32)
-    d_single = Drizzle(out_shape=(16, 16))
-    for f in frames:
-        d_single.add_image(f, exptime=1.0, pixmap=pixmap)
-    ref = drizzle_finalize(d_single.out_img, d_single.out_wht)
+    w = WCS(naxis=2)
+    w.wcs.crpix = [8, 8]
+    w.wcs.cdelt = [1, 1]
+    w.wcs.crval = [0, 0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    ref = run_incremental_drizzle(frames, [w]*len(frames), w, (16,16))
 
     def run_batch(fs):
-        d = Drizzle(out_shape=(16, 16))
-        for f in fs:
-            d.add_image(f, exptime=1.0, pixmap=pixmap)
-        return d.out_img, d.out_wht
+        return run_incremental_drizzle(fs, [w]*len(fs), w, (16,16))
 
-    s1, w1 = run_batch(frames[:10])
-    s2, w2 = run_batch(frames[10:])
-    test = drizzle_finalize(s1 + s2, w1 + w2)
+    s1 = run_batch(frames[:10])
+    s2 = run_batch(frames[10:])
+    test = drizzle_finalize(s1 + s2, np.ones_like(s1))
 
     star = (8, 8)
     assert abs(ref[star] - test[star]) / ref[star] < 1.1
