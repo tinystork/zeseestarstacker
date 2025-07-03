@@ -559,6 +559,10 @@ class SeestarQueuedStacker:
             "queue",
             "folders_lock",
             "processing_thread",
+
+            "autotuner",
+            "drizzle_processes",
+
         ):
             state[attr] = None
         return state
