@@ -36,7 +36,7 @@ reproject         # For mosaic
                            # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
                            # Uncomment and adjust if you have a compatible NVIDIA GPU and CUDA installed.
-
+# wmi                      # for zemosaic gpu support (windows only)
 # ---------------------------------------------------------------------------
 # NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
 # ---------------------------------------------------------------------------
