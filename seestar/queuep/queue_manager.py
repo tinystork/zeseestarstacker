@@ -640,27 +640,29 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
-    def _start_drizzle_thread(
+    def _start_drizzle_process(
         self,
         batch_temp_filepaths_list,
         current_batch_num=0,
         total_batches_est=0,
     ):
-        """Launch incremental drizzle processing in a background thread."""
+        """Launch incremental drizzle processing in a separate process."""
 
-        t = threading.Thread(
+        ctx = multiprocessing.get_context("fork")
+        p = ctx.Process(
             target=self._process_incremental_drizzle_batch,
             args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
             daemon=True,
+            name="DrizzleProcess",
         )
-        self.drizzle_threads.append(t)
-        t.start()
+        self.drizzle_processes.append(p)
+        p.start()
 
-    def _wait_drizzle_threads(self):
-        """Wait for all background drizzle threads to finish."""
-        for t in self.drizzle_threads:
-            t.join()
-        self.drizzle_threads = []
+    def _wait_drizzle_processes(self):
+        """Wait for all background drizzle processes to finish."""
+        for p in self.drizzle_processes:
+            p.join()
+        self.drizzle_processes = []
 
     # ------------------------------------------------------------------
     # Parallel reprojection of a list of FITS files
@@ -725,8 +727,8 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
-        # Keep track of background drizzle threads
-        self.drizzle_threads = []
+        # Keep track of background drizzle processes
+        self.drizzle_processes = []
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -3618,7 +3620,7 @@ class SeestarQueuedStacker:
                                     self._send_eta_update()
                                     if self.drizzle_active_session:
                                         if self.drizzle_mode == "Incremental":
-                                            self._start_drizzle_thread(
+                                            self._start_drizzle_process(
                                                 current_batch_items_with_masks_for_stack_batch,
                                                 self.stacked_batches_count,
                                                 self.total_batches_estimated,
@@ -8909,8 +8911,8 @@ class SeestarQueuedStacker:
             f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}"
         )
 
-        # Ensure all background drizzle threads have completed before finalising
-        getattr(self, "_wait_drizzle_threads", lambda: None)()
+        # Ensure all background drizzle processes have completed before finalising
+        getattr(self, "_wait_drizzle_processes", lambda: None)()
 
         save_as_float32_setting = getattr(self, "save_final_as_float32", False)
         preserve_linear_output_setting = getattr(self, "preserve_linear_output", False)
