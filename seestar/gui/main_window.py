@@ -257,6 +257,7 @@ class SeestarStackerGUI:
         self.processing = False
         self.thread = None
         self.current_preview_data = None
+        self.current_preview_hist_data = None
         self.current_stack_header = None
         self.debounce_timer_id = None
         self.time_per_image = 0
@@ -3673,7 +3674,7 @@ class SeestarStackerGUI:
             print("  [RefreshPreview] Calling preview_manager.update_preview...")
             # PreviewManager.update_preview retourne l'image PIL pour l'affichage
             # et les données (après WB, avant stretch) pour l'analyse de l'histogramme.
-            processed_pil_image, data_for_histogram_analysis = (
+            processed_pil_image, _ = (
                 self.preview_manager.update_preview(
                     self.current_preview_data,
                     preview_params,
@@ -3683,6 +3684,16 @@ class SeestarStackerGUI:
                     total_batches=self.preview_total_batches,
                 )
             )
+
+            if self.current_preview_hist_data is not None:
+                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
+                    self.current_preview_hist_data.copy(),
+                    r=preview_params["r_gain"],
+                    g=preview_params["g_gain"],
+                    b=preview_params["b_gain"],
+                )
+            else:
+                data_for_histogram_analysis = None
             print("  [RefreshPreview] Returned from preview_manager.update_preview.")
 
             if recalculate_histogram:  # Recalculer l'histogramme seulement si demandé
@@ -3881,12 +3892,19 @@ class SeestarStackerGUI:
             return
         self.logger.debug("[DEBUG-GUI] update_preview_from_stacker: Called.")
 
+        if isinstance(preview_array, (tuple, list)) and len(preview_array) == 2:
+            preview_display, preview_hist = preview_array
+        else:
+            preview_display = preview_array
+            preview_hist = preview_array
+
         if self._final_stretch_set_by_processing_finished:
             self.logger.info(
                 "  [update_preview] Verrou final actif. Mise à jour des données uniquement."
             )
             if preview_array is not None:
-                self.current_preview_data = preview_array.copy()
+                self.current_preview_data = preview_display.copy()
+                self.current_preview_hist_data = preview_hist.copy()
                 self.current_stack_header = (
                     stack_header.copy() if stack_header else None
                 )
@@ -3903,7 +3921,8 @@ class SeestarStackerGUI:
             )
             return
 
-        self.current_preview_data = preview_array.copy()
+        self.current_preview_data = preview_display.copy()
+        self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
         self.preview_total_imgs = total_imgs
@@ -3933,7 +3952,8 @@ class SeestarStackerGUI:
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
             )
             if self.drizzle_mode_var.get() == "Incremental":
-                self.current_preview_data = preview_array
+                self.current_preview_data = preview_display
+                self.current_preview_hist_data = preview_hist
                 self.apply_auto_stretch()
                 return
             # Non-drizzle modes keep existing behaviour
@@ -4170,7 +4190,7 @@ class SeestarStackerGUI:
 
         try:
             print("  [RefreshPreview] Calling preview_manager.update_preview...")
-            processed_pil_image, data_for_histogram_analysis = (
+            processed_pil_image, _ = (
                 self.preview_manager.update_preview(
                     self.current_preview_data,
                     preview_params,
@@ -4180,6 +4200,16 @@ class SeestarStackerGUI:
                     total_batches=self.preview_total_batches,
                 )
             )
+
+            if self.current_preview_hist_data is not None:
+                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
+                    self.current_preview_hist_data.copy(),
+                    r=preview_params["r_gain"],
+                    g=preview_params["g_gain"],
+                    b=preview_params["b_gain"],
+                )
+            else:
+                data_for_histogram_analysis = None
             print("  [RefreshPreview] Returned from preview_manager.update_preview.")
 
             if recalculate_histogram:
@@ -4394,6 +4424,7 @@ class SeestarStackerGUI:
                     )
 
             self.current_preview_data = img_for_preview.copy()
+            self.current_preview_hist_data = img_for_preview.copy()
             self.current_stack_header = (
                 header_from_load.copy() if header_from_load else fits.Header()
             )
@@ -5791,6 +5822,7 @@ class SeestarStackerGUI:
 
             if data_final is not None:
                 self.current_preview_data = data_final
+                self.current_preview_hist_data = data_final
                 self._temp_data_for_final_histo = data_final
                 self.current_stack_header = (
                     header_final if header_final else fits.Header()
