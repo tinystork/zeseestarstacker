@@ -194,6 +194,7 @@ FR_TRANSLATIONS = {
     "zoom_histo_button": "Zoom Histogramme",
     "reset_histo_button": "Réinitialiser Histogramme",
     "auto_zoom_histo_check": "Zoom auto histogramme",
+    "log_histo_check": "Log",
     # --- Boutons de Contrôle ---
     "start": "Démarrer",
     "stop": "Arrêter",

@@ -315,6 +315,7 @@ class SeestarStackerGUI:
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
+        self.log_histogram_var = tk.BooleanVar(value=False)
         self.initial_auto_stretch_done = False
 
         if (
@@ -2169,6 +2170,7 @@ class SeestarStackerGUI:
             fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 2), pady=(0, 2)
         )
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
+        self.histogram_widget.set_log_scale(self.log_histogram_var.get())
 
         self.auto_zoom_histo_check = ttk.Checkbutton(
             self.histo_toolbar,
@@ -2181,6 +2183,16 @@ class SeestarStackerGUI:
             ),
         )
         self.auto_zoom_histo_check.pack(side=tk.LEFT, padx=2)
+
+        self.log_histo_check = ttk.Checkbutton(
+            self.histo_toolbar,
+            text="Log",
+            variable=self.log_histogram_var,
+            command=lambda: self.histogram_widget.set_log_scale(
+                self.log_histogram_var.get()
+            ),
+        )
+        self.log_histo_check.pack(side=tk.LEFT, padx=2)
         self.hist_reset_view_btn = ttk.Button(
             self.histo_toolbar,
             text=self.tr("reset_histo_button", default="Reset Histogram"),

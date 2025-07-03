@@ -35,6 +35,7 @@ class HistogramWidget(ttk.Frame):
         self._current_hist_data_details = None
         self._current_data = None
         self.auto_zoom_enabled = False
+        self.use_log_scale = False
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -70,6 +71,7 @@ class HistogramWidget(ttk.Frame):
         self.ax.yaxis.label.set_color('lightgray'); self.ax.xaxis.label.set_color('lightgray')
         self.ax.yaxis.label.set_fontsize(8); self.ax.xaxis.label.set_fontsize(8)
         self.figure.subplots_adjust(left=0.12, right=0.98, bottom=0.18, top=0.95)
+        self.ax.set_yscale("log" if self.use_log_scale else "linear")
 
     def update_histogram(self, data_for_analysis):
         """Version async : lance le calcul dans le pool, puis revient
@@ -104,28 +106,45 @@ class HistogramWidget(ttk.Frame):
             lambda fut: self.after(0, self._apply_histogram, fut)
         )
 
+    def set_log_scale(self, enable: bool):
+        """Active ou désactive l'échelle Y logarithmique."""
+        self.use_log_scale = bool(enable)
+        self._configure_plot_style()
+        if self._current_hist_data_details:
+            self.plot_histogram(self._current_hist_data_details)
+
     @staticmethod
     def _compute_histogram(img):
         """Exécuté dans le worker : renvoie (counts_list, edges, is_color)."""
         if img is None:
             return None
         import numpy as np
-        num_bins = 256
-        if img.ndim == 3 and img.shape[2] == 3:  # RGB
+
+        img = img.astype(np.float32)
+        finite_vals = img[np.isfinite(img)]
+        if finite_vals.size == 0:
+            return None
+
+        data_min = float(finite_vals.min())
+        data_max = float(finite_vals.max())
+        if data_max <= data_min:
+            data_max = data_min + 1.0
+
+        num_bins = 512
+        hist_range = (data_min, data_max)
+
+        if img.ndim == 3 and img.shape[2] == 3:
             cols = []
             for ch in range(3):
-                h, _ = np.histogram(
-                    np.clip(img[..., ch].ravel(), 0, 1),
-                    bins=num_bins,
-                    range=(0, 1),
-                )
+                ch_vals = img[..., ch].ravel()
+                ch_vals = ch_vals[np.isfinite(ch_vals)]
+                h, _ = np.histogram(ch_vals, bins=num_bins, range=hist_range)
                 cols.append(h)
-            edges = np.linspace(0, 1, num_bins + 1, dtype=np.float32)
+            edges = np.linspace(hist_range[0], hist_range[1], num_bins + 1, dtype=np.float32)
             return cols, edges, True
-        else:  # Mono
-            h, edges = np.histogram(
-                np.clip(img.ravel(), 0, 1), bins=num_bins, range=(0, 1)
-            )
+        else:
+            vals = img.ravel()[np.isfinite(img.ravel())]
+            h, edges = np.histogram(vals, bins=num_bins, range=hist_range)
             return [h], edges, False
 
     def _apply_histogram(self, fut):
@@ -141,17 +160,20 @@ class HistogramWidget(ttk.Frame):
         bin_centers = (edges[:-1] + edges[1:]) / 2
         self._configure_plot_style()
         for i, counts in enumerate(counts_list):
+            to_plot = counts + 1 if self.use_log_scale else counts
             self.ax.plot(
                 bin_centers,
-                counts,
+                to_plot,
                 color=colors[i],
                 alpha=0.8,
                 drawstyle='steps-mid',
             )
-        self.ax.set_xlim(0, 1)
+        self.ax.set_xlim(edges[0], edges[-1])
         if counts_list:
             ymax = max(int(c.max()) for c in counts_list) or 1
-            self.ax.set_ylim(0, ymax * 1.05)
+            bottom = 0.8 if self.use_log_scale else 0
+            self.ax.set_ylim(bottom, ymax * 1.05)
+        self.ax.set_yscale("log" if self.use_log_scale else "linear")
         self.canvas.draw_idle()
         self._current_hist_data_details = {
             'bins': edges,
@@ -273,8 +295,10 @@ class HistogramWidget(ttk.Frame):
 
         if hist_data_details_to_plot is None or not hist_data_details_to_plot.get('hists') or hist_data_details_to_plot.get('bins') is None:
             self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
-            self.ax.set_ylim(1, 10); self.ax.set_yscale('log')
-            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})"); self.ax.set_ylabel("Nbre Pixels (log)")
+            self.ax.set_ylim(1, 10)
+            self.ax.set_yscale('log' if self.use_log_scale else 'linear')
+            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})")
+            self.ax.set_ylabel("Nbre Pixels (log)" if self.use_log_scale else "Nbre Pixels")
             self.ax.text(0.5, 0.5, "Aucune donnée", color="gray", ha='center', va='center', transform=self.ax.transAxes)
             print(f"  -> Affichage 'Aucune donnée'. Xlim réglé sur [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}].")
             self.canvas.draw_idle(); return
@@ -284,7 +308,7 @@ class HistogramWidget(ttk.Frame):
             
             all_pixel_counts_for_ylim = [] 
             for i, hist_counts in enumerate(hist_data_details_to_plot['hists']):
-                counts_for_plotting = hist_counts + 1 
+                counts_for_plotting = hist_counts + 1 if self.use_log_scale else hist_counts
                 if counts_for_plotting.size == bin_centers.size:
                     self.ax.plot(bin_centers, counts_for_plotting, color=hist_data_details_to_plot['colors'][i], alpha=0.85, drawstyle='steps-mid', linewidth=1.0)
                     all_pixel_counts_for_ylim.extend(hist_counts) 
@@ -323,12 +347,15 @@ class HistogramWidget(ttk.Frame):
                  else: 
                     print(f"    -> Aucun compte > 0 pour Ylim, utilisation défaut.")
             
-            current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8 # Fallback si ylim non défini
-            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10) 
-            self.ax.set_ylim(bottom=0.8, top=target_top_y_limit); self.ax.set_yscale('log')
-            print(f"  -> Ylim recalculé et appliqué: (0.8, {target_top_y_limit:.2f})")
+            current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else (0.8 if self.use_log_scale else 0)
+            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10)
+            bottom = 0.8 if self.use_log_scale else 0
+            self.ax.set_ylim(bottom=bottom, top=target_top_y_limit)
+            self.ax.set_yscale('log' if self.use_log_scale else 'linear')
+            print(f"  -> Ylim recalculé et appliqué: ({bottom}, {target_top_y_limit:.2f})")
 
-            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})"); self.ax.set_ylabel("Nbre Pixels (log)")
+            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})")
+            self.ax.set_ylabel("Nbre Pixels (log)" if self.use_log_scale else "Nbre Pixels")
 
             if was_x_zoomed_and_relevant:
                 self.ax.set_xlim(xlim_before_plot)
@@ -345,12 +372,15 @@ class HistogramWidget(ttk.Frame):
                     print(f"ERREUR HistoWidget.auto_zoom: {auto_e}")
         except Exception as e:
             print(f"ERREUR HistoWidget.plot_histogram: {e}"); traceback.print_exc(limit=2)
-            try: 
+            try:
                 self._configure_plot_style()
-                self.ax.set_xlim(0,1); self.ax.set_ylim(1,10); self.ax.set_yscale('log')
+                self.ax.set_xlim(0, 1)
+                self.ax.set_ylim(1, 10)
+                self.ax.set_yscale('log' if self.use_log_scale else 'linear')
                 self.ax.text(0.5, 0.5, "Erreur Histogramme", color="red", ha='center', va='center', transform=self.ax.transAxes)
                 self.canvas.draw_idle()
-            except Exception: pass
+            except Exception:
+                pass
 
 
 
