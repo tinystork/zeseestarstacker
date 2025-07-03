@@ -99,7 +99,10 @@ class CpuIoAutoTuner:
         )
         try:
             self.stacker.thread_fraction = new_frac
-            self.stacker._configure_global_threads(new_frac)
+            if hasattr(self.stacker, "request_thread_fraction_update"):
+                self.stacker.request_thread_fraction_update(new_frac)
+            else:
+                self.stacker._configure_global_threads(new_frac)
             self.stacker.max_reproj_workers = max(1, int(os.cpu_count() * new_frac))
         except Exception as e:  # pragma: no cover - log only
             log.error("AutoTune : \u00e9chec de l'application : %s", e)
