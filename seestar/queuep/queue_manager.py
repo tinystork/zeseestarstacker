@@ -550,6 +550,22 @@ class SeestarQueuedStacker:
 
     logger.debug("Lecture de la définition de la classe SeestarQueuedStacker...")
 
+    def __getstate__(self):
+        """Return picklable state for multiprocessing."""
+        state = self.__dict__.copy()
+        for attr in (
+            "progress_callback",
+            "preview_callback",
+            "queue",
+            "folders_lock",
+            "processing_thread",
+        ):
+            state[attr] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
     def _configure_global_threads(self, fraction: float) -> None:
         nthreads = max(1, math.floor(os.cpu_count() * fraction))
         for var in [
