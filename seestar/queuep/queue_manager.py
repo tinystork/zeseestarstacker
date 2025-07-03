@@ -561,10 +561,12 @@ class SeestarQueuedStacker:
             "processing_thread",
             "gui",
 
+
             "aligner",
             "local_aligner_instance",
             "astrometry_solver",
             "chroma_balancer",
+
 
             "autotuner",
             "drizzle_processes",
@@ -694,10 +696,12 @@ class SeestarQueuedStacker:
             ctx = multiprocessing.get_context("fork")
             use_process = ctx.get_start_method() == "fork"
         except ValueError:
+
             ctx = None
             use_process = False
 
         if use_process:
+
             p = ctx.Process(
                 target=self._process_incremental_drizzle_batch,
                 args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
@@ -706,6 +710,7 @@ class SeestarQueuedStacker:
             )
             self.drizzle_processes.append(p)
             p.start()
+
         else:
             t = threading.Thread(
                 target=self._process_incremental_drizzle_batch,
@@ -715,6 +720,7 @@ class SeestarQueuedStacker:
             )
             self.drizzle_processes.append(t)
             t.start()
+
 
     def _wait_drizzle_processes(self):
         """Wait for all background drizzle processes to finish."""
