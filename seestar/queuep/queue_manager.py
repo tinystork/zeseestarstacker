@@ -524,6 +524,25 @@ class SeestarQueuedStacker:
         if hasattr(self, "update_progress"):
             self.update_progress(f"Threads limited to {nthreads}")
 
+    def _get_indices(self, shape_hw: tuple[int, int], flat: bool = False):
+        """Return cached np.indices for ``shape_hw``.
+
+        Parameters
+        ----------
+        shape_hw : tuple[int, int]
+            Image shape ``(H, W)``.
+        flat : bool, optional
+            Whether to return flattened arrays.
+        """
+        shape_hw = tuple(int(v) for v in shape_hw)
+        grid = self._indices_cache.get(shape_hw)
+        if grid is None:
+            grid = np.indices(shape_hw)
+            self._indices_cache[shape_hw] = grid
+        if flat:
+            return grid.reshape(2, -1)
+        return grid
+
     def _process_batch_parallel(self, filepaths: list[str]):
         start = time.monotonic()
 
@@ -625,6 +644,9 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
+        # Cache pour les grilles d'indices afin de ne pas
+        # recalculer ``np.indices`` à chaque image.
+        self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
         self.max_reproj_workers = _suggest_pool_size(0.5)
         self.max_stack_workers = _suggest_pool_size(0.75)
         if batch_size is None:
@@ -6285,9 +6307,15 @@ class SeestarQueuedStacker:
 
                 # --- ÉTAPE 3: Calcul du Pixmap (mapping des pixels d'entrée vers la grille de sortie Drizzle) ---
                 logger.debug(f"      [Step 3] Calcul du Pixmap pour mapping WCS...")
-                y_in_coords_flat, x_in_coords_flat = np.indices(
-                    input_shape_hw_current_file
-                ).reshape(2, -1)
+                get_idx = getattr(self, "_get_indices", None)
+                if get_idx is not None:
+                    y_in_coords_flat, x_in_coords_flat = get_idx(
+                        input_shape_hw_current_file, flat=True
+                    )
+                else:  # Fallback for test stubs
+                    y_in_coords_flat, x_in_coords_flat = np.indices(
+                        input_shape_hw_current_file
+                    ).reshape(2, -1)
 
                 # Convertir les coordonnées pixels de l'image d'entrée en coordonnées célestes
                 sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(
@@ -8144,7 +8172,15 @@ class SeestarQueuedStacker:
                 # --- FIN DEBUG ---
 
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
-                y_lot_intermed, x_lot_intermed = np.indices(shape_lot_intermediaire_hw)
+                get_idx = getattr(self, "_get_indices", None)
+                if get_idx is not None:
+                    y_lot_intermed, x_lot_intermed = get_idx(
+                        shape_lot_intermediaire_hw, flat=False
+                    )
+                else:
+                    y_lot_intermed, x_lot_intermed = np.indices(
+                        shape_lot_intermediaire_hw
+                    )
                 (
                     sky_coords_lot_ra,
                     sky_coords_lot_dec,
@@ -11149,7 +11185,13 @@ class SeestarQueuedStacker:
                         raise ValueError(f"WCS non céleste dans FITS temp")
 
                 current_input_shape_hw = input_data_HxWxC_orig.shape[:2]
-                y_in_coords, x_in_coords = np.indices(current_input_shape_hw)
+                get_idx = getattr(self, "_get_indices", None)
+                if get_idx is not None:
+                    y_in_coords, x_in_coords = get_idx(
+                        current_input_shape_hw, flat=False
+                    )
+                else:
+                    y_in_coords, x_in_coords = np.indices(current_input_shape_hw)
                 (
                     sky_coords_ra_deg,
                     sky_coords_dec_deg,
