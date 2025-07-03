@@ -1,11 +1,15 @@
-import numpy as np
+# Standard library imports
 import os
 import traceback
 import warnings
 import gc
 import logging
+
+# Third party imports
+import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
+from reproject import reproject_exact
 import cv2
 from scipy.ndimage import gaussian_filter
 # ConvexHull n'est pas utilisé dans ce fichier
@@ -551,6 +555,110 @@ class DrizzleIntegrator:
         elif self.renormalize == "n_images":
             final_img *= self._n_images
         return final_img.astype(np.float32)
+
+
+def run_incremental_drizzle(
+    images,
+    wcs_list,
+    target_wcs,
+    shape_out,
+    *,
+    pixfrac=1.0,
+    kernel="square",
+):
+    """Stack images incrementally using ``reproject_exact``.
+
+    Parameters
+    ----------
+    images : iterable of `numpy.ndarray`
+        2D image arrays to drizzle.
+    wcs_list : iterable of `astropy.wcs.WCS`
+        Input WCS corresponding to each image.
+    target_wcs : `astropy.wcs.WCS`
+        Output WCS defining the drizzle grid.
+    shape_out : tuple
+        Shape ``(ny, nx)`` of the output grid.
+    pixfrac : float, optional
+        Drizzle ``pixfrac`` parameter.
+    kernel : str, optional
+        Drizzle kernel.
+
+    Returns
+    -------
+    numpy.ndarray
+        The drizzled image.
+    """
+
+    sum_data = np.zeros(shape_out, dtype=float)
+    sum_weight = np.zeros(shape_out, dtype=float)
+    for data, wcs_in in zip(images, wcs_list):
+        arr, fp = reproject_exact(
+            (data, wcs_in),
+            target_wcs,
+            shape_out=shape_out,
+            drizzle=True,
+            pixfrac=pixfrac,
+            kernel=kernel,
+        )
+        sum_data += arr * fp
+        sum_weight += fp
+
+    valid = sum_weight > 0
+    final = np.zeros_like(sum_data)
+    final[valid] = sum_data[valid] / sum_weight[valid]
+    return final
+
+
+def run_final_drizzle(
+    images,
+    wcs_list,
+    final_target_wcs,
+    final_shape_out,
+    *,
+    pixfrac=1.0,
+    kernel="square",
+):
+    """Combine all aligned images using ``reproject_exact``.
+
+    Parameters
+    ----------
+    images : iterable of `numpy.ndarray`
+        Aligned image arrays.
+    wcs_list : iterable of `astropy.wcs.WCS`
+        WCS for each image.
+    final_target_wcs : `astropy.wcs.WCS`
+        Output WCS for the final drizzle.
+    final_shape_out : tuple
+        Output array shape ``(ny, nx)``.
+    pixfrac : float, optional
+        Drizzle ``pixfrac`` parameter.
+    kernel : str, optional
+        Drizzle kernel.
+
+    Returns
+    -------
+    numpy.ndarray
+        Final drizzled image.
+    """
+
+    sum_data = np.zeros(final_shape_out, dtype=float)
+    sum_weight = np.zeros(final_shape_out, dtype=float)
+    for data, wcs_in in zip(images, wcs_list):
+        arr, fp = reproject_exact(
+            (data, wcs_in),
+            final_target_wcs,
+            shape_out=final_shape_out,
+            drizzle=True,
+            pixfrac=pixfrac,
+            kernel=kernel,
+        )
+        sum_data += arr * fp
+        sum_weight += fp
+
+    valid = sum_weight > 0
+    final = np.zeros_like(sum_data)
+    final[valid] = sum_data[valid] / sum_weight[valid]
+    return final
 
 
 # --- FIN DU FICHIER seestar/enhancement/drizzle_integration.py ---
