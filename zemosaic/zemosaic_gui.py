@@ -11,6 +11,18 @@ import subprocess
 import sys
 
 try:
+    import wmi
+except ImportError:  # pragma: no cover - wmi may be unavailable on non Windows
+    wmi = None
+
+import importlib.util
+
+CUPY_AVAILABLE = importlib.util.find_spec("cupy") is not None
+cupy = None
+getDeviceProperties = None
+getDeviceCount = None
+
+try:
     from PIL import Image, ImageTk # Importe depuis Pillow
     PILLOW_AVAILABLE_FOR_ICON = True
 except ImportError:
@@ -104,6 +116,40 @@ class ZeMosaicGUI:
                 "num_processing_workers": 0 # 0 pour auto, anciennement -1
             }
 
+        # --- GPU Detection helper ---
+        def _detect_gpus():
+            controllers = []
+            if wmi:
+                try:
+                    obj = wmi.WMI()
+                    controllers = [c.Name for c in obj.Win32_VideoController()]
+                except Exception:
+                    controllers = []
+
+            nv_cuda = []
+            try:
+                import cupy
+                from cupy.cuda.runtime import getDeviceCount, getDeviceProperties
+                for i in range(getDeviceCount()):
+                    name = getDeviceProperties(i)["name"]
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    nv_cuda.append(name)
+            except Exception:
+                nv_cuda = []
+
+            def _simplify(n):
+                return n.lower().replace("laptop gpu", "").strip()
+
+            simple_cuda = [_simplify(n) for n in nv_cuda]
+            gpus = []
+            for disp in controllers:
+                simp = _simplify(disp)
+                idx = simple_cuda.index(simp) if simp in simple_cuda else None
+                gpus.append((disp, idx))
+            gpus.insert(0, ("CPU (no GPU)", None))
+            return gpus
+
         default_lang_from_config = self.config.get("language", 'en')
         if ZEMOSAIC_LOCALIZATION_AVAILABLE and ZeMosaicLocalization:
             self.localizer = ZeMosaicLocalization(language_code=default_lang_from_config)
@@ -157,6 +203,7 @@ class ZeMosaicGUI:
         self.elapsed_time_var = tk.StringVar(value=self._tr("initial_elapsed_time", "00:00:00"))
         self._chrono_start_time = None
         self._chrono_after_id = None
+        self._stage_times = {}
         
         self.current_language_var = tk.StringVar(value=self.localizer.language_code)
         self.current_language_var.trace_add("write", self._on_language_change)
@@ -204,6 +251,11 @@ class ZeMosaicGUI:
         self.cleanup_memmap_var = tk.BooleanVar(value=self.config.get("coadd_cleanup_memmap", True))
         self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
         self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
+        self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
+        self._gpus = _detect_gpus()
+        self.gpu_selector_var = tk.StringVar(
+            value=self.config.get("gpu_selector", self._gpus[0][0] if self._gpus else "")
+        )
         # ---  ---
 
         self.translatable_widgets = {}
@@ -681,6 +733,45 @@ class ZeMosaicGUI:
         self.final_assembly_method_combo.grid(row=asm_opt_row, column=1, padx=5, pady=5, sticky="ew")
         self.final_assembly_method_combo.bind("<<ComboboxSelected>>", lambda e, c=self.final_assembly_method_combo, v=self.final_assembly_method_var, k_list=self.assembly_method_keys, p="assembly_method": self._combo_to_key(e, c, v, k_list, p)); asm_opt_row += 1
 
+        gpu_chk = ttk.Checkbutton(
+            final_assembly_options_frame,
+            text=self._tr("use_gpu_phase5", "Use NVIDIA GPU for Phase 5"),
+            variable=self.use_gpu_phase5_var,
+        )
+        gpu_chk.grid(row=asm_opt_row, column=0, sticky="w", padx=5, pady=3, columnspan=2)
+        asm_opt_row += 1
+
+        ttk.Label(
+            final_assembly_options_frame,
+            text=self._tr("gpu_selector_label", "GPU selector:")
+        ).grid(row=asm_opt_row, column=0, sticky="e", padx=5, pady=2)
+        names = [d for d, _ in self._gpus]
+        self.gpu_selector_var.set(names[0] if names else "")
+        self.gpu_selector_cb = ttk.Combobox(
+            final_assembly_options_frame,
+            textvariable=self.gpu_selector_var,
+            values=names,
+            state="readonly",
+            width=30,
+        )
+        self.gpu_selector_cb.grid(row=asm_opt_row, column=1, sticky="w", padx=5, pady=2)
+        self._gpu_selector_label = final_assembly_options_frame.grid_slaves(row=asm_opt_row, column=0)[0]
+        self.translatable_widgets["gpu_selector_label"] = self._gpu_selector_label
+        self._gpu_selector_label.grid_remove()
+        self.gpu_selector_cb.grid_remove()
+        asm_opt_row += 1
+
+        def on_gpu_check(*_):
+            if self.use_gpu_phase5_var.get():
+                self._gpu_selector_label.grid()
+                self.gpu_selector_cb.grid()
+            else:
+                self._gpu_selector_label.grid_remove()
+                self.gpu_selector_cb.grid_remove()
+
+        self.use_gpu_phase5_var.trace_add("write", on_gpu_check)
+        on_gpu_check()
+
         self.memmap_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_memmap_title", "Options memmap (coadd)"))
         self.memmap_frame.pack(fill=tk.X, pady=(0,10))
         self.memmap_frame.columnconfigure(1, weight=1)
@@ -1132,6 +1223,39 @@ class ZeMosaicGUI:
             except tk.TclError: pass
         self._chrono_after_id = None
         print("DEBUG GUI: Chronomètre arrêté.")
+
+    def on_worker_progress(self, stage: str, current: int, total: int):
+        """Handle progress updates for a specific processing stage."""
+        if stage not in self._stage_times:
+            self._stage_times[stage] = {
+                'start': time.monotonic(),
+                'last': time.monotonic(),
+                'steps': []
+            }
+        else:
+            now = time.monotonic()
+            last = self._stage_times[stage]['last']
+            self._stage_times[stage]['steps'].append(now - last)
+            self._stage_times[stage]['last'] = now
+
+        percent = (current / total * 100.0) if total else 0.0
+        try:
+            if hasattr(self, 'progress_bar_var'):
+                self.progress_bar_var.set(percent)
+        except tk.TclError:
+            pass
+
+        times = self._stage_times[stage]
+        if times['steps']:
+            avg = sum(times['steps']) / len(times['steps'])
+            remaining = max(0.0, (total - current) * avg)
+            h, rem = divmod(int(remaining), 3600)
+            m, s = divmod(rem, 60)
+            try:
+                if hasattr(self, 'eta_var') and self.eta_var:
+                    self.eta_var.set(f"{h:02d}:{m:02d}:{s:02d}")
+            except tk.TclError:
+                pass
         
 
 
@@ -1258,6 +1382,16 @@ class ZeMosaicGUI:
 
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
+
+        self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
+        sel = self.gpu_selector_var.get()
+        gpu_id = None
+        for disp, idx in self._gpus:
+            if disp == sel:
+                self.config["gpu_selector"] = disp
+                self.config["gpu_id_phase5"] = idx
+                gpu_id = idx
+                break
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
             zemosaic_config.save_config(self.config)
 
@@ -1289,6 +1423,8 @@ class ZeMosaicGUI:
             self.auto_limit_frames_var.get(),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
+            self.use_gpu_phase5_var.get(),
+            gpu_id,
             asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
@@ -1324,6 +1460,10 @@ class ZeMosaicGUI:
                     msg_key, prog, lvl, kwargs = self.progress_queue.get_nowait()
                 except Exception:
                     break
+                if msg_key == "STAGE_PROGRESS":
+                    stage, cur, tot = prog, lvl, kwargs.get('total', 0)
+                    self.on_worker_progress(stage, cur, tot)
+                    continue
                 if msg_key == "PROCESS_DONE":
                     if self.worker_process:
                         self.worker_process.join(timeout=0.1)

@@ -17,8 +17,8 @@ def test_run_process_forwards_solver_settings(monkeypatch):
         recorded['solver'] = solver_settings
         recorded['args_len'] = len(args)
     monkeypatch.setattr(worker, 'run_hierarchical_mosaic', fake_run)
-    dummy_args = [0] * 32
+    dummy_args = [0] * 33
     q = DummyQueue()
     worker.run_hierarchical_mosaic_process(q, *dummy_args, solver_settings_dict={'solver_choice': 'ASTROMETRY'})
     assert recorded['solver']['solver_choice'] == 'ASTROMETRY'
-    assert recorded['args_len'] == 33
+    assert recorded['args_len'] == 34

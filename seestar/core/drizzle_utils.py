@@ -1,11 +1,8 @@
 import numpy as np
+import importlib.util
 
-try:
-    import cupy as cp  # type: ignore
-    _cupy_available = cp.cuda.is_available()
-except Exception:
-    cp = None  # type: ignore
-    _cupy_available = False
+_cupy_available = importlib.util.find_spec("cupy") is not None
+cp = None  # lazily imported when needed
 
 
 def drizzle_finalize(
@@ -34,7 +31,11 @@ def drizzle_finalize(
     if use_gpu is None:
         use_gpu = _cupy_available
 
-    xp = cp if use_gpu and _cupy_available else np
+    xp = np
+    cp = None
+    if use_gpu and _cupy_available:
+        import cupy as cp  # type: ignore
+        xp = cp
 
     sci = xp.asarray(sci_sum, dtype=xp.float32)
     wht = xp.asarray(wht_sum, dtype=xp.float32)
@@ -51,6 +52,6 @@ def drizzle_finalize(
             result *= float(xp.mean(wht_safe))
 
     result = xp.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(xp.float32)
-    if xp is cp:
+    if cp is not None:
         result = cp.asnumpy(result)
     return result.astype(np.float32)

@@ -13,6 +13,7 @@ import glob
 import uuid
 import multiprocessing
 from typing import Callable
+from types import SimpleNamespace
 
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 # BrokenProcessPool moved under concurrent.futures.process in modern Python
@@ -107,7 +108,15 @@ zemosaic_align_stack, ZEMOSAIC_ALIGN_STACK_AVAILABLE = None, False
 CALC_GRID_OPTIMIZED_AVAILABLE = False
 _calculate_final_mosaic_grid_optimized = None
 
-try: import zemosaic_utils; ZEMOSAIC_UTILS_AVAILABLE = True; logger.info("Module 'zemosaic_utils' importé.")
+try:
+    import zemosaic_utils
+    from zemosaic_utils import (
+        gpu_assemble_final_mosaic_reproject_coadd,
+        gpu_assemble_final_mosaic_incremental,
+        reproject_and_coadd_wrapper,
+    )
+    ZEMOSAIC_UTILS_AVAILABLE = True
+    logger.info("Module 'zemosaic_utils' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_utils.py' échoué: {e}.")
 try: import zemosaic_astrometry; ZEMOSAIC_ASTROMETRY_AVAILABLE = True; logger.info("Module 'zemosaic_astrometry' importé.")
 except ImportError as e: logger.error(f"Import 'zemosaic_astrometry.py' échoué: {e}.")
@@ -115,8 +124,30 @@ try: import zemosaic_align_stack; ZEMOSAIC_ALIGN_STACK_AVAILABLE = True; logger.
 except ImportError as e: logger.error(f"Import 'zemosaic_align_stack.py' échoué: {e}.")
 from .solver_settings import SolverSettings
 
+# Optional configuration import for GPU toggle
+try:
+    import zemosaic_config
+    ZEMOSAIC_CONFIG_AVAILABLE = True
+except Exception:
+    zemosaic_config = None  # type: ignore
+    ZEMOSAIC_CONFIG_AVAILABLE = False
+
+import importlib.util
+
+def gpu_is_available() -> bool:
+    """Return True if CuPy and a CUDA device are available."""
+    if importlib.util.find_spec("cupy") is None:
+        return False
+    try:
+        import cupy
+        return cupy.is_available()
+    except Exception:
+        return False
+
 # Exposed compatibility flag expected by some tests
 ASTROMETRY_SOLVER_AVAILABLE = ZEMOSAIC_ASTROMETRY_AVAILABLE
+
+# progress_callback(stage: str, current: int, total: int)
 
 
 
@@ -1056,7 +1087,15 @@ def create_master_tile(
     Transmet toutes les options de stacking, y compris la pondération radiale.
     """
     pcb_tile = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
-    func_id_log_base = "mastertile" 
+    # Load persistent configuration to forward GPU preference
+    if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+        try:
+            zconfig = SimpleNamespace(**zemosaic_config.load_config())
+        except Exception:
+            zconfig = SimpleNamespace()
+    else:
+        zconfig = SimpleNamespace()
+    func_id_log_base = "mastertile"
 
     pcb_tile(f"{func_id_log_base}_info_creation_started_from_cache", prog=None, lvl="INFO", 
              num_raw=len(seestar_stack_group_info), tile_id=tile_id)
@@ -1156,24 +1195,44 @@ def create_master_tile(
     pcb_tile(f"{func_id_log_base}_info_stacking_started", prog=None, lvl="DEBUG_DETAIL", 
              num_to_stack=len(valid_aligned_images), tile_id=tile_id) # Les options sont loggées au début
     
-    master_tile_stacked_HWC = zemosaic_align_stack.stack_aligned_images(
-        aligned_image_data_list=valid_aligned_images, 
-        normalize_method=stack_norm_method,
-        weighting_method=stack_weight_method,
-        rejection_algorithm=stack_reject_algo,
-        final_combine_method=stack_final_combine,
-        sigma_clip_low=stack_kappa_low,
-        sigma_clip_high=stack_kappa_high,
-        winsor_limits=parsed_winsor_limits,
-        minimum_signal_adu_target=0.0,
-        # --- TRANSMISSION DES NOUVEAUX PARAMÈTRES ---
-        apply_radial_weight=apply_radial_weight,
-        radial_feather_fraction=radial_feather_fraction,
-        radial_shape_power=radial_shape_power,
-        winsor_max_workers=winsor_pool_workers,
-        # --- FIN TRANSMISSION ---
-        progress_callback=progress_callback
-    )
+    if stack_reject_algo == "winsorized_sigma_clip":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_winsorized_sigma_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            kappa=stack_kappa_low,
+            winsor_limits=parsed_winsor_limits,
+            apply_rewinsor=True,
+        )
+    elif stack_reject_algo == "kappa_sigma":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_kappa_sigma_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            sigma_low=stack_kappa_low,
+            sigma_high=stack_kappa_high,
+        )
+    elif stack_reject_algo == "linear_fit_clip":
+        master_tile_stacked_HWC, _ = zemosaic_align_stack.stack_linear_fit_clip(
+            valid_aligned_images,
+            zconfig=zconfig,
+            sigma=stack_kappa_high,
+        )
+    else:
+        master_tile_stacked_HWC = zemosaic_align_stack.stack_aligned_images(
+            aligned_image_data_list=valid_aligned_images,
+            normalize_method=stack_norm_method,
+            weighting_method=stack_weight_method,
+            rejection_algorithm=stack_reject_algo,
+            final_combine_method=stack_final_combine,
+            sigma_clip_low=stack_kappa_low,
+            sigma_clip_high=stack_kappa_high,
+            winsor_limits=parsed_winsor_limits,
+            minimum_signal_adu_target=0.0,
+            apply_radial_weight=apply_radial_weight,
+            radial_feather_fraction=radial_feather_fraction,
+            radial_shape_power=radial_shape_power,
+            winsor_max_workers=winsor_pool_workers,
+            progress_callback=progress_callback,
+        )
     
     del valid_aligned_images; gc.collect() # valid_aligned_images a été passé par valeur (copie de la liste)
                                           # mais les arrays NumPy à l'intérieur sont passés par référence.
@@ -1460,6 +1519,10 @@ def assemble_final_mosaic_incremental(
                 future_map[future] = tile_idx
 
             processed = 0
+            total_steps = len(future_map)
+            start_time_iter = time.time()
+            last_time = start_time_iter
+            step_times = []
             for fut in as_completed(future_map):
                 idx = future_map[fut]
                 try:
@@ -1523,6 +1586,14 @@ def assemble_final_mosaic_incremental(
                         tiles_since_flush = 0
 
                 processed += 1
+                now = time.time()
+                step_times.append(now - last_time)
+                last_time = now
+                if progress_callback:
+                    try:
+                        progress_callback("phase5_incremental", processed, total_steps)
+                    except Exception:
+                        pass
                 if processed % 10 == 0 or processed == len(master_tile_fits_with_wcs_list):
                     pcb_asm(
                         "assemble_progress_tiles_processed_inc",
@@ -1547,6 +1618,17 @@ def assemble_final_mosaic_incremental(
         mosaic = np.zeros_like(sum_data, dtype=np.float32)
         np.divide(sum_data, weight_data[..., None], out=mosaic, where=weight_data[..., None] > 0)
 
+    if step_times:
+        avg_step = sum(step_times) / len(step_times)
+        total_elapsed = time.time() - start_time_iter
+        pcb_asm(
+            "assemble_debug_incremental_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
+
     pcb_asm("assemble_info_finished_incremental", prog=None, lvl="INFO", shape=str(mosaic.shape))
 
     if cleanup_memmap:
@@ -1568,14 +1650,15 @@ def assemble_final_mosaic_incremental(
 def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, output_shape_hw, match_bg, mm_sum_prefix=None, mm_cov_prefix=None):
     """Worker function to run reproject_and_coadd in a separate process."""
     from astropy.wcs import WCS
-    from reproject.mosaicking import reproject_and_coadd
     from reproject import reproject_interp
     import numpy as np
 
     final_wcs = WCS(output_wcs_header)
-    prepared_inputs = []
+    data_list = []
+    wcs_list = []
     for arr, hdr in channel_data_list:
-        prepared_inputs.append((arr, WCS(hdr)))
+        data_list.append(arr)
+        wcs_list.append(WCS(hdr))
 
 
 
@@ -1598,7 +1681,15 @@ def _reproject_and_coadd_channel_worker(channel_data_list, output_wcs_header, ou
     if bg_kw:
         kwargs[bg_kw] = match_bg
 
-    stacked, coverage = reproject_and_coadd(prepared_inputs, **kwargs)
+    stacked, coverage = reproject_and_coadd_wrapper(
+        data_list=data_list,
+        wcs_list=wcs_list,
+        shape_out=output_shape_hw,
+        output_projection=final_wcs,
+        use_gpu=False,
+        cpu_func=reproject_and_coadd,
+        **kwargs,
+    )
 
     if mm_sum_prefix and mm_cov_prefix:
         _wait_for_memmap_files([mm_sum_prefix, mm_cov_prefix])
@@ -1621,6 +1712,9 @@ def assemble_final_mosaic_reproject_coadd(
     re_solve_cropped_tiles: bool = False,
     solver_settings: dict | None = None,
     solver_instance=None,
+    use_gpu: bool = False,
+
+
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1632,6 +1726,13 @@ def assemble_final_mosaic_reproject_coadd(
         f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    # Ensure wrapper uses the possibly monkeypatched CPU implementation
+    try:
+        zemosaic_utils.cpu_reproject_and_coadd = reproject_and_coadd
+    except Exception:
+        pass
+
 
     if not (REPROJECT_AVAILABLE and reproject_and_coadd and ASTROPY_AVAILABLE and fits):
         missing_deps = []
@@ -1760,14 +1861,24 @@ def assemble_final_mosaic_reproject_coadd(
     mosaic_channels = []
     coverage = None
     try:
+        total_steps = n_channels
+        start_time_loop = time.time()
+        last_time = start_time_loop
+        step_times = []
         for ch in range(n_channels):
-            channel_inputs = [
-                (arr[..., ch], wcs) for arr, wcs in input_data_all_tiles_HWC_processed
-            ]
-            chan_mosaic, chan_cov = reproject_and_coadd(
-                channel_inputs,
-                output_header,
-                final_output_shape_hw,
+
+            data_list = [arr[..., ch] for arr, _w in input_data_all_tiles_HWC_processed]
+            wcs_list = [wcs for _arr, wcs in input_data_all_tiles_HWC_processed]
+
+            chan_mosaic, chan_cov = reproject_and_coadd_wrapper(
+                data_list=data_list,
+                wcs_list=wcs_list,
+                shape_out=final_output_shape_hw,
+
+                output_projection=output_header,
+                use_gpu=use_gpu,
+                cpu_func=reproject_and_coadd,
+
                 reproject_function=reproject_interp,
                 combine_function="mean",
                 **reproj_kwargs,
@@ -1775,6 +1886,14 @@ def assemble_final_mosaic_reproject_coadd(
             mosaic_channels.append(chan_mosaic.astype(np.float32))
             if coverage is None:
                 coverage = chan_cov.astype(np.float32)
+            now = time.time()
+            step_times.append(now - last_time)
+            last_time = now
+            if progress_callback:
+                try:
+                    progress_callback("phase5_reproject", ch + 1, total_steps)
+                except Exception:
+                    pass
     except Exception as e_reproject:
         _pcb("assemble_error_reproject_coadd_call_failed", lvl="ERROR", error=str(e_reproject))
         logger.error(
@@ -1784,6 +1903,16 @@ def assemble_final_mosaic_reproject_coadd(
         return None, None
 
     mosaic_data = np.stack(mosaic_channels, axis=-1)
+    if step_times:
+        avg_step = sum(step_times) / len(step_times)
+        total_elapsed = time.time() - start_time_loop
+        _pcb(
+            "assemble_debug_reproject_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
     if re_solve_cropped_tiles and solver_instance is not None and hdr_for_output is not None:
         try:
             fits.writeto("final_mosaic.fits", mosaic_data.astype(np.float32), hdr_for_output, overwrite=True)
@@ -1875,6 +2004,8 @@ def run_hierarchical_mosaic(
     auto_limit_frames_per_master_tile_config: bool,
     winsor_worker_limit_config: int,
     max_raw_per_master_tile_config: int,
+    use_gpu_phase5: bool = False,
+    gpu_id_phase5: int | None = None,
     solver_settings: dict | None = None
 ):
     """
@@ -1913,6 +2044,28 @@ def run_hierarchical_mosaic(
     DEFAULT_PHASE_WORKER_RATIO = 1.0
     ALIGNMENT_PHASE_WORKER_RATIO = 0.5  # Limit aggressive phases to 50% of base workers
 
+    if use_gpu_phase5 and gpu_id_phase5 is not None:
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id_phase5)
+        try:
+            import cupy
+            cupy.cuda.Device(0).use()
+        except Exception as e:
+            pcb(
+                "run_error_gpu_init_failed",
+                prog=None,
+                lvl="ERROR",
+                error=str(e),
+            )
+            use_gpu_phase5 = False
+    else:
+        for v in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
+            os.environ.pop(v, None)
+
+    # Determine final GPU usage flag only if a valid NVIDIA GPU is selected
+    use_gpu_phase5_flag = (
+        use_gpu_phase5 and gpu_id_phase5 is not None and gpu_is_available()
+    )
     def _compute_phase_workers(base_workers: int, num_tasks: int, ratio: float = DEFAULT_PHASE_WORKER_RATIO) -> int:
         workers = max(1, int(base_workers * ratio))
         if num_tasks > 0:
@@ -2266,8 +2419,12 @@ def run_hierarchical_mosaic(
         ): i_stk for i_stk, sg_info_list in enumerate(seestar_stack_groups)
     }
 
-    for future in as_completed(future_to_group_index):
+    start_time_loop_ph3 = time.time()
+    last_time_loop_ph3 = start_time_loop_ph3
+    step_times_ph3 = []
 
+    for future in as_completed(future_to_group_index):
+            
             group_index_original = future_to_group_index[future]
             tiles_processed_count_ph3 += 1
             
@@ -2276,6 +2433,15 @@ def run_hierarchical_mosaic(
             # --- FIN ENVOI MISE À JOUR ---
             
             prog_step_phase3 = base_progress_phase3 + int(PROGRESS_WEIGHT_PHASE3_MASTER_TILES * (tiles_processed_count_ph3 / max(1, num_seestar_stacks_to_process)))
+            if progress_callback:
+                try:
+                    progress_callback("phase3_master_tiles", tiles_processed_count_ph3, num_seestar_stacks_to_process)
+                except Exception:
+                    pass
+
+            now = time.time()
+            step_times_ph3.append(now - last_time_loop_ph3)
+            last_time_loop_ph3 = now
             try:
                 mt_result_path, mt_result_wcs = future.result()
                 if mt_result_path and mt_result_wcs: 
@@ -2302,11 +2468,21 @@ def run_hierarchical_mosaic(
 
     master_tiles_results_list = [master_tiles_results_list_temp[i] for i in sorted(master_tiles_results_list_temp.keys())]
     del master_tiles_results_list_temp; gc.collect()
-    if not master_tiles_results_list: 
+    if not master_tiles_results_list:
         pcb("run_error_phase3_no_master_tiles_created", prog=(base_progress_phase3 + PROGRESS_WEIGHT_PHASE3_MASTER_TILES), lvl="ERROR"); return
-    
+
     current_global_progress = base_progress_phase3 + PROGRESS_WEIGHT_PHASE3_MASTER_TILES
-    _log_memory_usage(progress_callback, "Fin Phase 3"); 
+    _log_memory_usage(progress_callback, "Fin Phase 3");
+    if step_times_ph3:
+        avg_step = sum(step_times_ph3) / len(step_times_ph3)
+        total_elapsed = time.time() - start_time_loop_ph3
+        pcb(
+            "phase3_debug_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
     pcb("run_info_phase3_finished_from_cache", prog=current_global_progress, lvl="INFO", num_master_tiles=len(master_tiles_results_list))
     
     # Assurer que le compteur final est bien affiché (au cas où la dernière itération n'aurait pas été exactement le total)
@@ -2330,7 +2506,9 @@ def run_hierarchical_mosaic(
     _log_memory_usage(progress_callback, "Début Phase 4 (Calcul Grille)")
     pcb("run_info_phase4_started", prog=base_progress_phase4, lvl="INFO")
     wcs_list_for_final_grid = []; shapes_list_for_final_grid_hw = []
-    for mt_path_iter,mt_wcs_iter in master_tiles_results_list:
+    start_time_loop_ph4 = time.time(); last_time_loop_ph4 = start_time_loop_ph4; step_times_ph4 = []
+    total_steps_ph4 = len(master_tiles_results_list)
+    for idx_loop, (mt_path_iter,mt_wcs_iter) in enumerate(master_tiles_results_list, 1):
         # ... (logique de récupération shape, inchangée) ...
         if not (mt_path_iter and os.path.exists(mt_path_iter) and mt_wcs_iter and mt_wcs_iter.is_celestial): pcb("run_warn_phase4_invalid_master_tile_for_grid", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter if mt_path_iter else "N/A_path")); continue
         try:
@@ -2350,13 +2528,30 @@ def run_hierarchical_mosaic(
                         except Exception as e_set_ps: pcb("run_warn_phase4_failed_set_pixel_shape", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter), error=str(e_set_ps))
             if h_mt_loc > 0 and w_mt_loc > 0: shapes_list_for_final_grid_hw.append((int(h_mt_loc),int(w_mt_loc))); wcs_list_for_final_grid.append(mt_wcs_iter)
             else: pcb("run_warn_phase4_zero_dimensions_tile", prog=None, lvl="WARN", path=os.path.basename(mt_path_iter))
+            now = time.time(); step_times_ph4.append(now - last_time_loop_ph4); last_time_loop_ph4 = now
+            if progress_callback:
+                try:
+                    progress_callback("phase4_grid", idx_loop, total_steps_ph4)
+                except Exception:
+                    pass
         except Exception as e_read_tile_shape: pcb("run_error_phase4_reading_tile_shape", prog=None, lvl="ERROR", path=os.path.basename(mt_path_iter), error=str(e_read_tile_shape)); logger.error(f"Erreur lecture shape tuile {os.path.basename(mt_path_iter)}:", exc_info=True); continue
     if not wcs_list_for_final_grid or not shapes_list_for_final_grid_hw or len(wcs_list_for_final_grid) != len(shapes_list_for_final_grid_hw): pcb("run_error_phase4_insufficient_tile_info", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
     final_mosaic_drizzle_scale = 1.0 
     final_output_wcs, final_output_shape_hw = _calculate_final_mosaic_grid(wcs_list_for_final_grid, shapes_list_for_final_grid_hw, final_mosaic_drizzle_scale, progress_callback)
     if not final_output_wcs or not final_output_shape_hw: pcb("run_error_phase4_grid_calc_failed", prog=(base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC), lvl="ERROR"); return
     current_global_progress = base_progress_phase4 + PROGRESS_WEIGHT_PHASE4_GRID_CALC
-    _log_memory_usage(progress_callback, "Fin Phase 4"); pcb("run_info_phase4_finished", prog=current_global_progress, lvl="INFO", shape=final_output_shape_hw, crval=final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A')
+    _log_memory_usage(progress_callback, "Fin Phase 4");
+    if step_times_ph4:
+        avg_step = sum(step_times_ph4) / len(step_times_ph4)
+        total_elapsed = time.time() - start_time_loop_ph4
+        pcb(
+            "phase4_debug_timing",
+            prog=None,
+            lvl="DEBUG_DETAIL",
+            avg=f"{avg_step:.2f}",
+            total=f"{total_elapsed:.2f}",
+        )
+    pcb("run_info_phase4_finished", prog=current_global_progress, lvl="INFO", shape=final_output_shape_hw, crval=final_output_wcs.wcs.crval if final_output_wcs.wcs else 'N/A')
 
 # --- Phase 5 (Assemblage Final) ---
     base_progress_phase5 = current_global_progress
@@ -2388,38 +2583,96 @@ def run_hierarchical_mosaic(
             pcb("run_error_phase5_inc_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_incremental", prog=base_progress_phase5, lvl="INFO")
         inc_memmap_dir = temp_master_tile_storage_dir or output_folder
-        final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
-            final_output_wcs=final_output_wcs,
-            final_output_shape_hw=final_output_shape_hw,
-            progress_callback=progress_callback,
-            n_channels=3,
-            apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config,
-            processing_threads=assembly_process_workers_config,
-            memmap_dir=inc_memmap_dir,
-            cleanup_memmap=True,
-            # --- FIN PASSAGE ---
-        )
+        if use_gpu_phase5_flag:
+            try:
+                import cupy
+                cupy.cuda.Device(0).use()
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_incremental(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    processing_threads=assembly_process_workers_config,
+                    memmap_dir=inc_memmap_dir,
+                    cleanup_memmap=True,
+                )
+            except Exception as e_gpu:
+                logger.warning("GPU incremental assembly failed, falling back to CPU: %s", e_gpu)
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    processing_threads=assembly_process_workers_config,
+                    memmap_dir=inc_memmap_dir,
+                    cleanup_memmap=True,
+                )
+        else:
+            final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_incremental(
+                master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                final_output_wcs=final_output_wcs,
+                final_output_shape_hw=final_output_shape_hw,
+                progress_callback=progress_callback,
+                n_channels=3,
+                apply_crop=apply_master_tile_crop_config,
+                crop_percent=master_tile_crop_percent_config,
+                processing_threads=assembly_process_workers_config,
+                memmap_dir=inc_memmap_dir,
+                cleanup_memmap=True,
+            )
         log_key_phase5_failed = "run_error_phase5_assembly_failed_incremental"
         log_key_phase5_finished = "run_info_phase5_finished_incremental"
     else: # Méthode Reproject & Coadd
         if not reproject_coadd_available: 
             pcb("run_error_phase5_reproject_coadd_func_missing", prog=None, lvl="CRITICAL"); return
         pcb("run_info_phase5_started_reproject_coadd", prog=base_progress_phase5, lvl="INFO")
-        final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
-            master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly, 
-            final_output_wcs=final_output_wcs, 
-            final_output_shape_hw=final_output_shape_hw,
-            progress_callback=progress_callback,
-            n_channels=3, 
-            match_bg=True,
-            # --- PASSAGE DES PARAMÈTRES DE ROGNAGE ---
-            apply_crop=apply_master_tile_crop_config,
-            crop_percent=master_tile_crop_percent_config,
-            # Memmap options removed for compatibility with standard reproject
-            # --- FIN PASSAGE ---
-        )
+
+        if use_gpu_phase5_flag:
+            try:
+                import cupy
+                cupy.cuda.Device(0).use()
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = zemosaic_utils.gpu_assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                )
+            except Exception as e_gpu:
+                logger.warning("GPU reproject_coadd failed, falling back to CPU: %s", e_gpu)
+                final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                    master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                    final_output_wcs=final_output_wcs,
+                    final_output_shape_hw=final_output_shape_hw,
+                    progress_callback=progress_callback,
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=apply_master_tile_crop_config,
+                    crop_percent=master_tile_crop_percent_config,
+                    use_gpu=False,
+                )
+        else:
+            final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
+                master_tile_fits_with_wcs_list=valid_master_tiles_for_assembly,
+                final_output_wcs=final_output_wcs,
+                final_output_shape_hw=final_output_shape_hw,
+                progress_callback=progress_callback,
+                n_channels=3,
+                match_bg=True,
+                apply_crop=apply_master_tile_crop_config,
+                crop_percent=master_tile_crop_percent_config,
+                use_gpu=use_gpu_phase5_flag,
+            )
+
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
         log_key_phase5_finished = "run_info_phase5_finished_reproject_coadd"
 
@@ -2613,7 +2866,34 @@ def run_hierarchical_mosaic_process(
 ):
     """Wrapper for running :func:`run_hierarchical_mosaic` in a separate process."""
 
-    def queue_callback(message_key_or_raw, progress_value=None, level="INFO", **cb_kwargs):
+    # progress_callback(stage: str, current: int, total: int)
+
+    def queue_callback(*cb_args, **cb_kwargs):
+        """Proxy callback used inside the worker process.
+
+        It supports both legacy logging calls and the new progress
+        reporting style ``progress_callback(stage, current, total)``.
+
+        Legacy calls are forwarded unchanged as
+        ``(message_key_or_raw, progress_value, level, kwargs)`` tuples.
+        Stage updates are sent with ``"STAGE_PROGRESS"`` as the message key.
+        """
+        if (
+            len(cb_args) == 3
+            and not cb_kwargs
+            and isinstance(cb_args[0], str)
+            and isinstance(cb_args[1], int)
+            and isinstance(cb_args[2], int)
+        ):
+            stage, current, total = cb_args
+            progress_queue.put(("STAGE_PROGRESS", stage, current, {"total": total}))
+            return
+
+        message_key_or_raw = cb_args[0] if cb_args else ""
+        progress_value = cb_args[1] if len(cb_args) > 1 else None
+        level = cb_args[2] if len(cb_args) > 2 else cb_kwargs.pop("level", "INFO")
+        if "lvl" in cb_kwargs:
+            level = cb_kwargs.pop("lvl")
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
     full_args = args[:8] + (queue_callback,) + args[8:]
