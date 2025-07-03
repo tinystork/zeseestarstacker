@@ -25,21 +25,22 @@ from a dedicated "LiveStack" tab.
 from __future__ import annotations
 
 import sys
-import traceback
 import threading
+import traceback
 from pathlib import Path
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, List, Optional, Tuple
 
+import astroalign as aa
+import cv2
 import numpy as np
 from astropy.io import fits
-import cv2
-import astroalign as aa
 
 # stsci.drizzle imports
 try:
     from drizzle.resample import Drizzle
 except ImportError:
     Drizzle = None  # handled later
+from seestar.core.drizzle_utils import drizzle_finalize
 
 # === Type aliases
 PreviewCB = Callable[[np.ndarray, fits.Header | None, str], None]
@@ -48,6 +49,7 @@ ProgressCB = Callable[[str], None]
 # ----------------------------------------------------------------------
 # Utility helpers
 # ----------------------------------------------------------------------
+
 
 def compute_snr(img: np.ndarray) -> float:
     """Compute a very rough per‑frame SNR (median / MAD)."""
@@ -84,9 +86,11 @@ def save_png16(path: Path, data: np.ndarray):
     else:
         raise ValueError("Unsupported PNG shape: " + str(arr.shape))
 
+
 # ----------------------------------------------------------------------
 # LiveStackController
 # ----------------------------------------------------------------------
+
 
 class LiveStackController:
     """Image‑by‑image LiveStack with optional SNR rejection *and* alignment."""
@@ -167,7 +171,12 @@ class LiveStackController:
             cv2.imwrite(str(filepath), bgr)
         elif fmt.lower() == "fits":
             hdr = self.ref_header if self.ref_header else fits.Header()
-            fits.writeto(filepath, np.moveaxis(stack.astype(np.float32), -1, 0), header=hdr, overwrite=True)
+            fits.writeto(
+                filepath,
+                np.moveaxis(stack.astype(np.float32), -1, 0),
+                header=hdr,
+                overwrite=True,
+            )
         else:
             raise ValueError("Unknown format: " + fmt)
         self._log(f"💾 Saved stack → {filepath}")
@@ -206,7 +215,9 @@ class LiveStackController:
     # -------------------------------------------------- helpers
 
     def _list_fits(self) -> List[Path]:
-        return [p for p in self.input_dir.iterdir() if p.suffix.lower() in {".fits", ".fit"}]
+        return [
+            p for p in self.input_dir.iterdir() if p.suffix.lower() in {".fits", ".fit"}
+        ]
 
     def _load(self, path: Path) -> Tuple[Optional[np.ndarray], Optional[fits.Header]]:
         try:
@@ -217,7 +228,12 @@ class LiveStackController:
             data = stretch_01(data)
             # ensure H,W,C
             if data.ndim == 2:
-                data = cv2.cvtColor((data*255).astype(np.uint8), cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+                data = (
+                    cv2.cvtColor(
+                        (data * 255).astype(np.uint8), cv2.COLOR_GRAY2RGB
+                    ).astype(np.float32)
+                    / 255.0
+                )
             elif data.ndim == 3 and data.shape[0] == 3:
                 data = np.moveaxis(data, 0, -1)  # C,H,W -> H,W,C
             return data, hdr
@@ -229,18 +245,26 @@ class LiveStackController:
         self.ref_image = img.copy()
         self.ref_header = hdr.copy() if hdr else fits.Header()
         # grayscale for alignment
-        self.ref_gray = cv2.cvtColor((stretch_01(img)*255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        self.ref_gray = cv2.cvtColor(
+            (stretch_01(img) * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
+        )
         h, w, _ = img.shape
         self.mem_shape = (h, w, 3)
-        self.sum_mem = np.lib.format.open_memmap(self.mem_dir / "SUM.npy", mode="w+", dtype=np.float32, shape=self.mem_shape)
-        self.wht_mem = np.lib.format.open_memmap(self.mem_dir / "WHT.npy", mode="w+", dtype=np.float32, shape=(h, w))
+        self.sum_mem = np.lib.format.open_memmap(
+            self.mem_dir / "SUM.npy", mode="w+", dtype=np.float32, shape=self.mem_shape
+        )
+        self.wht_mem = np.lib.format.open_memmap(
+            self.mem_dir / "WHT.npy", mode="w+", dtype=np.float32, shape=(h, w)
+        )
         self.sum_mem[:] = 0.0
         self.wht_mem[:] = 0.0
         self._log(f"🔰 Reference set ({h}×{w})")
 
     def _align(self, img: np.ndarray) -> Optional[np.ndarray]:
         try:
-            gray = cv2.cvtColor((stretch_01(img)*255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            gray = cv2.cvtColor(
+                (stretch_01(img) * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
+            )
             transf, _ = aa.find_transform(gray, self.ref_gray)
             aligned16 = aa.apply_transform(transf, img, self.ref_image.shape)
             return aligned16.astype(np.float32)
@@ -303,7 +327,17 @@ class LiveStackController:
         # Dummy WCS (pixel scale only)
         out_wcs = None
 
-        drizzlers = [Drizzle(out_img[..., c], out_wht[..., c], (out_h, out_w), out_wcs, kernel="square", pixfrac=1.0) for c in range(3)]
+        drizzlers = [
+            Drizzle(
+                out_img[..., c],
+                out_wht[..., c],
+                (out_h, out_w),
+                out_wcs,
+                kernel="square",
+                pixfrac=1.0,
+            )
+            for c in range(3)
+        ]
 
         for f in temp_files:
             data, _ = self._load(f)
@@ -311,15 +345,18 @@ class LiveStackController:
                 continue
             for c in range(3):
                 drizzlers[c].add_image(data[..., c], wcs=None, exposure=1.0)
-        # fetch output
-        final = np.dstack([d.outsci.astype(np.float32) for d in drizzlers])
+        # fetch output with correct normalisation
+        final_channels = [drizzle_finalize(d.out_img, d.out_wht) for d in drizzlers]
+        final = np.stack(final_channels, axis=-1)
         final = stretch_01(final)
         png_path = self.output_dir / "livestack_drizzled.png"
         save_png16(png_path, final)
         self._log(f"✅ PNG drizzled saved → {png_path.relative_to(self.output_dir)}")
 
         fits_path = self.output_dir / "livestack_drizzled.fits"
-        fits.writeto(fits_path, np.moveaxis(final.astype(np.float32), -1, 0), overwrite=True)
+        fits.writeto(
+            fits_path, np.moveaxis(final.astype(np.float32), -1, 0), overwrite=True
+        )
         self._log(f"✅ FITS drizzled saved → {fits_path.relative_to(self.output_dir)}")
 
     # -------------------------------------------------- logging utilities
@@ -330,13 +367,16 @@ class LiveStackController:
         else:
             print(msg)
 
+
 # ----------------------------------------------------------------------
 # Convenience wrapper
 # ----------------------------------------------------------------------
 
+
 def start_livestack_cli(input_dir: str, output_dir: str, snr: float = 2.5):
     ctrl = LiveStackController(input_dir, output_dir, snr_threshold=snr)
     ctrl.run_blocking()
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

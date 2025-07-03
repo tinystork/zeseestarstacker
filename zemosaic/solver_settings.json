@@ -1,0 +1,7 @@
+{
+  "solver_choice": "ASTAP",
+  "api_key": "apgjydxhqbprdljz",
+  "timeout": 60,
+  "downsample": 2,
+  "force_lum": false
+}

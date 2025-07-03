@@ -4,29 +4,33 @@ Intègre la prévisualisation avancée et le traitement en file d'attente via Qu
 (Version Révisée: Ajout dossiers avant start, Log amélioré, Bouton Ouvrir Sortie)
 """
 
-import os
-import tkinter as tk
-from tkinter import ttk, messagebox, font as tkFont
-import threading
-import time
-import numpy as np
-from astropy.io import fits
-import traceback
+import gc
+import logging
 import math
+import os
 import platform  # NOUVEL import
 import subprocess  # NOUVEL import
-import gc  #
-from pathlib import Path
-from PIL import Image, ImageTk
-from .ui_utils import ToolTip
 
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 import sys  # Pour sys.executable
 
 # ----------------------------------------------------
 import tempfile  # <-- AJOUTÉ
-import logging
+import threading
+import time
+import tkinter as tk
+import traceback
+from pathlib import Path
+from tkinter import font as tkFont
+from tkinter import messagebox, ttk
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageTk
+
 from zemosaic import zemosaic_config
+
+from .ui_utils import ToolTip
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +63,14 @@ except Exception as gen_err:
 # Print separator to clearly show the start of queued stacker import logs
 logger.debug("-" * 20)
 # Seestar imports
-from ..core.image_processing import load_and_validate_fits, debayer_image
+from ..core.image_processing import debayer_image, load_and_validate_fits
 from ..localization import Localization
 from .local_solver_gui import LocalSolverSettingsWindow
 from .mosaic_gui import MosaicSettingsWindow
 
 try:
     # Import tools for preview adjustments and auto calculations
-    from ..tools.stretch import StretchPresets, ColorCorrection
+    from ..tools.stretch import ColorCorrection, StretchPresets
     from ..tools.stretch import apply_auto_stretch as calculate_auto_stretch
     from ..tools.stretch import apply_auto_white_balance as calculate_auto_wb
 
@@ -124,10 +128,10 @@ except ImportError as tool_err:
 
 # GUI Component Imports
 from .file_handling import FileHandlingManager
+from .histogram_widget import HistogramWidget
 from .preview import PreviewManager
 from .progress import ProgressManager
 from .settings import SettingsManager
-from .histogram_widget import HistogramWidget
 
 
 class SeestarStackerGUI:
@@ -519,6 +523,7 @@ class SeestarStackerGUI:
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
+        self.max_hq_mem_var = tk.DoubleVar(value=8)
         self.batch_size = tk.IntVar(value=10)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
@@ -532,8 +537,7 @@ class SeestarStackerGUI:
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
-        self.drizzle_renorm_var = tk.StringVar(value="max")
-        self.drizzle_renorm_display_var = tk.StringVar()
+        self.use_gpu_var = tk.BooleanVar(value=False)
 
         self.preview_stretch_method = tk.StringVar(value="Asinh")
         self.preview_black_point = tk.DoubleVar(value=0.01)
@@ -674,8 +678,7 @@ class SeestarStackerGUI:
                 # Pixfrac Drizzle
                 getattr(self, "drizzle_pixfrac_label", None),
                 getattr(self, "drizzle_pixfrac_spinbox", None),
-                getattr(self, "drizzle_renorm_label", None),
-                getattr(self, "drizzle_renorm_combo", None),
+                getattr(self, "use_gpu_check", None),
                 # --- FIN DES NOUVELLES LIGNES ---
             ]
 
@@ -686,12 +689,7 @@ class SeestarStackerGUI:
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
 
-                    # --- Logique Optionnelle (pour plus tard) : Désactivation spécifique au mode ---
-                    # Si Drizzle est activé ET que le mode est Incrémental ET que le widget est lié à une option non pertinente
-                    # if global_drizzle_enabled and self.drizzle_mode_var.get() == "Incremental":
-                    #     if widget in [widget_echelle_1, widget_echelle_2, ...]: # Liste des widgets à désactiver en mode incrémental
-                    #         widget.config(state=tk.DISABLED)
-                    #     # Sinon (widget pertinent ou mode final), il garde l'état 'state' défini plus haut
+
 
         except tk.TclError:
             # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
@@ -1038,6 +1036,18 @@ class SeestarStackerGUI:
         last_browse.pack(side=tk.RIGHT)
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
         last_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+
+        zoom_frame = ttk.Frame(tab_stacking)
+        zoom_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Label(zoom_frame, text="Zoom (%)").grid(row=0, column=0, sticky=tk.W)
+        self.zoom_percent_var = tk.IntVar(value=0)
+        ttk.Combobox(
+            zoom_frame,
+            values=[0, 10, 20, 30, 40, 50],
+            textvariable=self.zoom_percent_var,
+            width=6,
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
         self.options_frame = ttk.LabelFrame(tab_stacking, text="Stacking Options")
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
 
@@ -1135,6 +1145,17 @@ class SeestarStackerGUI:
         self.stack_final_combo.pack(side=tk.LEFT, padx=(5, 0))
         self.stack_final_combo.bind("<<ComboboxSelected>>", self._on_final_combo_change)
 
+        tk.Label(
+            final_frame,
+            text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
+        ).pack(side=tk.LEFT, padx=(10, 2))
+        tk.Spinbox(
+            final_frame,
+            from_=1, to=64, increment=1,
+            width=5,
+            textvariable=self.max_hq_mem_var,
+        ).pack(side=tk.LEFT)
+
         # Mapping between internal keys and displayed labels for normalization, weighting and final combine
         self.norm_keys = ["none", "linear_fit", "sky_mean"]
         self.norm_key_to_label = {}
@@ -1164,7 +1185,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.final_keys = ["mean", "median"]
+        self.final_keys = ["mean", "median", "winsorized_sigma_clip", "reproject"]
         self.final_key_to_label = {}
         self.final_label_to_key = {}
         for k in self.final_keys:
@@ -1172,11 +1193,16 @@ class SeestarStackerGUI:
             self.final_key_to_label[k] = label
             self.final_label_to_key[label] = k
         self.stack_final_combo["values"] = list(self.final_key_to_label.values())
-        self.stack_final_display_var.set(
-            self.final_key_to_label.get(
-                self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+        if self.reproject_between_batches_var.get():
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get("reproject", "reproject")
             )
-        )
+        else:
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get(
+                    self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+                )
+            )
 
         method_kappa_scnr_frame = ttk.Frame(self.options_frame)
         method_kappa_scnr_frame.pack(fill=tk.X, padx=0, pady=(5, 0))
@@ -1363,37 +1389,12 @@ class SeestarStackerGUI:
             format="%.2f",
         )
         self.drizzle_pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
-        renorm_frame = ttk.Frame(self.drizzle_options_frame)
-        renorm_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
-        self.drizzle_renorm_label = ttk.Label(
-            renorm_frame,
-            text=self.tr("drizzle_renorm_label", default="Renormalize flux"),
+        self.use_gpu_check = ttk.Checkbutton(
+            pixfrac_frame,
+            text=self.tr("drizzle_use_gpu_label", default="Use GPU"),
+            variable=self.use_gpu_var,
         )
-        self.drizzle_renorm_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.drizzle_renorm_combo = ttk.Combobox(
-            renorm_frame,
-            textvariable=self.drizzle_renorm_display_var,
-            state="readonly",
-            width=12,
-        )
-        self.drizzle_renorm_combo.pack(side=tk.LEFT, padx=5)
-        self.drizzle_renorm_keys = ["none", "max", "n_images"]
-        self.drizzle_renorm_key_to_label = {
-            "none": "None",
-            "max": "Max weight",
-            "n_images": "# images",
-        }
-        self.drizzle_renorm_label_to_key = {
-            v: k for k, v in self.drizzle_renorm_key_to_label.items()
-        }
-        self.drizzle_renorm_combo["values"] = list(
-            self.drizzle_renorm_key_to_label.values()
-        )
-        self.drizzle_renorm_display_var.set(
-            self.drizzle_renorm_key_to_label.get(
-                self.drizzle_renorm_var.get(), self.drizzle_renorm_var.get()
-            )
-        )
+        self.use_gpu_check.pack(side=tk.LEFT, padx=5)
         self.hp_frame = ttk.LabelFrame(tab_stacking, text="Hot Pixel Correction")
         self.hp_frame.pack(fill=tk.X, pady=5, padx=5)
         hp_check_frame = ttk.Frame(self.hp_frame)
@@ -2380,17 +2381,23 @@ class SeestarStackerGUI:
     def _toggle_kappa_visibility(self, event=None):
         """Affiche ou cache les widgets Kappa en fonction de la méthode de stacking, en utilisant grid."""
         method = None
+        final_method = None
         if hasattr(self, "stack_method_var"):
             try:
                 method = self.stack_method_var.get()
             except tk.TclError:
                 method = None
+        if hasattr(self, "stack_final_combine_var"):
+            try:
+                final_method = self.stack_final_combine_var.get()
+            except tk.TclError:
+                final_method = None
 
         show_kappa = False
         show_winsor = False
-        if method == "kappa_sigma":
+        if method == "kappa_sigma" or final_method == "winsorized_sigma_clip":
             show_kappa = True
-        elif method == "winsorized_sigma_clip":
+        if method == "winsorized_sigma_clip" or final_method == "winsorized_sigma_clip":
             show_kappa = True
             show_winsor = True
 
@@ -2450,10 +2457,15 @@ class SeestarStackerGUI:
             self.stack_final_combine_var.set("mean")
             self.stack_reject_algo_var.set("linear_fit_clip")
         if hasattr(self, "final_key_to_label"):
-            current_key = self.stack_final_combine_var.get()
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get(current_key, current_key)
-            )
+            if self.reproject_between_batches_var.get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject", "reproject")
+                )
+            else:
+                current_key = self.stack_final_combine_var.get()
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get(current_key, current_key)
+                )
         self._toggle_kappa_visibility()
 
     def _on_norm_combo_change(self, event=None):
@@ -2472,7 +2484,13 @@ class SeestarStackerGUI:
         """Update internal var when final combine selection changes."""
         display_value = self.stack_final_display_var.get()
         key = self.final_label_to_key.get(display_value, display_value)
-        self.stack_final_combine_var.set(key)
+        if key == "reproject":
+            self.reproject_between_batches_var.set(True)
+            self.stack_final_combine_var.set("mean")
+        else:
+            self.reproject_between_batches_var.set(False)
+            self.stack_final_combine_var.set(key)
+        self._toggle_kappa_visibility()
 
     #################################################################################################################################
 
@@ -3094,6 +3112,7 @@ class SeestarStackerGUI:
             "drizzle_mode_label": "drizzle_mode_label",
             "drizzle_kernel_label": "drizzle_kernel_label",
             "drizzle_pixfrac_label": "drizzle_pixfrac_label",
+            "drizzle_use_gpu_label": "drizzle_use_gpu_label",
             "drizzle_wht_threshold_label": "drizzle_wht_label",
             "hot_pixel_threshold": "hot_pixel_threshold_label",
             "neighborhood_size": "neighborhood_size_label",
@@ -3437,10 +3456,15 @@ class SeestarStackerGUI:
                 self.final_key_to_label[k] = label
                 self.final_label_to_key[label] = k
             self.stack_final_combo["values"] = list(self.final_key_to_label.values())
-            current_key = self.stack_final_combine_var.get()
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get(current_key, current_key)
-            )
+            if self.reproject_between_batches_var.get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject", "reproject")
+                )
+            else:
+                current_key = self.stack_final_combine_var.get()
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get(current_key, current_key)
+                )
         # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
@@ -3838,7 +3862,7 @@ class SeestarStackerGUI:
 
     def update_preview_from_stacker(
         self,
-        stack_data,
+        preview_array,
         stack_header,
         stack_name,
         img_count,
@@ -3852,8 +3876,8 @@ class SeestarStackerGUI:
         if threading.current_thread() is not threading.main_thread():
             self.root.after(
                 0,
-                lambda sd=stack_data, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
-                    sd, sh, sn, ic, ti, cb, tb
+                lambda pa=preview_array, sh=stack_header, sn=stack_name, ic=img_count, ti=total_imgs, cb=current_batch, tb=total_batches: self.update_preview_from_stacker(
+                    pa, sh, sn, ic, ti, cb, tb
                 ),
             )
             return
@@ -3863,8 +3887,8 @@ class SeestarStackerGUI:
             self.logger.info(
                 "  [update_preview] Verrou final actif. Mise à jour des données uniquement."
             )
-            if stack_data is not None:
-                self.current_preview_data = stack_data.copy()
+            if preview_array is not None:
+                self.current_preview_data = preview_array.copy()
                 self.current_stack_header = (
                     stack_header.copy() if stack_header else None
                 )
@@ -3875,13 +3899,13 @@ class SeestarStackerGUI:
                 self.refresh_preview(recalculate_histogram=True)
             return
 
-        if stack_data is None:
+        if preview_array is None:
             self.logger.info(
                 "[DEBUG-GUI] update_preview_from_stacker: Received None stack_data. Skipping visual update."
             )
             return
 
-        self.current_preview_data = stack_data.copy()
+        self.current_preview_data = preview_array.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
         self.preview_total_imgs = total_imgs
@@ -3910,6 +3934,11 @@ class SeestarStackerGUI:
             self.logger.debug(
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
             )
+            if self.drizzle_mode_var.get() == "Incremental":
+                self.current_preview_data = preview_array
+                self.apply_auto_stretch()
+                return
+            # Non-drizzle modes keep existing behaviour
             self.refresh_preview()
 
         if self.current_stack_header:
@@ -5741,7 +5770,15 @@ class SeestarStackerGUI:
             header_final = None
             preview_load_error_msg = None
 
-            if final_stack_path and os.path.exists(final_stack_path):
+            if cosmetic_01_data_for_preview_from_backend is not None:
+                self.logger.info(
+                    "    [PF_S4] Utilisation des données de prévisualisation fournies par le backend."
+                )
+                data_final = cosmetic_01_data_for_preview_from_backend
+                header_final = (
+                    final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
+                )
+            elif final_stack_path and os.path.exists(final_stack_path):
                 try:
                     data_final, header_final = load_and_validate_fits(final_stack_path)
                     self.logger.info(
@@ -6694,6 +6731,21 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing..."
         )
+
+        # Propager l'option GPU au backend
+        try:
+            import cv2
+
+            self.queued_stacker.use_gpu = bool(self.settings.use_gpu)
+            self.queued_stacker.use_cuda = bool(
+                self.settings.use_gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0
+            )
+            if hasattr(self.queued_stacker, "aligner") and self.queued_stacker.aligner:
+                self.queued_stacker.aligner.use_cuda = self.queued_stacker.use_cuda
+        except Exception:
+            self.queued_stacker.use_gpu = False
+            self.queued_stacker.use_cuda = False
+
         start_proc_kwargs = {
             "input_dir": self.settings.input_folder,
             "output_dir": self.settings.output_folder,
@@ -6720,6 +6772,7 @@ class SeestarStackerGUI:
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
+            "zoom_percent": self.settings.zoom_percent,
             "use_weighting": self.settings.stack_weight_method == "quality",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
@@ -6732,7 +6785,6 @@ class SeestarStackerGUI:
             "drizzle_mode": self.settings.drizzle_mode,
             "drizzle_kernel": self.settings.drizzle_kernel,
             "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-            "drizzle_renorm": self.settings.drizzle_renorm,
             "apply_chroma_correction": self.settings.apply_chroma_correction,
             "apply_final_scnr": self.settings.apply_final_scnr,
             "final_scnr_target_channel": self.settings.final_scnr_target_channel,

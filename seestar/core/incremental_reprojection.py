@@ -1,8 +1,11 @@
 """Helper functions for incremental reprojection stacking."""
 
 import numpy as np
-from astropy.wcs import WCS
 import logging
+from astropy.wcs import WCS
+import importlib.util
+
+_cupy_available = importlib.util.find_spec("cupy") is not None
 
 from .reprojection import reproject_to_reference_wcs
 
@@ -14,6 +17,7 @@ def initialize_master(
     batch_cov: np.ndarray,
     batch_wcs: WCS,
     ref_wcs: WCS,
+    use_gpu: bool | None = None,
 ):
     """Return initial weighted sum and coverage map.
 
@@ -31,10 +35,19 @@ def initialize_master(
     The first batch is reprojected so that all subsequent batches
     accumulate on the same grid.
     """
+    if use_gpu is None:
+        use_gpu = _cupy_available
+
+    xp = np
+    cp = None
+    if use_gpu and _cupy_available:
+        import cupy as cp  # type: ignore
+        xp = cp
+
     if batch_img is None or batch_cov is None:
         raise ValueError("batch_img and batch_cov are required")
-    batch_img_f = batch_img.astype(np.float32, copy=True)
-    batch_cov_f = batch_cov.astype(np.float32, copy=True)
+    batch_img_f = xp.asarray(batch_img, dtype=xp.float32)
+    batch_cov_f = xp.asarray(batch_cov, dtype=xp.float32)
 
     target_shape = (
         (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
@@ -43,20 +56,33 @@ def initialize_master(
     )
 
     reproj_img = reproject_to_reference_wcs(
-        batch_img_f, batch_wcs, ref_wcs, target_shape
+        cp.asnumpy(batch_img_f) if cp is not None else batch_img_f,
+        batch_wcs,
+        ref_wcs,
+        target_shape,
     )
     reproj_cov = reproject_to_reference_wcs(
-        batch_cov_f, batch_wcs, ref_wcs, target_shape
+        cp.asnumpy(batch_cov_f) if cp is not None else batch_cov_f,
+        batch_wcs,
+        ref_wcs,
+        target_shape,
     )
+    reproj_img = xp.asarray(reproj_img, dtype=xp.float32)
+    reproj_cov = xp.asarray(reproj_cov, dtype=xp.float32)
 
     if reproj_img.ndim == 3:
         master_sum = reproj_img * reproj_cov[..., None]
     else:
         master_sum = reproj_img * reproj_cov
 
-
     master_cov = reproj_cov
 
+    master_sum = xp.asarray(master_sum, dtype=xp.float32)
+    master_cov = xp.asarray(master_cov, dtype=xp.float32)
+
+    if cp is not None:
+        master_sum = cp.asnumpy(master_sum)
+        master_cov = cp.asnumpy(master_cov)
 
     return master_sum.astype(np.float32), master_cov.astype(np.float32)
 
@@ -68,6 +94,7 @@ def reproject_and_combine(
     batch_cov: np.ndarray,
     batch_wcs: WCS,
     ref_wcs: WCS,
+    use_gpu: bool | None = None,
 ):
     """Reproject ``batch_img`` to ``ref_wcs`` and accumulate its weighted signal."""
 
@@ -80,6 +107,15 @@ def reproject_and_combine(
     target_shape = (ref_wcs.pixel_shape[1], ref_wcs.pixel_shape[0])
 
 
+    if use_gpu is None:
+        use_gpu = _cupy_available
+
+    xp = np
+    cp = None
+    if use_gpu and _cupy_available:
+        import cupy as cp  # type: ignore
+        xp = cp
+
     reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
     reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
 
@@ -89,10 +125,10 @@ def reproject_and_combine(
         reproj_img = reproject_to_reference_wcs(batch_img, batch_wcs, ref_wcs, target_shape)
         reproj_cov = reproject_to_reference_wcs(batch_cov, batch_wcs, ref_wcs, target_shape)
 
-    master_sum = master_sum.astype(np.float32, copy=False)
-    master_cov = master_cov.astype(np.float32, copy=False)
-    reproj_img = reproj_img.astype(np.float32, copy=False)
-    reproj_cov = reproj_cov.astype(np.float32, copy=False)
+    master_sum = xp.asarray(master_sum, dtype=xp.float32)
+    master_cov = xp.asarray(master_cov, dtype=xp.float32)
+    reproj_img = xp.asarray(reproj_img, dtype=xp.float32)
+    reproj_cov = xp.asarray(reproj_cov, dtype=xp.float32)
 
     if master_sum.ndim == 3:
         master_sum += reproj_img * reproj_cov[..., None]
@@ -101,10 +137,13 @@ def reproject_and_combine(
 
     master_cov += reproj_cov
 
-    master_sum = np.nan_to_num(master_sum, nan=0.0, posinf=0.0, neginf=0.0)
-    master_cov = np.nan_to_num(master_cov, nan=0.0, posinf=0.0, neginf=0.0)
+    master_sum = xp.nan_to_num(master_sum, nan=0.0, posinf=0.0, neginf=0.0)
+    master_cov = xp.nan_to_num(master_cov, nan=0.0, posinf=0.0, neginf=0.0)
 
-    print(np.nanmin(master_cov), np.nanmax(master_cov))
+    print(xp.nanmin(master_cov), xp.nanmax(master_cov))
+    if cp is not None:
+        master_sum = cp.asnumpy(master_sum)
+        master_cov = cp.asnumpy(master_cov)
     return master_sum.astype(np.float32), master_cov.astype(np.float32)
 
 

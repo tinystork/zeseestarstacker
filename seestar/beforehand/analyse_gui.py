@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use('TkAgg') # Assurer la compatibilité Tkinter pour Matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.widgets import RangeSlider
 import numpy as np
 import datetime
 import platform
@@ -320,8 +321,12 @@ class AstroImageAnalyzerGUI:
         self.timer_running = False 
         self.timer_start_time = None 
         self.timer_job_id = None 
-        self.base_status_message = "" 
+        self.base_status_message = ""
         self.has_pending_snr_actions = False
+        self.current_snr_min = None
+        self.current_snr_max = None
+        self.snr_range_slider = None
+        self.snr_slider_lines = ()
         
         # Références aux widgets (pour traduction, activation/désactivation)
         self.widgets_refs = {}
@@ -335,8 +340,9 @@ class AstroImageAnalyzerGUI:
         self.trail_param_labels = {}
         self.trail_param_entries = {}
         self.manage_markers_button = None
-        self.stack_after_analysis = False      
-        self.apply_snr_button = None 
+        self.stack_after_analysis = False
+        self.apply_snr_button = None
+        self.visual_apply_button = None
         
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -433,6 +439,8 @@ class AstroImageAnalyzerGUI:
 
     def start_analysis(self):
         """Appelle la logique de lancement SANS l'option d'empiler après."""
+        if hasattr(self, 'analyze_button') and self.analyze_button:
+            self.analyze_button.config(state='disabled')
         self._launch_analysis(stack_after=False)
 
 
@@ -719,11 +727,37 @@ class AstroImageAnalyzerGUI:
                 figures_list.append(fig1)
                 valid_snrs = [r['snr'] for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr'])]
                 if valid_snrs:
-                    ax1.hist(valid_snrs, bins=20, color='skyblue', edgecolor='black')
+                    hist = ax1.hist(valid_snrs, bins=20, color='skyblue', edgecolor='black')
                     ax1.set_title(self._("visu_snr_dist_title"))
                     ax1.set_xlabel(self._("visu_snr_dist_xlabel"))
                     ax1.set_ylabel(self._("visu_snr_dist_ylabel"))
                     ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+                    min_snr, max_snr = min(valid_snrs), max(valid_snrs)
+                    self.current_snr_min = min_snr
+                    self.current_snr_max = max_snr
+                    ax1.set_xlim(min_snr, max_snr)
+                    line_lo = ax1.axvline(min_snr, color='red', linestyle='--')
+                    line_hi = ax1.axvline(max_snr, color='red', linestyle='--')
+
+                    fig1.subplots_adjust(bottom=0.25)
+                    slider_ax = fig1.add_axes([0.15, 0.1, 0.7, 0.05])
+                    self.snr_range_slider = RangeSlider(slider_ax, "SNR", min_snr, max_snr, valinit=(min_snr, max_snr))
+                    self.snr_slider_lines = (line_lo, line_hi)
+
+                    def _on_slider_change(val):
+                        lo, hi = val
+                        line_lo.set_xdata([lo, lo])
+                        line_hi.set_xdata([hi, hi])
+                        fig1.canvas.draw_idle()
+                        self.current_snr_min = lo
+                        self.current_snr_max = hi
+                        if self.apply_snr_button:
+                            self.apply_snr_button.config(state=tk.NORMAL)
+                        if self.visual_apply_button:
+                            self.visual_apply_button.config(state=tk.NORMAL)
+
+                    self.snr_range_slider.on_changed(_on_slider_change)
                 else:
                     ax1.text(0.5, 0.5, self._("visu_snr_dist_no_data"), ha='center', va='center', fontsize=12, color='red')
                 canvas1 = FigureCanvasTkAgg(fig1, master=snr_tab)
@@ -867,10 +901,25 @@ class AstroImageAnalyzerGUI:
                     except Exception as e_other_win:
                         print(f"  Erreur détruisant vis_window: {e_other_win}")
 
-            # Bouton Fermer et liaison fermeture fenêtre
-            close_button = ttk.Button(vis_window, text=self._("Fermer", default="Close"), command=cleanup_vis_window)
-            close_button.pack(pady=10)
-            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window) # Lier bouton X
+            # Boutons d'action en bas de la fenêtre
+            bottom_frame = ttk.Frame(vis_window)
+            bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+
+            self.visual_apply_button = ttk.Button(
+                bottom_frame,
+                text="Apply SNR Rejection",
+                state=tk.DISABLED,
+                command=self._on_visual_apply_snr
+            )
+            self.visual_apply_button.pack(side=tk.RIGHT, padx=5)
+
+            close_button = ttk.Button(
+                bottom_frame,
+                text=self._("Fermer", default="Close"),
+                command=cleanup_vis_window
+            )
+            close_button.pack(side=tk.RIGHT)
+            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window)  # Lier bouton X
 
             # Attendre que la fenêtre de visualisation soit fermée
             self.root.wait_window(vis_window)
@@ -2081,6 +2130,8 @@ class AstroImageAnalyzerGUI:
                 self.update_status("status_custom", text=self._("Des actions SNR sont en attente.", default="Pending SNR actions.")) # Clé à ajouter à zone.py
 
         if not should_write_command:
+            if hasattr(self, 'analyze_button') and self.analyze_button:
+                self.root.after(0, lambda: self.analyze_button.config(state='normal'))
             self._set_widget_state(self.analyze_button, tk.NORMAL)
             self._set_widget_state(self.analyze_stack_button, tk.NORMAL)
             self._set_widget_state(self.return_button, tk.NORMAL)
@@ -2128,7 +2179,8 @@ class AstroImageAnalyzerGUI:
                 self._update_log_and_vis_buttons_state()
                 if hasattr(self, 'apply_snr_button') and self.apply_snr_button:
                      self._set_widget_state(self.apply_snr_button, tk.DISABLED)
-        
+
+        self.update_status("status_analysis_done")
         print("DEBUG (analyse_gui): Appel final à gc.collect()")
         gc.collect()
         print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
@@ -2159,70 +2211,58 @@ class AstroImageAnalyzerGUI:
                 self.main_app_callback()
 
     def apply_pending_snr_actions_gui(self):
-        """
-        Lance l'application des actions SNR en attente (déplacement/suppression).
-        Appelée par le bouton "Appliquer Rejet SNR".
-        """
-        if self.analysis_running: # Ne pas lancer si une autre analyse/action est en cours
-            messagebox.showwarning(self._("msg_warning"), self._("msg_analysis_running"), parent=self.root)
+        """Applique les actions SNR sélectionnées via le RangeSlider."""
+        lo = self.current_snr_min
+        hi = self.current_snr_max
+        if lo is None or hi is None:
             return
 
-        if not self.has_pending_snr_actions:
-            messagebox.showinfo(self._("msg_info"), self._("Aucune action SNR en attente à appliquer.", default="No pending SNR actions to apply."), parent=self.root)
-            return
+        for r in self.analysis_results:
+            snr = r.get('snr')
+            if r.get('status') == 'ok' and snr is not None and np.isfinite(snr):
+                if snr < lo or snr > hi:
+                    r['rejected_reason'] = 'low_snr_pending_action'
+                    r['action'] = 'pending_snr_action'
 
-        # Vérifier la configuration de l'action sur rejet
-        reject_action = self.reject_action.get()
-        move_rejected_flag = (reject_action == 'move')
-        delete_rejected_flag = (reject_action == 'delete')
-
-        if not move_rejected_flag and not delete_rejected_flag:
-            messagebox.showinfo(self._("msg_info"), self._("L'action sur rejet est 'Ne Rien Faire'. Aucune action ne sera appliquée.", default="Reject action is 'Do Nothing'. No file actions will be performed."), parent=self.root)
-            # On pourrait quand même finaliser les statuts dans results_list si 'low_snr_pending_action' est juste transformé en 'low_snr'
-            # Pour l'instant, on sort.
-            # On peut aussi désactiver le bouton si 'Ne Rien Faire' est sélectionné (géré dans finalize_analysis)
-            return
-        
-        snr_reject_dir_path = self.snr_reject_dir.get()
-        if move_rejected_flag and not snr_reject_dir_path:
-            messagebox.showerror(self._("msg_error"), self._("snr_reject_dir_label") + " " + self._("non spécifié") + self._(" pour le déplacement des rejets SNR.", default=" for moving SNR rejects."), parent=self.root)
-            return
-        
-        abs_snr_reject_path = os.path.abspath(snr_reject_dir_path) if snr_reject_dir_path else None
-        abs_input_dir = os.path.abspath(self.input_dir.get()) if self.input_dir.get() else None
-
-        if delete_rejected_flag:
-             if not messagebox.askyesno(self._("msg_warning"), self._("confirm_delete") + self._("\nCeci s'appliquera aux fichiers marqués pour faible SNR.", default="\nThis will apply to files marked for low SNR."), parent=self.root):
-                return # Annulé par l'utilisateur
-
-        # Préparer UI pour l'action
-        self.analysis_running = True # Utiliser le même flag pour bloquer d'autres actions
-        self._set_widget_state(self.analyze_button, tk.DISABLED)
-        self._set_widget_state(self.analyze_stack_button, tk.DISABLED)
-        self._set_widget_state(self.visualize_button, tk.DISABLED)
-        self._set_widget_state(self.open_log_button, tk.DISABLED)
-        self._set_widget_state(self.return_button, tk.DISABLED)
-        self._set_widget_state(self.manage_markers_button, tk.DISABLED)
-        if hasattr(self, 'apply_snr_button') and self.apply_snr_button:
-            self._set_widget_state(self.apply_snr_button, tk.DISABLED)
-
-        self.update_status("status_custom", text=self._("Application des rejets SNR...", default="Applying SNR rejections..."))
-        self.update_results_text(f"--- {self._('Début application rejets SNR...', default='Start applying SNR rejections...')} ---")
-        self.update_progress(0.0) # Ou 'indeterminate'
-
-        callbacks = {
-            'log': self.update_results_text,
-            'status': self.update_status,
-            'progress': self.update_progress
-        }
-
-        # Lancer l'application des actions dans un thread
-        action_thread = threading.Thread(
-            target=self.run_apply_actions_thread,
-            args=(self.analysis_results, abs_snr_reject_path, delete_rejected_flag, move_rejected_flag, callbacks, abs_input_dir),
-            daemon=True
+        analyse_logic.apply_pending_snr_actions(
+            self.analysis_results,
+            self.snr_reject_dir.get(),
+            delete_rejected_flag=self.reject_action.get() == 'delete',
+            move_rejected_flag=self.reject_action.get() == 'move',
+            log_callback=lambda *a, **k: None,
+            status_callback=lambda *a, **k: None,
+            progress_callback=lambda v: None,
+            input_dir_abs=self.input_dir.get()
         )
-        action_thread.start()
+
+        if self.apply_snr_button:
+            self.apply_snr_button.config(state=tk.DISABLED)
+        if self.snr_range_slider:
+            try:
+                self.snr_range_slider.disconnect_events()
+            except Exception:
+                pass
+
+        if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
+            self._refresh_treeview()
+
+    def _on_visual_apply_snr(self):
+        """Handler pour le bouton d'application SNR de la fenêtre de visualisation."""
+        # Reuse the existing logic
+        self.apply_pending_snr_actions_gui()
+
+        # Disable both buttons
+        if self.apply_snr_button:
+            self.apply_snr_button.config(state=tk.DISABLED)
+        if self.visual_apply_button:
+            self.visual_apply_button.config(state=tk.DISABLED)
+
+        # Disable the slider if possible
+        try:
+            if self.snr_range_slider:
+                self.snr_range_slider.set_active(False)
+        except Exception:
+            pass
 
     def run_apply_actions_thread(self, results_list, snr_reject_abs, delete_flag, move_flag, callbacks, input_dir_abs):
         """
@@ -2341,8 +2381,12 @@ class AstroImageAnalyzerGUI:
         # has_pending_snr_actions est False. On le force au cas où.
         if hasattr(self, 'apply_snr_button') and self.apply_snr_button:
             self._set_widget_state(self.apply_snr_button, tk.DISABLED)
-        
+
         gc.collect()
+
+    def _refresh_treeview(self):
+        """Placeholder for treeview refresh if implemented."""
+        pass
 
  #####################################################################################################################
 

@@ -17,73 +17,79 @@ logger = logging.getLogger(__name__)
 # --- FIN AJOUT CRITIQUE ---
 
 
-# --- Standard Library Imports ---
-from astropy.io import fits
-from astropy.wcs import WCS
-import glob, os, gc
+import asyncio
+import concurrent.futures
+import gc
+import glob
 import math
 import multiprocessing
-from queue import Queue, Empty  # Essentiel pour la classe
+import os
 import shutil
-from ..tools.file_ops import move_to_stacked
+import sys
 import tempfile
 import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
-from pathlib import Path
-
-
-import sys
-import asyncio
-import concurrent.futures
+import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
-import warnings
+from pathlib import Path
+from queue import Empty, Queue  # Essentiel pour la classe
+
+# --- Standard Library Imports ---
+from astropy.io import fits
+from astropy.wcs import WCS
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
+
+from ..tools.file_ops import move_to_stacked
 
 logger.debug("Imports standard OK.")
 
 
-# --- Third-Party Library Imports ---
-from ..core.background import (
-    subtract_background_2d,
-    _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE,
-)
+from typing import Literal
+
 import astroalign as aa
 import cv2
 import numpy as np
-from astropy.coordinates import SkyCoord, concatenate as skycoord_concatenate, Angle
-from typing import Literal
 from astropy import units as u
-from astropy.wcs import FITSFixedWarning
-from ccdproc import combine as ccdproc_combine
+from astropy.coordinates import Angle, SkyCoord
+from astropy.coordinates import concatenate as skycoord_concatenate
 from astropy.nddata import CCDData
-from ..enhancement.stack_enhancement import apply_edge_crop
+from astropy.wcs import FITSFixedWarning
 from astropy.wcs.utils import proj_plane_pixel_scales
+from ccdproc import combine as ccdproc_combine
 from scipy.spatial import ConvexHull
+
+from seestar.core.stack_methods import (
+    _stack_kappa_sigma,
+    _stack_linear_fit_clip,
+    _stack_mean,
+    _stack_median,
+    _stack_winsorized_sigma,
+)
 from seestar.gui.settings import SettingsManager
 
-from ..core.reprojection import reproject_to_reference_wcs
+# --- Third-Party Library Imports ---
+from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
+from ..core.background import (
+    subtract_background_2d,
+)
+from ..core.drizzle_utils import drizzle_finalize
 from ..core.incremental_reprojection import (
-    reproject_and_combine,
     reproject_and_coadd_batch,
+    reproject_and_combine,
 )
 from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
 )
-from seestar.core.stack_methods import (
-    _stack_mean,
-    _stack_median,
-    _stack_kappa_sigma,
-    _stack_linear_fit_clip,
-    _stack_winsorized_sigma,
-)
+from ..core.reprojection import reproject_to_reference_wcs
 from ..core.weights import (
-    _calculate_image_weights_noise_variance,
     _calculate_image_weights_noise_fwhm,
+    _calculate_image_weights_noise_variance,
 )
+from ..enhancement.stack_enhancement import apply_edge_crop
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
@@ -149,14 +155,15 @@ def _stack_worker(args):
         kappa_low,
         kappa_high,
         winsor_limits,
+        apply_rewinsor,
     ) = args
     os.environ["OMP_NUM_THREADS"] = "1"
 
     from seestar.core.stack_methods import (
-        _stack_mean,
-        _stack_median,
         _stack_kappa_sigma,
         _stack_linear_fit_clip,
+        _stack_mean,
+        _stack_median,
         _stack_winsorized_sigma,
     )
 
@@ -166,6 +173,7 @@ def _stack_worker(args):
             weights,
             kappa=max(kappa_low, kappa_high),
             winsor_limits=winsor_limits,
+            apply_rewinsor=apply_rewinsor,
         )
     elif mode == "kappa-sigma":
         return _stack_kappa_sigma(
@@ -203,8 +211,8 @@ except ImportError as e:
     raise
 try:
     from ..core.image_processing import (
-        load_and_validate_fits,
         debayer_image,
+        load_and_validate_fits,
         save_fits_image,
         save_preview_image,
     )
@@ -260,8 +268,8 @@ except ImportError as e:
 # Core Image Processing (Utilisé PARTOUT)
 try:
     from ..core.image_processing import (
-        load_and_validate_fits,
         debayer_image,
+        load_and_validate_fits,
         save_fits_image,
         save_preview_image,
     )
@@ -456,11 +464,10 @@ except ImportError as e:
 # pour éviter les dépendances circulaires au chargement initial.
 
 
-from ..alignment.astrometry_solver import (
+from ..alignment.astrometry_solver import (  # Déplacé vers _worker/_process_file
     AstrometrySolver,
     solve_image_wcs,
-)  # Déplacé vers _worker/_process_file
-
+)
 
 # --- Configuration des Avertissements ---
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
@@ -488,7 +495,6 @@ class SeestarQueuedStacker:
         ]:
             os.environ[var] = str(nthreads)
         try:
-
             from threadpoolctl import threadpool_limits
         except Exception:
             threadpool_limits = None
@@ -538,7 +544,6 @@ class SeestarQueuedStacker:
 
         def _run(files):
             async def _prefetch_async():
-
                 tasks = [asyncio.to_thread(_read_one, fp) for fp in files]
                 await asyncio.gather(*tasks)
 
@@ -577,6 +582,16 @@ class SeestarQueuedStacker:
 
             # continuous accumulation
             self.cumulative_sum_memmap += reproj_data * reproj_wht[..., None]
+            if self.cumulative_wht_memmap.shape != reproj_wht.shape:
+                from numpy.lib.format import open_memmap
+
+                self.cumulative_wht_memmap = open_memmap(
+                    self.cumulative_wht_path,
+                    mode="w+",
+                    dtype=np.float32,
+                    shape=reproj_wht.shape,
+                )
+                self.cumulative_wht_memmap[:] = 0.0
             self.cumulative_wht_memmap += reproj_wht
             self.cumulative_sum_memmap.flush()
             self.cumulative_wht_memmap.flush()
@@ -667,7 +682,8 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
         )
-        self.drizzle_renorm_method = "none"
+        self.max_hq_mem = getattr(settings, "max_hq_mem", 8 * 1024**3)
+        self.stack_final_combine = getattr(settings, "stack_final_combine", "mean")
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
@@ -703,6 +719,7 @@ class SeestarQueuedStacker:
         self.drizzle_temp_dir = None
         self.output_filename = ""
         self.drizzle_batch_output_dir = None
+        self.classic_batch_output_dir = None
         self.final_stacked_path = None
         self.api_key = None
         self.reference_wcs_object = None
@@ -723,6 +740,17 @@ class SeestarQueuedStacker:
         self.memmap_dtype_wht = np.float32
         self.enable_preview = False
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
+
+        # Cumulative weight map across all batches
+        from numpy.lib.format import open_memmap
+
+        seestar_root = Path(__file__).resolve().parents[1]
+        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
+        H, W = 1, 1
+        self.cumulative_wht_memmap = open_memmap(
+            self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
+        )
+        self.cumulative_wht_memmap[:] = 0.0
 
         # Options pour déplacement et sauvegarde partiels
         self.partial_save_interval = 1
@@ -784,12 +812,6 @@ class SeestarQueuedStacker:
                 # When using inter-batch reprojection we want to keep the
                 # reference WCS stable after the first solve.
                 self.freeze_reference_wcs = self.reproject_between_batches
-                self.drizzle_renorm_method = str(
-                    getattr(settings, "drizzle_renorm", "none")
-                )
-                logger.debug(
-                    f"  -> Méthode de renormalisation drizzle: {self.drizzle_renorm_method}"
-                )
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -801,9 +823,11 @@ class SeestarQueuedStacker:
         self.stack_kappa_low = 2.5
         self.stack_kappa_high = 2.5
         self.winsor_limits = (0.05, 0.05)
+        self.stack_final_combine = "mean"
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
+        self.zoom_percent = 0
         self.bayer_pattern = "GRBG"
         self.drizzle_mode = "Final"
         self.drizzle_scale = 2.0
@@ -1097,6 +1121,9 @@ class SeestarQueuedStacker:
             self.drizzle_batch_output_dir = os.path.join(
                 self.output_folder, "drizzle_batch_outputs"
             )
+            self.classic_batch_output_dir = os.path.join(
+                self.output_folder, "classic_batch_outputs"
+            )
 
             # Définir le chemin du dossier memmap mais ne le créer que si nécessaire plus tard
             memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
@@ -1133,6 +1160,17 @@ class SeestarQueuedStacker:
                     except Exception as e:
                         self.update_progress(
                             f"⚠️ Erreur nettoyage {self.drizzle_batch_output_dir}: {e}"
+                        )
+                if (
+                    os.path.isdir(self.classic_batch_output_dir)
+                    and self.reproject_between_batches
+                ):
+                    try:
+                        shutil.rmtree(self.classic_batch_output_dir)
+                        os.makedirs(self.classic_batch_output_dir, exist_ok=True)
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ Erreur nettoyage {self.classic_batch_output_dir}: {e}"
                         )
             self.update_progress(f"🗄️ Dossiers prêts.")
         except OSError as e:
@@ -1199,12 +1237,13 @@ class SeestarQueuedStacker:
                     self.drizzle_output_wcs is None
                     or self.drizzle_output_shape_hw is None
                 ):
-                    self.drizzle_output_wcs, self.drizzle_output_shape_hw = (
-                        self._create_drizzle_output_wcs(
-                            self.reference_wcs_object,
-                            ref_shape_hw_for_grid,
-                            self.drizzle_scale,
-                        )
+                    (
+                        self.drizzle_output_wcs,
+                        self.drizzle_output_shape_hw,
+                    ) = self._create_drizzle_output_wcs(
+                        self.reference_wcs_object,
+                        ref_shape_hw_for_grid,
+                        self.drizzle_scale,
                     )
                     if (
                         self.drizzle_output_wcs is None
@@ -1286,8 +1325,12 @@ class SeestarQueuedStacker:
             if self.enable_preview:
                 self.preview_H = 256
                 self.preview_W = 256
-                self.preview_sum = np.zeros((self.preview_H, self.preview_W, C), dtype=np.float32)
-                self.preview_wht = np.zeros((self.preview_H, self.preview_W), dtype=np.float32)
+                self.preview_sum = np.zeros(
+                    (self.preview_H, self.preview_W, C), dtype=np.float32
+                )
+                self.preview_wht = np.zeros(
+                    (self.preview_H, self.preview_W), dtype=np.float32
+                )
 
         # --- Réinitialisations Communes ---
         self.warned_unaligned_source_folders.clear()
@@ -2365,7 +2408,6 @@ class SeestarQueuedStacker:
         except Exception:
             pass
 
-
         # Do not automatically enable inter-batch reprojection when preparing
         # the global grid. The user's existing preference is preserved.
 
@@ -2636,7 +2678,6 @@ class SeestarQueuedStacker:
             pass  # Les attributs self.mosaic_drizzle_xyz sont déjà settés par start_processing et ne sont pas lus ici.
 
         try:
-
             # =====================================================================================
             # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
             # =====================================================================================
@@ -2784,9 +2825,7 @@ class SeestarQueuedStacker:
                 logger.debug(
                     "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
                 )
-            if not (
-                self.reproject_between_batches and self.freeze_reference_wcs
-            ):
+            if not (self.reproject_between_batches and self.freeze_reference_wcs):
                 self.reference_wcs_object = None
             temp_wcs_ancre = None  # Spécifique pour la logique mosaïque locale
 
@@ -3076,12 +3115,13 @@ class SeestarQueuedStacker:
                             self.drizzle_output_wcs is None
                             or self.drizzle_output_shape_hw is None
                         ):
-                            self.drizzle_output_wcs, self.drizzle_output_shape_hw = (
-                                self._create_drizzle_output_wcs(
-                                    self.reference_wcs_object,
-                                    ref_shape_for_drizzle_grid_hw,
-                                    self.drizzle_scale,
-                                )
+                            (
+                                self.drizzle_output_wcs,
+                                self.drizzle_output_shape_hw,
+                            ) = self._create_drizzle_output_wcs(
+                                self.reference_wcs_object,
+                                ref_shape_for_drizzle_grid_hw,
+                                self.drizzle_scale,
                             )
                             if (
                                 self.drizzle_output_wcs is None
@@ -3211,7 +3251,6 @@ class SeestarQueuedStacker:
                             and isinstance(item_result_tuple[3], WCS)
                             and item_result_tuple[4] is not None
                         ):
-
                             (
                                 panel_data,
                                 panel_header,
@@ -3264,7 +3303,6 @@ class SeestarQueuedStacker:
                             and item_result_tuple[3] is not None
                             and isinstance(item_result_tuple[3], WCS)
                         ):
-
                             (
                                 panel_data,
                                 panel_header,
@@ -3328,7 +3366,6 @@ class SeestarQueuedStacker:
                             and len(item_result_tuple) == 6
                             and item_result_tuple[0] is not None
                         ):
-
                             if self.reproject_between_batches:
                                 # --- NEW incremental reprojection on *stacked* batches ---
                                 # store only the components expected by
@@ -3368,13 +3405,14 @@ class SeestarQueuedStacker:
                                         gc.collect()
                                     else:
                                         # 2. Ensure WCS on the stacked image
-                                        solved_path, _ = (
-                                            self._save_and_solve_classic_batch(
-                                                stacked_np,
-                                                wht_2d,
-                                                hdr,
-                                                self.stacked_batches_count,
-                                            )
+                                        (
+                                            solved_path,
+                                            _,
+                                        ) = self._save_and_solve_classic_batch(
+                                            stacked_np,
+                                            wht_2d,
+                                            hdr,
+                                            self.stacked_batches_count,
                                         )
                                         batch_wcs = None
                                         try:
@@ -3398,9 +3436,10 @@ class SeestarQueuedStacker:
 
                                         # After accumulation, solve the cumulative stack
                                         if self.reproject_between_batches:
-                                            stack_img, solved_hdr = (
-                                                self._solve_cumulative_stack()
-                                            )
+                                            (
+                                                stack_img,
+                                                solved_hdr,
+                                            ) = self._solve_cumulative_stack()
                                             if (
                                                 stack_img is not None
                                                 and solved_hdr is not None
@@ -3486,20 +3525,25 @@ class SeestarQueuedStacker:
                                     self._send_eta_update()
                                     if self.drizzle_active_session:
                                         if self.drizzle_mode == "Incremental":
-                                            self._process_incremental_drizzle_batch(
-                                                current_batch_items_with_masks_for_stack_batch,
-                                                self.stacked_batches_count,
-                                                self.total_batches_estimated,
-                                            )
+                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                                                driz_exec.submit(
+                                                    self._process_incremental_drizzle_batch,
+                                                    current_batch_items_with_masks_for_stack_batch,
+                                                    self.stacked_batches_count,
+                                                    self.total_batches_estimated,
+                                                ).result()
                                         elif self.drizzle_mode == "Final":
-                                            batch_sci_p, batch_wht_p_list = (
-                                                self._process_and_save_drizzle_batch(
+                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                                                (
+                                                    batch_sci_p,
+                                                    batch_wht_p_list,
+                                                ) = driz_exec.submit(
+                                                    self._process_and_save_drizzle_batch,
                                                     current_batch_items_with_masks_for_stack_batch,
                                                     self.drizzle_output_wcs,
                                                     self.drizzle_output_shape_hw,
                                                     self.stacked_batches_count,
-                                                )
-                                            )
+                                                ).result()
                                             if batch_sci_p and batch_wht_p_list:
                                                 self.intermediate_drizzle_batch_files.append(
                                                     (batch_sci_p, batch_wht_p_list)
@@ -3766,14 +3810,17 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle (mode Final) du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        batch_sci_path, batch_wht_paths = (
-                            self._process_and_save_drizzle_batch(
+                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                            (
+                                batch_sci_path,
+                                batch_wht_paths,
+                            ) = driz_exec.submit(
+                                self._process_and_save_drizzle_batch,
                                 current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
                                 self.drizzle_output_wcs,
                                 self.drizzle_output_shape_hw,
                                 self.stacked_batches_count,
-                            )
-                        )
+                            ).result()
                         if batch_sci_path and batch_wht_paths:
                             self.intermediate_drizzle_batch_files.append(
                                 (batch_sci_path, batch_wht_paths)
@@ -3787,11 +3834,13 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle Incr. VRAI du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        self._process_incremental_drizzle_batch(  # Utilise la version V_True_Incremental_Driz
-                            current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
-                            self.stacked_batches_count,
-                            self.total_batches_estimated,
-                        )
+                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                            driz_exec.submit(
+                                self._process_incremental_drizzle_batch,  # Utilise la version V_True_Incremental_Driz
+                                current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
+                                self.stacked_batches_count,
+                                self.total_batches_estimated,
+                            ).result()
 
                     self._move_to_stacked(self._current_batch_paths)
                     self._save_partial_stack()
@@ -3823,12 +3872,13 @@ class SeestarQueuedStacker:
                         self.processing_error = "Drizzle Final: Aucun lot intermédiaire"
                         self.final_stacked_path = None
                     else:
-                        final_drizzle_sci_hxwxc, final_drizzle_wht_hxwxc = (
-                            self._combine_intermediate_drizzle_batches(
-                                self.intermediate_drizzle_batch_files,
-                                self.drizzle_output_wcs,
-                                self.drizzle_output_shape_hw,
-                            )
+                        (
+                            final_drizzle_sci_hxwxc,
+                            final_drizzle_wht_hxwxc,
+                        ) = self._combine_intermediate_drizzle_batches(
+                            self.intermediate_drizzle_batch_files,
+                            self.drizzle_output_wcs,
+                            self.drizzle_output_shape_hw,
                         )
                         if final_drizzle_sci_hxwxc is not None:
                             self.update_progress(
@@ -3967,9 +4017,7 @@ class SeestarQueuedStacker:
                         )
                         self.final_stacked_path = None
                 else:
-                    self.update_progress(
-                        "🏁 Finalisation Stacking Classique (SUM/W)..."
-                    )
+                    self.update_progress("🏁 Finalisation Stacking Classique (SUM/W)...")
                     if self.images_in_cumulative_stack > 0 or (
                         hasattr(self, "cumulative_sum_memmap")
                         and self.cumulative_sum_memmap is not None
@@ -4030,6 +4078,7 @@ class SeestarQueuedStacker:
                 self.update_progress("🧹 Nettoyage final des fichiers temporaires...")
                 self._cleanup_drizzle_temp_files()  # Dossier des inputs Drizzle (aligned_input_*.fits)
                 self._cleanup_drizzle_batch_outputs()  # Dossier des sorties Drizzle par lot (batch_*_sci.fits, batch_*_wht_*.fits)
+                self._cleanup_classic_batch_outputs()  # Dossier des sorties Classic par lot
                 self._cleanup_mosaic_panel_stacks_temp()  # Dossier des stacks de panneaux (si ancienne logique ou tests)
                 if not self.user_requested_stop:
                     self.cleanup_temp_reference()  # Fichiers reference_image.fit/png
@@ -4799,9 +4848,9 @@ class SeestarQueuedStacker:
         if (
             self.use_quality_weighting
         ):  # Le Drizzle actuel ne prend pas en compte ces poids directement
-            final_header["HISTORY"] = (
-                "Quality weighting parameters were set, but Drizzle uses its own weighting."
-            )
+            final_header[
+                "HISTORY"
+            ] = "Quality weighting parameters were set, but Drizzle uses its own weighting."
 
         # Le WCS sera ajouté par _save_final_stack à partir du self.drizzle_output_wcs
 
@@ -4905,9 +4954,13 @@ class SeestarQueuedStacker:
 
         for panel_info_tuple in aligned_files_info_list:
             try:
-                panel_image_data, panel_header, wcs_for_panel, _, pixel_mask = (
-                    panel_info_tuple
-                )
+                (
+                    panel_image_data,
+                    panel_header,
+                    wcs_for_panel,
+                    _,
+                    pixel_mask,
+                ) = panel_info_tuple
                 if panel_image_data is None or wcs_for_panel is None:
                     continue
                 input_data_for_reproject.append((panel_image_data, wcs_for_panel))
@@ -5023,6 +5076,30 @@ class SeestarQueuedStacker:
         # else: # Log optionnel si le dossier n'existait pas ou chemin invalide
         # if self.output_folder: # Pour éviter de logguer si c'est juste output_folder qui est None
         #    logger.debug(f"DEBUG QM [_cleanup_drizzle_batch_outputs]: Dossier {batch_output_dir} non trouvé ou invalide pour nettoyage.")
+
+    ####################################################################################################
+
+    def _cleanup_classic_batch_outputs(self):
+        """Supprime le dossier contenant les sorties intermédiaires du mode classique."""
+        if self.output_folder is None:
+            logger.debug(
+                "WARN QM [_cleanup_classic_batch_outputs]: self.output_folder non défini, nettoyage annulé."
+            )
+            return
+
+        batch_output_dir = self.classic_batch_output_dir or os.path.join(
+            self.output_folder, "classic_batch_outputs"
+        )
+        if os.path.isdir(batch_output_dir):
+            try:
+                shutil.rmtree(batch_output_dir)
+                self.update_progress(
+                    f"🧹 Dossier batches classiques supprimé: {os.path.basename(batch_output_dir)}"
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Erreur suppression dossier batches classiques ({os.path.basename(batch_output_dir)}): {e}"
+                )
 
     ####################################################################################################################
 
@@ -5267,6 +5344,27 @@ class SeestarQueuedStacker:
                     )
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
+
+            zoom_pct = getattr(self, "zoom_percent", 0)
+            if isinstance(zoom_pct, (int, float)) and zoom_pct > 0:
+                factor = 1.0 + zoom_pct / 100.0
+                try:
+                    h, w = prepared_img_after_initial_proc.shape[:2]
+                    resized = cv2.resize(
+                        prepared_img_after_initial_proc,
+                        None,
+                        fx=factor,
+                        fy=factor,
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                    center = (resized.shape[1] // 2, resized.shape[0] // 2)
+                    prepared_img_after_initial_proc = cv2.getRectSubPix(
+                        resized,
+                        patchSize=(w, h),
+                        center=center,
+                    )
+                except Exception as e_zoom:
+                    logger.warning(f"Zoom ROI désactivé (erreur : {e_zoom})")
 
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
@@ -5519,13 +5617,14 @@ class SeestarQueuedStacker:
                 if reference_image_data_for_alignment is None:
                     raise RuntimeError("Image de référence Astroalign manquante.")
 
-                aligned_img_astroalign, align_success_astroalign = (
-                    self.aligner._align_image(
-                        image_for_alignment_or_drizzle_input,
-                        reference_image_data_for_alignment,
-                        file_name,
-                        force_same_shape_as_ref=True,
-                    )
+                (
+                    aligned_img_astroalign,
+                    align_success_astroalign,
+                ) = self.aligner._align_image(
+                    image_for_alignment_or_drizzle_input,
+                    reference_image_data_for_alignment,
+                    file_name,
+                    force_same_shape_as_ref=True,
                 )
 
                 if align_success_astroalign and aligned_img_astroalign is not None:
@@ -5761,10 +5860,12 @@ class SeestarQueuedStacker:
         self.update_progress(
             f"⚙️ Traitement classique du batch {progress_info_log} ({num_items_in_this_batch} images)..."
         )
-        stacked_batch_data_np, stack_info_header, batch_coverage_map_2d = (
-            self._stack_batch(
-                batch_items_to_stack, current_batch_num, total_batches_est
-            )
+        (
+            stacked_batch_data_np,
+            stack_info_header,
+            batch_coverage_map_2d,
+        ) = self._stack_batch(
+            batch_items_to_stack, current_batch_num, total_batches_est
         )
 
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
@@ -5928,11 +6029,13 @@ class SeestarQueuedStacker:
         aux objets Drizzle persistants. Met à jour l'aperçu après chaque image (ou lot).
         Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full_EXTENDED_DEBUG_ULTRA
         """
-        # --- LIGNE DE PRINT ULTRA-CRITIQUE ET UNIQUE ---
-        print(
-            f"\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) - Lot #{current_batch_num} - Fichiers: {len(batch_temp_filepaths_list)} ========"
+        # Log de début de méthode
+        logger.debug(
+            "\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: %s) - Lot #%d - Fichiers: %d ========",
+            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
+            current_batch_num,
+            len(batch_temp_filepaths_list),
         )
-        # --- FIN LIGNE DE PRINT ULTRA-CRITIQUE ---
 
         num_files_in_batch = len(batch_temp_filepaths_list)
         logger.debug(
@@ -6152,9 +6255,10 @@ class SeestarQueuedStacker:
                     )
 
                 # Convertir les coordonnées célestes en coordonnées pixels de la grille de sortie Drizzle (initialement avec origin=0)
-                final_x_output_pixels, final_y_output_pixels = (
-                    self.drizzle_output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
-                )
+                (
+                    final_x_output_pixels,
+                    final_y_output_pixels,
+                ) = self.drizzle_output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
 
                 # Dimensions de la grille de sortie Drizzle
                 height_out, width_out = self.drizzle_output_shape_hw
@@ -6169,8 +6273,14 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"        Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})"
                 )
-                print(
-                    f"ULTRA-DEBUG: Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})"
+                logger.debug(
+                    "ULTRA-DEBUG: Pixmap initial (origin=0) X range %.2f-%.2f vs [0,%d]; Y range %.2f-%.2f vs [0,%d)",
+                    min_x_initial,
+                    max_x_initial,
+                    width_out - 1,
+                    min_y_initial,
+                    max_y_initial,
+                    height_out - 1,
                 )
 
                 # RECALCUL AVEC origin=1 SI HORS BORNES (et correction en 0-based)
@@ -6186,13 +6296,14 @@ class SeestarQueuedStacker:
                     logger.debug(
                         "      WARN [ProcIncrDrizLoop]: Pixmap initial (origin=0) en dehors de la plage attendue. Recalcul avec origin=1."
                     )
-                    print(
+                    logger.debug(
                         "ULTRA-DEBUG: Pixmap initial (origin=0) is OUT OF BOUNDS. Recalculating with origin=1..."
                     )
-                    final_x_output_pixels, final_y_output_pixels = (
-                        self.drizzle_output_wcs.all_world2pix(
-                            sky_ra_deg, sky_dec_deg, 1  # Recalcul avec origin=1
-                        )
+                    (
+                        final_x_output_pixels,
+                        final_y_output_pixels,
+                    ) = self.drizzle_output_wcs.all_world2pix(
+                        sky_ra_deg, sky_dec_deg, 1  # Recalcul avec origin=1
                     )
                     # --- FIX CRITIQUE : CONVERSION DE 1-BASED À 0-BASED ---
                     final_x_output_pixels -= 1.0  # Convertir 1-based en 0-based
@@ -6200,8 +6311,10 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap ajusté (1-based vers 0-based) après recalcul avec origin=1."
                     )
-                    print(
-                        f"ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x={np.nanmin(final_x_output_pixels):.2f}, min_y={np.nanmin(final_y_output_pixels):.2f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x=%.2f, min_y=%.2f",
+                        np.nanmin(final_x_output_pixels),
+                        np.nanmin(final_y_output_pixels),
                     )
                     # --- FIN FIX CRITIQUE ---
 
@@ -6213,7 +6326,7 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection (post-correction). Nettoyage..."
                     )
-                    print(f"ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
+                    logger.debug("ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
                     final_x_output_pixels = np.nan_to_num(
                         final_x_output_pixels, nan=0.0, posinf=0.0, neginf=0.0
                     )  # Utilisez 0.0 pour les valeurs numériques
@@ -6255,11 +6368,19 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"      Output Grid (width, height) for comparison: ({width_out}, {height_out})"
                 )
-                print(
-                    f"ULTRA-DEBUG: Final Pixmap X stats (post-clip): min={min_x_final:.2f}, max={max_x_final:.2f}, mean={np.nanmean(pix_x_final):.2f}, std={np.nanstd(pix_x_final):.2f}"
+                logger.debug(
+                    "ULTRA-DEBUG: Final Pixmap X stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
+                    min_x_final,
+                    max_x_final,
+                    np.nanmean(pix_x_final),
+                    np.nanstd(pix_x_final),
                 )
-                print(
-                    f"ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min={min_y_final:.2f}, max={max_y_final:.2f}, mean={np.nanmean(pix_y_final):.2f}, std={np.nanstd(pix_y_final):.2f}"
+                logger.debug(
+                    "ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
+                    min_y_final,
+                    max_y_final,
+                    np.nanmean(pix_y_final),
+                    np.nanstd(pix_y_final),
                 )
 
                 # Vérification critique des bornes du pixmap final
@@ -6283,7 +6404,7 @@ class SeestarQueuedStacker:
                     logger.warning(
                         "        WARN: All pixmap points map to (or very close to) a single output pixel! This indicates a severe WCS issue or extreme input image data where all points are projected to the same output pixel. No significant image will be drizzled."
                     )
-                    print(
+                    logger.debug(
                         "ULTRA-DEBUG: WARNING: Pixmap is 'flat' - all points map to a single output pixel!"
                     )
 
@@ -6370,8 +6491,14 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} CALLING add_image - data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], exptime={exptime_for_drizzle_add}, pixfrac={self.drizzle_pixfrac}, input_shape_hw={input_shape_hw_current_file}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d CALLING add_image - data range %.3g-%.3g, exptime=%.2f, pixfrac=%.2f, input_shape_hw=%s",
+                        ch_idx,
+                        np.min(channel_data_2d),
+                        np.max(channel_data_2d),
+                        exptime_for_drizzle_add,
+                        self.drizzle_pixfrac,
+                        input_shape_hw_current_file,
                     )
 
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
@@ -6383,8 +6510,11 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} SCI_SUM BEFORE add_image: {sci_sum_before:.3f}"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state BEFORE add_image: out_wht_sum={wht_sum_before:.3f}, out_img_sum={sci_sum_before:.3f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d Drizzle Obj state BEFORE add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
+                        ch_idx,
+                        wht_sum_before,
+                        sci_sum_before,
                     )
 
                     # L'appel CRITIQUE à add_image
@@ -6399,9 +6529,12 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} RETURNED from add_image: nskip={nskip}, nmiss={nmiss}"
                     )  # Log des retours de add_image
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} add_image RETURNED: nskip={nskip}, nmiss={nmiss}"
-                    )  # Print direct pour nskip/nmiss
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d add_image RETURNED: nskip=%d, nmiss=%d",
+                        ch_idx,
+                        nskip,
+                        nmiss,
+                    )
 
                     wht_sum_after = float(np.sum(driz_obj.out_wht))
                     sci_sum_after = float(np.sum(driz_obj.out_img))
@@ -6411,8 +6544,11 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_sum_after:.3f} (Change: {sci_sum_after - sci_sum_before:.3f})"
                     )
-                    print(
-                        f"ULTRA-DEBUG: Ch{ch_idx} Drizzle Obj state AFTER add_image: out_wht_sum={wht_sum_after:.3f}, out_img_sum={sci_sum_after:.3f}"
+                    logger.debug(
+                        "ULTRA-DEBUG: Ch%d Drizzle Obj state AFTER add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
+                        ch_idx,
+                        wht_sum_after,
+                        sci_sum_after,
                     )
 
                     # Vérification des assertions (maintenues)
@@ -6441,8 +6577,10 @@ class SeestarQueuedStacker:
                     f"ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Échec fichier '{current_filename_for_log}': {e_file}",
                     exc_info=True,
                 )
-                print(
-                    f"ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '{current_filename_for_log}': {e_file}"
+                logger.debug(
+                    "ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '%s': %s",
+                    current_filename_for_log,
+                    e_file,
                 )
 
             finally:
@@ -6528,31 +6666,17 @@ class SeestarQueuedStacker:
             if self.preview_callback and self.incremental_drizzle_objects:
                 avg_img_channels_preview = []
                 # IMPORTANT: driz_obj.out_img contient SCI*WHT, driz_obj.out_wht contient WHT
-                # Pour obtenir l'image moyenne, il faut diviser SCI*WHT par WHT.
+                # Utiliser drizzle_finalize pour obtenir l'image moyennée.
                 for c in range(num_output_channels):
                     driz_obj = self.incremental_drizzle_objects[c]
 
-                    # Obtenir les données et poids cumulatifs
                     sci_accum = driz_obj.out_img.astype(np.float32)
                     wht_accum = driz_obj.out_wht.astype(np.float32)
 
-                    # Éviter la division par zéro
-                    wht_safe = np.maximum(wht_accum, 1e-9)
-
-                    # Calculer l'image moyenne pour l'aperçu
-                    preview_channel_data = np.zeros_like(sci_accum)
-                    valid_pixels = (
-                        wht_safe > 1e-8
-                    )  # Masque pour les pixels où il y a eu contribution
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        preview_channel_data[valid_pixels] = (
-                            sci_accum[valid_pixels] / wht_safe[valid_pixels]
-                        )
+                    preview_channel_data = drizzle_finalize(sci_accum, wht_accum)
 
                     avg_img_channels_preview.append(
-                        np.nan_to_num(
-                            preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0
-                        )
+                        np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0)
                     )
 
                 preview_data_HWC_raw = np.stack(avg_img_channels_preview, axis=-1)
@@ -6584,36 +6708,46 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"    DEBUG QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
                 )
-                print(
-                    f"ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
+                logger.debug(
+                    "ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): %.3f-%.3f",
+                    np.min(preview_data_HWC_final),
+                    np.max(preview_data_HWC_final),
                 )
             else:
                 logger.debug(
                     f"    WARN QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Impossible de mettre à jour l'aperçu Driz Incr VRAI (callback ou objets Drizzle manquants)."
                 )
-                print(
-                    f"ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI."
+                logger.debug(
+                    "ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI."
                 )
         except Exception as e_prev:
             logger.error(
                 f"    ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}",
                 exc_info=True,
             )
-            print(f"ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: {e_prev}")
+            logger.debug(
+                "ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: %s",
+                e_prev,
+            )
 
         # --- NETTOYAGE DES FICHIERS TEMPORAIRES DU LOT ---
         if self.perform_cleanup:
             logger.debug(
                 f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Nettoyage fichiers temp lot #{current_batch_num}..."
             )
-            print(f"ULTRA-DEBUG: Nettoyage fichiers temp lot #{current_batch_num}...")
+            logger.debug(
+                "ULTRA-DEBUG: Nettoyage fichiers temp lot #%d...",
+                current_batch_num,
+            )
             self._cleanup_batch_temp_files(batch_temp_filepaths_list)
 
         logger.debug(
             f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n"
         )
-        print(
-            f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n"
+        logger.debug(
+            "======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #%d - %s) ========",
+            current_batch_num,
+            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
         )
 
     #################################################################################################################################################
@@ -6763,9 +6897,7 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=1)
             return None, None
         except Exception as e:
-            self.update_progress(
-                f"❌ Erreur inattendue pendant combinaison chunks: {e}"
-            )
+            self.update_progress(f"❌ Erreur inattendue pendant combinaison chunks: {e}")
             traceback.print_exc(limit=2)
             return None, None
 
@@ -7217,9 +7349,9 @@ class SeestarQueuedStacker:
                                 ),
                             )
                         except Exception:
-                            self.current_stack_header[key_iter] = (
-                                first_header_from_batch[key_iter]
-                            )
+                            self.current_stack_header[
+                                key_iter
+                            ] = first_header_from_batch[key_iter]
                 self.current_stack_header["STACKTYP"] = (
                     f"Classic SUM/W ({self.stacking_mode})",
                     "Stacking method",
@@ -7229,17 +7361,17 @@ class SeestarQueuedStacker:
                     "Processing Software",
                 )
                 if self.correct_hot_pixels:
-                    self.current_stack_header["HISTORY"] = (
-                        "Hot pixel correction applied"
-                    )
+                    self.current_stack_header[
+                        "HISTORY"
+                    ] = "Hot pixel correction applied"
                 if self.use_quality_weighting:
-                    self.current_stack_header["HISTORY"] = (
-                        "Quality weighting (SNR/Stars) with per-pixel coverage for SUM/W"
-                    )
+                    self.current_stack_header[
+                        "HISTORY"
+                    ] = "Quality weighting (SNR/Stars) with per-pixel coverage for SUM/W"
                 else:
-                    self.current_stack_header["HISTORY"] = (
-                        "Uniform weighting (by image count) with per-pixel coverage for SUM/W"
-                    )
+                    self.current_stack_header[
+                        "HISTORY"
+                    ] = "Uniform weighting (by image count) with per-pixel coverage for SUM/W"
                 self.current_stack_header["HISTORY"] = "SUM/W Accumulation Initialized"
 
             self.current_stack_header["NIMAGES"] = (
@@ -7422,6 +7554,10 @@ class SeestarQueuedStacker:
         apply_rewinsor=True,
     ):
         """Run winsorized sigma clipping in a separate process."""
+        self.update_progress(
+            f"RejWinsor: kappa={kappa}, limits={winsor_limits}, apply_rewinsor={apply_rewinsor}",
+            None,
+        )
         stack_args = (
             "winsorized-sigma",
             images,
@@ -7429,9 +7565,43 @@ class SeestarQueuedStacker:
             kappa,
             kappa,
             winsor_limits,
+            apply_rewinsor,
         )
         with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
-            return exe.submit(_stack_worker, stack_args).result()
+            stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        self.update_progress(
+            f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
+            None,
+        )
+        return stacked, rejected_pct
+
+    def _combine_hq_by_tiles(
+        self, images_list, weights, kappa, winsor_limits, tile_h=512
+    ):
+        """Combine les mini-stacks en bandes pour limiter la RAM."""
+        H, W, _ = images_list[0].shape
+        final = np.zeros_like(images_list[0], dtype=np.float32)
+        wht = np.zeros((H, W), dtype=np.float32)
+
+        for y0 in range(0, H, tile_h):
+            y1 = min(y0 + tile_h, H)
+            cube = np.stack([img[y0:y1] for img in images_list], axis=0)
+            w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
+            if self.stack_final_combine == "winsorized_sigma_clip":
+                stacked, _ = self._stack_winsorized_sigma(
+                    cube,
+                    w_cube,
+                    kappa=kappa,
+                    winsor_limits=winsor_limits,
+                )
+            elif self.stack_final_combine == "median":
+                stacked, _ = _stack_median(cube, w_cube)
+            else:
+                stacked, _ = _stack_mean(cube, w_cube)
+            final[y0:y1] += stacked * np.sum(w_cube, axis=0)[..., None]
+            wht[y0:y1] += np.sum(w_cube, axis=0)
+
+        return np.nan_to_num(final / np.maximum(wht[..., None], 1e-6))
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
@@ -7942,15 +8112,17 @@ class SeestarQueuedStacker:
 
                 shape_lot_intermediaire_hw = sci_data_cxhxw_lot.shape[1:]
                 y_lot_intermed, x_lot_intermed = np.indices(shape_lot_intermediaire_hw)
-                sky_coords_lot_ra, sky_coords_lot_dec = (
-                    wcs_lot_intermediaire.all_pix2world(
-                        x_lot_intermed.ravel(), y_lot_intermed.ravel(), 0
-                    )
+                (
+                    sky_coords_lot_ra,
+                    sky_coords_lot_dec,
+                ) = wcs_lot_intermediaire.all_pix2world(
+                    x_lot_intermed.ravel(), y_lot_intermed.ravel(), 0
                 )
-                x_final_output_pix, y_final_output_pix = (
-                    output_wcs_final_target.all_world2pix(
-                        sky_coords_lot_ra, sky_coords_lot_dec, 0
-                    )
+                (
+                    x_final_output_pix,
+                    y_final_output_pix,
+                ) = output_wcs_final_target.all_world2pix(
+                    sky_coords_lot_ra, sky_coords_lot_dec, 0
                 )
                 x_final_output_pix = np.nan_to_num(
                     x_final_output_pix, nan=-1e9, posinf=-1e9, neginf=-1e9
@@ -8046,12 +8218,31 @@ class SeestarQueuedStacker:
         try:
             # Les `final_output_images_list` contiennent la somme(data*wht) et `final_output_weights_list` contient la somme(wht)
             # La division se fera dans _save_final_stack. Ici, on stack juste pour retourner.
-            final_sci_image_HWC = np.stack(final_output_images_list, axis=-1).astype(
-                np.float32
-            )
-            final_wht_map_HWC = np.stack(final_output_weights_list, axis=-1).astype(
-                np.float32
-            )  # Maintenant HWC
+            cube = np.stack(final_output_images_list, axis=0)
+            w_cube = np.stack(final_output_weights_list, axis=0)
+            if cube.nbytes > self.max_hq_mem:
+                self.update_progress(
+                    "HQ combine : trop de RAM, bascule en passe 2 par bandes"
+                )
+                final_sci_image_HWC = self._combine_hq_by_tiles(
+                    final_output_images_list,
+                    final_output_weights_list,
+                    kappa=self.stack_kappa_high,
+                    winsor_limits=self.winsor_limits,
+                )
+            else:
+                if self.stack_final_combine == "winsorized_sigma_clip":
+                    final_sci_image_HWC, _ = self._stack_winsorized_sigma(
+                        cube,
+                        w_cube,
+                        kappa=self.stack_kappa_high,
+                        winsor_limits=self.winsor_limits,
+                    )
+                elif self.stack_final_combine == "median":
+                    final_sci_image_HWC, _ = _stack_median(cube, w_cube)
+                else:
+                    final_sci_image_HWC, _ = _stack_mean(cube, w_cube)
+            final_wht_map_HWC = np.sum(w_cube, axis=0).astype(np.float32)
 
             # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---
             # if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:
@@ -8339,7 +8530,7 @@ class SeestarQueuedStacker:
             data=avg.astype(np.float32), header=self.reference_header_for_wcs
         )
         fits.writeto(
-            'master_stack_classic_nodriz.fits', hdu.data, hdu.header, overwrite=True
+            "master_stack_classic_nodriz.fits", hdu.data, hdu.header, overwrite=True
         )
 
     def _final_reproject_cached_files(self, cache_list):
@@ -8410,9 +8601,9 @@ class SeestarQueuedStacker:
             ).astype(np.float32)
             tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
             tmp.close()
-            fits.PrimaryHDU(
-                data=luminance, header=header
-            ).writeto(tmp.name, overwrite=True, output_verify="ignore")
+            fits.PrimaryHDU(data=luminance, header=header).writeto(
+                tmp.name, overwrite=True, output_verify="ignore"
+            )
             solved_ok = self._run_astap_and_update_header(tmp.name)
             if solved_ok:
                 solved_hdr = fits.getheader(tmp.name)
@@ -8474,9 +8665,9 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-        fits.PrimaryHDU(
-            data=np.moveaxis(final_stacked, -1, 0), header=header
-        ).writeto(sci_fits, overwrite=True, output_verify="ignore")
+        fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
+            sci_fits, overwrite=True, output_verify="ignore"
+        )
         for ch_i in range(final_stacked.shape[2]):
             wht_path = os.path.join(
                 out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
@@ -8790,27 +8981,10 @@ class SeestarQueuedStacker:
                 avg_img_channels_list = []
                 processed_wht_channels_list_for_mean = []
                 for c in range(3):
-                    sci_ch_accum_float64 = sci_arrays_hw_list[c].astype(np.float64)
-                    wht_ch_accum_raw_float64 = wht_arrays_hw_list[c].astype(np.float64)
-                    wht_ch_clipped_positive = np.maximum(wht_ch_accum_raw_float64, 0.0)
-                    processed_wht_channels_list_for_mean.append(
-                        wht_ch_clipped_positive.astype(np.float32)
-                    )
-                    wht_ch_for_division = np.maximum(wht_ch_clipped_positive, 1e-9)
-                    channel_mean_image_adu = np.zeros_like(
-                        sci_ch_accum_float64, dtype=np.float32
-                    )
-                    valid_pixels_mask = wht_ch_for_division > 1e-8
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        channel_mean_image_adu[valid_pixels_mask] = (
-                            sci_ch_accum_float64[valid_pixels_mask]
-                            / wht_ch_for_division[valid_pixels_mask]
-                        )
-                    avg_img_channels_list.append(
-                        np.nan_to_num(
-                            channel_mean_image_adu, nan=0.0, posinf=0.0, neginf=0.0
-                        ).astype(np.float32)
-                    )
+                    sci_ch = sci_arrays_hw_list[c].astype(np.float32)
+                    wht_ch = np.maximum(wht_arrays_hw_list[c].astype(np.float32), 0.0)
+                    processed_wht_channels_list_for_mean.append(wht_ch)
+                    avg_img_channels_list.append(drizzle_finalize(sci_ch, wht_ch))
                 final_image_initial_raw = np.stack(avg_img_channels_list, axis=-1)
                 final_wht_map_for_postproc = np.mean(
                     np.stack(processed_wht_channels_list_for_mean, axis=-1), axis=2
@@ -8834,18 +9008,38 @@ class SeestarQueuedStacker:
                     raise ValueError(
                         "Donnees de lot Drizzle final (sci/wht) manquantes."
                     )
-                sci_data_float64 = drizzle_final_sci_data.astype(np.float64)
-                wht_data_float64 = drizzle_final_wht_data.astype(np.float64)
+                sci_arr = drizzle_final_sci_data
+                if sci_arr.ndim == 4 and sci_arr.shape[0] == 1:
+                    sci_arr = sci_arr[0]
+                if sci_arr.ndim == 3 and sci_arr.shape[0] == 3:
+                    sci_arr = np.moveaxis(sci_arr, 0, -1)
+                sci_data_float64 = sci_arr.astype(np.float64)
+
+                wht_arr = drizzle_final_wht_data
+                if wht_arr.ndim == 4 and wht_arr.shape[0] == 1:
+                    wht_arr = wht_arr[0]
+                wht_data_float64 = wht_arr.astype(np.float64)
                 wht_data_clipped_positive = np.maximum(wht_data_float64, 0.0)
-                final_wht_map_for_postproc = np.mean(
-                    wht_data_clipped_positive, axis=2
-                ).astype(np.float32)
-                wht_for_div = np.maximum(wht_data_clipped_positive, 1e-9)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    final_image_initial_raw = sci_data_float64 / wht_for_div
-                final_image_initial_raw = np.nan_to_num(
-                    final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0
-                ).astype(np.float32)
+
+                if wht_arr.ndim == 3:
+                    wht3d = (
+                        wht_data_clipped_positive
+                        if wht_arr.shape[-1] == 3
+                        else np.moveaxis(wht_data_clipped_positive, 0, -1)
+                    )
+                    final_wht_map_for_postproc = np.mean(wht3d, axis=2).astype(
+                        np.float32
+                    )
+                    wht_for_div = wht3d
+                else:
+                    final_wht_map_for_postproc = wht_data_clipped_positive.astype(
+                        np.float32
+                    )
+                    wht_for_div = wht_data_clipped_positive[:, :, np.newaxis]
+
+                final_image_initial_raw = drizzle_finalize(
+                    sci_data_float64, wht_for_div
+                )
                 self._close_memmaps()
                 self.update_progress(
                     f"    DEBUG QM: Drizzle Std Final - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
@@ -9199,6 +9393,35 @@ class SeestarQueuedStacker:
             round(self.total_exposure_seconds, 2),
             "[s] Approx total exposure",
         )
+        # Propagate basic pointing information if absent
+
+        if "RA" not in final_header:
+            if "CRVAL1" in final_header:
+                final_header["RA"] = (
+                    float(final_header["CRVAL1"]),
+                    "[deg] Approx pointing RA from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "RA" in self.reference_header_for_wcs:
+                final_header["RA"] = (
+                    float(self.reference_header_for_wcs["RA"]),
+                    self.reference_header_for_wcs.comments["RA"]
+                    if "RA" in self.reference_header_for_wcs.comments
+                    else "[deg] Pointing RA from reference header",
+                )
+        if "DEC" not in final_header:
+            if "CRVAL2" in final_header:
+                final_header["DEC"] = (
+                    float(final_header["CRVAL2"]),
+                    "[deg] Approx pointing DEC from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "DEC" in self.reference_header_for_wcs:
+                final_header["DEC"] = (
+                    float(self.reference_header_for_wcs["DEC"]),
+                    self.reference_header_for_wcs.comments["DEC"]
+                    if "DEC" in self.reference_header_for_wcs.comments
+                    else "[deg] Pointing DEC from reference header",
+                )
+
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):
             base_name = self.output_filename.strip()
@@ -9310,14 +9533,6 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee."
             )
-            try:
-                renormalize_fits(
-                    fits_path,
-                    getattr(self, "drizzle_renorm_method", "none"),
-                    getattr(self, "images_in_cumulative_stack", 0),
-                )
-            except Exception as ren_err:
-                self.update_progress(f"   ⚠️ Renormalisation échouée: {ren_err}", "WARN")
         except Exception as save_err:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}")
             self.final_stacked_path = None
@@ -9780,6 +9995,7 @@ class SeestarQueuedStacker:
         local_solver_preference="none",
         move_stacked=False,
         partial_save_interval=1,
+        zoom_percent=0,
         *,
         save_as_float32=False,
         preserve_linear_output=False,
@@ -9821,7 +10037,9 @@ class SeestarQueuedStacker:
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
         if self.processing_active:
-            self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
+            self.update_progress(
+                "⚠️ Tentative de démarrer un traitement déjà en cours."
+            )
             return False
 
         self.stop_processing = False
@@ -9953,6 +10171,7 @@ class SeestarQueuedStacker:
         self.correct_hot_pixels = bool(correct_hot_pixels)
         self.hot_pixel_threshold = float(hot_pixel_threshold)
         self.neighborhood_size = int(neighborhood_size)
+        self.zoom_percent = int(zoom_percent)
         self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
         self.weight_by_snr = bool(weight_by_snr)
@@ -10422,10 +10641,11 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object and self.fixed_output_wcs is None:
             try:
                 ref_hw = ref_shape_hwc[:2]
-                self.fixed_output_wcs, self.fixed_output_shape = (
-                    self._create_drizzle_output_wcs(
-                        self.reference_wcs_object, ref_hw, self.drizzle_scale
-                    )
+                (
+                    self.fixed_output_wcs,
+                    self.fixed_output_shape,
+                ) = self._create_drizzle_output_wcs(
+                    self.reference_wcs_object, ref_hw, self.drizzle_scale
                 )
                 self.drizzle_output_wcs = self.fixed_output_wcs
                 self.drizzle_output_shape_hw = self.fixed_output_shape
@@ -10499,7 +10719,8 @@ class SeestarQueuedStacker:
                                 )
                     except Exception as e_scan:
                         self.update_progress(
-                            f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}", "WARN"
+                            f"⚠️ Scan skip {os.path.basename(folder_iter)}: {e_scan}",
+                            "WARN",
                         )
 
         initial_files_added = self._add_files_to_queue(self.current_folder)
@@ -10902,15 +11123,17 @@ class SeestarQueuedStacker:
 
                 current_input_shape_hw = input_data_HxWxC_orig.shape[:2]
                 y_in_coords, x_in_coords = np.indices(current_input_shape_hw)
-                sky_coords_ra_deg, sky_coords_dec_deg = (
-                    wcs_input_from_file_header.all_pix2world(
-                        x_in_coords.ravel(), y_in_coords.ravel(), 0
-                    )
+                (
+                    sky_coords_ra_deg,
+                    sky_coords_dec_deg,
+                ) = wcs_input_from_file_header.all_pix2world(
+                    x_in_coords.ravel(), y_in_coords.ravel(), 0
                 )
-                x_output_pixels_flat, y_output_pixels_flat = (
-                    output_wcs_target.all_world2pix(
-                        sky_coords_ra_deg, sky_coords_dec_deg, 0
-                    )
+                (
+                    x_output_pixels_flat,
+                    y_output_pixels_flat,
+                ) = output_wcs_target.all_world2pix(
+                    sky_coords_ra_deg, sky_coords_dec_deg, 0
                 )
                 pixmap_for_this_file = np.dstack(
                     (
@@ -11152,9 +11375,9 @@ class SeestarQueuedStacker:
                 wht_header_ch["NAXIS"] = 2
                 wht_header_ch["NAXIS1"] = wht_data_to_save_ch.shape[1]
                 wht_header_ch["NAXIS2"] = wht_data_to_save_ch.shape[0]
-                wht_header_ch["HISTORY"] = (
-                    f"Drizzle Weights ({ch_name}) Batch {batch_num}"
-                )
+                wht_header_ch[
+                    "HISTORY"
+                ] = f"Drizzle Weights ({ch_name}) Batch {batch_num}"
                 wht_header_ch["NINPUTS"] = processed_in_batch_count
                 wht_header_ch["BUNIT"] = "Weight"
                 logger.debug(
@@ -11201,6 +11424,19 @@ class SeestarQueuedStacker:
         del drizzlers_batch, output_images_batch, output_weights_batch
         gc.collect()
         return out_filepath_sci, out_filepaths_wht
+
+    def finish(self):
+        """Export the cumulative weight map to a FITS file."""
+        from astropy.io import fits
+
+        if self.cumulative_wht_memmap is not None:
+            if hasattr(self.cumulative_wht_memmap, "flush"):
+                self.cumulative_wht_memmap.flush()
+            fits.writeto(
+                "cumulative_weights.fits",
+                self.cumulative_wht_memmap,
+                overwrite=True,
+            )
 
 
 ######################################################################################################################################################

@@ -608,7 +608,7 @@ def test_use_sidecar_wcs(monkeypatch, tmp_path):
             data = np.ones((2, 2), dtype=np.float32)
             hdr = fits.Header()
             hdr["BITPIX"] = 16
-            return data, hdr
+            return data, hdr, {"axis_order_original": "HWC"}
 
         @staticmethod
         def debayer_image(img, pattern, progress_callback=None):
@@ -639,7 +639,7 @@ def test_use_sidecar_wcs(monkeypatch, tmp_path):
 
     solver = DummySolver()
 
-    img, wcs_out, hdr = worker.get_wcs_and_pretreat_raw_file(
+    img, wcs_out, hdr, _ = worker.get_wcs_and_pretreat_raw_file(
         str(fits_path),
         "",  # astap_exe_path
         "",  # astap_data_dir
@@ -730,5 +730,104 @@ def test_grid_uses_resolved_wcs(monkeypatch):
 
     assert captured.get("wcs")
     assert np.allclose(captured["wcs"][0].wcs.crval, [5, 5])
+
+
+def test_astrometry_fallback_to_astap(monkeypatch, tmp_path):
+    import importlib
+    import types
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ZEMOSAIC_ASTROMETRY_AVAILABLE", True)
+
+    monkeypatch.setattr(worker, "solve_with_astrometry", lambda *a, **k: None)
+
+    dummy_wcs = make_wcs(1, 1, shape=(2, 2))
+
+    monkeypatch.setattr(
+        worker,
+        "zemosaic_astrometry",
+        types.SimpleNamespace(solve_with_astap=lambda *a, **k: dummy_wcs),
+    )
+
+    astap_exe = tmp_path / "astap.exe"
+    astap_exe.write_text(" ")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    from astropy.io import fits
+
+    fits_path = tmp_path / "img.fits"
+    fits.writeto(fits_path, np.ones((2, 2), dtype=np.float32), overwrite=True)
+
+    img, wcs_out, hdr, _ = worker.get_wcs_and_pretreat_raw_file(
+        str(fits_path),
+        str(astap_exe),
+        str(data_dir),
+        3.0,
+        0,
+        0,
+        10,
+        lambda *a, **k: None,
+        solver_settings={"solver_choice": "ASTROMETRY"},
+    )
+
+    assert wcs_out is not None
+    assert np.allclose(wcs_out.wcs.crval, dummy_wcs.wcs.crval)
+
+
+def test_astrometry_called(monkeypatch, tmp_path):
+    import importlib
+    import types
+    importlib.reload(worker)
+
+    monkeypatch.setattr(worker, "ASTROMETRY_SOLVER_AVAILABLE", True)
+    monkeypatch.setattr(worker, "ZEMOSAIC_ASTROMETRY_AVAILABLE", True)
+
+    calls = {"astrometry": 0, "astap": 0}
+
+    dummy_wcs = make_wcs(2, 2, shape=(2, 2))
+
+    def dummy_astrometry(*a, **k):
+        calls["astrometry"] += 1
+        return dummy_wcs
+
+    def dummy_astap(*a, **k):
+        calls["astap"] += 1
+        return None
+
+    monkeypatch.setattr(worker, "solve_with_astrometry", dummy_astrometry)
+    monkeypatch.setattr(
+        worker,
+        "zemosaic_astrometry",
+        types.SimpleNamespace(solve_with_astap=dummy_astap),
+    )
+
+    astap_exe = tmp_path / "astap.exe"
+    astap_exe.write_text(" ")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    from astropy.io import fits
+
+    fits_path = tmp_path / "img.fits"
+    fits.writeto(fits_path, np.ones((2, 2), dtype=np.float32), overwrite=True)
+
+    img, wcs_out, hdr, _ = worker.get_wcs_and_pretreat_raw_file(
+        str(fits_path),
+        str(astap_exe),
+        str(data_dir),
+        3.0,
+        0,
+        0,
+        10,
+        lambda *a, **k: None,
+        solver_settings={"solver_choice": "ASTROMETRY"},
+    )
+
+    assert wcs_out is not None
+    assert calls["astrometry"] == 1
+    assert calls["astap"] == 0
+    assert np.allclose(wcs_out.wcs.crval, dummy_wcs.wcs.crval)
 
 

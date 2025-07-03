@@ -4,13 +4,17 @@ import os
 import numpy as np
 import warnings
 import time
-# import tempfile # Plus utilisé directement si on nettoie manuellement
+import tempfile
 import traceback
 import subprocess
-# import shutil # Plus utilisé directement si on nettoie manuellement
+import shutil
 import gc
 import logging
-from seestar.alignment.astrometry_solver import AstrometrySolver
+import psutil
+from concurrent.futures import ProcessPoolExecutor
+
+import multiprocessing
+
 
 logger = logging.getLogger("ZeMosaicAstrometry")
 # ... (pas besoin de reconfigurer le logger ici s'il hérite du worker)
@@ -30,47 +34,59 @@ except ImportError:
     class FITSFixedWarning(Warning): pass
     u = None
 
-
-def solve_with_astrometry_local(image_fits_path: str,
-                                original_fits_header,
-                                local_ansvr_path: str,
-                                timeout_sec: int = 180,
-                                progress_callback=None):
-    """Essaye ansvr (Astrometry local). Retourne WCS ou None."""
-    solver = AstrometrySolver(progress_callback=progress_callback)
-    settings = {
-        "local_solver_preference": "ansvr",
-        "local_ansvr_path": local_ansvr_path,
-        "ansvr_timeout_sec": timeout_sec,
-        "api_key": "",
-        "use_radec_hints": False,
-    }
-    return solver.solve(
-        image_fits_path,
-        original_fits_header,
-        settings,
-        update_header_with_solution=True,
+# --- Dépendances pour Astrometry.net web ---
+ASTROQUERY_AVAILABLE_ASTROMETRY = False
+AstrometryNet = None
+try:
+    from astroquery.astrometry_net import AstrometryNet as _AstrometryNetClass
+    AstrometryNet = _AstrometryNetClass
+    ASTROQUERY_AVAILABLE_ASTROMETRY = True
+except Exception:
+    logger.warning(
+        "AstrometrySolver: astroquery non installée. Plate-solving web Astrometry.net désactivé."
     )
 
 
-def solve_with_astrometry_net(image_fits_path: str,
-                              original_fits_header,
-                              api_key: str,
-                              timeout_sec: int = 300,
-                              progress_callback=None):
-    """Essaye Astrometry.net Web. Retourne WCS ou None."""
-    solver = AstrometrySolver(progress_callback=progress_callback)
-    settings = {
-        "local_solver_preference": "none",
-        "api_key": api_key,
-        "astrometry_net_timeout_sec": timeout_sec,
-        "use_radec_hints": False,
-    }
-    return solver.solve(
-        image_fits_path,
-        original_fits_header,
-        settings,
-        update_header_with_solution=True,
+def _log_memory_usage(progress_callback: callable, context_message: str = ""):
+    """Logue l'utilisation mémoire du processus courant."""
+    if not progress_callback or not callable(progress_callback):
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        rss_mb = mem_info.rss / (1024 * 1024)
+        vms_mb = mem_info.vms / (1024 * 1024)
+
+        virtual_mem = psutil.virtual_memory()
+        available_ram_mb = virtual_mem.available / (1024 * 1024)
+        total_ram_mb = virtual_mem.total / (1024 * 1024)
+        percent_ram_used = virtual_mem.percent
+
+        swap_mem = psutil.swap_memory()
+        used_swap_mb = swap_mem.used / (1024 * 1024)
+        total_swap_mb = swap_mem.total / (1024 * 1024)
+        percent_swap_used = swap_mem.percent
+
+        log_msg = (
+            f"Memory Usage ({context_message}): "
+            f"Proc RSS: {rss_mb:.1f}MB, VMS: {vms_mb:.1f}MB. "
+            f"Sys RAM: Avail {available_ram_mb:.0f}MB / Total {total_ram_mb:.0f}MB ({percent_ram_used}% used). "
+            f"Sys Swap: Used {used_swap_mb:.0f}MB / Total {total_swap_mb:.0f}MB ({percent_swap_used}% used)."
+        )
+        progress_callback(log_msg, None, "DEBUG")
+    except Exception as e_mem_log:
+        progress_callback(f"Erreur lors du logging mémoire ({context_message}): {e_mem_log}", None, "WARN")
+
+
+def _run_astap_subprocess(cmd_list: list, cwd: str, timeout_sec: int):
+    """Fonction exécutée dans un ProcessPoolExecutor pour lancer ASTAP."""
+    return subprocess.run(
+        cmd_list,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout_sec,
+        check=False,
+        cwd=cwd,
     )
 
 
@@ -299,25 +315,35 @@ def solve_with_astap(image_fits_path: str,
     astap_success = False
 
     try:
-        astap_process_result = subprocess.run(
-            cmd_list_astap,
-            capture_output=True, text=True,
-            timeout=timeout_sec, check=False,
-            cwd=current_image_dir,
-            errors='replace'
-        )
-        logger.debug(f"ASTAP return code: {astap_process_result.returncode}")
-        if astap_process_result.stdout: logger.debug(f"ASTAP stdout:\n{astap_process_result.stdout[:1000]}")
-        if astap_process_result.stderr: logger.warning(f"ASTAP stderr:\n{astap_process_result.stderr[:1000]}")
 
-        if astap_process_result.returncode == 0:
+        astap_process_result = None
+        try:
+            if not multiprocessing.current_process().daemon:
+                with ProcessPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_run_astap_subprocess, cmd_list_astap, current_image_dir, timeout_sec)
+                    astap_process_result = future.result()
+            else:
+                raise RuntimeError("daemon process")
+        except (AssertionError, RuntimeError) as e_pool:
+            if progress_callback:
+                progress_callback(f"  ASTAP Solve: ProcessPoolExecutor indisponible ({e_pool}). Lancement direct.", None, "DEBUG_DETAIL")
+            astap_process_result = _run_astap_subprocess(cmd_list_astap, current_image_dir, timeout_sec)
+
+        logger.debug(f"ASTAP return code: {astap_process_result.returncode}")
+
+        rc_astap = astap_process_result.returncode
+        del astap_process_result
+        gc.collect()
+        _log_memory_usage(progress_callback, "Après GC post-ASTAP")
+
+        if rc_astap == 0:
             if os.path.exists(expected_wcs_file_path) and os.path.getsize(expected_wcs_file_path) > 0:
                 if progress_callback: progress_callback(f"  ASTAP Solve: Résolution OK (code 0). Fichier WCS '{os.path.basename(expected_wcs_file_path)}' trouvé.", None, "INFO_DETAIL")
                 img_height = original_fits_header.get('NAXIS2', 0)
                 img_width = original_fits_header.get('NAXIS1', 0)
                 if img_height == 0 or img_width == 0:
                     try:
-                        with fits.open(image_fits_path, memmap=False) as hdul_shape:
+                        with fits.open(image_fits_path) as hdul_shape:
                             shape_from_file = hdul_shape[0].shape
                             if len(shape_from_file) >=2 :
                                 img_height = shape_from_file[-2]
@@ -342,10 +368,10 @@ def solve_with_astap(image_fits_path: str,
             else:
                 if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Code 0 mais fichier .wcs manquant/vide ('{os.path.basename(expected_wcs_file_path)}').", None, "ERROR")
         else:
-            error_msg = f"ASTAP Solve Échec (code {astap_process_result.returncode}) pour '{img_basename_log}'."
-            if astap_process_result.returncode == 1: error_msg += " (No solution found)."
-            elif astap_process_result.returncode == 2: error_msg += " (ASTAP FITS read error - vérifiez format/corruption)."
-            elif astap_process_result.returncode == 10: error_msg += " (ASTAP database not found - vérifiez -d)."
+            error_msg = f"ASTAP Solve Échec (code {rc_astap}) pour '{img_basename_log}'."
+            if rc_astap == 1: error_msg += " (No solution found)."
+            elif rc_astap == 2: error_msg += " (ASTAP FITS read error - vérifiez format/corruption)."
+            elif rc_astap == 10: error_msg += " (ASTAP database not found - vérifiez -d)."
             if progress_callback: progress_callback(f"  {error_msg}", None, "WARN")
             logger.warning(error_msg)
 
@@ -389,4 +415,327 @@ def solve_with_astap(image_fits_path: str,
     return wcs_solved_obj
 
 
+def solve_with_ansvr(
+    image_fits_path: str,
+    original_fits_header: fits.Header,
+    ansvr_config_path: str,
+    timeout_sec: int = 120,
+    update_original_header_in_place: bool = False,
+    progress_callback: callable = None,
+):
+    """Solve WCS using a local ansvr installation."""
 
+    _pcb = (
+        lambda msg, lvl="INFO": progress_callback(msg, None, lvl)
+        if progress_callback
+        else None
+    )
+
+    if not (ASTROPY_AVAILABLE_ASTROMETRY and AstropyWCS):
+        if _pcb:
+            _pcb("Ansvr solve unavailable (missing deps).", "ERROR")
+        return None
+
+    if not (image_fits_path and os.path.isfile(image_fits_path) and ansvr_config_path):
+        if _pcb:
+            _pcb("Ansvr solve input invalid or path missing.", "ERROR")
+        return None
+
+    tmp_dir = tempfile.mkdtemp(prefix="ansvr_")
+    output_fits = os.path.join(tmp_dir, "solution.new")
+
+    cmd = [
+        "solve-field",
+        "--no-plots",
+        "--overwrite",
+        "--config",
+        ansvr_config_path,
+        "--dir",
+        tmp_dir,
+        "--new-fits",
+        output_fits,
+        image_fits_path,
+    ]
+
+    if original_fits_header:
+        ra = original_fits_header.get("RA", original_fits_header.get("CRVAL1"))
+        dec = original_fits_header.get("DEC", original_fits_header.get("CRVAL2"))
+        if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
+            cmd.extend(["--ra", str(ra), "--dec", str(dec)])
+
+    if _pcb:
+        _pcb(f"Ansvr: cmd={' '.join(cmd)}", "DEBUG")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except Exception as e_run:
+        if _pcb:
+            _pcb(f"Ansvr: execution error {e_run}", "ERROR")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    if result.returncode != 0 or not os.path.exists(output_fits):
+        if _pcb:
+            _pcb("Ansvr: solve-field failed", "WARN")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    try:
+        with fits.open(output_fits, memmap=False) as hdul:
+            wcs_header = hdul[0].header
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = AstropyWCS(wcs_header, naxis=2)
+    except Exception as e_parse:
+        if _pcb:
+            _pcb(f"Ansvr: parse error {e_parse}", "ERROR")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    if wcs_obj and wcs_obj.is_celestial and update_original_header_in_place and original_fits_header is not None:
+        _update_fits_header_with_wcs_za(
+            original_fits_header,
+            wcs_obj,
+            solver_name="Ansvr",
+            progress_callback=progress_callback,
+        )
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return wcs_obj
+
+
+
+
+def solve_with_astrometry_net(
+    image_fits_path: str,
+    original_fits_header: fits.Header,
+    api_key: str,
+    timeout_sec: int = 60,
+    scale_est_arcsec_per_pix: float | None = None,
+    scale_tolerance_percent: float = 20.0,
+    downsample_factor: int | None = None,
+    update_original_header_in_place: bool = False,
+    progress_callback: callable = None,
+):
+    """Solve WCS using the astrometry.net web service."""
+
+    _pcb = (
+        lambda msg, lvl="INFO": progress_callback(msg, None, lvl)
+        if progress_callback
+        else None
+    )
+
+    if not (
+        ASTROPY_AVAILABLE_ASTROMETRY
+        and ASTROQUERY_AVAILABLE_ASTROMETRY
+        and AstrometryNet
+        and AstropyWCS
+    ):
+        if _pcb:
+            missing = []
+            if not (ASTROPY_AVAILABLE_ASTROMETRY and AstropyWCS):
+                missing.append("astropy")
+            if not (ASTROQUERY_AVAILABLE_ASTROMETRY and AstrometryNet):
+                missing.append("astroquery")
+            joined = ", ".join(missing) if missing else "unknown"
+            _pcb(
+                f"Astrometry.net solve unavailable (missing deps: {joined}).",
+                "ERROR",
+            )
+        return None
+
+    if not api_key:
+        api_key = os.environ.get("ASTROMETRY_API_KEY", "")
+    if not os.path.isfile(image_fits_path) or not api_key:
+        if _pcb:
+            path_ok = os.path.isfile(image_fits_path)
+            key_len = len(api_key) if isinstance(api_key, str) else 0
+
+            preview = (
+                f"{api_key[:4]}..." if isinstance(api_key, str) and key_len > 4 else api_key
+            )
+            _pcb(
+                "Astrometry.net solve input invalid or API key missing. "
+                f"Path ok={path_ok} Key len={key_len} Preview='{preview}'",
+
+                "ERROR",
+            )
+        return None
+
+    img_basename_log = os.path.basename(image_fits_path)
+    if _pcb:
+        _pcb(f"WebANET: Début solving pour '{img_basename_log}'", "INFO_DETAIL")
+
+    ast = AstrometryNet()
+    ast.api_key = api_key
+    original_timeout = None
+    if timeout_sec and timeout_sec > 0:
+        try:
+            original_timeout = getattr(ast, "TIMEOUT", None)
+            ast.TIMEOUT = timeout_sec
+            if _pcb:
+                _pcb(f"WebANET: Timeout configuré à {timeout_sec}s", "DEBUG")
+        except Exception as e:
+            if _pcb:
+                _pcb(f"WebANET: Erreur configuration timeout: {e}", "WARN")
+
+    temp_path = None
+    wcs_header = None
+    try:
+        with fits.open(image_fits_path, memmap=False) as hdul:
+            data = hdul[0].data
+
+        if data is None:
+            if _pcb:
+                _pcb("WebANET: Données image manquantes", "ERROR")
+            return None
+
+        if not np.all(np.isfinite(data)):
+            data = np.nan_to_num(data)
+
+        if data.ndim == 3:
+            # Convert color images to a single channel luminance image expected by
+            # astrometry.net.  Some FITS files store the RGB channels in the first
+            # axis (3, H, W) while others use the last axis (H, W, 3).  Handle both
+            # cases gracefully.
+            if data.shape[0] == 3:
+                data = np.moveaxis(data, 0, -1)
+
+            if data.shape[-1] == 3:
+                data = np.sum(
+                    data
+                    * np.array([0.299, 0.587, 0.114], dtype=np.float32).reshape(
+                        1, 1, 3
+                    ),
+                    axis=2,
+                )
+            else:
+                # Fallback: take the first plane if the dimensionality is
+                # unexpected.  This avoids passing a 3D array to photutils which
+                # would raise an error.
+                data = data[..., 0]
+
+        if downsample_factor and isinstance(downsample_factor, int) and downsample_factor > 1:
+            data = data[::downsample_factor, ::downsample_factor]
+
+        min_v, max_v = np.min(data), np.max(data)
+        norm_float = (data - min_v) / (max_v - min_v) if max_v > min_v else np.zeros_like(data)
+        data_uint16 = (np.clip(norm_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+        data_int16 = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
+
+        header_tmp = fits.Header()
+        header_tmp["SIMPLE"] = True
+        header_tmp["BITPIX"] = 16
+        header_tmp["BSCALE"] = 1
+        header_tmp["BZERO"] = 32768
+        header_tmp["NAXIS"] = 2
+        header_tmp["NAXIS1"] = data_int16.shape[1]
+        header_tmp["NAXIS2"] = data_int16.shape[0]
+        for key in ["OBJECT", "DATE-OBS", "EXPTIME", "FILTER", "INSTRUME", "TELESCOP"]:
+            if original_fits_header and key in original_fits_header:
+                header_tmp[key] = original_fits_header[key]
+
+        with tempfile.NamedTemporaryFile(suffix=".fits", delete=False, mode="wb") as tf:
+            temp_path = tf.name
+        fits.writeto(
+            temp_path,
+            data_int16,
+            header=header_tmp,
+            overwrite=True,
+            output_verify="silentfix",
+        )
+
+        if header_tmp.get("BITPIX") == 16:
+            with fits.open(temp_path, mode="update", memmap=False) as hdul_fix:
+                hd0 = hdul_fix[0]
+                hd0.header["BSCALE"] = 1
+                hd0.header["BZERO"] = 32768
+                hdul_fix.flush()
+
+        solve_args = {
+            "allow_commercial_use": "n",
+            "allow_modifications": "n",
+            "publicly_visible": "n",
+        }
+
+        if scale_est_arcsec_per_pix and scale_est_arcsec_per_pix > 0:
+            try:
+                est_val = float(scale_est_arcsec_per_pix)
+                tol_val = float(scale_tolerance_percent)
+                solve_args["scale_units"] = "arcsecperpix"
+                solve_args["scale_lower"] = est_val * (1.0 - tol_val / 100.0)
+                solve_args["scale_upper"] = est_val * (1.0 + tol_val / 100.0)
+                if _pcb:
+                    _pcb(
+                        f"WebANET: Échelle contraint [{solve_args['scale_lower']:.2f}-{solve_args['scale_upper']:.2f}] asec/pix",
+                        "DEBUG",
+                    )
+            except Exception as e:
+                if _pcb:
+                    _pcb(f"WebANET: Erreur config échelle: {e}", "WARN")
+
+        if _pcb:
+            _pcb("WebANET: Soumission du job...", "INFO")
+
+            _pcb("WebANET: Contacting nova.astrometry.net", "DEBUG")
+        wcs_header = ast.solve_from_image(temp_path, **solve_args)
+
+        if _pcb:
+            if wcs_header:
+                _pcb("WebANET: Solving RÉUSSI", "INFO")
+            else:
+                _pcb("WebANET: Solving ÉCHOUÉ", "WARN")
+
+    except Exception as e:
+        if _pcb:
+            msg = f"WebANET: ERREUR solving: {e}"
+            if "timeout" in str(e).lower():
+                _pcb(msg, "ERROR")
+            else:
+                _pcb(msg, "ERROR")
+        logger.error("Astrometry.net solve exception", exc_info=True)
+        wcs_header = None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        if original_timeout is not None:
+            try:
+                ast.TIMEOUT = original_timeout
+            except Exception:
+                pass
+
+    if not isinstance(wcs_header, fits.Header):
+        return None
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = AstropyWCS(wcs_header)
+    except Exception as e:
+        if _pcb:
+            _pcb(f"WebANET: ERREUR conversion WCS: {e}", "ERROR")
+        return None
+
+    if (
+        wcs_obj
+        and wcs_obj.is_celestial
+        and update_original_header_in_place
+        and original_fits_header is not None
+    ):
+        _update_fits_header_with_wcs_za(
+            original_fits_header,
+            wcs_obj,
+            solver_name="AstrometryNet",
+            progress_callback=progress_callback,
+        )
+
+    return wcs_obj

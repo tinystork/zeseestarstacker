@@ -4,11 +4,12 @@ de pondération qualité et Drizzle.
 """
 
 import json
+import logging
 import os
 import tkinter as tk
-import numpy as np
 import traceback
-import logging
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,11 @@ class SettingsManager:
                 "batch_size",
                 tk.IntVar(value=default_values_from_code.get("batch_size", 0)),
             ).get()
+            self.max_hq_mem_gb = getattr(
+                gui_instance,
+                "max_hq_mem_var",
+                tk.DoubleVar(value=default_values_from_code.get("max_hq_mem_gb", 8)),
+            ).get()
             self.correct_hot_pixels = getattr(
                 gui_instance,
                 "correct_hot_pixels",
@@ -196,6 +202,11 @@ class SettingsManager:
                 gui_instance,
                 "cleanup_temp_var",
                 tk.BooleanVar(value=default_values_from_code.get("cleanup_temp", True)),
+            ).get()
+            self.zoom_percent = getattr(
+                gui_instance,
+                "zoom_percent_var",
+                tk.IntVar(value=default_values_from_code.get("zoom_percent", 0)),
             ).get()
             self.bayer_pattern = getattr(
                 gui_instance,
@@ -282,13 +293,6 @@ class SettingsManager:
                 "drizzle_pixfrac_var",
                 tk.DoubleVar(
                     value=default_values_from_code.get("drizzle_pixfrac", 1.0)
-                ),
-            ).get()
-            self.drizzle_renorm = getattr(
-                gui_instance,
-                "drizzle_renorm_var",
-                tk.StringVar(
-                    value=default_values_from_code.get("drizzle_renorm", "max")
                 ),
             ).get()
             self.astrometry_api_key = (
@@ -547,6 +551,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Lecture du paramètre d'utilisation du GPU ---
+            self.use_gpu = getattr(
+                gui_instance,
+                "use_gpu_var",
+                tk.BooleanVar(value=default_values_from_code.get("use_gpu", False)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): self.use_gpu lu (attribut UI ou défaut): {self.use_gpu}"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Lecture du setting d'utilisation des solveurs tiers ---
             self.use_third_party_solver = getattr(
                 gui_instance,
@@ -741,6 +756,9 @@ class SettingsManager:
             getattr(gui_instance, "stack_final_combine_var", tk.StringVar()).set(
                 self.stack_final_combine
             )
+            getattr(gui_instance, "max_hq_mem_var", tk.DoubleVar()).set(
+                self.max_hq_mem_gb
+            )
             getattr(gui_instance, "stack_method_var", tk.StringVar()).set(
                 self.stack_method
             )
@@ -761,6 +779,9 @@ class SettingsManager:
             )
             getattr(gui_instance, "cleanup_temp_var", tk.BooleanVar()).set(
                 self.cleanup_temp
+            )
+            getattr(gui_instance, "zoom_percent_var", tk.IntVar()).set(
+                self.zoom_percent
             )
 
             if not hasattr(self, "local_solver_preference"):
@@ -849,15 +870,6 @@ class SettingsManager:
             getattr(gui_instance, "drizzle_pixfrac_var", tk.DoubleVar()).set(
                 self.drizzle_pixfrac
             )
-            getattr(gui_instance, "drizzle_renorm_var", tk.StringVar()).set(
-                self.drizzle_renorm
-            )
-            if hasattr(gui_instance, "drizzle_renorm_key_to_label"):
-                gui_instance.drizzle_renorm_display_var.set(
-                    gui_instance.drizzle_renorm_key_to_label.get(
-                        self.drizzle_renorm, self.drizzle_renorm
-                    )
-                )
 
             setattr(gui_instance, "mosaic_mode_active", bool(self.mosaic_mode_active))
             setattr(
@@ -1001,6 +1013,15 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Application du paramètre use_gpu à l'UI ---
+            getattr(gui_instance, "use_gpu_var", tk.BooleanVar()).set(
+                self.use_gpu
+            )
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): use_gpu appliqué à l'UI (valeur: {self.use_gpu})"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Application du toggle use_third_party_solver ---
             getattr(gui_instance, "use_third_party_solver_var", tk.BooleanVar()).set(
                 self.use_third_party_solver
@@ -1127,11 +1148,13 @@ class SettingsManager:
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
         defaults_dict["stack_final_combine"] = "mean"
+        defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
         defaults_dict["hot_pixel_threshold"] = 3.0
         defaults_dict["neighborhood_size"] = 5
         defaults_dict["cleanup_temp"] = True
+        defaults_dict["zoom_percent"] = 0
 
         # --- Paramètres de Pondération par Qualité ---
         defaults_dict["use_quality_weighting"] = True
@@ -1148,7 +1171,7 @@ class SettingsManager:
         defaults_dict["drizzle_mode"] = "Final"
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
-        defaults_dict["drizzle_renorm"] = "max"
+        defaults_dict["drizzle_double_norm_fix"] = True
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
         defaults_dict["apply_chroma_correction"] = True
@@ -1179,9 +1202,9 @@ class SettingsManager:
         defaults_dict["low_wht_soften_px"] = 128
 
         # --- NOUVEAU : Paramètre de sauvegarde float32 ---
-        defaults_dict["save_final_as_float32"] = (
-            False  # Défaut à False (donc uint16 après mise à l'échelle par défaut)
-        )
+        defaults_dict[
+            "save_final_as_float32"
+        ] = False  # Défaut à False (donc uint16 après mise à l'échelle par défaut)
         logger.debug(
             f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}"
         )
@@ -1191,6 +1214,13 @@ class SettingsManager:
         defaults_dict["preserve_linear_output"] = False
         logger.debug(
             f"DEBUG (SettingsManager get_default_values): Ajout de 'preserve_linear_output'={defaults_dict['preserve_linear_output']}"
+        )
+        # --- FIN NOUVEAU ---
+
+        # --- NOUVEAU : Paramètre global d'utilisation du GPU ---
+        defaults_dict["use_gpu"] = False
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'use_gpu'={defaults_dict['use_gpu']}"
         )
         # --- FIN NOUVEAU ---
 
@@ -1222,6 +1252,7 @@ class SettingsManager:
         defaults_dict["mosaic_settings"] = {
             "kernel": "square",
             "pixfrac": 0.8,
+            "use_gpu": False,
             "fillval": "0.0",
             "wht_threshold": 0.01,
             "alignment_mode": "local_fast_fallback",
@@ -1448,6 +1479,21 @@ class SettingsManager:
                     f"Kappa High ('{original}') invalide, réinitialisé à {self.stack_kappa_high}"
                 )
 
+            # --- HQ RAM limit ---
+            try:
+                self.max_hq_mem_gb = float(self.max_hq_mem_gb)
+                if not (1 <= self.max_hq_mem_gb <= 64):
+                    original = self.max_hq_mem_gb
+                    self.max_hq_mem_gb = np.clip(self.max_hq_mem_gb, 1, 64)
+                    messages.append(
+                        f"Limite RAM HQ ({original}) hors plage [1,64] Go, réglée à {self.max_hq_mem_gb} Go"
+                    )
+            except (ValueError, TypeError):
+                messages.append("Limite RAM HQ invalide – 8 Go utilisée")
+                self.max_hq_mem_gb = defaults_fallback["max_hq_mem_gb"]
+
+            self.max_hq_mem = int(self.max_hq_mem_gb * 1024**3)
+
             winsor_str = str(
                 getattr(
                     self,
@@ -1476,7 +1522,7 @@ class SettingsManager:
                 parsed = defaults_fallback["stack_winsor_limits"]
             self.stack_winsor_limits = parsed
 
-            valid_combine = ["mean", "median"]
+            valid_combine = ["mean", "median", "winsorized_sigma_clip"]
             self.stack_final_combine = str(
                 getattr(
                     self,
@@ -1654,18 +1700,7 @@ class SettingsManager:
                     f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}"
                 )
 
-            valid_renorm = ["none", "max", "n_images"]
-            current_renorm = getattr(
-                self, "drizzle_renorm", defaults_fallback["drizzle_renorm"]
-            )
-            if current_renorm not in valid_renorm:
-                original = current_renorm
-                self.drizzle_renorm = defaults_fallback["drizzle_renorm"]
-                messages.append(
-                    f"Option Renormalize flux ('{original}') invalide, réinitialisée à '{self.drizzle_renorm}'"
-                )
-            else:
-                self.drizzle_renorm = current_renorm
+
 
             # --- SCNR Final Validation ---
             # ... (inchangé) ...
@@ -1981,6 +2016,22 @@ class SettingsManager:
                 self.preserve_linear_output = current_preserve_val
             # --- FIN NOUVEAU ---
 
+            # --- NOUVEAU : Validation du paramètre use_gpu ---
+            logger.debug("    -> Validating use_gpu...")
+            current_use_gpu = getattr(
+                self,
+                "use_gpu",
+                defaults_fallback["use_gpu"],
+            )
+            if not isinstance(current_use_gpu, bool):
+                messages.append(
+                    f"Option 'Use GPU' ('{current_use_gpu}') invalide, réinitialisée à {defaults_fallback['use_gpu']}."
+                )
+                self.use_gpu = defaults_fallback["use_gpu"]
+            else:
+                self.use_gpu = current_use_gpu
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Validation du toggle use_third_party_solver ---
             logger.debug("    -> Validating use_third_party_solver...")
             current_use_solver_val = getattr(
@@ -2229,7 +2280,7 @@ class SettingsManager:
         MODIFIED: Ajout de save_final_as_float32.
         """
         settings_data = {
-            "version": "2.6.0",  # Version mise à jour pour refléter l'ajout
+            "version": "5.0.0",  # Version mise à jour pour refléter l'ajout
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             "input_folder": str(self.input_folder),
             "output_folder": str(self.output_folder),
@@ -2246,12 +2297,14 @@ class SettingsManager:
             "stack_kappa_high": float(self.stack_kappa_high),
             "stack_winsor_limits": str(self.stack_winsor_limits),
             "stack_final_combine": str(self.stack_final_combine),
+            "max_hq_mem_gb": float(self.max_hq_mem_gb),
             "stack_method": str(self.stack_method),
             "batch_size": int(self.batch_size),
             "correct_hot_pixels": bool(self.correct_hot_pixels),
             "hot_pixel_threshold": float(self.hot_pixel_threshold),
             "neighborhood_size": int(self.neighborhood_size),
             "cleanup_temp": bool(self.cleanup_temp),
+            "zoom_percent": int(self.zoom_percent),
             "use_quality_weighting": bool(self.use_quality_weighting),
             "weight_by_snr": bool(self.weight_by_snr),
             "weight_by_stars": bool(self.weight_by_stars),
@@ -2264,7 +2317,9 @@ class SettingsManager:
             "drizzle_mode": str(self.drizzle_mode),
             "drizzle_kernel": str(self.drizzle_kernel),
             "drizzle_pixfrac": float(self.drizzle_pixfrac),
-            "drizzle_renorm": str(self.drizzle_renorm),
+            "drizzle_double_norm_fix": bool(
+                getattr(self, "drizzle_double_norm_fix", True)
+            ),
             "mosaic_mode_active": bool(self.mosaic_mode_active),
             "mosaic_settings": (
                 self.mosaic_settings if isinstance(self.mosaic_settings, dict) else {}
@@ -2311,6 +2366,9 @@ class SettingsManager:
             "save_final_as_float32": bool(
                 getattr(self, "save_final_as_float32", False)
             ),
+            # --- FIN NOUVEAU ---
+            # --- NOUVEAU : Sauvegarde du paramètre use_gpu ---
+            "use_gpu": bool(getattr(self, "use_gpu", False)),
             # --- FIN NOUVEAU ---
             # --- NOUVEAU : Sauvegarde du setting preserve_linear_output ---
             "preserve_linear_output": bool(

@@ -1,9 +1,15 @@
 # zemosaic_align_stack.py
 
 import numpy as np
-import traceback 
+import importlib.util
+
+GPU_AVAILABLE = importlib.util.find_spec("cupy") is not None
+import traceback
 import gc
-import logging # Added for logger fallback
+import logging  # Added for logger fallback
+import time
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 # dépendance Photutils
 PHOTOUTILS_AVAILABLE = False
@@ -60,6 +66,32 @@ try:
 except ImportError:
     print("AVERT (zemosaic_align_stack): Scipy non disponible. Winsorized Sigma Clip non fonctionnel.")
 
+def _winsorize_axis0_numpy(arr: np.ndarray, limits: tuple[float, float]) -> np.ndarray:
+    """Vectorized winsorization along the stack axis using NumPy.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Array of shape (N, H, W) or (N, H, W, C) to winsorize along axis 0.
+    limits : tuple[float, float]
+        Fractions of data to clip on the low and high end respectively.
+
+    Returns
+    -------
+    np.ndarray
+        Winsorized array with the same shape as ``arr``.
+    """
+    low, high = limits
+    arr = arr.astype(np.float32, copy=False)
+    result = arr.copy()
+    if low > 0:
+        lower = np.quantile(arr, low, axis=0)
+        result = np.maximum(result, lower)
+    if high > 0:
+        upper = np.quantile(arr, 1.0 - high, axis=0)
+        result = np.minimum(result, upper)
+    return result
+
 ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = False
 make_radial_weight_map_func = None
 try:
@@ -68,6 +100,107 @@ try:
     ZEMOSAIC_UTILS_AVAILABLE_FOR_RADIAL = True
 except ImportError as e_util_rad:
         print(f"AVERT (zemosaic_align_stack): Radial weighting: Erreur import make_radial_weight_map: {e_util_rad}")
+
+# --- Import des méthodes de stack CPU provenant du projet Seestar ---
+cpu_stack_winsorized = None
+cpu_stack_kappa = None
+cpu_stack_linear = None
+try:
+    import importlib.util, os, pathlib
+    _sm_path = pathlib.Path(__file__).resolve().parents[1] / 'seestar' / 'core' / 'stack_methods.py'
+    spec = importlib.util.spec_from_file_location('seestar_stack_methods', _sm_path)
+    _sm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_sm)  # type: ignore
+    cpu_stack_winsorized = _sm._stack_winsorized_sigma
+    cpu_stack_kappa = _sm._stack_kappa_sigma
+    cpu_stack_linear = _sm._stack_linear_fit_clip
+except Exception as e_import_stack:
+    print(f"AVERT (zemosaic_align_stack): Import stack methods failed: {e_import_stack}")
+
+# --- Implementations GPU simplifiées des méthodes de stack ---
+def gpu_stack_winsorized(frames, *, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
+    import cupy as cp
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    low_q = cp.quantile(arr, winsor_limits[0], axis=0)
+    high_q = cp.quantile(arr, 1.0 - winsor_limits[1], axis=0)
+    arr_w = cp.clip(arr, low_q, high_q)
+    mean = cp.nanmean(arr_w, axis=0)
+    std = cp.nanstd(arr_w, axis=0)
+    mask = cp.abs(arr - mean) < kappa * std
+    if apply_rewinsor:
+        arr_clip = cp.where(mask, arr, arr_w)
+    else:
+        arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def gpu_stack_kappa(frames, *, sigma_low=3.0, sigma_high=3.0):
+    import cupy as cp
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    med = cp.nanmedian(arr, axis=0)
+    std = cp.nanstd(arr, axis=0)
+    low = med - sigma_low * std
+    high = med + sigma_high * std
+    mask = (arr >= low) & (arr <= high)
+    arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def gpu_stack_linear(frames, *, sigma=3.0):
+    import cupy as cp
+    arr = cp.stack([cp.asarray(f) for f in frames], axis=0)
+    med = cp.nanmedian(arr, axis=0)
+    resid = arr - med
+    med_r = cp.nanmedian(resid, axis=0)
+    std_r = cp.nanstd(resid, axis=0)
+    mask = cp.abs(resid - med_r) <= sigma * std_r
+    arr_clip = cp.where(mask, arr, cp.nan)
+    result = cp.nanmean(arr_clip, axis=0)
+    rejected = 100.0 * float(mask.size - cp.count_nonzero(mask)) / float(mask.size)
+    return cp.asnumpy(result.astype(cp.float32)), float(rejected)
+
+
+def stack_winsorized_sigma_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU winsorized sigma clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_winsorized(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU winsorized clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_winsorized:
+        return cpu_stack_winsorized(frames, **kwargs)
+    raise RuntimeError("CPU stack_winsorized function unavailable")
+
+
+def stack_kappa_sigma_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU kappa-sigma clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_kappa(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU kappa clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_kappa:
+        return cpu_stack_kappa(frames, **kwargs)
+    raise RuntimeError("CPU stack_kappa function unavailable")
+
+
+def stack_linear_fit_clip(frames, zconfig=None, **kwargs):
+    """Wrapper calling GPU or CPU linear fit clip."""
+    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            return gpu_stack_linear(frames, **kwargs)
+        except Exception:
+            _internal_logger.warning("GPU linear clip failed, fallback CPU", exc_info=True)
+    if cpu_stack_linear:
+        return cpu_stack_linear(frames, **kwargs)
+    raise RuntimeError("CPU stack_linear function unavailable")
 
 
 # Fallback logger for cases where progress_callback might not be available
@@ -874,7 +1007,11 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
     output_data_with_nans = stacked_array_NHDWC.copy()
 
     if stacked_array_NHDWC.ndim == 4: # Couleur (N, H, W, C)
-        for c in range(stacked_array_NHDWC.shape[3]):
+        total_steps = stacked_array_NHDWC.shape[3]
+        start_time = time.time()
+        last_time = start_time
+        step_times = []
+        for c in range(total_steps):
             channel_data = stacked_array_NHDWC[..., c]
             try: 
                 _, median_ch, stddev_ch = sigma_clipped_stats_func(channel_data, sigma_lower=sigma_low, sigma_upper=sigma_high, axis=0, maxiters=5)
@@ -884,6 +1021,14 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
             channel_rejection_this_iter = (channel_data < lower_bound) | (channel_data > upper_bound)
             rejection_mask[..., c] = ~channel_rejection_this_iter
             output_data_with_nans[channel_rejection_this_iter, c] = np.nan
+            now = time.time()
+            step_times.append(now - last_time)
+            last_time = now
+            if progress_callback:
+                try:
+                    progress_callback("stack_kappa", c + 1, total_steps)
+                except Exception:
+                    pass
     elif stacked_array_NHDWC.ndim == 3: # Monochrome (N, H, W)
         try: _, median_img, stddev_img = sigma_clipped_stats_func(stacked_array_NHDWC, sigma_lower=sigma_low, sigma_upper=sigma_high, axis=0, maxiters=5)
         except TypeError: _, median_img, stddev_img = sigma_clipped_stats_func(stacked_array_NHDWC, sigma=max(sigma_low, sigma_high), axis=0, maxiters=5)
@@ -891,6 +1036,11 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
         stats_rejection_this_iter = (stacked_array_NHDWC < lower_bound) | (stacked_array_NHDWC > upper_bound)
         rejection_mask = ~stats_rejection_this_iter
         output_data_with_nans[stats_rejection_this_iter] = np.nan
+        if progress_callback:
+            try:
+                progress_callback("stack_kappa", 1, 1)
+            except Exception:
+                pass
     else:
         _pcb("stackhelper_error_kappa_sigma_unexpected_shape", lvl="ERROR", shape=stacked_array_NHDWC.shape)
         return stacked_array_NHDWC, rejection_mask
@@ -899,14 +1049,72 @@ def _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_low, sigma_high, pro
     return output_data_with_nans, rejection_mask
 
 
+def _apply_winsor_single(args):
+    """Helper for parallel winsorization.
+
+    Ensures winsorization is applied along the image axis (axis=0) to
+    preserve per-pixel statistics. ``scipy.stats.mstats.winsorize`` flattens
+    the array when no axis is provided which would incorrectly clip signal
+    across the entire stack.
+    """
+    arr, limits = args
+    # NumPy-based vectorized winsorization for efficiency
+    return _winsorize_axis0_numpy(arr, limits)
+
+
+def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
+    """Apply winsorization in parallel on a list of arrays."""
+    args_list = [(ch, limits) for ch in channels]
+
+    if max_workers <= 1 or len(args_list) <= 1:
+        results = []
+        start_time = time.time()
+        last_time = start_time
+        for idx, a in enumerate(args_list, start=1):
+            results.append(_apply_winsor_single(a))
+            if progress_callback:
+                now = time.time()
+                progress_callback("stack_winsorized", idx, len(args_list))
+                last_time = now
+        return results
+
+    results = [None] * len(args_list)
+
+    # Avoid spawning a new process pool when already running inside a
+    # multiprocessing worker as this would raise "daemonic processes are not
+    # allowed to have children". In that case fallback to threads.
+    parent_is_daemon = multiprocessing.current_process().daemon
+    Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
+
+    with Executor(max_workers=max_workers) as exe:
+        futures = {exe.submit(_apply_winsor_single, a): i for i, a in enumerate(args_list)}
+        total = len(futures)
+        done = 0
+        start_time = time.time()
+        last_time = start_time
+        step_times = []
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            results[idx] = fut.result()
+            done += 1
+            if progress_callback:
+                now = time.time()
+                step_times.append(now - last_time)
+                last_time = now
+                progress_callback("stack_winsorized", done, total)
+
+    return results
+
+
 
 def _reject_outliers_winsorized_sigma_clip(
-    stacked_array_NHDWC: np.ndarray, 
-    winsor_limits_tuple: tuple[float, float], # (low_cut_fraction, high_cut_fraction), ex: (0.05, 0.05)
-    sigma_low: float, 
+    stacked_array_NHDWC: np.ndarray,
+    winsor_limits_tuple: tuple[float, float],  # (low_cut_fraction, high_cut_fraction)
+    sigma_low: float,
     sigma_high: float,
     progress_callback: callable = None,
-    apply_rewinsor: bool = True
+    max_workers: int = 1,
+    apply_rewinsor: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Rejette les outliers en utilisant un Winsorized Sigma Clip.
@@ -920,6 +1128,10 @@ def _reject_outliers_winsorized_sigma_clip(
         sigma_low: Nombre de sigmas pour le seuil inférieur de rejet.
         sigma_high: Nombre de sigmas pour le seuil supérieur de rejet.
         progress_callback: Fonction de callback pour les logs.
+        max_workers: Nombre maximum de travailleurs parallèles pour la winsorisation.
+            Typiquement issu de ``run_cfg.winsor_worker_limit``.
+        apply_rewinsor: Si True, remplace les pixels rejetés par les valeurs winsorisées
+            ("rewinsorisation"). Sinon, les pixels rejetés restent NaN.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: 
@@ -949,6 +1161,8 @@ def _reject_outliers_winsorized_sigma_clip(
     # Copie des données originales pour y insérer les NaN pour les pixels rejetés
     output_data_with_nans = stacked_array_NHDWC.astype(np.float32, copy=True) # Travailler sur float32
     rejection_mask_final = np.ones_like(stacked_array_NHDWC, dtype=bool) # True = garder
+    winsorized_channels = None
+    winsorized_data = None
 
     is_color = stacked_array_NHDWC.ndim == 4 and stacked_array_NHDWC.shape[-1] == 3
     num_images_in_stack = stacked_array_NHDWC.shape[0]
@@ -960,51 +1174,54 @@ def _reject_outliers_winsorized_sigma_clip(
     try:
         if is_color:
             _pcb("RejWinsor: Traitement image couleur (par canal).", lvl="DEBUG_DETAIL")
-            for c_idx in range(stacked_array_NHDWC.shape[-1]): # Boucle sur les canaux R, G, B
-                _pcb(f"  RejWinsor: Canal {c_idx}...", lvl="DEBUG_VERY_DETAIL")
-                original_channel_data_NHW = stacked_array_NHDWC[..., c_idx].astype(np.float32, copy=False)
-                
-                # 1. Winsorization du canal actuel
-                # winsorize_func opère sur un axe. axis=0 pour winsoriser le long des N images.
-                winsorized_channel_data = winsorize_func(original_channel_data_NHW, limits=winsor_limits_tuple, axis=0)
-                # _pcb(f"    Canal {c_idx}: Winsorization terminée.", lvl="DEBUG_VERY_DETAIL")
 
-                # 2. Calcul des statistiques sur les données winsorisées
-                # sigma_clipped_stats attend les données sous la forme où l'axe de stacking est le premier
-                # Ici, winsorized_channel_data est (N, H, W), donc axis=0 est correct.
+            orig_channels = [stacked_array_NHDWC[..., idx].astype(np.float32, copy=False)
+                             for idx in range(stacked_array_NHDWC.shape[-1])]
+
+            def prog_cb(done, total):
+                _pcb("reject_winsor_info_channel_progress", lvl="INFO_DETAIL", channel=done)
+                if progress_callback:
+                    try:
+                        progress_callback("stack_winsorized", done, total)
+                    except Exception:
+                        pass
+
+            winsorized_channels = parallel_rejwinsor(orig_channels, winsor_limits_tuple,
+                                                     max_workers=max_workers, progress_callback=prog_cb)
+
+            for c_idx, winsorized_channel_data in enumerate(winsorized_channels):
+                _pcb(f"  RejWinsor: Canal {c_idx}...", lvl="DEBUG_VERY_DETAIL")
+                original_channel_data_NHW = orig_channels[c_idx]
+
                 try:
-                    # Pour sigma_clipped_stats, sigma_lower et sigma_upper sont pour *ses propres* itérations de clipping
-                    # lors du calcul des stats. Utilisons des valeurs raisonnables ici (ex: 3-sigma)
-                    # pour obtenir une médiane et un stddev robustes DES DONNÉES WINSORISÉES.
                     _, median_winsorized, stddev_winsorized = sigma_clipped_stats_func(
                         winsorized_channel_data, sigma=3.0, axis=0, maxiters=5
                     )
-                except TypeError: # Ancienne version d'Astropy peut ne pas avoir sigma_lower/upper
-                     _, median_winsorized, stddev_winsorized = sigma_clipped_stats_func(
+                except TypeError:
+                    _, median_winsorized, stddev_winsorized = sigma_clipped_stats_func(
                         winsorized_channel_data, sigma_lower=3.0, sigma_upper=3.0, axis=0, maxiters=5
                     )
 
-                # _pcb(f"    Canal {c_idx}: Stats sur données winsorisées calculées.", lvl="DEBUG_VERY_DETAIL")
-
-                # 3. Rejet sur les données ORIGINALES en utilisant les stats des données winsorisées
-                # Les seuils de rejet (sigma_low, sigma_high) sont ceux passés en argument à la fonction.
                 lower_bound = median_winsorized - (sigma_low * stddev_winsorized)
                 upper_bound = median_winsorized + (sigma_high * stddev_winsorized)
-                
-                # `original_channel_data_NHW` vs `lower_bound` (HW) et `upper_bound` (HW)
-                pixels_to_reject_this_channel = (original_channel_data_NHW < lower_bound[np.newaxis, ...]) | \
-                                                (original_channel_data_NHW > upper_bound[np.newaxis, ...])
-                
+
+                pixels_to_reject_this_channel = (
+                    original_channel_data_NHW < lower_bound[np.newaxis, ...]
+                ) | (
+                    original_channel_data_NHW > upper_bound[np.newaxis, ...]
+                )
+
                 rejection_mask_final[..., c_idx] = ~pixels_to_reject_this_channel
-                if apply_rewinsor:
-                    output_data_with_nans[pixels_to_reject_this_channel, c_idx] = \
-                        winsorized_channel_data[pixels_to_reject_this_channel]
-                else:
-                    output_data_with_nans[pixels_to_reject_this_channel, c_idx] = np.nan
-                
+                output_data_with_nans[pixels_to_reject_this_channel, c_idx] = np.nan
+
                 num_rejected_ch = np.sum(pixels_to_reject_this_channel)
-                _pcb(f"    RejWinsor: Canal {c_idx}, {num_rejected_ch} pixels rejetés.", lvl="DEBUG_DETAIL")
+                _pcb(
+                    f"    RejWinsor: Canal {c_idx}, {num_rejected_ch} pixels rejetés.",
+                    lvl="DEBUG_DETAIL",
+                )
+                time.sleep(0)
         else: # Image monochrome (N, H, W)
+            _pcb("reject_winsor_info_mono_progress", lvl="INFO_DETAIL")
             _pcb("RejWinsor: Traitement image monochrome.", lvl="DEBUG_DETAIL")
             original_data_NHW = stacked_array_NHDWC.astype(np.float32, copy=False)
 
@@ -1029,10 +1246,7 @@ def _reject_outliers_winsorized_sigma_clip(
                                (original_data_NHW > upper_bound[np.newaxis, ...])
                                
             rejection_mask_final = ~pixels_to_reject
-            if apply_rewinsor:
-                output_data_with_nans[pixels_to_reject] = winsorized_data[pixels_to_reject]
-            else:
-                output_data_with_nans[pixels_to_reject] = np.nan
+            output_data_with_nans[pixels_to_reject] = np.nan
             
             num_rejected_mono = np.sum(pixels_to_reject)
             _pcb(f"  RejWinsor: Monochrome, {num_rejected_mono} pixels rejetés.", lvl="DEBUG_DETAIL")
@@ -1049,8 +1263,17 @@ def _reject_outliers_winsorized_sigma_clip(
 
     total_rejected_pixels = np.sum(~rejection_mask_final)
     _pcb("reject_winsor_info_finished", lvl="INFO_DETAIL", num_rejected=total_rejected_pixels)
-    
-    return output_data_with_nans, rejection_mask_final
+
+    output_data_final = output_data_with_nans
+    if apply_rewinsor:
+        if is_color:
+            wins_stack = np.stack(winsorized_channels, axis=-1)
+        else:
+            wins_stack = winsorized_data
+        output_data_final = output_data_with_nans.copy()
+        np.copyto(output_data_final, wins_stack, where=np.isnan(output_data_with_nans))
+
+    return output_data_final, rejection_mask_final
 
 def _reject_outliers_linear_fit_clip(
     stacked_array_NHDWC: np.ndarray,
@@ -1075,8 +1298,7 @@ def _reject_outliers_linear_fit_clip(
 
     Returns:
         tuple[np.ndarray, np.ndarray]:
-            - output_data_with_nans: Les données originales avec NaN ou les valeurs winsorisées
-              selon ``apply_rewinsor`` pour les pixels rejetés.
+            - output_data_with_nans ou réwinsorisé selon ``apply_rewinsor``.
             - rejection_mask: Masque booléen (True où les pixels sont gardés).
     """
     _pcb = lambda msg_key, lvl="INFO_DETAIL", **kwargs: \
@@ -1107,14 +1329,14 @@ def stack_aligned_images(
     apply_radial_weight: bool = False,
     radial_feather_fraction: float = 0.8,
     radial_shape_power: float = 2.0,
-    progress_callback: callable = None,
-    apply_rewinsor: bool = True
+    winsor_max_workers: int = 1,
+    progress_callback: callable = None
 ) -> np.ndarray | None:
     """
     Stacke une liste d'images alignées, appliquant normalisation, pondération (qualité + radiale),
-    et rejet d'outliers optionnels. ``apply_rewinsor`` contrôle si les pixels rejetés
-    par Winsorized Sigma Clip sont remplacés par les limites winsorisées plutôt que
-    marqués comme NaN. VERSION AVEC LOGS DE DEBUG INTENSIFS.
+    et rejet d'outliers optionnels. VERSION AVEC LOGS DE DEBUG INTENSIFS.
+    ``winsor_max_workers`` permet de paralléliser la phase de Winsorisation lors
+    du rejet Winsorized Sigma Clip.
     """
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: \
         progress_callback(msg_key, prog, lvl, **kwargs) if progress_callback else _internal_logger.debug(f"PCB_FALLBACK_{lvl}_{prog}: {msg_key} {kwargs}")
@@ -1331,8 +1553,12 @@ def stack_aligned_images(
         data_for_combine, rejection_mask = _reject_outliers_kappa_sigma(stacked_array_NHDWC, sigma_clip_low, sigma_clip_high, progress_callback)
     elif rejection_algorithm == 'winsorized_sigma_clip':
         data_for_combine, rejection_mask = _reject_outliers_winsorized_sigma_clip(
-            stacked_array_NHDWC, winsor_limits, sigma_clip_low, sigma_clip_high,
-            progress_callback, apply_rewinsor
+            stacked_array_NHDWC,
+            winsor_limits,
+            sigma_clip_low,
+            sigma_clip_high,
+            progress_callback,
+            winsor_max_workers,
         )
     # ... (autres algos de rejet) ...
     _pcb(f"STACK_IMG_REJECT: Fin rejet. data_for_combine shape: {data_for_combine.shape}, range: [{np.nanmin(data_for_combine):.2g}-{np.nanmax(data_for_combine):.2g}] (contient NaN)", lvl="ERROR")
