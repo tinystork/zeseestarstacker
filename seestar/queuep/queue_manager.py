@@ -93,6 +93,7 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
+from time import monotonic
 from time import monotonic as _mono
 _DRZ_PREV_MIN_DT = 0.5  # secondes
 _last_drz_prev = 0.0
@@ -6165,6 +6166,7 @@ class SeestarQueuedStacker:
         files_added_to_drizzle_this_batch = 0
 
         for i_file, temp_fits_filepath in enumerate(batch_temp_filepaths_list):
+            t0 = monotonic()
             if self.stop_processing:
                 logger.debug(
                     f"  Arrêt demandé. Interruption du traitement du lot #{current_batch_num}."
@@ -6658,6 +6660,11 @@ class SeestarQueuedStacker:
                 # Forcer un garbage collect de temps en temps, surtout si les images sont grandes
                 if (i_file + 1) % 10 == 0:
                     gc.collect()
+
+            dt = monotonic() - t0
+            print(
+                f"DrizIncrVrai image {i_file+1}/{len(batch_temp_filepaths_list)} en {dt:.2f}s"
+            )
 
         # --- FIN DE LA BOUCLE DE TRAITEMENT DES FICHIERS ---
         if files_added_to_drizzle_this_batch == 0 and num_files_in_batch > 0:
