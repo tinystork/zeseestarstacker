@@ -561,6 +561,13 @@ class SeestarQueuedStacker:
             "processing_thread",
             "gui",
 
+
+            "aligner",
+            "local_aligner_instance",
+            "astrometry_solver",
+            "chroma_balancer",
+
+
             "autotuner",
             "drizzle_processes",
 
