@@ -121,7 +121,6 @@ def _reproject_worker(
     use_gpu: bool = False,
 ):
     """Worker function used by the process pool for reprojection."""
-    os.environ["OMP_NUM_THREADS"] = "1"
 
     data = fits.getdata(fits_path, memmap=False)
 
@@ -164,7 +163,6 @@ def _stack_worker(args):
         winsor_limits,
         apply_rewinsor,
     ) = args
-    os.environ["OMP_NUM_THREADS"] = "1"
 
     from seestar.core.stack_methods import (
         _stack_kappa_sigma,
