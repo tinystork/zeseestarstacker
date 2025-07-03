@@ -10,6 +10,9 @@ matplotlib.use('TkAgg') # Explicitly use TkAgg backend for compatibility
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import traceback
+import concurrent.futures, time
+
+_HIST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 class HistogramWidget(ttk.Frame):
     """
@@ -44,6 +47,9 @@ class HistogramWidget(ttk.Frame):
         self._pan_start_coord_x = None
         self._pan_initial_xlim = None
 
+        self._last_hist_req = 0.0
+        self._hist_future = None
+
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('button_release_event', self._on_release)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
@@ -66,14 +72,92 @@ class HistogramWidget(ttk.Frame):
         self.figure.subplots_adjust(left=0.12, right=0.98, bottom=0.18, top=0.95)
 
     def update_histogram(self, data_for_analysis):
-        print(f"DEBUG HistoWidget.update_histogram: Reçu data_for_analysis.")
+        """Version async : lance le calcul dans le pool, puis revient
+        via Tk `after` pour tracer. 100 % thread-safe."""
+        print("DEBUG HistoWidget.update_histogram: Reçu data_for_analysis.")
         if data_for_analysis is not None:
-            print(f"  -> data_for_analysis - Shape: {data_for_analysis.shape}, Dtype: {data_for_analysis.dtype}, Range: [{np.nanmin(data_for_analysis):.4g} - {np.nanmax(data_for_analysis):.4g}]")
+            print(
+                f"  -> data_for_analysis - Shape: {data_for_analysis.shape}, Dtype: {data_for_analysis.dtype}, Range: [{np.nanmin(data_for_analysis):.4g} - {np.nanmax(data_for_analysis):.4g}]"
+            )
         else:
-            print(f"  -> data_for_analysis est None.")
+            print("  -> data_for_analysis est None.")
+
         self._current_data = data_for_analysis
-        self._current_hist_data_details = self._calculate_hist_data(data_for_analysis)
-        self.plot_histogram(self._current_hist_data_details)
+        now = time.monotonic()
+        if now - self._last_hist_req < 0.40 and self._hist_future:
+            return
+        self._last_hist_req = now
+
+        small = None
+        if data_for_analysis is not None and data_for_analysis.size:
+            small = (
+                data_for_analysis[::4, ::4]
+                if data_for_analysis.ndim == 2
+                else data_for_analysis[::4, ::4, :]
+            )
+
+        if self._hist_future and not self._hist_future.done():
+            self._hist_future.cancel()
+
+        self._hist_future = _HIST_EXECUTOR.submit(self._compute_histogram, small)
+        self._hist_future.add_done_callback(
+            lambda fut: self.after(0, self._apply_histogram, fut)
+        )
+
+    @staticmethod
+    def _compute_histogram(img):
+        """Exécuté dans le worker : renvoie (counts_list, edges, is_color)."""
+        if img is None:
+            return None
+        import numpy as np
+        num_bins = 256
+        if img.ndim == 3 and img.shape[2] == 3:  # RGB
+            cols = []
+            for ch in range(3):
+                h, _ = np.histogram(
+                    np.clip(img[..., ch].ravel(), 0, 1),
+                    bins=num_bins,
+                    range=(0, 1),
+                )
+                cols.append(h)
+            edges = np.linspace(0, 1, num_bins + 1, dtype=np.float32)
+            return cols, edges, True
+        else:  # Mono
+            h, edges = np.histogram(
+                np.clip(img.ravel(), 0, 1), bins=num_bins, range=(0, 1)
+            )
+            return [h], edges, False
+
+    def _apply_histogram(self, fut):
+        """Thread GUI : reçoit le résultat, trace sans recalculer les bins."""
+        if fut.cancelled() or fut.exception():
+            return
+        res = fut.result()
+        if res is None:
+            self.plot_histogram(None)
+            return
+        counts_list, edges, is_color = res
+        colors = ['#FF4444', '#44FF44', '#4466FF'] if is_color else ['lightgray']
+        bin_centers = (edges[:-1] + edges[1:]) / 2
+        self._configure_plot_style()
+        for i, counts in enumerate(counts_list):
+            self.ax.plot(
+                bin_centers,
+                counts,
+                color=colors[i],
+                alpha=0.8,
+                drawstyle='steps-mid',
+            )
+        self.ax.set_xlim(0, 1)
+        if counts_list:
+            ymax = max(int(c.max()) for c in counts_list) or 1
+            self.ax.set_ylim(0, ymax * 1.05)
+        self.canvas.draw_idle()
+        self._current_hist_data_details = {
+            'bins': edges,
+            'hists': [np.array(c) for c in counts_list],
+            'colors': colors,
+        }
 
 
 
@@ -500,9 +584,14 @@ class HistogramWidget(ttk.Frame):
             needs_redraw_flag = True
             print(f"  -> Ylim réinitialisé à {target_ylim_reset}")
             
-        if needs_redraw_flag: 
+        if needs_redraw_flag:
             self.canvas.draw_idle()
             print("  -> Histogramme redessiné après reset_zoom.")
+
+    def destroy(self):
+        if _HIST_EXECUTOR:
+            _HIST_EXECUTOR.shutdown(wait=False)
+        super().destroy()
 
 
 
