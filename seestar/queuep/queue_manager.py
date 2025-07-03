@@ -196,6 +196,66 @@ def _stack_worker(args):
         return _stack_mean(images, weights)
 
 
+def _quality_metrics_worker(image_data):
+    """Compute SNR and star count in a separate process."""
+    import numpy as np
+    import astroalign as aa
+
+    scores = {"snr": 0.0, "stars": 0.0}
+    star_msg = None
+    num_stars = 0
+
+    if image_data is None:
+        return scores, star_msg, num_stars
+
+    # --- Calculate SNR ---
+    try:
+        if image_data.ndim == 3 and image_data.shape[2] == 3:
+            data_for_snr = (
+                0.299 * image_data[..., 0]
+                + 0.587 * image_data[..., 1]
+                + 0.114 * image_data[..., 2]
+            )
+        elif image_data.ndim == 2:
+            data_for_snr = image_data
+        else:
+            raise ValueError("Unsupported image format for SNR")
+
+        finite_data = data_for_snr[np.isfinite(data_for_snr)]
+        if finite_data.size < 50:
+            raise ValueError("Not enough finite pixels for SNR")
+
+        signal = np.median(finite_data)
+        mad = np.median(np.abs(finite_data - signal))
+        noise_std = max(mad * 1.4826, 1e-9)
+        snr = signal / noise_std
+        scores["snr"] = float(np.clip(snr, 0.0, 1000.0))
+    except Exception:
+        scores["snr"] = 0.0
+
+    # --- Calculate Star Count ---
+    try:
+        transform, (source_list, _target_list) = aa.find_transform(
+            image_data, image_data
+        )
+        num_stars = len(source_list)
+        max_stars_for_score = 200.0
+        scores["stars"] = float(
+            np.clip(num_stars / max_stars_for_score, 0.0, 1.0)
+        )
+    except (aa.MaxIterError, ValueError) as star_err:
+        star_msg = (
+            f"Warning: Failed finding stars ({type(star_err).__name__}). "
+            "Stars score set to 0."
+        )
+        scores["stars"] = 0.0
+    except Exception as e:
+        star_msg = f"Error calculating stars: {e}. Stars score set to 0."
+        scores["stars"] = 0.0
+
+    return scores, star_msg, num_stars
+
+
 # --- Optional Third-Party Imports (with availability flags) ---
 try:
     # On importe juste Drizzle ici, car la CLASSE est utilisée dans les méthodes
@@ -2504,88 +2564,29 @@ class SeestarQueuedStacker:
     ################################################################################################################################################
 
     def _calculate_quality_metrics(self, image_data):
-        """Calculates SNR and Star Count, WITH ADDED LOGGING."""  # Docstring updated
-        scores = {"snr": 0.0, "stars": 0.0}
-        # --- Added: Get filename for logging ---
-        # We need the filename here. Since it's not passed directly, we'll have to
-        # rely on it being logged just before this function is called in _process_file.
-        # This isn't ideal, but avoids major refactoring for diagnostics.
-        # The log message in _process_file before calling this will provide context.
-        # --- End Added ---
-
+        """Calculate SNR and star count using a separate process."""
         if image_data is None:
-            return scores  # Should not happen if called correctly
+            return {"snr": 0.0, "stars": 0.0}
 
-        # --- Calculate SNR ---
-        snr = 0.0
         try:
-            if image_data.ndim == 3 and image_data.shape[2] == 3:
-                # Use luminance for SNR calculation
-                data_for_snr = (
-                    0.299 * image_data[..., 0]
-                    + 0.587 * image_data[..., 1]
-                    + 0.114 * image_data[..., 2]
-                )
-            elif image_data.ndim == 2:
-                data_for_snr = image_data
-            else:
-                # self.update_progress(f"⚠️ Format non supporté pour SNR (fichier ?)") # Logged before
-                raise ValueError("Unsupported image format for SNR")
-
-            finite_data = data_for_snr[np.isfinite(data_for_snr)]
-            if finite_data.size < 50:  # Need enough pixels
-                # self.update_progress(f"⚠️ Pas assez de pixels finis pour SNR (fichier ?)") # Logged before
-                raise ValueError("Not enough finite pixels for SNR")
-
-            signal = np.median(finite_data)
-            mad = np.median(np.abs(finite_data - signal))  # Median Absolute Deviation
-            noise_std = max(mad * 1.4826, 1e-9)  # Approx std dev from MAD, avoid zero
-            snr = signal / noise_std
-            scores["snr"] = np.clip(snr, 0.0, 1000.0)  # Clip SNR to a reasonable range
-
+            with ProcessPoolExecutor(max_workers=1) as exe:
+                scores, star_msg, num_stars = exe.submit(
+                    _quality_metrics_worker, image_data
+                ).result()
         except Exception as e:
-            # Error message will be logged before returning from _process_file
-            # self.update_progress(f"⚠️ Erreur calcul SNR (fichier ?): {e}")
-            scores["snr"] = 0.0
-
-        # --- Calculate Star Count ---
-        num_stars = 0
-        try:
-            transform, (source_list, _target_list) = aa.find_transform(
-                image_data, image_data
-            )
-            num_stars = len(source_list)
-            max_stars_for_score = 200.0
-            scores["stars"] = np.clip(num_stars / max_stars_for_score, 0.0, 1.0)
-
-        except (
-            aa.MaxIterError,
-            ValueError,
-        ) as star_err:  # Handles specific astroalign errors
             self.update_progress(
-                f"      Quality Scores -> Warning: Failed finding stars ({type(star_err).__name__}). Stars score set to 0."
+                f"      Quality Scores -> Process error: {e}. Scores set to 0.",
+                "WARN",
             )
-            scores = {
-                "snr": scores.get("snr", 0.0),
-                "stars": 0.0,
-            }  # Explicitly set scores
-            return scores  # Return immediately
+            return {"snr": 0.0, "stars": 0.0}
 
-        except Exception as e:  # Handles any other unexpected error
-            self.update_progress(
-                f"      Quality Scores -> Error calculating stars: {e}. Stars score set to 0."
-            )
-            scores = {
-                "snr": scores.get("snr", 0.0),
-                "stars": 0.0,
-            }  # Explicitly set scores
-            return scores  # Return immediately
+        if star_msg:
+            self.update_progress(f"      Quality Scores -> {star_msg}")
 
-        # --- This section is ONLY reached if the 'try' block succeeds ---
         self.update_progress(
             f"      Quality Scores -> SNR: {scores['snr']:.2f}, Stars: {scores['stars']:.3f} ({num_stars} raw)"
         )
-        return scores  # Return the successfully calculated scores
+        return scores
 
     ##################################################################################################################
 
