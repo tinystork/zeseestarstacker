@@ -6531,10 +6531,9 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"      [Step 5] Appel driz_obj.add_image pour chaque canal..."
                 )
-                for ch_idx in range(num_output_channels):
+                def _add_one_channel(ch_idx: int):
                     channel_data_2d = image_hwc_cleaned[..., ch_idx]
 
-                    # Log des stats spécifiques à ce canal avant add_image
                     logger.debug(
                         f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], mean={np.mean(channel_data_2d):.3g}"
                     )
@@ -6552,22 +6551,8 @@ class SeestarQueuedStacker:
                     )
 
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
-                    wht_sum_before = float(np.sum(driz_obj.out_wht))
-                    sci_sum_before = float(np.sum(driz_obj.out_img))
-                    logger.debug(
-                        f"        Ch{ch_idx} WHT_SUM BEFORE add_image: {wht_sum_before:.3f}"
-                    )
-                    logger.debug(
-                        f"        Ch{ch_idx} SCI_SUM BEFORE add_image: {sci_sum_before:.3f}"
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Ch%d Drizzle Obj state BEFORE add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
-                        ch_idx,
-                        wht_sum_before,
-                        sci_sum_before,
-                    )
-
-                    # L'appel CRITIQUE à add_image
+                    wht_before = float(np.sum(driz_obj.out_wht))
+                    sci_before = float(np.sum(driz_obj.out_img))
                     nskip, nmiss = driz_obj.add_image(
                         data=channel_data_2d,
                         pixmap=pixmap_for_this_file,
@@ -6576,40 +6561,36 @@ class SeestarQueuedStacker:
                         pixfrac=self.drizzle_pixfrac,
                         weight_map=weight_map_param_for_add,
                     )
+                    wht_after = float(np.sum(driz_obj.out_wht))
+                    sci_after = float(np.sum(driz_obj.out_img))
+                    return ch_idx, nskip, nmiss, wht_before, wht_after, sci_before, sci_after
+
+                max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    results = list(ex.map(_add_one_channel, range(num_output_channels)))
+
+                for ch_idx, nskip, nmiss, wht_before, wht_after, sci_before, sci_after in results:
                     logger.debug(
                         f"        Ch{ch_idx} RETURNED from add_image: nskip={nskip}, nmiss={nmiss}"
-                    )  # Log des retours de add_image
+                    )
                     logger.debug(
                         "ULTRA-DEBUG: Ch%d add_image RETURNED: nskip=%d, nmiss=%d",
                         ch_idx,
                         nskip,
                         nmiss,
                     )
-
-                    wht_sum_after = float(np.sum(driz_obj.out_wht))
-                    sci_sum_after = float(np.sum(driz_obj.out_img))
                     logger.debug(
-                        f"        Ch{ch_idx} WHT_SUM AFTER add_image: {wht_sum_after:.3f} (Change: {wht_sum_after - wht_sum_before:.3f})"
+                        f"        Ch{ch_idx} WHT_SUM AFTER add_image: {wht_after:.3f} (Change: {wht_after - wht_before:.3f})"
                     )
                     logger.debug(
-                        f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_sum_after:.3f} (Change: {sci_sum_after - sci_sum_before:.3f})"
+                        f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_after:.3f} (Change: {sci_after - sci_before:.3f})"
+                    )
+                    assert wht_after >= wht_before - 1e-6, f"WHT sum decreased for Ch{ch_idx}!"
+                    logger.debug(
+                        f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(self.incremental_drizzle_objects[ch_idx].out_img):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_img):.3g}]"
                     )
                     logger.debug(
-                        "ULTRA-DEBUG: Ch%d Drizzle Obj state AFTER add_image: out_wht_sum=%.3f, out_img_sum=%.3f",
-                        ch_idx,
-                        wht_sum_after,
-                        sci_sum_after,
-                    )
-
-                    # Vérification des assertions (maintenues)
-                    assert (
-                        wht_sum_after >= wht_sum_before - 1e-6
-                    ), f"WHT sum decreased for Ch{ch_idx}!"
-                    logger.debug(
-                        f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(driz_obj.out_img):.3g}, {np.max(driz_obj.out_img):.3g}]"
-                    )
-                    logger.debug(
-                        f"                             out_wht range [{np.min(driz_obj.out_wht):.3g}, {np.max(driz_obj.out_wht):.3g}]"
+                        f"                             out_wht range [{np.min(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}]"
                     )
 
                 files_added_to_drizzle_this_batch += 1
@@ -11264,10 +11245,9 @@ class SeestarQueuedStacker:
                     )
                     # --- END CRITICAL FIX 2 ---
 
-                    for ch_index in range(num_output_channels):
-                        channel_data_2d_clean = input_data_HxWxC_cleaned[..., ch_index]
-
-                        drizzlers_batch[ch_index].add_image(
+                    def _add_final_channel(ch_idx: int):
+                        channel_data_2d_clean = input_data_HxWxC_cleaned[..., ch_idx]
+                        drizzlers_batch[ch_idx].add_image(
                             data=channel_data_2d_clean,
                             pixmap=pixmap_for_this_file,
                             exptime=base_exptime,
@@ -11275,6 +11255,10 @@ class SeestarQueuedStacker:
                             in_units="counts",
                             weight_map=effective_weight_map,
                         )
+
+                    max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
+                    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        ex.map(_add_final_channel, range(num_output_channels))
                     file_successfully_added_to_drizzle = True
                 except Exception as drizzle_add_err:
                     self.update_progress(
