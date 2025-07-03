@@ -685,47 +685,27 @@ class SeestarQueuedStacker:
         current_batch_num=0,
         total_batches_est=0,
     ):
-        """Launch incremental drizzle processing in a separate process."""
+        """Launch incremental drizzle processing using the dedicated executor."""
 
-        # ``fork`` allows the child process to operate on the same memory space
-        # for the drizzle objects. When only ``spawn`` is available (e.g. on
-        # Windows), spawning a new process would duplicate the object state and
-        # the accumulated drizzle data would be lost. In that case we fall back
-        # to using a background thread so the drizzle arrays remain shared.
-        try:
-            ctx = multiprocessing.get_context("fork")
-            use_process = ctx.get_start_method() == "fork"
-        except ValueError:
-
-            ctx = None
-            use_process = False
-
-        if use_process:
-
-            p = ctx.Process(
-                target=self._process_incremental_drizzle_batch,
-                args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
-                daemon=True,
-                name="DrizzleProcess",
-            )
-            self.drizzle_processes.append(p)
-            p.start()
-
-        else:
-            t = threading.Thread(
-                target=self._process_incremental_drizzle_batch,
-                args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
-                daemon=True,
-                name="DrizzleThread",
-            )
-            self.drizzle_processes.append(t)
-            t.start()
+        fut = self.drizzle_executor.submit(
+            self._process_incremental_drizzle_batch,
+            batch_temp_filepaths_list,
+            current_batch_num,
+            total_batches_est,
+        )
+        self.drizzle_processes.append(fut)
 
 
     def _wait_drizzle_processes(self):
         """Wait for all background drizzle processes to finish."""
         for p in self.drizzle_processes:
-            p.join()
+            if hasattr(p, "join"):
+                p.join()
+            elif hasattr(p, "result"):
+                try:
+                    p.result()
+                except Exception:
+                    pass
         self.drizzle_processes = []
 
     # ------------------------------------------------------------------
@@ -793,6 +773,10 @@ class SeestarQueuedStacker:
         self.use_gpu = bool(gpu)
         # Keep track of background drizzle processes
         self.drizzle_processes = []
+        # Dedicated thread pool for drizzle tasks
+        self.drizzle_executor = ThreadPoolExecutor(
+            max_workers=max(1, self.num_threads // 2)
+        )
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -3690,17 +3674,14 @@ class SeestarQueuedStacker:
                                                 self.total_batches_estimated,
                                             )
                                         elif self.drizzle_mode == "Final":
-                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
-                                                (
-                                                    batch_sci_p,
-                                                    batch_wht_p_list,
-                                                ) = driz_exec.submit(
-                                                    self._process_and_save_drizzle_batch,
-                                                    current_batch_items_with_masks_for_stack_batch,
-                                                    self.drizzle_output_wcs,
-                                                    self.drizzle_output_shape_hw,
-                                                    self.stacked_batches_count,
-                                                ).result()
+                                            fut = self.drizzle_executor.submit(
+                                                self._process_and_save_drizzle_batch,
+                                                current_batch_items_with_masks_for_stack_batch,
+                                                self.drizzle_output_wcs,
+                                                self.drizzle_output_shape_hw,
+                                                self.stacked_batches_count,
+                                            )
+                                            batch_sci_p, batch_wht_p_list = fut.result()
                                             if batch_sci_p and batch_wht_p_list:
                                                 self.intermediate_drizzle_batch_files.append(
                                                     (batch_sci_p, batch_wht_p_list)
@@ -3991,13 +3972,13 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle Incr. VRAI du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
-                            driz_exec.submit(
-                                self._process_incremental_drizzle_batch,  # Utilise la version V_True_Incremental_Driz
-                                current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
-                                self.stacked_batches_count,
-                                self.total_batches_estimated,
-                            ).result()
+                        fut = self.drizzle_executor.submit(
+                            self._process_incremental_drizzle_batch,  # Utilise la version V_True_Incremental_Driz
+                            current_batch_items_with_masks_for_stack_batch,  # Liste de CHEMINS
+                            self.stacked_batches_count,
+                            self.total_batches_estimated,
+                        )
+                        fut.result()
 
                     self._move_to_stacked(self._current_batch_paths)
                     self._save_partial_stack()
