@@ -559,6 +559,7 @@ class SeestarQueuedStacker:
             "queue",
             "folders_lock",
             "processing_thread",
+            "gui",
 
             "autotuner",
             "drizzle_processes",
