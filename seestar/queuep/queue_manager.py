@@ -81,6 +81,7 @@ from ..core.incremental_reprojection import (
     reproject_and_combine,
 )
 from reproject import reproject_exact as _reproject_exact
+from reproject import reproject_adaptive
 try:
     from seestar.enhancement.reproject_utils import reproject_exact_mp
 except Exception:
@@ -6580,11 +6581,22 @@ class SeestarQueuedStacker:
                     kwargs = {}
                     if _HAS_DRIZZLE_PARAM:
                         kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                    arr, _ = reproject_exact_mp(
+                    kwargs_adaptive = {}
+                    sig_adapt = inspect.signature(reproject_adaptive)
+                    if "drizzle" in sig_adapt.parameters:
+                        kwargs_adaptive["drizzle"] = True
+                    if "max_err" in sig_adapt.parameters:
+                        kwargs_adaptive["max_err"] = 0.01
+                    if (
+                        "kernel" in sig_adapt.parameters
+                        and str(self.drizzle_kernel).lower() in {"hann", "gaussian"}
+                    ):
+                        kwargs_adaptive["kernel"] = self.drizzle_kernel
+                    arr, _ = reproject_adaptive(
                         (weighted_input, wcs_for_pixmap),
                         self.drizzle_output_wcs,
                         shape_out=self.drizzle_output_shape_hw,
-                        **kwargs,
+                        **kwargs_adaptive,
                     )
                     wht_reproj, _ = reproject_exact_mp(
                         (weight_map_param_for_add, wcs_for_pixmap),
@@ -8249,11 +8261,22 @@ class SeestarQueuedStacker:
                         kwargs = {}
                         if _HAS_DRIZZLE_PARAM:
                             kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                        arr, _ = reproject_exact_mp(
+                        kwargs_adaptive = {}
+                        sig_adapt = inspect.signature(reproject_adaptive)
+                        if "drizzle" in sig_adapt.parameters:
+                            kwargs_adaptive["drizzle"] = True
+                        if "max_err" in sig_adapt.parameters:
+                            kwargs_adaptive["max_err"] = 0.01
+                        if (
+                            "kernel" in sig_adapt.parameters
+                            and str(self.drizzle_kernel).lower() in {"hann", "gaussian"}
+                        ):
+                            kwargs_adaptive["kernel"] = self.drizzle_kernel
+                        arr, _ = reproject_adaptive(
                             (weighted_input, wcs_lot_intermediaire),
                             output_wcs_final_target,
                             shape_out=output_shape_final_target_hw,
-                            **kwargs,
+                            **kwargs_adaptive,
                         )
                         wht_reproj, _ = reproject_exact_mp(
                             (data_ch_wht_2d_lot, wcs_lot_intermediaire),
