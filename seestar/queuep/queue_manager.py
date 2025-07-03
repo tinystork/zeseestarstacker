@@ -94,6 +94,9 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 from time import monotonic as _mono
+_DRZ_PREV_MIN_DT = 0.5  # secondes
+_last_drz_prev = 0.0
+_MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0           # horodatage du dernier push
 _QM_DEBOUNCE = 0.20               # secondes mini entre deux messages GUI
 
@@ -1820,6 +1823,10 @@ class SeestarQueuedStacker:
         Met à jour l'aperçu spécifiquement pour le mode Drizzle Incrémental.
         Envoie les données drizzlées cumulatives et le header mis à jour.
         """
+        global _last_drz_prev
+        if _mono() - _last_drz_prev < _DRZ_PREV_MIN_DT:
+            return
+        _last_drz_prev = _mono()
         if self.preview_callback is None or self.cumulative_drizzle_data is None:
             # Ne rien faire si pas de callback ou pas de données drizzle cumulatives
             return
@@ -1828,8 +1835,21 @@ class SeestarQueuedStacker:
             # Utiliser les données et le header cumulatifs Drizzle
             data_to_send = (
                 self.cumulative_drizzle_data.copy(),
-                self.cumulative_drizzle_data_raw.copy() if self.cumulative_drizzle_data_raw is not None else self.cumulative_drizzle_data.copy(),
+                self.cumulative_drizzle_data_raw.copy()
+                if self.cumulative_drizzle_data_raw is not None
+                else self.cumulative_drizzle_data.copy(),
             )
+
+            if max(data_to_send[0].shape[:2]) > _MAX_PREVIEW_SIDE_PX:
+                scale = _MAX_PREVIEW_SIDE_PX / max(data_to_send[0].shape[:2])
+                new_size = (
+                    int(data_to_send[0].shape[1] * scale),
+                    int(data_to_send[0].shape[0] * scale),
+                )
+                data_to_send = (
+                    cv2.resize(data_to_send[0], new_size, interpolation=cv2.INTER_AREA),
+                    cv2.resize(data_to_send[1], new_size, interpolation=cv2.INTER_AREA),
+                )
             header_to_send = (
                 self.current_stack_header.copy()
                 if self.current_stack_header
