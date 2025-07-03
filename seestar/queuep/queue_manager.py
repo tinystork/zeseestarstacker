@@ -559,12 +559,29 @@ class SeestarQueuedStacker:
             "queue",
             "folders_lock",
             "processing_thread",
+            "gui",
+
+            "aligner",
+            "local_aligner_instance",
+            "astrometry_solver",
+            "chroma_balancer",
 
             "autotuner",
             "drizzle_processes",
 
         ):
             state[attr] = None
+
+        # Remove any tkinter objects that may have been stored dynamically
+        try:
+            import tkinter
+        except Exception:
+            tkinter = None
+        if tkinter is not None:
+            for k, v in list(state.items()):
+                if v is not None and type(v).__module__.startswith("tkinter"):
+                    state[k] = None
+
         return state
 
     def __setstate__(self, state):
@@ -668,20 +685,36 @@ class SeestarQueuedStacker:
     ):
         """Launch incremental drizzle processing in a separate process."""
 
-        # ``fork`` context is unavailable on some platforms (e.g. Windows).
-        # ``spawn`` is always supported, so fall back to it if ``fork`` cannot be used.
+        # ``fork`` allows the child process to operate on the same memory space
+        # for the drizzle objects. When only ``spawn`` is available (e.g. on
+        # Windows), spawning a new process would duplicate the object state and
+        # the accumulated drizzle data would be lost. In that case we fall back
+        # to using a background thread so the drizzle arrays remain shared.
         try:
             ctx = multiprocessing.get_context("fork")
+            use_process = ctx.get_start_method() == "fork"
         except ValueError:
-            ctx = multiprocessing.get_context("spawn")
-        p = ctx.Process(
-            target=self._process_incremental_drizzle_batch,
-            args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
-            daemon=True,
-            name="DrizzleProcess",
-        )
-        self.drizzle_processes.append(p)
-        p.start()
+            ctx = None
+            use_process = False
+
+        if use_process:
+            p = ctx.Process(
+                target=self._process_incremental_drizzle_batch,
+                args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
+                daemon=True,
+                name="DrizzleProcess",
+            )
+            self.drizzle_processes.append(p)
+            p.start()
+        else:
+            t = threading.Thread(
+                target=self._process_incremental_drizzle_batch,
+                args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
+                daemon=True,
+                name="DrizzleThread",
+            )
+            self.drizzle_processes.append(t)
+            t.start()
 
     def _wait_drizzle_processes(self):
         """Wait for all background drizzle processes to finish."""
