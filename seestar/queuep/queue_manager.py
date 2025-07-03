@@ -648,7 +648,12 @@ class SeestarQueuedStacker:
     ):
         """Launch incremental drizzle processing in a separate process."""
 
-        ctx = multiprocessing.get_context("fork")
+        # ``fork`` context is unavailable on some platforms (e.g. Windows).
+        # ``spawn`` is always supported, so fall back to it if ``fork`` cannot be used.
+        try:
+            ctx = multiprocessing.get_context("fork")
+        except ValueError:
+            ctx = multiprocessing.get_context("spawn")
         p = ctx.Process(
             target=self._process_incremental_drizzle_batch,
             args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
