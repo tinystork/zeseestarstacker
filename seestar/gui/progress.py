@@ -6,7 +6,11 @@ Version: V_ProgressManager_ColorLog_1
 
 import time
 import tkinter as tk
-from tkinter import ttk 
+from tkinter import ttk
+from time import monotonic as _mono
+
+_PM_LAST_UI = 0.0
+_PM_MIN_DT = 0.20   # secondes mini entre deux MAJ GUI
 
 
 class ProgressManager:
@@ -72,10 +76,15 @@ class ProgressManager:
         Version: V_ProgressManager_ColorLog_ApplyTags
         """
         def _update_ui():
+            global _PM_LAST_UI
+            now = _mono()
+            if now - _PM_LAST_UI < _PM_MIN_DT:
+                return
+            _PM_LAST_UI = now
             try:
                 # Check if widgets still exist before configuring them
                 if not self.progress_bar.winfo_exists() or not self.status_text.winfo_exists():
-                    return 
+                    return
 
                 # Update progress bar if value provided
                 if progress is not None:
