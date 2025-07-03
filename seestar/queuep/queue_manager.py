@@ -6690,6 +6690,8 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"                             out_wht range [{np.min(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}]"
                     )
+                # Small sleep to yield GIL before processing next file
+                time.sleep(0.001)
 
                 files_added_to_drizzle_this_batch += 1
                 self.images_in_cumulative_stack += 1
@@ -6735,6 +6737,9 @@ class SeestarQueuedStacker:
             print(
                 f"DrizIncrVrai image {i_file+1}/{len(batch_temp_filepaths_list)} en {dt:.2f}s"
             )
+            # Yield a tiny slice of time back to the interpreter so the GUI
+            # thread can run while heavy drizzle operations proceed.
+            time.sleep(0.001)
 
         # --- FIN DE LA BOUCLE DE TRAITEMENT DES FICHIERS ---
         if files_added_to_drizzle_this_batch == 0 and num_files_in_batch > 0:
@@ -8315,6 +8320,8 @@ class SeestarQueuedStacker:
                             pixfrac=self.drizzle_pixfrac,
                             in_units="cps",  # Confirmé par BUNIT='Counts/s' dans les fichiers de lot
                         )
+                        # Briefly yield to ensure GUI remains responsive
+                        time.sleep(0.001)
                     batches_successfully_added_to_final_drizzle += 1
                     total_contributing_ninputs_for_final_header += ninputs_this_batch
 
@@ -11391,6 +11398,8 @@ class SeestarQueuedStacker:
                     max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
                     with ThreadPoolExecutor(max_workers=max_workers) as ex:
                         ex.map(_add_final_channel, range(num_output_channels))
+                    # Pause très courte pour libérer le GIL et garder le GUI réactif
+                    time.sleep(0.001)
                     file_successfully_added_to_drizzle = True
                 except Exception as drizzle_add_err:
                     self.update_progress(
