@@ -10,7 +10,9 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from reproject import reproject_exact
+
 import inspect
+
 import cv2
 from scipy.ndimage import gaussian_filter
 # ConvexHull n'est pas utilisé dans ce fichier
@@ -287,15 +289,19 @@ def run_incremental_drizzle(
 
     sum_data = np.zeros(shape_out, dtype=float)
     sum_weight = np.zeros(shape_out, dtype=float)
+
     drizzle_kwargs = {}
     if "drizzle" in inspect.signature(reproject_exact).parameters:
         drizzle_kwargs = {"drizzle": True, "pixfrac": pixfrac, "kernel": kernel}
+
     for data, wcs_in in zip(images, wcs_list):
         arr, fp = reproject_exact(
             (data, wcs_in),
             target_wcs,
             shape_out=shape_out,
+
             **drizzle_kwargs,
+
         )
         sum_data += arr * fp
         sum_weight += fp
@@ -338,9 +344,11 @@ def run_final_drizzle(
         Final drizzled image.
     """
 
+
     drizzle_kwargs = {}
     if "drizzle" in inspect.signature(reproject_exact).parameters:
         drizzle_kwargs = {"drizzle": True, "pixfrac": pixfrac, "kernel": kernel}
+
 
     sum_data = np.zeros(final_shape_out, dtype=float)
     sum_weight = np.zeros(final_shape_out, dtype=float)
@@ -349,7 +357,9 @@ def run_final_drizzle(
             (data, wcs_in),
             final_target_wcs,
             shape_out=final_shape_out,
+
             **drizzle_kwargs,
+
         )
         sum_data += arr * fp
         sum_weight += fp

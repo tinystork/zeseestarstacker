@@ -83,7 +83,9 @@ from ..core.incremental_reprojection import (
 from reproject import reproject_exact
 import inspect
 
+
 _HAS_DRIZZLE_PARAM = "drizzle" in inspect.signature(reproject_exact).parameters
+
 from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
@@ -6550,6 +6552,7 @@ class SeestarQueuedStacker:
                 def _add_one_channel(ch_idx: int):
                     channel_data_2d = image_hwc_cleaned[..., ch_idx]
 
+
                     sci_arr = self.incremental_drizzle_sci_arrays[ch_idx]
                     wht_arr = self.incremental_drizzle_wht_arrays[ch_idx]
                     wht_before = float(np.sum(wht_arr))
@@ -6579,6 +6582,7 @@ class SeestarQueuedStacker:
 
                     wht_after = float(np.sum(wht_arr))
                     sci_after = float(np.sum(sci_arr))
+
                     return ch_idx, nskip, nmiss, wht_before, wht_after, sci_before, sci_after
 
                 max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
@@ -8064,6 +8068,7 @@ class SeestarQueuedStacker:
         num_output_channels = 3
         final_output_images_list = []  # Liste des arrays SCI (H,W) par canal
         final_output_weights_list = []  # Liste des arrays WHT (H,W) par canal
+        final_drizzlers = []
 
         try:
             self.update_progress(
@@ -8076,9 +8081,11 @@ class SeestarQueuedStacker:
                 final_output_weights_list.append(
                     np.zeros(output_shape_final_target_hw, dtype=np.float32)
                 )
+
             self.update_progress(
                 f"   [CombineBatches V4] Accumulateurs finaux initialisés."
             )
+
         except Exception as init_err:
             self.update_progress(
                 f"   [CombineBatches V4] ERREUR: Échec init Drizzle final: {init_err}",
@@ -8224,6 +8231,7 @@ class SeestarQueuedStacker:
                         final_output_images_list[ch_idx_add] += arr
                         final_output_weights_list[ch_idx_add] += wht_reproj
 
+
                     batches_successfully_added_to_final_drizzle += 1
                     total_contributing_ninputs_for_final_header += ninputs_this_batch
 
@@ -8338,6 +8346,7 @@ class SeestarQueuedStacker:
             final_sci_image_HWC = None
             final_wht_map_HWC = None
         finally:
+
             del final_output_images_list, final_output_weights_list
             gc.collect()
 
