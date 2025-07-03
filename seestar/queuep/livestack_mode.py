@@ -104,6 +104,7 @@ class LiveStackController:
         drizzle_scale: int = 2,
         preview_callback: Optional[PreviewCB] = None,
         progress_callback: Optional[ProgressCB] = None,
+        use_gpu: bool = False,
     ) -> None:
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
@@ -112,6 +113,7 @@ class LiveStackController:
         self.preview_cb = preview_callback
         self.progress_cb = progress_callback
         self.drizzle_scale = int(drizzle_scale)
+        self.use_gpu = bool(use_gpu)
 
         # Runtime state
         self._stop_flag = False
@@ -346,7 +348,10 @@ class LiveStackController:
             for c in range(3):
                 drizzlers[c].add_image(data[..., c], wcs=None, exposure=1.0)
         # fetch output with correct normalisation
-        final_channels = [drizzle_finalize(d.out_img, d.out_wht) for d in drizzlers]
+        final_channels = [
+            drizzle_finalize(d.out_img, d.out_wht, use_gpu=self.use_gpu)
+            for d in drizzlers
+        ]
         final = np.stack(final_channels, axis=-1)
         final = stretch_01(final)
         png_path = self.output_dir / "livestack_drizzled.png"
