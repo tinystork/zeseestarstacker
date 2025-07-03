@@ -630,10 +630,10 @@ class SeestarQueuedStacker:
         self,
         gpu: bool = False,
         io_profile: str = "ssd",
-        thread_fraction: float = 0.5,
+        thread_fraction: float = 0.75,
         batch_size: int | None = None,
         settings: SettingsManager | None = None,
-        autotune: bool = True,
+        autotune: bool = False,
         *args,
         **kwargs,
     ):
