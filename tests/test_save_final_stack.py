@@ -114,14 +114,12 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
     obj.preserve_linear_output = True
 
     shape = (2, 2)
-    from drizzle.resample import Drizzle
-
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
-    obj.incremental_drizzle_objects[0].out_img[:] = 1.0
-    obj.incremental_drizzle_objects[1].out_img[:] = 2.0
-    obj.incremental_drizzle_objects[2].out_img[:] = 3.0
-    for d in obj.incremental_drizzle_objects:
-        d.out_wht[:] = 1.0
+    obj.incremental_drizzle_sci_arrays = [
+        np.full(shape, i + 1.0, dtype=np.float32) for i in range(3)
+    ]
+    obj.incremental_drizzle_wht_arrays = [
+        np.ones(shape, dtype=np.float32) for _ in range(3)
+    ]
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
@@ -155,9 +153,12 @@ def test_save_final_stack_incremental_drizzle_batch(tmp_path):
     obj.failed_stack_count = 0
     obj.current_stack_header = None
 
-    from drizzle.resample import Drizzle
-
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+    obj.incremental_drizzle_sci_arrays = [
+        np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+    ]
+    obj.incremental_drizzle_wht_arrays = [
+        np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+    ]
 
     wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
     data = np.stack([
@@ -172,8 +173,8 @@ def test_save_final_stack_incremental_drizzle_batch(tmp_path):
         obj, [str(path)], current_batch_num=1, total_batches_est=1
     )
 
-    for d in obj.incremental_drizzle_objects:
-        assert np.sum(d.out_wht) > 0
+    for arr in obj.incremental_drizzle_wht_arrays:
+        assert np.sum(arr) > 0
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
@@ -195,12 +196,12 @@ def test_save_final_stack_zero_weights_abort(tmp_path):
     obj.preserve_linear_output = True
 
     shape = (2, 2)
-    from drizzle.resample import Drizzle
-
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
-    for idx, d in enumerate(obj.incremental_drizzle_objects):
-        d.out_img[:] = idx + 1.0
-        d.out_wht[:] = 0.0
+    obj.incremental_drizzle_sci_arrays = [
+        np.full(shape, idx + 1.0, dtype=np.float32) for idx in range(3)
+    ]
+    obj.incremental_drizzle_wht_arrays = [
+        np.zeros(shape, dtype=np.float32) for _ in range(3)
+    ]
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
@@ -232,9 +233,12 @@ def test_incremental_drizzle_batch_weight_override(tmp_path):
         obj.failed_stack_count = 0
         obj.current_stack_header = None
 
-        from drizzle.resample import Drizzle
-
-        obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+        obj.incremental_drizzle_sci_arrays = [
+            np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+        ]
+        obj.incremental_drizzle_wht_arrays = [
+            np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+        ]
 
         wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
         data = np.stack([
@@ -246,11 +250,11 @@ def test_incremental_drizzle_batch_weight_override(tmp_path):
         path = tmp_path / f"tmp_{suffix}.fits"
         fits.writeto(path, data, header, overwrite=True)
 
-        wht_before = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+        wht_before = [np.sum(arr) for arr in obj.incremental_drizzle_wht_arrays]
         qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
             obj, [str(path)], current_batch_num=1, total_batches_est=1, weight_map_override=weight
         )
-        wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+        wht_after = [np.sum(arr) for arr in obj.incremental_drizzle_wht_arrays]
         for b_val, a_val in zip(wht_before, wht_after):
             assert a_val >= b_val - 1e-6
         return wht_after
@@ -282,9 +286,12 @@ def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
     obj.failed_stack_count = 0
     obj.current_stack_header = None
 
-    from drizzle.resample import Drizzle
-
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+    obj.incremental_drizzle_sci_arrays = [
+        np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+    ]
+    obj.incremental_drizzle_wht_arrays = [
+        np.zeros(obj.drizzle_output_shape_hw, dtype=np.float32) for _ in range(3)
+    ]
 
     wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
     data = np.stack(
@@ -299,18 +306,18 @@ def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
     fits.writeto(path1, data, header, overwrite=True)
     fits.writeto(path2, data, header, overwrite=True)
 
-    wht_before = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+    wht_before = [np.sum(arr) for arr in obj.incremental_drizzle_wht_arrays]
     qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
         obj, [str(path1)], current_batch_num=1, total_batches_est=2
     )
-    wht_mid = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+    wht_mid = [np.sum(arr) for arr in obj.incremental_drizzle_wht_arrays]
     for b_val, a_val in zip(wht_before, wht_mid):
         assert a_val >= b_val - 1e-6
 
     qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
         obj, [str(path2)], current_batch_num=2, total_batches_est=2
     )
-    wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
+    wht_after = [np.sum(arr) for arr in obj.incremental_drizzle_wht_arrays]
     for b_val, a_val in zip(wht_mid, wht_after):
         assert a_val >= b_val - 1e-6
 

@@ -116,8 +116,12 @@ def _make_worker(tmp_path):
     obj._save_drizzle_input_temp = lambda d, h: str(Path(tmp_path) / "tmp.fits")
     obj._save_final_stack = lambda *a, **k: None
 
-    from drizzle.resample import Drizzle
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=(2, 2)) for _ in range(3)]
+    obj.incremental_drizzle_sci_arrays = [
+        np.zeros((2, 2), dtype=np.float32) for _ in range(3)
+    ]
+    obj.incremental_drizzle_wht_arrays = [
+        np.zeros((2, 2), dtype=np.float32) for _ in range(3)
+    ]
 
     calls = {"incremental": 0}
 

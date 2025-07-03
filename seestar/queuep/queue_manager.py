@@ -80,6 +80,10 @@ from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
     reproject_and_combine,
 )
+from reproject import reproject_exact
+import inspect
+
+_HAS_DRIZZLE_PARAM = "drizzle" in inspect.signature(reproject_exact).parameters
 from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
@@ -194,19 +198,6 @@ def _stack_worker(args):
         return _stack_median(images, weights)
     else:
         return _stack_mean(images, weights)
-
-
-# --- Optional Third-Party Imports (with availability flags) ---
-try:
-    # On importe juste Drizzle ici, car la CLASSE est utilisée dans les méthodes
-    from drizzle.resample import Drizzle
-
-    _OO_DRIZZLE_AVAILABLE = True
-    logger.debug("Import drizzle.resample.Drizzle OK.")
-except ImportError as e_driz_cls:
-    _OO_DRIZZLE_AVAILABLE = False
-    Drizzle = None  # Définir comme None si indisponible
-    logger.error("Échec import drizzle.resample.Drizzle: %s", e_driz_cls)
 
 
 # --- Core/Internal Imports (Needed for __init__ or core logic) ---
@@ -826,9 +817,10 @@ class SeestarQueuedStacker:
         # input size instead of the expanded drizzle size.
         self.keep_input_size_for_reproject = False
 
-        self.incremental_drizzle_objects = []
+        self.incremental_drizzle_sci_arrays = []
+        self.incremental_drizzle_wht_arrays = []
         logger.debug(
-            "  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide."
+            "  -> Accumulateurs pour Drizzle Incrémental initialisés à liste vide."
         )
 
         if settings is not None:
@@ -1295,28 +1287,25 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"💧 Initialisation des objets Drizzle persistants pour mode Incrémental (Shape: {current_output_shape_hw_for_accum_or_driz})..."
             )
-            self.incremental_drizzle_objects = []
-            self.incremental_drizzle_sci_arrays = []  # ← ajouté
-            self.incremental_drizzle_wht_arrays = []  # ← ajouté
+            self.incremental_drizzle_sci_arrays = []
+            self.incremental_drizzle_wht_arrays = []
             num_channels_driz = 3
 
             try:
                 for _ in range(num_channels_driz):
-                    driz_obj = Drizzle(
-                        out_shape=current_output_shape_hw_for_accum_or_driz,
-                        kernel=self.drizzle_kernel,
-                        fillval=str(getattr(self, "drizzle_fillval", "0.0")),
+                    self.incremental_drizzle_sci_arrays.append(
+                        np.zeros(current_output_shape_hw_for_accum_or_driz, dtype=np.float32)
                     )
-                    self.incremental_drizzle_sci_arrays.append(driz_obj.out_img)
-                    self.incremental_drizzle_wht_arrays.append(driz_obj.out_wht)
-                    self.incremental_drizzle_objects.append(driz_obj)
+                    self.incremental_drizzle_wht_arrays.append(
+                        np.zeros(current_output_shape_hw_for_accum_or_driz, dtype=np.float32)
+                    )
 
                 logger.debug(
-                    f"  -> {len(self.incremental_drizzle_objects)} objets Drizzle persistants créés pour mode Incrémental."
+                    f"  -> {len(self.incremental_drizzle_sci_arrays)} accumulateurs créés pour mode Incrémental."
                 )
             except Exception as e_driz_obj_init:
                 self.update_progress(
-                    f"❌ Erreur initialisation objets Drizzle persistants: {e_driz_obj_init}",
+                    f"❌ Erreur initialisation accumulateurs Drizzle: {e_driz_obj_init}",
                     "ERROR",
                 )
                 traceback.print_exc(limit=1)
@@ -3797,10 +3786,9 @@ class SeestarQueuedStacker:
                 if (
                     self.drizzle_active_session
                     and self.drizzle_mode == "Incremental"
-                    and hasattr(self, "incremental_drizzle_objects")
-                    and self.incremental_drizzle_objects
+                    and self.incremental_drizzle_sci_arrays
                     and self.images_in_cumulative_stack > 0
-                ):  # Vérifier si Drizzle Incr. VRAI a des données
+                ):
                     self.update_progress(
                         "   Sauvegarde du stack Drizzle Incrémental VRAI partiel..."
                     )
@@ -3922,8 +3910,8 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "🏁 Finalisation Drizzle Incrémental VRAI (depuis objets Drizzle)..."
                     )
-                    # Pour le VRAI Drizzle Incrémental, _save_final_stack doit lire depuis
-                    # self.incremental_drizzle_objects/arrays. Ne pas passer drizzle_final_sci_data.
+                    # Pour le Drizzle Incrémental, _save_final_stack lit directement
+                    # depuis self.incremental_drizzle_sci_arrays et _wht_arrays. Ne pas passer drizzle_final_sci_data.
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_incr_true"
                     )  # MODIFIÉ ICI
@@ -6124,14 +6112,14 @@ class SeestarQueuedStacker:
 
         # --- VÉRIFICATIONS CRITIQUES ---
         if (
-            not self.incremental_drizzle_objects
-            or len(self.incremental_drizzle_objects) != 3
+            not self.incremental_drizzle_sci_arrays
+            or len(self.incremental_drizzle_sci_arrays) != 3
         ):
             self.update_progress(
-                "❌ Erreur critique: Objets Drizzle persistants non initialisés pour mode Incrémental.",
+                "❌ Erreur critique: Accumulateurs Drizzle non initialisés pour mode Incrémental.",
                 "ERROR",
             )
-            self.processing_error = "Objets Drizzle Incr. non initialisés"
+            self.processing_error = "Accumulateurs Drizzle Incr. non initialisés"
             self.stop_processing = True
             logger.debug(f"  Sortie ERREUR: Objets Drizzle non initialisés.")
             return
@@ -6562,35 +6550,35 @@ class SeestarQueuedStacker:
                 def _add_one_channel(ch_idx: int):
                     channel_data_2d = image_hwc_cleaned[..., ch_idx]
 
-                    logger.debug(
-                        f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], mean={np.mean(channel_data_2d):.3g}"
-                    )
-                    logger.debug(
-                        f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}"
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Ch%d CALLING add_image - data range %.3g-%.3g, exptime=%.2f, pixfrac=%.2f, input_shape_hw=%s",
-                        ch_idx,
-                        np.min(channel_data_2d),
-                        np.max(channel_data_2d),
-                        exptime_for_drizzle_add,
-                        self.drizzle_pixfrac,
-                        input_shape_hw_current_file,
-                    )
+                    sci_arr = self.incremental_drizzle_sci_arrays[ch_idx]
+                    wht_arr = self.incremental_drizzle_wht_arrays[ch_idx]
+                    wht_before = float(np.sum(wht_arr))
+                    sci_before = float(np.sum(sci_arr))
 
-                    driz_obj = self.incremental_drizzle_objects[ch_idx]
-                    wht_before = float(np.sum(driz_obj.out_wht))
-                    sci_before = float(np.sum(driz_obj.out_img))
-                    nskip, nmiss = driz_obj.add_image(
-                        data=channel_data_2d,
-                        pixmap=pixmap_for_this_file,
-                        exptime=exptime_for_drizzle_add,
-                        in_units=in_units_for_drizzle_add,
-                        pixfrac=self.drizzle_pixfrac,
-                        weight_map=weight_map_param_for_add,
+                    weighted_input = channel_data_2d * weight_map_param_for_add
+                    kwargs = {}
+                    if _HAS_DRIZZLE_PARAM:
+                        kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
+                    arr, _ = reproject_exact(
+                        (weighted_input, wcs_for_pixmap),
+                        self.drizzle_output_wcs,
+                        shape_out=self.drizzle_output_shape_hw,
+                        **kwargs,
                     )
-                    wht_after = float(np.sum(driz_obj.out_wht))
-                    sci_after = float(np.sum(driz_obj.out_img))
+                    wht_reproj, _ = reproject_exact(
+                        (weight_map_param_for_add, wcs_for_pixmap),
+                        self.drizzle_output_wcs,
+                        shape_out=self.drizzle_output_shape_hw,
+                        **kwargs,
+                    )
+                    sci_arr += arr
+                    wht_arr += wht_reproj
+                    self.incremental_drizzle_sci_arrays[ch_idx] = sci_arr
+                    self.incremental_drizzle_wht_arrays[ch_idx] = wht_arr
+                    nskip = nmiss = 0
+
+                    wht_after = float(np.sum(wht_arr))
+                    sci_after = float(np.sum(sci_arr))
                     return ch_idx, nskip, nmiss, wht_before, wht_after, sci_before, sci_after
 
                 max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
@@ -6615,10 +6603,10 @@ class SeestarQueuedStacker:
                     )
                     assert wht_after >= wht_before - 1e-6, f"WHT sum decreased for Ch{ch_idx}!"
                     logger.debug(
-                        f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(self.incremental_drizzle_objects[ch_idx].out_img):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_img):.3g}]"
+                        f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_sci_arrays[ch_idx]):.3g}]"
                     )
                     logger.debug(
-                        f"                             out_wht range [{np.min(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}]"
+                        f"                             out_wht range [{np.min(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}, {np.max(self.incremental_drizzle_wht_arrays[ch_idx]):.3g}]"
                     )
 
                 files_added_to_drizzle_this_batch += 1
@@ -6727,15 +6715,13 @@ class SeestarQueuedStacker:
             f"   -> Préparation aperçu Drizzle Incrémental VRAI (Lot #{current_batch_num})..."
         )
         try:
-            if self.preview_callback and self.incremental_drizzle_objects:
+            if self.preview_callback and self.incremental_drizzle_sci_arrays:
                 avg_img_channels_preview = []
                 # IMPORTANT: driz_obj.out_img contient SCI*WHT, driz_obj.out_wht contient WHT
                 # Utiliser drizzle_finalize pour obtenir l'image moyennée.
                 for c in range(num_output_channels):
-                    driz_obj = self.incremental_drizzle_objects[c]
-
-                    sci_accum = driz_obj.out_img.astype(np.float32)
-                    wht_accum = driz_obj.out_wht.astype(np.float32)
+                    sci_accum = self.incremental_drizzle_sci_arrays[c].astype(np.float32)
+                    wht_accum = self.incremental_drizzle_wht_arrays[c].astype(np.float32)
 
                     preview_channel_data = drizzle_finalize(sci_accum, wht_accum)
 
@@ -8076,7 +8062,6 @@ class SeestarQueuedStacker:
             return None, None
 
         num_output_channels = 3
-        final_drizzlers = []
         final_output_images_list = []  # Liste des arrays SCI (H,W) par canal
         final_output_weights_list = []  # Liste des arrays WHT (H,W) par canal
 
@@ -8091,20 +8076,8 @@ class SeestarQueuedStacker:
                 final_output_weights_list.append(
                     np.zeros(output_shape_final_target_hw, dtype=np.float32)
                 )
-
-            for i in range(num_output_channels):
-                driz_ch = Drizzle(
-                    kernel=self.drizzle_kernel,
-                    fillval=str(
-                        getattr(self, "drizzle_fillval", "0.0")
-                    ),  # Utiliser l'attribut si existe
-                    out_img=final_output_images_list[i],
-                    out_wht=final_output_weights_list[i],
-                    out_shape=output_shape_final_target_hw,
-                )
-                final_drizzlers.append(driz_ch)
             self.update_progress(
-                f"   [CombineBatches V4] Objets Drizzle finaux initialisés."
+                f"   [CombineBatches V4] Accumulateurs finaux initialisés."
             )
         except Exception as init_err:
             self.update_progress(
@@ -8228,19 +8201,29 @@ class SeestarQueuedStacker:
                             sci_data_cxhxw_lot[ch_idx_add, :, :]
                         )
                         data_ch_wht_2d_lot = wht_maps_2d_list_for_lot[ch_idx_add]
-                        # --- DEBUG DRIZZLE FINAL 1: Log avant add_image ---
                         logger.debug(
                             f"      Ch{ch_idx_add} add_image: data SCI min/max [{np.min(data_ch_sci_2d_lot):.3g}, {np.max(data_ch_sci_2d_lot):.3g}], data WHT min/max [{np.min(data_ch_wht_2d_lot):.3g}, {np.max(data_ch_wht_2d_lot):.3g}], pixfrac={self.drizzle_pixfrac}"
                         )
-                        # --- FIN DEBUG ---
-                        final_drizzlers[ch_idx_add].add_image(
-                            data=data_ch_sci_2d_lot,
-                            pixmap=pixmap_batch_to_final_grid,
-                            weight_map=data_ch_wht_2d_lot,
-                            exptime=1.0,  # Les lots sont déjà en counts/sec
-                            pixfrac=self.drizzle_pixfrac,
-                            in_units="cps",  # Confirmé par BUNIT='Counts/s' dans les fichiers de lot
+
+                        weighted_input = data_ch_sci_2d_lot * data_ch_wht_2d_lot
+                        kwargs = {}
+                        if _HAS_DRIZZLE_PARAM:
+                            kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
+                        arr, _ = reproject_exact(
+                            (weighted_input, wcs_lot_intermediaire),
+                            output_wcs_final_target,
+                            shape_out=output_shape_final_target_hw,
+                            **kwargs,
                         )
+                        wht_reproj, _ = reproject_exact(
+                            (data_ch_wht_2d_lot, wcs_lot_intermediaire),
+                            output_wcs_final_target,
+                            shape_out=output_shape_final_target_hw,
+                            **kwargs,
+                        )
+                        final_output_images_list[ch_idx_add] += arr
+                        final_output_weights_list[ch_idx_add] += wht_reproj
+
                     batches_successfully_added_to_final_drizzle += 1
                     total_contributing_ninputs_for_final_header += ninputs_this_batch
 
@@ -8355,7 +8338,7 @@ class SeestarQueuedStacker:
             final_sci_image_HWC = None
             final_wht_map_HWC = None
         finally:
-            del final_drizzlers, final_output_images_list, final_output_weights_list
+            del final_output_images_list, final_output_weights_list
             gc.collect()
 
         logger.debug("=" * 70 + "\n")
@@ -8940,12 +8923,8 @@ class SeestarQueuedStacker:
             current_operation_mode_log_desc = "Mosaïque (reproject_and_coadd)"
             current_operation_mode_log_fits = "Mosaic (reproject_and_coadd)"
         elif is_true_incremental_drizzle_from_objects:
-            current_operation_mode_log_desc = (
-                "Drizzle Incrémental VRAI (objets Drizzle)"
-            )
-            current_operation_mode_log_fits = (
-                "True Incremental Drizzle (Drizzle objects)"
-            )
+            current_operation_mode_log_desc = "Drizzle Incrémental"
+            current_operation_mode_log_fits = "Incremental Drizzle"
         elif is_drizzle_final_mode_with_data:
             current_operation_mode_log_desc = (
                 f"Drizzle Standard Final (données lot fournies)"
@@ -9026,17 +9005,17 @@ class SeestarQueuedStacker:
                     "  DEBUG QM [SaveFinalStack] Mode: Drizzle Incrémental VRAI"
                 )
                 if (
-                    not self.incremental_drizzle_objects
-                    or len(self.incremental_drizzle_objects) != 3
+                    not self.incremental_drizzle_sci_arrays
+                    or len(self.incremental_drizzle_sci_arrays) != 3
                 ):
                     raise ValueError(
-                        "Objets Drizzle incremental invalides ou manquants."
+                        "Accumulateurs Drizzle incrementaux invalides ou manquants."
                     )
                 sci_arrays_hw_list = [
-                    d.out_img for d in self.incremental_drizzle_objects
+                    arr for arr in self.incremental_drizzle_sci_arrays
                 ]
                 wht_arrays_hw_list = [
-                    d.out_wht for d in self.incremental_drizzle_objects
+                    arr for arr in self.incremental_drizzle_wht_arrays
                 ]
 
                 if not any(
@@ -11116,7 +11095,6 @@ class SeestarQueuedStacker:
 
         num_output_channels = 3
         channel_names = ["R", "G", "B"]
-        drizzlers_batch = []
         output_images_batch = []
         output_weights_batch = []
         try:
@@ -11130,17 +11108,8 @@ class SeestarQueuedStacker:
                 output_weights_batch.append(
                     np.zeros(output_shape_target_hw, dtype=np.float32)
                 )
-            for i in range(num_output_channels):
-                driz_ch = Drizzle(
-                    out_img=output_images_batch[i],
-                    out_wht=output_weights_batch[i],
-                    out_shape=output_shape_target_hw,
-                    kernel=self.drizzle_kernel,
-                    fillval="0.0",
-                )
-                drizzlers_batch.append(driz_ch)
             self.update_progress(
-                f"   - Objets Drizzle initialisés pour lot #{batch_num}."
+                f"   - Accumulateurs initialisés pour lot #{batch_num}."
             )
         except Exception as init_err:
             self.update_progress(
@@ -11294,14 +11263,24 @@ class SeestarQueuedStacker:
 
                     def _add_final_channel(ch_idx: int):
                         channel_data_2d_clean = input_data_HxWxC_cleaned[..., ch_idx]
-                        drizzlers_batch[ch_idx].add_image(
-                            data=channel_data_2d_clean,
-                            pixmap=pixmap_for_this_file,
-                            exptime=base_exptime,
-                            pixfrac=self.drizzle_pixfrac,
-                            in_units="counts",
-                            weight_map=effective_weight_map,
+                        weighted_input = channel_data_2d_clean * effective_weight_map
+                        kwargs = {}
+                        if _HAS_DRIZZLE_PARAM:
+                            kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
+                        arr, _ = reproject_exact(
+                            (weighted_input, wcs_input_from_file_header),
+                            output_wcs_target,
+                            shape_out=output_shape_target_hw,
+                            **kwargs,
                         )
+                        wht_r, _ = reproject_exact(
+                            (effective_weight_map, wcs_input_from_file_header),
+                            output_wcs_target,
+                            shape_out=output_shape_target_hw,
+                            **kwargs,
+                        )
+                        output_images_batch[ch_idx] += arr
+                        output_weights_batch[ch_idx] += wht_r
 
                     max_workers = min(getattr(self, "num_threads", os.cpu_count() or 1), num_output_channels)
                     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -11345,7 +11324,7 @@ class SeestarQueuedStacker:
                 f"   - Erreur: Aucun fichier du lot Drizzle #{batch_num} n'a pu être traité (processed_in_batch_count est 0).",
                 "ERROR",
             )
-            del drizzlers_batch, output_images_batch, output_weights_batch
+            del output_images_batch, output_weights_batch
             gc.collect()
             return None, []
 
@@ -11415,7 +11394,7 @@ class SeestarQueuedStacker:
             )
             logger.debug(f"ERREUR QM [P&SDB_Save]: Échec sauvegarde SCI: {e_save_sci}")
             traceback.print_exc(limit=1)
-            del drizzlers_batch, output_images_batch, output_weights_batch
+            del output_images_batch, output_weights_batch
             gc.collect()
             return None, []
 
@@ -11491,14 +11470,14 @@ class SeestarQueuedStacker:
                             os.remove(wht_f_clean)
                         except Exception:
                             pass
-                del drizzlers_batch, output_images_batch, output_weights_batch
+                del output_images_batch, output_weights_batch
                 gc.collect()
                 return None, []
 
         self.update_progress(
             f"   -> Sauvegarde lot Drizzle #{batch_num} terminée ({time.time() - batch_start_time:.2f}s)."
         )
-        del drizzlers_batch, output_images_batch, output_weights_batch
+        del output_images_batch, output_weights_batch
         gc.collect()
         return out_filepath_sci, out_filepaths_wht
 
