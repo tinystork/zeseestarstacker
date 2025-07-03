@@ -516,6 +516,13 @@ class SeestarQueuedStacker:
         if hasattr(self, "update_progress"):
             self.update_progress(f"Threads limited to {nthreads}")
 
+    def request_thread_fraction_update(self, fraction: float) -> None:
+        """Request a change of thread fraction to be applied by the worker."""
+        try:
+            self._pending_thread_fraction = float(fraction)
+        except Exception:
+            self._pending_thread_fraction = None
+
     def _get_indices(self, shape_hw: tuple[int, int], flat: bool = False):
         """Return cached np.indices for ``shape_hw``.
 
@@ -639,6 +646,8 @@ class SeestarQueuedStacker:
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
+        # Pending thread fraction change requested by autotuner
+        self._pending_thread_fraction: float | None = None
         self.max_reproj_workers = _suggest_pool_size(0.5)
         self.max_stack_workers = _suggest_pool_size(0.75)
         if batch_size is None:
@@ -3226,6 +3235,11 @@ class SeestarQueuedStacker:
             # self.update_progress("DEBUG WORKER: ENTRÉE IMMINENTE DANS LA BOUCLE while not self.stop_processing...") # Peut être un peu verbeux
 
             while not self.stop_processing:
+                if self._pending_thread_fraction is not None:
+                    frac = self._pending_thread_fraction
+                    self._pending_thread_fraction = None
+                    self._configure_global_threads(frac)
+
                 iteration_count += 1
 
                 logger.debug(
