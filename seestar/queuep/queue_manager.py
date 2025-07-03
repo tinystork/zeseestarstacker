@@ -80,11 +80,15 @@ from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
     reproject_and_combine,
 )
-from reproject import reproject_exact
+from reproject import reproject_exact as _reproject_exact
+try:
+    from seestar.enhancement.reproject_utils import reproject_exact_mp
+except Exception:
+    reproject_exact_mp = _reproject_exact
 import inspect
 
 
-_HAS_DRIZZLE_PARAM = "drizzle" in inspect.signature(reproject_exact).parameters
+_HAS_DRIZZLE_PARAM = "drizzle" in inspect.signature(_reproject_exact).parameters
 
 from ..core.normalization import (
     _normalize_images_linear_fit,
@@ -6562,13 +6566,13 @@ class SeestarQueuedStacker:
                     kwargs = {}
                     if _HAS_DRIZZLE_PARAM:
                         kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                    arr, _ = reproject_exact(
+                    arr, _ = reproject_exact_mp(
                         (weighted_input, wcs_for_pixmap),
                         self.drizzle_output_wcs,
                         shape_out=self.drizzle_output_shape_hw,
                         **kwargs,
                     )
-                    wht_reproj, _ = reproject_exact(
+                    wht_reproj, _ = reproject_exact_mp(
                         (weight_map_param_for_add, wcs_for_pixmap),
                         self.drizzle_output_wcs,
                         shape_out=self.drizzle_output_shape_hw,
@@ -8216,13 +8220,13 @@ class SeestarQueuedStacker:
                         kwargs = {}
                         if _HAS_DRIZZLE_PARAM:
                             kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                        arr, _ = reproject_exact(
+                        arr, _ = reproject_exact_mp(
                             (weighted_input, wcs_lot_intermediaire),
                             output_wcs_final_target,
                             shape_out=output_shape_final_target_hw,
                             **kwargs,
                         )
-                        wht_reproj, _ = reproject_exact(
+                        wht_reproj, _ = reproject_exact_mp(
                             (data_ch_wht_2d_lot, wcs_lot_intermediaire),
                             output_wcs_final_target,
                             shape_out=output_shape_final_target_hw,
@@ -11276,13 +11280,13 @@ class SeestarQueuedStacker:
                         kwargs = {}
                         if _HAS_DRIZZLE_PARAM:
                             kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                        arr, _ = reproject_exact(
+                        arr, _ = reproject_exact_mp(
                             (weighted_input, wcs_input_from_file_header),
                             output_wcs_target,
                             shape_out=output_shape_target_hw,
                             **kwargs,
                         )
-                        wht_r, _ = reproject_exact(
+                        wht_r, _ = reproject_exact_mp(
                             (effective_weight_map, wcs_input_from_file_header),
                             output_wcs_target,
                             shape_out=output_shape_target_hw,
