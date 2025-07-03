@@ -640,6 +640,28 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
+    def _start_drizzle_thread(
+        self,
+        batch_temp_filepaths_list,
+        current_batch_num=0,
+        total_batches_est=0,
+    ):
+        """Launch incremental drizzle processing in a background thread."""
+
+        t = threading.Thread(
+            target=self._process_incremental_drizzle_batch,
+            args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
+            daemon=True,
+        )
+        self.drizzle_threads.append(t)
+        t.start()
+
+    def _wait_drizzle_threads(self):
+        """Wait for all background drizzle threads to finish."""
+        for t in self.drizzle_threads:
+            t.join()
+        self.drizzle_threads = []
+
     # ------------------------------------------------------------------
     # Parallel reprojection of a list of FITS files
     # ------------------------------------------------------------------
@@ -703,6 +725,8 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
+        # Keep track of background drizzle threads
+        self.drizzle_threads = []
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -3594,13 +3618,11 @@ class SeestarQueuedStacker:
                                     self._send_eta_update()
                                     if self.drizzle_active_session:
                                         if self.drizzle_mode == "Incremental":
-                                            with ThreadPoolExecutor(max_workers=1) as driz_exec:
-                                                driz_exec.submit(
-                                                    self._process_incremental_drizzle_batch,
-                                                    current_batch_items_with_masks_for_stack_batch,
-                                                    self.stacked_batches_count,
-                                                    self.total_batches_estimated,
-                                                ).result()
+                                            self._start_drizzle_thread(
+                                                current_batch_items_with_masks_for_stack_batch,
+                                                self.stacked_batches_count,
+                                                self.total_batches_estimated,
+                                            )
                                         elif self.drizzle_mode == "Final":
                                             with ThreadPoolExecutor(max_workers=1) as driz_exec:
                                                 (
@@ -6738,7 +6760,11 @@ class SeestarQueuedStacker:
                     sci_accum = driz_obj.out_img.astype(np.float32)
                     wht_accum = driz_obj.out_wht.astype(np.float32)
 
-                    preview_channel_data = drizzle_finalize(sci_accum, wht_accum)
+                    preview_channel_data = drizzle_finalize(
+                        sci_accum,
+                        wht_accum,
+                        use_gpu=getattr(self, "use_gpu", False),
+                    )
 
                     avg_img_channels_preview.append(
                         np.nan_to_num(preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0)
@@ -8883,6 +8909,9 @@ class SeestarQueuedStacker:
             f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}"
         )
 
+        # Ensure all background drizzle threads have completed before finalising
+        getattr(self, "_wait_drizzle_threads", lambda: None)()
+
         save_as_float32_setting = getattr(self, "save_final_as_float32", False)
         preserve_linear_output_setting = getattr(self, "preserve_linear_output", False)
         # Retro-compatibilité : certaines versions utilisaient le nom
@@ -9059,7 +9088,13 @@ class SeestarQueuedStacker:
                     sci_ch = sci_arrays_hw_list[c].astype(np.float32)
                     wht_ch = np.maximum(wht_arrays_hw_list[c].astype(np.float32), 0.0)
                     processed_wht_channels_list_for_mean.append(wht_ch)
-                    avg_img_channels_list.append(drizzle_finalize(sci_ch, wht_ch))
+                    avg_img_channels_list.append(
+                        drizzle_finalize(
+                            sci_ch,
+                            wht_ch,
+                            use_gpu=getattr(self, "use_gpu", False),
+                        )
+                    )
                 final_image_initial_raw = np.stack(avg_img_channels_list, axis=-1)
                 final_wht_map_for_postproc = np.mean(
                     np.stack(processed_wht_channels_list_for_mean, axis=-1), axis=2
@@ -9113,7 +9148,9 @@ class SeestarQueuedStacker:
                     wht_for_div = wht_data_clipped_positive[:, :, np.newaxis]
 
                 final_image_initial_raw = drizzle_finalize(
-                    sci_data_float64, wht_for_div
+                    sci_data_float64,
+                    wht_for_div,
+                    use_gpu=getattr(self, "use_gpu", False),
                 )
                 self._close_memmaps()
                 self.update_progress(
