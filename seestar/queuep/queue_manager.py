@@ -93,6 +93,10 @@ from ..enhancement.stack_enhancement import apply_edge_crop
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
+from time import monotonic as _mono
+_QM_LAST_GUI_PUSH = 0.0           # horodatage du dernier push
+_QM_DEBOUNCE = 0.20               # secondes mini entre deux messages GUI
+
 # ----------------------------------------------------------------------
 # Pool size helper for CPU reprojection
 # ----------------------------------------------------------------------
@@ -1384,18 +1388,32 @@ class SeestarQueuedStacker:
 
     ########################################################################################################################################################
 
-    def update_progress(self, message, progress=None):
+    def update_progress(self, message: str, progress: float | None = None):
+        """Filtre + relaie les messages de progression vers le callback GUI."""
+        global _QM_LAST_GUI_PUSH
         message = str(message)
+
+        # 2.a throttle : si le dernier envoi < _QM_DEBOUNCE sec → on ignore
+        now = _mono()
+        if now - _QM_LAST_GUI_PUSH < _QM_DEBOUNCE:
+            # … sauf si c’est une véritable valeur de pourcentage
+            if progress is None:
+                return
+        _QM_LAST_GUI_PUSH = now
+
+        # 2.b envoi protégé
         if self.progress_callback:
             try:
                 self.progress_callback(message, progress)
+                return
             except Exception as e:
                 logger.debug(f"Error in progress callback: {e}")
+
+        # 2.c fallback console
+        if progress is not None:
+            logger.debug(f"[{int(progress)}%] {message}")
         else:
-            if progress is not None:
-                logger.debug(f"[{int(progress)}%] {message}")
-            else:
-                logger.debug(message)
+            logger.debug(message)
 
     def _send_eta_update(self):
         """Compute and send remaining time estimation to the GUI."""
@@ -6105,10 +6123,13 @@ class SeestarQueuedStacker:
                 break
 
             current_filename_for_log = os.path.basename(temp_fits_filepath)
-            self.update_progress(
-                f"   -> DrizIncrVrai: Ajout fichier {i_file+1}/{num_files_in_batch} ('{current_filename_for_log}') au Drizzle cumulatif...",
-                None,
-            )
+            if i_file % 5:  # n'envoyer qu'un message sur 5
+                pass
+            else:
+                self.update_progress(
+                    f"   -> DrizIncrVrai: Ajout fichier {i_file+1}/{num_files_in_batch} ('{current_filename_for_log}') au Drizzle cumulatif...",
+                    None,
+                )
             logger.debug(
                 f"\n    === TRAITEMENT FICHIER: '{current_filename_for_log}' (Fichier {i_file+1}/{num_files_in_batch}) ==="
             )
