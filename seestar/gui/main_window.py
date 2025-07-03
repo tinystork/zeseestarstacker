@@ -231,6 +231,7 @@ class SeestarStackerGUI:
             self.logger.error(f"Error loading or setting window icon: {e}")
 
         self.astrometry_api_key_var = tk.StringVar()
+        self.last_stack_path = tk.StringVar()
         self.localization = Localization("en")
         self.settings = SettingsManager()
         try:
@@ -343,6 +344,7 @@ class SeestarStackerGUI:
 
         self.file_handler = FileHandlingManager(self)
         self.create_layout()
+        self.last_stack_path.trace_add("write", self._on_last_stack_changed)
         self.init_managers()
         self.logger.info("DEBUG (GUI __init__): Layout créé, managers initialisés.")
 

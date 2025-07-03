@@ -10927,6 +10927,12 @@ class SeestarQueuedStacker:
                 self.output_folder, "drizzle_temp_inputs"
             )
         # Vérifier si le dossier est défini et existe
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        if self.drizzle_temp_dir and os.path.abspath(self.drizzle_temp_dir).startswith(
+            os.path.abspath(memmap_dir)
+        ):
+            self.update_progress("⚠️ Nettoyage Drizzle ignoré (dossier memmap)")
+            return
         if self.drizzle_temp_dir and os.path.isdir(self.drizzle_temp_dir):
             memmap_dir = os.path.join(self.output_folder or "", "memmap_accumulators")
             abs_temp = os.path.abspath(self.drizzle_temp_dir)
