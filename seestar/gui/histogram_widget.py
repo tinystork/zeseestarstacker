@@ -99,34 +99,14 @@ class HistogramWidget(ttk.Frame):
         if self._hist_future and not self._hist_future.done():
             self._hist_future.cancel()
 
-        self._hist_future = _HIST_EXECUTOR.submit(self._compute_histogram, small)
+        self._hist_future = _HIST_EXECUTOR.submit(self._calculate_hist_data, small)
         self._hist_future.add_done_callback(
             lambda fut: self.after(0, self._apply_histogram, fut)
         )
 
-    @staticmethod
-    def _compute_histogram(img):
-        """Exécuté dans le worker : renvoie (counts_list, edges, is_color)."""
-        if img is None:
-            return None
-        import numpy as np
-        num_bins = 256
-        if img.ndim == 3 and img.shape[2] == 3:  # RGB
-            cols = []
-            for ch in range(3):
-                h, _ = np.histogram(
-                    np.clip(img[..., ch].ravel(), 0, 1),
-                    bins=num_bins,
-                    range=(0, 1),
-                )
-                cols.append(h)
-            edges = np.linspace(0, 1, num_bins + 1, dtype=np.float32)
-            return cols, edges, True
-        else:  # Mono
-            h, edges = np.histogram(
-                np.clip(img.ravel(), 0, 1), bins=num_bins, range=(0, 1)
-            )
-            return [h], edges, False
+    def _compute_histogram(self, img):
+        """Worker thread: compute histogram details using _calculate_hist_data."""
+        return self._calculate_hist_data(img)
 
     def _apply_histogram(self, fut):
         """Thread GUI : reçoit le résultat, trace sans recalculer les bins."""
@@ -136,28 +116,8 @@ class HistogramWidget(ttk.Frame):
         if res is None:
             self.plot_histogram(None)
             return
-        counts_list, edges, is_color = res
-        colors = ['#FF4444', '#44FF44', '#4466FF'] if is_color else ['lightgray']
-        bin_centers = (edges[:-1] + edges[1:]) / 2
-        self._configure_plot_style()
-        for i, counts in enumerate(counts_list):
-            self.ax.plot(
-                bin_centers,
-                counts,
-                color=colors[i],
-                alpha=0.8,
-                drawstyle='steps-mid',
-            )
-        self.ax.set_xlim(0, 1)
-        if counts_list:
-            ymax = max(int(c.max()) for c in counts_list) or 1
-            self.ax.set_ylim(0, ymax * 1.05)
-        self.canvas.draw_idle()
-        self._current_hist_data_details = {
-            'bins': edges,
-            'hists': [np.array(c) for c in counts_list],
-            'colors': colors,
-        }
+        self._current_hist_data_details = res
+        self.plot_histogram(res)
 
 
 

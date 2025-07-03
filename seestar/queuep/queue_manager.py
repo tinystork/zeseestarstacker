@@ -774,8 +774,10 @@ class SeestarQueuedStacker:
 
         self.current_batch_data = []
         self.current_stack_header = None
+        self.current_stack_data_raw = None
         self.images_in_cumulative_stack = 0
         self.cumulative_drizzle_data = None
+        self.cumulative_drizzle_data_raw = None
         self.total_exposure_seconds = 0.0
         self.intermediate_drizzle_batch_files = []
 
@@ -1438,7 +1440,10 @@ class SeestarQueuedStacker:
         if self.preview_callback is None or self.current_stack_data is None:
             return
         try:
-            data_copy = self.current_stack_data.copy()
+            data_copy = (
+                self.current_stack_data.copy(),
+                self.current_stack_data_raw.copy() if self.current_stack_data_raw is not None else self.current_stack_data.copy(),
+            )
             header_copy = (
                 self.current_stack_header.copy() if self.current_stack_header else None
             )
@@ -1821,7 +1826,10 @@ class SeestarQueuedStacker:
 
         try:
             # Utiliser les données et le header cumulatifs Drizzle
-            data_to_send = self.cumulative_drizzle_data.copy()
+            data_to_send = (
+                self.cumulative_drizzle_data.copy(),
+                self.cumulative_drizzle_data_raw.copy() if self.cumulative_drizzle_data_raw is not None else self.cumulative_drizzle_data.copy(),
+            )
             header_to_send = (
                 self.current_stack_header.copy()
                 if self.current_stack_header
@@ -1898,6 +1906,7 @@ class SeestarQueuedStacker:
             else:
                 norm = np.zeros_like(avg_cropped, dtype=np.float32)
 
+            self.current_stack_data_raw = avg_cropped.astype(np.float32)
             self.current_stack_data = np.clip(norm, 0.0, 1.0).astype(np.float32)
             self.current_stack_header = self.current_stack_header or fits.Header()
             self._update_preview()
@@ -6724,7 +6733,9 @@ class SeestarQueuedStacker:
 
                 # Stocker l'image de prévisualisation (potentiellement pour usage UI)
                 self.current_stack_data = preview_data_HWC_final
+                self.current_stack_data_raw = preview_data_HWC_raw.astype(np.float32)
                 self.cumulative_drizzle_data = preview_data_HWC_final  # Pour l'aperçu
+                self.cumulative_drizzle_data_raw = preview_data_HWC_raw.astype(np.float32)
                 self._update_preview_incremental_drizzle()  # Appelle le callback GUI
                 logger.debug(
                     f"    DEBUG QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
