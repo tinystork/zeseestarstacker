@@ -674,14 +674,25 @@ class SeestarQueuedStacker:
             ctx = multiprocessing.get_context("fork")
         except ValueError:
             ctx = multiprocessing.get_context("spawn")
-        p = ctx.Process(
-            target=self._process_incremental_drizzle_batch,
-            args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
-            daemon=True,
-            name="DrizzleProcess",
-        )
-        self.drizzle_processes.append(p)
-        p.start()
+        # Avoid pickling GUI objects (e.g. Tkinter widgets) when spawning the
+        # new process. ``progress_callback`` may hold references to such
+        # objects, which are not serializable under the ``spawn`` start method
+        # used on Windows. Temporarily clear it during process creation so the
+        # QueueManager instance can be pickled safely.
+        progress_cb = self.progress_callback
+        self.progress_callback = None
+        try:
+            p = ctx.Process(
+                target=self._process_incremental_drizzle_batch,
+                args=(batch_temp_filepaths_list, current_batch_num, total_batches_est),
+                daemon=True,
+                name="DrizzleProcess",
+            )
+            self.drizzle_processes.append(p)
+            p.start()
+        finally:
+            # Restore callback for the rest of the session
+            self.progress_callback = progress_cb
 
     def _wait_drizzle_processes(self):
         """Wait for all background drizzle processes to finish."""
