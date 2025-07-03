@@ -559,12 +559,24 @@ class SeestarQueuedStacker:
             "queue",
             "folders_lock",
             "processing_thread",
+            "gui",
 
             "autotuner",
             "drizzle_processes",
 
         ):
             state[attr] = None
+
+        # Remove any tkinter objects that may have been stored dynamically
+        try:
+            import tkinter
+        except Exception:
+            tkinter = None
+        if tkinter is not None:
+            for k, v in list(state.items()):
+                if v is not None and type(v).__module__.startswith("tkinter"):
+                    state[k] = None
+
         return state
 
     def __setstate__(self, state):
