@@ -6595,6 +6595,7 @@ class SeestarQueuedStacker:
                     # ``reproject_exact`` can return tiny negative values
                     # for very high resolution images. Clip to avoid
                     # decreasing the accumulated weight sum.
+
                     arr = np.clip(
                         np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0),
                         0.0,
@@ -6605,6 +6606,7 @@ class SeestarQueuedStacker:
                         0.0,
                         None,
                     )
+
                     sci_arr += arr
                     wht_arr += wht_reproj
                     self.incremental_drizzle_sci_arrays[ch_idx] = sci_arr
