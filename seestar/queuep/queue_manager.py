@@ -80,6 +80,10 @@ from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
     reproject_and_combine,
 )
+from reproject import reproject_exact
+import inspect
+
+_REPROJECT_HAS_DRIZZLE = "drizzle" in inspect.signature(reproject_exact).parameters
 from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
@@ -6562,33 +6566,40 @@ class SeestarQueuedStacker:
                 def _add_one_channel(ch_idx: int):
                     channel_data_2d = image_hwc_cleaned[..., ch_idx]
 
-                    logger.debug(
-                        f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], mean={np.mean(channel_data_2d):.3g}"
-                    )
-                    logger.debug(
-                        f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}"
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Ch%d CALLING add_image - data range %.3g-%.3g, exptime=%.2f, pixfrac=%.2f, input_shape_hw=%s",
-                        ch_idx,
-                        np.min(channel_data_2d),
-                        np.max(channel_data_2d),
-                        exptime_for_drizzle_add,
-                        self.drizzle_pixfrac,
-                        input_shape_hw_current_file,
-                    )
-
                     driz_obj = self.incremental_drizzle_objects[ch_idx]
                     wht_before = float(np.sum(driz_obj.out_wht))
                     sci_before = float(np.sum(driz_obj.out_img))
-                    nskip, nmiss = driz_obj.add_image(
-                        data=channel_data_2d,
-                        pixmap=pixmap_for_this_file,
-                        exptime=exptime_for_drizzle_add,
-                        in_units=in_units_for_drizzle_add,
-                        pixfrac=self.drizzle_pixfrac,
-                        weight_map=weight_map_param_for_add,
-                    )
+
+                    if _REPROJECT_HAS_DRIZZLE:
+                        weighted_input = channel_data_2d * weight_map_param_for_add
+                        arr, _ = reproject_exact(
+                            (weighted_input, wcs_for_pixmap),
+                            self.drizzle_output_wcs,
+                            shape_out=self.drizzle_output_shape_hw,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                        )
+                        wht_reproj, _ = reproject_exact(
+                            (weight_map_param_for_add, wcs_for_pixmap),
+                            self.drizzle_output_wcs,
+                            shape_out=self.drizzle_output_shape_hw,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                        )
+                        driz_obj.out_img += arr
+                        driz_obj.out_wht += wht_reproj
+                        nskip = nmiss = 0
+                    else:
+                        nskip, nmiss = driz_obj.add_image(
+                            data=channel_data_2d,
+                            pixmap=pixmap_for_this_file,
+                            exptime=exptime_for_drizzle_add,
+                            in_units=in_units_for_drizzle_add,
+                            pixfrac=self.drizzle_pixfrac,
+                            weight_map=weight_map_param_for_add,
+                        )
                     wht_after = float(np.sum(driz_obj.out_wht))
                     sci_after = float(np.sum(driz_obj.out_img))
                     return ch_idx, nskip, nmiss, wht_before, wht_after, sci_before, sci_after
@@ -8076,9 +8087,9 @@ class SeestarQueuedStacker:
             return None, None
 
         num_output_channels = 3
-        final_drizzlers = []
         final_output_images_list = []  # Liste des arrays SCI (H,W) par canal
         final_output_weights_list = []  # Liste des arrays WHT (H,W) par canal
+        final_drizzlers = []
 
         try:
             self.update_progress(
@@ -8091,21 +8102,23 @@ class SeestarQueuedStacker:
                 final_output_weights_list.append(
                     np.zeros(output_shape_final_target_hw, dtype=np.float32)
                 )
-
-            for i in range(num_output_channels):
-                driz_ch = Drizzle(
-                    kernel=self.drizzle_kernel,
-                    fillval=str(
-                        getattr(self, "drizzle_fillval", "0.0")
-                    ),  # Utiliser l'attribut si existe
-                    out_img=final_output_images_list[i],
-                    out_wht=final_output_weights_list[i],
-                    out_shape=output_shape_final_target_hw,
+            if not _REPROJECT_HAS_DRIZZLE:
+                for i in range(num_output_channels):
+                    driz_ch = Drizzle(
+                        kernel=self.drizzle_kernel,
+                        fillval=str(getattr(self, "drizzle_fillval", "0.0")),
+                        out_img=final_output_images_list[i],
+                        out_wht=final_output_weights_list[i],
+                        out_shape=output_shape_final_target_hw,
+                    )
+                    final_drizzlers.append(driz_ch)
+                self.update_progress(
+                    f"   [CombineBatches V4] Objets Drizzle finaux initialisés."
                 )
-                final_drizzlers.append(driz_ch)
-            self.update_progress(
-                f"   [CombineBatches V4] Objets Drizzle finaux initialisés."
-            )
+            else:
+                self.update_progress(
+                    f"   [CombineBatches V4] Accumulateurs finaux initialisés."
+                )
         except Exception as init_err:
             self.update_progress(
                 f"   [CombineBatches V4] ERREUR: Échec init Drizzle final: {init_err}",
@@ -8228,19 +8241,40 @@ class SeestarQueuedStacker:
                             sci_data_cxhxw_lot[ch_idx_add, :, :]
                         )
                         data_ch_wht_2d_lot = wht_maps_2d_list_for_lot[ch_idx_add]
-                        # --- DEBUG DRIZZLE FINAL 1: Log avant add_image ---
                         logger.debug(
                             f"      Ch{ch_idx_add} add_image: data SCI min/max [{np.min(data_ch_sci_2d_lot):.3g}, {np.max(data_ch_sci_2d_lot):.3g}], data WHT min/max [{np.min(data_ch_wht_2d_lot):.3g}, {np.max(data_ch_wht_2d_lot):.3g}], pixfrac={self.drizzle_pixfrac}"
                         )
-                        # --- FIN DEBUG ---
-                        final_drizzlers[ch_idx_add].add_image(
-                            data=data_ch_sci_2d_lot,
-                            pixmap=pixmap_batch_to_final_grid,
-                            weight_map=data_ch_wht_2d_lot,
-                            exptime=1.0,  # Les lots sont déjà en counts/sec
-                            pixfrac=self.drizzle_pixfrac,
-                            in_units="cps",  # Confirmé par BUNIT='Counts/s' dans les fichiers de lot
-                        )
+
+                        if _REPROJECT_HAS_DRIZZLE:
+                            weighted_input = data_ch_sci_2d_lot * data_ch_wht_2d_lot
+                            arr, _ = reproject_exact(
+                                (weighted_input, wcs_lot_intermediaire),
+                                output_wcs_final_target,
+                                shape_out=output_shape_final_target_hw,
+                                drizzle=True,
+                                pixfrac=self.drizzle_pixfrac,
+                                kernel=self.drizzle_kernel,
+                            )
+                            wht_reproj, _ = reproject_exact(
+                                (data_ch_wht_2d_lot, wcs_lot_intermediaire),
+                                output_wcs_final_target,
+                                shape_out=output_shape_final_target_hw,
+                                drizzle=True,
+                                pixfrac=self.drizzle_pixfrac,
+                                kernel=self.drizzle_kernel,
+                            )
+                            final_output_images_list[ch_idx_add] += arr
+                            final_output_weights_list[ch_idx_add] += wht_reproj
+                        else:
+                            final_drizzlers[ch_idx_add].add_image(
+                                data=data_ch_sci_2d_lot,
+                                pixmap=pixmap_batch_to_final_grid,
+                                weight_map=data_ch_wht_2d_lot,
+                                exptime=1.0,
+                                pixfrac=self.drizzle_pixfrac,
+                                in_units="cps",
+                            )
+
                     batches_successfully_added_to_final_drizzle += 1
                     total_contributing_ninputs_for_final_header += ninputs_this_batch
 
@@ -8355,7 +8389,9 @@ class SeestarQueuedStacker:
             final_sci_image_HWC = None
             final_wht_map_HWC = None
         finally:
-            del final_drizzlers, final_output_images_list, final_output_weights_list
+            if not _REPROJECT_HAS_DRIZZLE:
+                del final_drizzlers
+            del final_output_images_list, final_output_weights_list
             gc.collect()
 
         logger.debug("=" * 70 + "\n")
