@@ -599,7 +599,7 @@ class SeestarQueuedStacker:
             _reproject_worker,
             ref_wcs_header=self.ref_wcs_header,
             shape_out=self.reference_shape,
-            use_gpu=self.use_gpu,
+            use_gpu=getattr(self, "use_gpu", False),
         )
 
         for fits_path in batch_fits_list:
@@ -646,8 +646,8 @@ class SeestarQueuedStacker:
         self._configure_global_threads(thread_fraction)
         self.autotuner = CpuIoAutoTuner(self) if autotune else None
         self.io_profile = io_profile
-        self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
-        self.use_gpu = bool(gpu)
+        # GPU is enabled only if requested and a CUDA device is available
+        self.use_gpu = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -916,7 +916,7 @@ class SeestarQueuedStacker:
                 "  -> Instanciation SeestarAligner (pour alignement général astroalign)..."
             )
             self.aligner = SeestarAligner()
-            self.aligner.use_cuda = self.use_cuda
+            self.aligner.use_cuda = self.use_gpu
             logger.debug("     ✓ SeestarAligner (astroalign) OK.")
         except Exception as e_align:
             logger.debug(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
@@ -5282,6 +5282,32 @@ class SeestarQueuedStacker:
 
         return batch_image.astype(np.float32), batch_wht.astype(np.float32)
 
+    def _reproject_worker(
+        self,
+        data: np.ndarray,
+        input_wcs: WCS,
+        target_wcs: WCS,
+        shape_out: tuple[int, int],
+        drizzle: bool = False,
+        pixfrac: float = 1.0,
+        kernel: str = "square",
+        use_gpu: bool = False,
+    ):
+        """Wrapper around ``reproject_exact`` used for Drizzle operations."""
+
+        kwargs = {}
+        if _HAS_DRIZZLE_PARAM:
+            kwargs = {"drizzle": drizzle, "pixfrac": pixfrac, "kernel": kernel}
+
+        arr, fp = reproject_exact_mp(
+            (data, input_wcs),
+            target_wcs,
+            shape_out=shape_out,
+            **kwargs,
+        )
+
+        return arr.astype(np.float32), fp.astype(np.float32)
+
     ############################################################################################################################
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
@@ -6174,6 +6200,19 @@ class SeestarQueuedStacker:
         num_output_channels = 3
         files_added_to_drizzle_this_batch = 0
 
+        reproject_fn = getattr(self, "_reproject_worker", None)
+        if reproject_fn is None:
+            def reproject_fn(data, wcs, target_wcs, shape_out, drizzle=False, pixfrac=1.0, kernel="square", use_gpu=False):
+                kwargs = {}
+                if _HAS_DRIZZLE_PARAM:
+                    kwargs = {"drizzle": drizzle, "pixfrac": pixfrac, "kernel": kernel}
+                return reproject_exact_mp(
+                    (data, wcs),
+                    target_wcs,
+                    shape_out=shape_out,
+                    **kwargs,
+                )
+
         for i_file, temp_fits_filepath in enumerate(batch_temp_filepaths_list):
             t0 = monotonic()
             if self.stop_processing:
@@ -6578,31 +6617,25 @@ class SeestarQueuedStacker:
                     sci_before = float(np.sum(sci_arr))
 
                     weighted_input = channel_data_2d * weight_map_param_for_add
-                    kwargs = {}
-                    if _HAS_DRIZZLE_PARAM:
-                        kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                    kwargs_adaptive = {}
-                    sig_adapt = inspect.signature(reproject_adaptive)
-                    if "drizzle" in sig_adapt.parameters:
-                        kwargs_adaptive["drizzle"] = True
-                    if "max_err" in sig_adapt.parameters:
-                        kwargs_adaptive["max_err"] = 0.01
-                    if (
-                        "kernel" in sig_adapt.parameters
-                        and str(self.drizzle_kernel).lower() in {"hann", "gaussian"}
-                    ):
-                        kwargs_adaptive["kernel"] = self.drizzle_kernel
-                    arr, _ = reproject_adaptive(
-                        (weighted_input, wcs_for_pixmap),
-                        self.drizzle_output_wcs,
+                    arr, _ = reproject_fn(
+                        weighted_input,
+                        wcs_for_pixmap,
+                        target_wcs=self.drizzle_output_wcs,
                         shape_out=self.drizzle_output_shape_hw,
-                        **kwargs_adaptive,
+                        drizzle=True,
+                        pixfrac=self.drizzle_pixfrac,
+                        kernel=self.drizzle_kernel,
+                        use_gpu=getattr(self, "use_gpu", False),
                     )
-                    wht_reproj, _ = reproject_exact_mp(
-                        (weight_map_param_for_add, wcs_for_pixmap),
-                        self.drizzle_output_wcs,
+                    wht_reproj, _ = reproject_fn(
+                        weight_map_param_for_add,
+                        wcs_for_pixmap,
+                        target_wcs=self.drizzle_output_wcs,
                         shape_out=self.drizzle_output_shape_hw,
-                        **kwargs,
+                        drizzle=True,
+                        pixfrac=self.drizzle_pixfrac,
+                        kernel=self.drizzle_kernel,
+                        use_gpu=getattr(self, "use_gpu", False),
                     )
                     # ``reproject_exact`` can return tiny negative values
                     # for very high resolution images. Clip to avoid
@@ -8145,6 +8178,19 @@ class SeestarQueuedStacker:
         total_contributing_ninputs_for_final_header = 0
         batches_successfully_added_to_final_drizzle = 0
 
+        reproject_fn = getattr(self, "_reproject_worker", None)
+        if reproject_fn is None:
+            def reproject_fn(data, wcs, target_wcs, shape_out, drizzle=False, pixfrac=1.0, kernel="square", use_gpu=False):
+                kwargs = {}
+                if _HAS_DRIZZLE_PARAM:
+                    kwargs = {"drizzle": drizzle, "pixfrac": pixfrac, "kernel": kernel}
+                return reproject_exact_mp(
+                    (data, wcs),
+                    target_wcs,
+                    shape_out=shape_out,
+                    **kwargs,
+                )
+
         for i_batch_loop, (sci_fpath, wht_fpaths_list_for_batch) in enumerate(
             intermediate_files_list
         ):
@@ -8258,31 +8304,25 @@ class SeestarQueuedStacker:
                         )
 
                         weighted_input = data_ch_sci_2d_lot * data_ch_wht_2d_lot
-                        kwargs = {}
-                        if _HAS_DRIZZLE_PARAM:
-                            kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                        kwargs_adaptive = {}
-                        sig_adapt = inspect.signature(reproject_adaptive)
-                        if "drizzle" in sig_adapt.parameters:
-                            kwargs_adaptive["drizzle"] = True
-                        if "max_err" in sig_adapt.parameters:
-                            kwargs_adaptive["max_err"] = 0.01
-                        if (
-                            "kernel" in sig_adapt.parameters
-                            and str(self.drizzle_kernel).lower() in {"hann", "gaussian"}
-                        ):
-                            kwargs_adaptive["kernel"] = self.drizzle_kernel
-                        arr, _ = reproject_adaptive(
-                            (weighted_input, wcs_lot_intermediaire),
-                            output_wcs_final_target,
+                        arr, _ = reproject_fn(
+                            weighted_input,
+                            wcs_lot_intermediaire,
+                            target_wcs=output_wcs_final_target,
                             shape_out=output_shape_final_target_hw,
-                            **kwargs_adaptive,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                            use_gpu=getattr(self, "use_gpu", False),
                         )
-                        wht_reproj, _ = reproject_exact_mp(
-                            (data_ch_wht_2d_lot, wcs_lot_intermediaire),
-                            output_wcs_final_target,
+                        wht_reproj, _ = reproject_fn(
+                            data_ch_wht_2d_lot,
+                            wcs_lot_intermediaire,
+                            target_wcs=output_wcs_final_target,
                             shape_out=output_shape_final_target_hw,
-                            **kwargs,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                            use_gpu=getattr(self, "use_gpu", False),
                         )
                         final_output_images_list[ch_idx_add] += arr
                         final_output_weights_list[ch_idx_add] += wht_reproj
@@ -11162,6 +11202,18 @@ class SeestarQueuedStacker:
         channel_names = ["R", "G", "B"]
         output_images_batch = []
         output_weights_batch = []
+        reproject_fn = getattr(self, "_reproject_worker", None)
+        if reproject_fn is None:
+            def reproject_fn(data, wcs, target_wcs, shape_out, drizzle=False, pixfrac=1.0, kernel="square", use_gpu=False):
+                kwargs = {}
+                if _HAS_DRIZZLE_PARAM:
+                    kwargs = {"drizzle": drizzle, "pixfrac": pixfrac, "kernel": kernel}
+                return reproject_exact_mp(
+                    (data, wcs),
+                    target_wcs,
+                    shape_out=shape_out,
+                    **kwargs,
+                )
         try:
             logger.debug(
                 f"DEBUG QM [_process_and_save_drizzle_batch V_ProcessAndSaveDrizzleBatch_DrizzleInputFix_5_ForceADUAllChannels]: Initialisation Drizzle pour lot #{batch_num}. Shape Sortie CIBLE: {output_shape_target_hw}."
@@ -11329,20 +11381,25 @@ class SeestarQueuedStacker:
                     def _add_final_channel(ch_idx: int):
                         channel_data_2d_clean = input_data_HxWxC_cleaned[..., ch_idx]
                         weighted_input = channel_data_2d_clean * effective_weight_map
-                        kwargs = {}
-                        if _HAS_DRIZZLE_PARAM:
-                            kwargs = {"drizzle": True, "pixfrac": self.drizzle_pixfrac, "kernel": self.drizzle_kernel}
-                        arr, _ = reproject_exact_mp(
-                            (weighted_input, wcs_input_from_file_header),
-                            output_wcs_target,
+                        arr, _ = reproject_fn(
+                            weighted_input,
+                            wcs_input_from_file_header,
+                            target_wcs=output_wcs_target,
                             shape_out=output_shape_target_hw,
-                            **kwargs,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                            use_gpu=getattr(self, "use_gpu", False),
                         )
-                        wht_r, _ = reproject_exact_mp(
-                            (effective_weight_map, wcs_input_from_file_header),
-                            output_wcs_target,
+                        wht_r, _ = reproject_fn(
+                            effective_weight_map,
+                            wcs_input_from_file_header,
+                            target_wcs=output_wcs_target,
                             shape_out=output_shape_target_hw,
-                            **kwargs,
+                            drizzle=True,
+                            pixfrac=self.drizzle_pixfrac,
+                            kernel=self.drizzle_kernel,
+                            use_gpu=getattr(self, "use_gpu", False),
                         )
                         output_images_batch[ch_idx] += arr
                         output_weights_batch[ch_idx] += wht_r
