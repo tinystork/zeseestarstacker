@@ -701,11 +701,16 @@ class SeestarQueuedStacker:
         for p in self.drizzle_processes:
             if hasattr(p, "join"):
                 p.join()
-            elif hasattr(p, "result"):
+                result = None
+            else:
                 try:
-                    p.result()
+                    result = p.result()
                 except Exception:
-                    pass
+                    result = None
+            if result and isinstance(result, tuple) and len(result) == 2:
+                sci_path, wht_paths = result
+                if sci_path and wht_paths:
+                    self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
         self.drizzle_processes = []
 
     # ------------------------------------------------------------------
@@ -773,9 +778,14 @@ class SeestarQueuedStacker:
         self.use_gpu = bool(gpu)
         # Keep track of background drizzle processes
         self.drizzle_processes = []
-        # Dedicated thread pool for drizzle tasks
-        self.drizzle_executor = ThreadPoolExecutor(
-            max_workers=max(1, self.num_threads // 2)
+        # Dedicated pool for drizzle tasks.  We prefer processes when possible
+        # to avoid GIL contention since drizzle can be CPU intensive.  When the
+        # parent process is a daemon (which prevents forking new processes on
+        # some platforms) we fall back to a simple ThreadPoolExecutor.
+        parent_is_daemon = multiprocessing.current_process().daemon
+        Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
+        self.drizzle_executor = Executor(
+            max_workers=max(1, self.num_threads // 2),
         )
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
@@ -3681,15 +3691,7 @@ class SeestarQueuedStacker:
                                                 self.drizzle_output_shape_hw,
                                                 self.stacked_batches_count,
                                             )
-                                            batch_sci_p, batch_wht_p_list = fut.result()
-                                            if batch_sci_p and batch_wht_p_list:
-                                                self.intermediate_drizzle_batch_files.append(
-                                                    (batch_sci_p, batch_wht_p_list)
-                                                )
-                                            else:
-                                                self.failed_stack_count += len(
-                                                    current_batch_items_with_masks_for_stack_batch
-                                                )
+                                            self.drizzle_processes.append(fut)
                                     else:  # Stacking Classique SUM/W
                                         self._process_completed_batch(
                                             current_batch_items_with_masks_for_stack_batch,
