@@ -780,15 +780,18 @@ class SeestarQueuedStacker:
         self.use_gpu = bool(gpu)
         # Keep track of background drizzle processes
         self.drizzle_processes = []
-        # Dedicated pool for drizzle tasks. Heavy drizzle operations may block
-        # the Python GIL.  Using a process pool keeps the GUI responsive even on
-        # platforms that normally require the ``spawn`` start method.
+        # Dedicated pool for drizzle tasks.  On platforms that require the
+        # ``spawn`` start method (Windows/macOS) using a ``ProcessPoolExecutor``
+        # with bound instance methods would fail because ``self`` contains
+        # objects like ``threading.Lock`` that cannot be pickled.  To remain
+        # cross-platform we fall back to a ``ThreadPoolExecutor`` in those
+        # cases.  On Linux we can still leverage ``ProcessPoolExecutor`` when
+        # the parent process is not a daemon.
         parent_is_daemon = multiprocessing.current_process().daemon
         if platform.system() in {"Windows", "Darwin"}:
-            ctx = multiprocessing.get_context("spawn")
-            Executor = partial(ProcessPoolExecutor, mp_context=ctx)
+            Executor = ThreadPoolExecutor
         else:
-            Executor = ProcessPoolExecutor if not parent_is_daemon else ThreadPoolExecutor
+            Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
 
         self.drizzle_executor = Executor(
             max_workers=max(1, self.num_threads // 2),
