@@ -4,6 +4,16 @@ import numpy as np
 import logging
 from typing import Optional, Sequence, Tuple
 
+
+try:  # optional acceleration
+    import bottleneck as bn  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    bn = None
+
+NANMEAN = bn.nanmean if bn else np.nanmean
+NANSTD = bn.nanstd if bn else np.nanstd
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +53,7 @@ def _stack_kappa_sigma(images, weights=None, sigma_low=3.0, sigma_high=3.0):
         sum_d = np.nansum(arr_clip * w, axis=0)
         result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
     else:
-        result = np.nanmean(arr_clip, axis=0)
+        result = NANMEAN(arr_clip, axis=0)
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
     return result.astype(np.float32), rejected_pct
 
@@ -64,7 +74,7 @@ def _stack_linear_fit_clip(images, weights=None, sigma=3.0):
         sum_d = np.nansum(arr_clip * w, axis=0)
         result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
     else:
-        result = np.nanmean(arr_clip, axis=0)
+        result = NANMEAN(arr_clip, axis=0)
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
     return result.astype(np.float32), rejected_pct
 
@@ -73,11 +83,14 @@ def _stack_winsorized_sigma_iter(
     images: Sequence[np.ndarray],
     weights: Optional[np.ndarray],
     kappa: float = 3.0,
-    winsor_limits: tuple[float, float] = (0.05, 0.05),
+
+    winsor_limits: Tuple[float, float] = (0.05, 0.05),
     apply_rewinsor: bool = True,
     max_iters: int = 5,
     kappa_decay: float = 0.9,
-) -> tuple[np.ndarray, float]:
+    max_mem_bytes: int = 2_000_000_000,
+) -> Tuple[np.ndarray, float]:
+
     """Iterative Winsorized sigma clipping.
 
     Parameters
@@ -88,7 +101,9 @@ def _stack_winsorized_sigma_iter(
         Optional weight array of shape ``(N,)``.
     kappa : float, optional
         Sigma clipping threshold. Defaults to ``3.0``.
-    winsor_limits : tuple[float, float], optional
+
+    winsor_limits : Tuple[float, float], optional
+
         Fractional limits for Winsorization ``(low, high)``.
     apply_rewinsor : bool, optional
         Replace rejected pixels with their winsorized value if ``True``,
@@ -98,9 +113,13 @@ def _stack_winsorized_sigma_iter(
     kappa_decay : float, optional
         Multiplicative decay for ``kappa`` at each iteration.
 
+    max_mem_bytes : int, optional
+        Abort if stacking would exceed this memory usage.
+
     Returns
     -------
-    tuple[np.ndarray, float]
+    Tuple[np.ndarray, float]
+
         Stacked image and rejection percentage.
 
     Examples
@@ -124,7 +143,14 @@ def _stack_winsorized_sigma_iter(
 
     from scipy.stats.mstats import winsorize
 
-    arr = np.stack([im for im in images], axis=0).astype(np.float32)
+
+    shape = images[0].shape
+    exp_bytes = len(images) * np.prod(shape) * 4
+    if exp_bytes > max_mem_bytes:
+        raise MemoryError("Stack exceeds max_mem_bytes")
+
+    arr = np.stack([im.astype(np.float32, copy=False) for im in images], axis=0)
+
     mask = np.ones_like(arr, dtype=bool)
     kappa_iter = float(kappa)
 
@@ -132,8 +158,10 @@ def _stack_winsorized_sigma_iter(
         arr_masked = np.ma.array(arr, mask=~mask)
         arr_w = winsorize(arr_masked, limits=winsor_limits, axis=0)
         arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
-        mu_w = np.nanmean(arr_w_data, axis=0)
-        sigma_w = np.nanstd(arr_w_data, axis=0, ddof=1)
+
+        mu_w = NANMEAN(arr_w_data, axis=0)
+        sigma_w = NANSTD(arr_w_data, axis=0, ddof=1)
+
         low = mu_w - kappa_iter * sigma_w
         high = mu_w + kappa_iter * sigma_w
         new_mask = mask & (arr >= low) & (arr <= high)
@@ -167,9 +195,16 @@ def _stack_winsorized_sigma_iter(
         sum_w = np.nansum(w * mask, axis=0)
         sum_d = np.nansum(arr_nan * w, axis=0)
         with np.errstate(invalid="ignore", divide="ignore"):
-            result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
+
+            result = np.divide(
+                sum_d,
+                sum_w,
+                out=np.zeros_like(sum_d),
+                where=sum_w > 1e-6,
+            )
     else:
-        result = np.nanmean(arr_final, axis=0)
+        result = NANMEAN(arr_final, axis=0)
+
 
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
     logger.debug("WinsorSig done : total rej=%.2f%%", rejected_pct)
