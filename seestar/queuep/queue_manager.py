@@ -786,7 +786,7 @@ class SeestarQueuedStacker:
         parent_is_daemon = multiprocessing.current_process().daemon
         if platform.system() in {"Windows", "Darwin"}:
             ctx = multiprocessing.get_context("spawn")
-            Executor = ctx.ProcessPoolExecutor
+            Executor = partial(ProcessPoolExecutor, mp_context=ctx)
         else:
             Executor = ProcessPoolExecutor if not parent_is_daemon else ThreadPoolExecutor
 
