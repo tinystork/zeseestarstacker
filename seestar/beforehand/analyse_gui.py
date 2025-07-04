@@ -23,6 +23,19 @@ from PIL import Image, ImageTk
 # L'import de ToolTip est déplacé APRES l'ajustement de sys.path
 import json
 import importlib.util
+import numbers
+
+# Détection de l'environnement : intégré ou autonome
+try:
+    import zeseestarstacker  # package parent
+    _EMBEDDED_IN_STACKER = True
+except ImportError:
+    _EMBEDDED_IN_STACKER = False
+
+# Helper to safely check numeric finite values
+def is_finite_number(value):
+    """Return True if value is a real number and finite."""
+    return isinstance(value, numbers.Number) and np.isfinite(value)
 
 # --- AJUSTEMENT DE SYS.PATH POUR PERMETTRE LES IMPORTS DEPUIS LA RACINE DU PROJET ---
 # Ceci est crucial lorsque ce script (analyse_gui.py) est exécuté directement
@@ -102,6 +115,324 @@ except ImportError as e_logic:
         root_err_logic.destroy()
     except Exception: pass
     sys.exit(1)
+
+# Ajout fonction apply_pending_starcount_actions si absente dans analyse_logic
+if not hasattr(analyse_logic, 'apply_pending_starcount_actions'):
+    def apply_pending_starcount_actions(results_list, sc_reject_abs_path,
+                                       delete_rejected_flag, move_rejected_flag,
+                                       log_callback, status_callback, progress_callback,
+                                       input_dir_abs):
+        actions_count = 0
+        if not results_list:
+            return actions_count
+
+        _log = log_callback if callable(log_callback) else lambda k, **kw: None
+        _status = status_callback if callable(status_callback) else lambda k, **kw: None
+        _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+        to_process = [r for r in results_list if r.get('rejected_reason') == 'starcount_pending_action' and r.get('status') == 'ok']
+        total = len(to_process)
+        if total == 0:
+            _log('logic_info_prefix', text='Aucune action Starcount en attente.')
+            return 0
+
+        _status('status_custom', text=f'Application des actions Starcount différées sur {total} fichiers...')
+        _progress(0)
+
+        for i, r in enumerate(to_process):
+            current_progress = ((i + 1) / total) * 100
+            _progress(current_progress)
+            try:
+                rel_path = os.path.relpath(r.get('path'), input_dir_abs) if r.get('path') and input_dir_abs else r.get('file', 'N/A')
+            except ValueError:
+                rel_path = r.get('file', 'N/A')
+
+            _status('status_custom', text=f'Action Starcount sur {rel_path} ({i+1}/{total})')
+
+            current_path = r.get('path')
+            if not current_path or not os.path.exists(current_path):
+                _log('logic_move_skipped', file=rel_path, e='Fichier source introuvable pour action Starcount différée.')
+                r['action_comment'] = r.get('action_comment', '') + ' Source non trouvée pour action différée.'
+                r['action'] = 'error_action_deferred'
+                r['status'] = 'error'
+                continue
+
+            action_done = False
+            original_reason = r['rejected_reason']
+            if delete_rejected_flag:
+                try:
+                    os.remove(current_path)
+                    _log('logic_info_prefix', text=f'Fichier supprimé (Starcount différé): {rel_path}')
+                    r['path'] = None
+                    r['action'] = 'deleted_starcount'
+                    r['rejected_reason'] = 'starcount'
+                    r['status'] = 'processed_action'
+                    actions_count += 1
+                    action_done = True
+                except Exception as del_e:
+                    _log('logic_error_prefix', text=f'Erreur suppression Starcount différé {rel_path}: {del_e}')
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur suppression différée: {del_e}'
+                    r['action'] = 'error_delete'
+                    r['rejected_reason'] = original_reason
+            elif move_rejected_flag and sc_reject_abs_path:
+                if not os.path.isdir(sc_reject_abs_path):
+                    try:
+                        os.makedirs(sc_reject_abs_path)
+                        _log('logic_dir_created', path=sc_reject_abs_path)
+                    except OSError as e_mkdir:
+                        _log('logic_dir_create_error', path=sc_reject_abs_path, e=e_mkdir)
+                        r['action_comment'] = r.get('action_comment', '') + f' Dossier rejet Starcount inaccessible: {e_mkdir}'
+                        r['action'] = 'error_move'
+                        r['rejected_reason'] = original_reason
+                        continue
+
+                dest_path = os.path.join(sc_reject_abs_path, os.path.basename(current_path))
+                try:
+                    if os.path.normpath(current_path) != os.path.normpath(dest_path):
+                        shutil.move(current_path, dest_path)
+                        _log('logic_moved_info', folder=os.path.basename(sc_reject_abs_path), text_key_suffix='_deferred_starcount', file_rel_path=rel_path)
+                        r['path'] = dest_path
+                        r['action'] = 'moved_starcount'
+                        r['rejected_reason'] = 'starcount'
+                        r['status'] = 'processed_action'
+                        actions_count += 1
+                        action_done = True
+                    else:
+                        r['action_comment'] = r.get('action_comment', '') + ' Déjà dans dossier cible (différé)?'
+                        r['action'] = 'kept'
+                        r['rejected_reason'] = 'starcount'
+                        r['status'] = 'processed_action'
+                        action_done = True
+                except Exception as move_e:
+                    _log('logic_move_error', file=rel_path, e=move_e)
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur déplacement différé: {move_e}'
+                    r['action'] = 'error_move'
+                    r['rejected_reason'] = original_reason
+
+            if not action_done and not delete_rejected_flag and not move_rejected_flag:
+                r['action'] = 'kept_pending_starcount_no_action'
+                r['rejected_reason'] = 'starcount'
+                r['status'] = 'processed_action'
+                r['action_comment'] = r.get('action_comment', '') + ' Action Starcount différée mais aucune opération configurée.'
+
+        _progress(100)
+        _status('status_custom', text=f'{actions_count} actions Starcount différées appliquées.')
+        _log('logic_info_prefix', text=f'{actions_count} actions Starcount différées appliquées.')
+        return actions_count
+
+    analyse_logic.apply_pending_starcount_actions = apply_pending_starcount_actions
+
+# Ajout fonction apply_pending_fwhm_actions si absente dans analyse_logic
+if not hasattr(analyse_logic, 'apply_pending_fwhm_actions'):
+    def apply_pending_fwhm_actions(results_list, fwhm_reject_path,
+                                   delete_rejected_flag, move_rejected_flag,
+                                   log_callback, status_callback, progress_callback,
+                                   input_dir_abs):
+        actions_count = 0
+        if not results_list:
+            return actions_count
+
+        _log = log_callback if callable(log_callback) else lambda k, **kw: None
+        _status = status_callback if callable(status_callback) else lambda k, **kw: None
+        _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+        to_process = [r for r in results_list if r.get('rejected_reason') == 'high_fwhm_pending_action' and r.get('status') == 'ok']
+        total = len(to_process)
+        if total == 0:
+            _log('logic_info_prefix', text='Aucune action FWHM en attente.')
+            return 0
+
+        _status('status_custom', text=f'Application des actions FWHM différées sur {total} fichiers...')
+        _progress(0)
+
+        for i, r in enumerate(to_process):
+            current_progress = ((i + 1) / total) * 100
+            _progress(current_progress)
+            try:
+                rel_path = os.path.relpath(r.get('path'), input_dir_abs) if r.get('path') and input_dir_abs else r.get('file', 'N/A')
+            except ValueError:
+                rel_path = r.get('file', 'N/A')
+
+            _status('status_custom', text=f'Action FWHM sur {rel_path} ({i+1}/{total})')
+
+            current_path = r.get('path')
+            if not current_path or not os.path.exists(current_path):
+                _log('logic_move_skipped', file=rel_path, e='Fichier source introuvable pour action FWHM différée.')
+                r['action_comment'] = r.get('action_comment', '') + ' Source non trouvée pour action différée.'
+                r['action'] = 'error_action_deferred'
+                r['status'] = 'error'
+                continue
+
+            action_done = False
+            original_reason = r['rejected_reason']
+            if delete_rejected_flag:
+                try:
+                    os.remove(current_path)
+                    _log('logic_info_prefix', text=f'Fichier supprimé (FWHM différé): {rel_path}')
+                    r['path'] = None
+                    r['action'] = 'deleted_fwhm'
+                    r['rejected_reason'] = 'high_fwhm'
+                    r['status'] = 'processed_action'
+                    actions_count += 1
+                    action_done = True
+                except Exception as del_e:
+                    _log('logic_error_prefix', text=f'Erreur suppression FWHM différé {rel_path}: {del_e}')
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur suppression différée: {del_e}'
+                    r['action'] = 'error_delete'
+                    r['rejected_reason'] = original_reason
+            elif move_rejected_flag and fwhm_reject_path:
+                if not os.path.isdir(fwhm_reject_path):
+                    try:
+                        os.makedirs(fwhm_reject_path)
+                        _log('logic_dir_created', path=fwhm_reject_path)
+                    except OSError as e_mkdir:
+                        _log('logic_dir_create_error', path=fwhm_reject_path, e=e_mkdir)
+                        r['action_comment'] = r.get('action_comment', '') + f' Dossier rejet FWHM inaccessible: {e_mkdir}'
+                        r['action'] = 'error_move'
+                        r['rejected_reason'] = original_reason
+                        continue
+
+                dest_path = os.path.join(fwhm_reject_path, os.path.basename(current_path))
+                try:
+                    if os.path.normpath(current_path) != os.path.normpath(dest_path):
+                        shutil.move(current_path, dest_path)
+                        _log('logic_moved_info', folder=os.path.basename(fwhm_reject_path), text_key_suffix='_deferred_fwhm', file_rel_path=rel_path)
+                        r['path'] = dest_path
+                        r['action'] = 'moved_fwhm'
+                        r['rejected_reason'] = 'high_fwhm'
+                        r['status'] = 'processed_action'
+                        actions_count += 1
+                        action_done = True
+                    else:
+                        r['action_comment'] = r.get('action_comment', '') + ' Déjà dans dossier cible (différé)?'
+                        r['action'] = 'kept'
+                        r['rejected_reason'] = 'high_fwhm'
+                        r['status'] = 'processed_action'
+                        action_done = True
+                except Exception as move_e:
+                    _log('logic_move_error', file=rel_path, e=move_e)
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur déplacement différé: {move_e}'
+                    r['action'] = 'error_move'
+                    r['rejected_reason'] = original_reason
+
+            if not action_done and not delete_rejected_flag and not move_rejected_flag:
+                r['action'] = 'kept_pending_fwhm_no_action'
+                r['rejected_reason'] = 'high_fwhm'
+                r['status'] = 'processed_action'
+                r['action_comment'] = r.get('action_comment', '') + ' Action FWHM différée mais aucune opération configurée.'
+
+        _progress(100)
+        _status('status_custom', text=f'{actions_count} actions FWHM différées appliquées.')
+        _log('logic_info_prefix', text=f'{actions_count} actions FWHM différées appliquées.')
+        return actions_count
+
+    analyse_logic.apply_pending_fwhm_actions = apply_pending_fwhm_actions
+
+# Ajout fonction apply_pending_ecc_actions si absente dans analyse_logic
+if not hasattr(analyse_logic, 'apply_pending_ecc_actions'):
+    def apply_pending_ecc_actions(results_list, ecc_reject_path,
+                                  delete_rejected_flag, move_rejected_flag,
+                                  log_callback, status_callback, progress_callback,
+                                  input_dir_abs):
+        actions_count = 0
+        if not results_list:
+            return actions_count
+
+        _log = log_callback if callable(log_callback) else lambda k, **kw: None
+        _status = status_callback if callable(status_callback) else lambda k, **kw: None
+        _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+        to_process = [r for r in results_list if r.get('rejected_reason') == 'high_ecc_pending_action' and r.get('status') == 'ok']
+        total = len(to_process)
+        if total == 0:
+            _log('logic_info_prefix', text='Aucune action Excentricité en attente.')
+            return 0
+
+        _status('status_custom', text=f'Application des actions Excentricité différées sur {total} fichiers...')
+        _progress(0)
+
+        for i, r in enumerate(to_process):
+            current_progress = ((i + 1) / total) * 100
+            _progress(current_progress)
+            try:
+                rel_path = os.path.relpath(r.get('path'), input_dir_abs) if r.get('path') and input_dir_abs else r.get('file', 'N/A')
+            except ValueError:
+                rel_path = r.get('file', 'N/A')
+
+            _status('status_custom', text=f'Action Excentricité sur {rel_path} ({i+1}/{total})')
+
+            current_path = r.get('path')
+            if not current_path or not os.path.exists(current_path):
+                _log('logic_move_skipped', file=rel_path, e='Fichier source introuvable pour action Excentricité différée.')
+                r['action_comment'] = r.get('action_comment', '') + ' Source non trouvée pour action différée.'
+                r['action'] = 'error_action_deferred'
+                r['status'] = 'error'
+                continue
+
+            action_done = False
+            original_reason = r['rejected_reason']
+            if delete_rejected_flag:
+                try:
+                    os.remove(current_path)
+                    _log('logic_info_prefix', text=f'Fichier supprimé (Excentricité différé): {rel_path}')
+                    r['path'] = None
+                    r['action'] = 'deleted_ecc'
+                    r['rejected_reason'] = 'high_ecc'
+                    r['status'] = 'processed_action'
+                    actions_count += 1
+                    action_done = True
+                except Exception as del_e:
+                    _log('logic_error_prefix', text=f'Erreur suppression Excentricité différé {rel_path}: {del_e}')
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur suppression différée: {del_e}'
+                    r['action'] = 'error_delete'
+                    r['rejected_reason'] = original_reason
+            elif move_rejected_flag and ecc_reject_path:
+                if not os.path.isdir(ecc_reject_path):
+                    try:
+                        os.makedirs(ecc_reject_path)
+                        _log('logic_dir_created', path=ecc_reject_path)
+                    except OSError as e_mkdir:
+                        _log('logic_dir_create_error', path=ecc_reject_path, e=e_mkdir)
+                        r['action_comment'] = r.get('action_comment', '') + f' Dossier rejet Excentricité inaccessible: {e_mkdir}'
+                        r['action'] = 'error_move'
+                        r['rejected_reason'] = original_reason
+                        continue
+
+                dest_path = os.path.join(ecc_reject_path, os.path.basename(current_path))
+                try:
+                    if os.path.normpath(current_path) != os.path.normpath(dest_path):
+                        shutil.move(current_path, dest_path)
+                        _log('logic_moved_info', folder=os.path.basename(ecc_reject_path), text_key_suffix='_deferred_ecc', file_rel_path=rel_path)
+                        r['path'] = dest_path
+                        r['action'] = 'moved_ecc'
+                        r['rejected_reason'] = 'high_ecc'
+                        r['status'] = 'processed_action'
+                        actions_count += 1
+                        action_done = True
+                    else:
+                        r['action_comment'] = r.get('action_comment', '') + ' Déjà dans dossier cible (différé)?'
+                        r['action'] = 'kept'
+                        r['rejected_reason'] = 'high_ecc'
+                        r['status'] = 'processed_action'
+                        action_done = True
+                except Exception as move_e:
+                    _log('logic_move_error', file=rel_path, e=move_e)
+                    r['action_comment'] = r.get('action_comment', '') + f' Erreur déplacement différé: {move_e}'
+                    r['action'] = 'error_move'
+                    r['rejected_reason'] = original_reason
+
+            if not action_done and not delete_rejected_flag and not move_rejected_flag:
+                r['action'] = 'kept_pending_ecc_no_action'
+                r['rejected_reason'] = 'high_ecc'
+                r['status'] = 'processed_action'
+                r['action_comment'] = r.get('action_comment', '') + ' Action Excentricité différée mais aucune opération configurée.'
+
+        _progress(100)
+        _status('status_custom', text=f'{actions_count} actions Excentricité différées appliquées.')
+        _log('logic_info_prefix', text=f'{actions_count} actions Excentricité différées appliquées.')
+        return actions_count
+
+    analyse_logic.apply_pending_ecc_actions = apply_pending_ecc_actions
 
 # Importe le module contenant les textes traduits
 # Cet import devrait fonctionner car zone.py est dans le même dossier 'beforehand'
@@ -220,7 +551,7 @@ class ToolTip:
 class AstroImageAnalyzerGUI:
     """Interface graphique pour l'analyseur d'images astronomiques."""
     def __init__(self, root, command_file_path=None, main_app_callback=None,
-                 initial_lang='fr', lock_language=False):
+                 initial_lang='fr', lock_language=None):
         """
         Initialise l'interface graphique.
 
@@ -230,7 +561,9 @@ class AstroImageAnalyzerGUI:
                                                pour la communication avec le GUI principal.
             main_app_callback (callable, optional): Fonction à appeler lors de la fermeture (Retour).
             initial_lang (str): Langue initiale de l'interface.
-            lock_language (bool): Si vrai, la sélection de langue sera désactivée.
+            lock_language (bool or None):
+                Si True, la sélection de langue sera désactivée.
+                Si None, le choix est déterminé automatiquement.
         """
         self.root = root
         self.main_app_callback = main_app_callback # Callback pour retourner au script appelant
@@ -277,6 +610,8 @@ class AstroImageAnalyzerGUI:
 
         # Variables Tkinter pour lier les widgets aux données
         self.current_lang = tk.StringVar(value=initial_lang)
+        if lock_language is None:
+            lock_language = _EMBEDDED_IN_STACKER
         self.lock_language = lock_language
         self.current_lang.trace_add('write', self.change_language)
 
@@ -298,8 +633,9 @@ class AstroImageAnalyzerGUI:
 
         # Paramètres Sélection SNR
         self.snr_selection_mode = tk.StringVar(value='percent') 
-        self.snr_selection_value = tk.StringVar(value='80') 
-        self.snr_reject_dir = tk.StringVar() 
+        self.snr_selection_value = tk.StringVar(value='80')
+        self.snr_reject_dir = tk.StringVar()
+        self.starcount_reject_dir = tk.StringVar()
 
         # Paramètres Détection Traînées (acstools.satdet)
         self.trail_params = {
@@ -320,13 +656,29 @@ class AstroImageAnalyzerGUI:
         self.tooltips = {}
         self.timer_running = False 
         self.timer_start_time = None 
-        self.timer_job_id = None 
+        self.timer_job_id = None
         self.base_status_message = ""
+        self.progress_start_time = None
         self.has_pending_snr_actions = False
         self.current_snr_min = None
         self.current_snr_max = None
         self.snr_range_slider = None
         self.snr_slider_lines = ()
+        self.current_sc_min = None
+        self.current_sc_max = None
+        self.starcount_range_slider = None
+        self.current_fwhm_min = None
+        self.current_fwhm_max = None
+        self.fwhm_range_slider = None
+        self.current_ecc_min = None
+        self.current_ecc_max = None
+        self.ecc_range_slider = None
+
+        # Recommended images and associated thresholds
+        self.recommended_images = []
+        self.reco_snr_min = None
+        self.reco_fwhm_max = None
+        self.reco_ecc_max = None
         
         # Références aux widgets (pour traduction, activation/désactivation)
         self.widgets_refs = {}
@@ -343,6 +695,11 @@ class AstroImageAnalyzerGUI:
         self.stack_after_analysis = False
         self.apply_snr_button = None
         self.visual_apply_button = None
+        self.apply_starcount_button = None
+        self.apply_fwhm_button = None
+        self.apply_ecc_button = None
+        self.apply_reco_button = None
+        self.visual_apply_reco_button = None
         
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -413,7 +770,15 @@ class AstroImageAnalyzerGUI:
                 if isinstance(loaded_data, list):
                     self.analysis_results = loaded_data
                     print(f"INFO: Données de visualisation chargées depuis {log_path} ({len(self.analysis_results)} éléments).")
-                    self.analysis_completed_successfully = True 
+                    self.analysis_completed_successfully = True
+                    if self.analysis_results:
+                        (self.recommended_images,
+                         self.reco_snr_min,
+                         self.reco_fwhm_max,
+                         self.reco_ecc_max) = analyse_logic.build_recommended_images(self.analysis_results)
+                    else:
+                        self.recommended_images = []
+                        self.reco_snr_min = self.reco_fwhm_max = self.reco_ecc_max = None
                     return True
                 else:
                     print(f"AVERTISSEMENT: Données JSON dans {log_path} ne sont pas une liste. Type: {type(loaded_data)}") # NOUVEAU PRINT
@@ -710,7 +1075,7 @@ class AstroImageAnalyzerGUI:
             # Créer la fenêtre Toplevel pour la visualisation
             vis_window = tk.Toplevel(self.root)
             vis_window.title(self._("visu_window_title"))
-            vis_window.geometry("850x650")
+            vis_window.state('zoomed')
             vis_window.transient(self.root) # Lier à la fenêtre principale
             vis_window.grab_set() # Rendre modale
 
@@ -725,7 +1090,7 @@ class AstroImageAnalyzerGUI:
             try:
                 fig1, ax1 = plt.subplots(figsize=(7, 5))
                 figures_list.append(fig1)
-                valid_snrs = [r['snr'] for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr'])]
+                valid_snrs = [r['snr'] for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and is_finite_number(r['snr'])]
                 if valid_snrs:
                     hist = ax1.hist(valid_snrs, bins=20, color='skyblue', edgecolor='black')
                     ax1.set_title(self._("visu_snr_dist_title"))
@@ -768,12 +1133,172 @@ class AstroImageAnalyzerGUI:
                 print(f"Erreur Histogramme SNR: {e}"); ttk.Label(snr_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
                 if fig1: plt.close(fig1) # Fermer figure si erreur canvas
 
+            # --- Onglet Starcount Distribution ---
+            sc_tab = ttk.Frame(notebook)
+            notebook.add(sc_tab, text=self._('starcount_distribution_tab'))
+            fig_sc = None
+            try:
+                sc_values = [r['starcount'] for r in self.analysis_results if r.get('starcount') is not None]
+                fig_sc, ax_sc = plt.subplots(figsize=(7, 5))
+                figures_list.append(fig_sc)
+                if sc_values:
+                    n, bins, patches = ax_sc.hist(sc_values, bins=20, color='skyblue', edgecolor='black')
+                    ax_sc.set_title(self._('starcount_distribution_title'))
+                    ax_sc.set_xlabel(self._('starcount_label'))
+                    ax_sc.set_ylabel(self._('number_of_images'))
+                    ax_sc.grid(axis='y', linestyle='--', alpha=0.7)
+
+                    self.current_sc_min = min(sc_values)
+                    self.current_sc_max = max(sc_values)
+
+                    ax_slider_sc = fig_sc.add_axes([0.15, 0.02, 0.7, 0.03])
+                    self.starcount_range_slider = RangeSlider(
+                        ax_slider_sc,
+                        self._('starcount_label'),
+                        valmin=min(sc_values),
+                        valmax=max(sc_values),
+                        valinit=(min(sc_values), max(sc_values))
+                    )
+                    self.starcount_range_slider.on_changed(lambda val: self._on_starcount_slider_change(val, patches))
+                else:
+                    ax_sc.text(0.5, 0.5, self._('visu_snr_dist_no_data'), ha='center', va='center', fontsize=12, color='red')
+
+                canvas_sc = FigureCanvasTkAgg(fig_sc, master=sc_tab)
+                canvas_sc.draw()
+                canvas_sc.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                canvas_list.append(canvas_sc)
+            except Exception as e:
+                print(f"Erreur Histogramme Starcount: {e}")
+                ttk.Label(sc_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig_sc:
+                    plt.close(fig_sc)
+
+            # --- Onglet Distribution FWHM ---
+            fwhm_tab = ttk.Frame(notebook)
+            notebook.add(fwhm_tab, text=self._('visu_tab_fwhm_dist'))
+            fig_fwhm = None
+            try:
+                fwhm_values = [r['fwhm'] for r in self.analysis_results if is_finite_number(r.get('fwhm', np.nan))]
+                fig_fwhm, ax_fwhm = plt.subplots(figsize=(7, 5))
+                figures_list.append(fig_fwhm)
+                if fwhm_values:
+                    ax_fwhm.hist(fwhm_values, bins=20, color='skyblue', edgecolor='black')
+                    ax_fwhm.set_title(self._('fwhm_distribution_title'))
+                    ax_fwhm.set_xlabel('FWHM')
+                    ax_fwhm.set_ylabel(self._('number_of_images'))
+                    ax_fwhm.grid(axis='y', linestyle='--', alpha=0.7)
+
+                    self.current_fwhm_min = min(fwhm_values)
+                    self.current_fwhm_max = max(fwhm_values)
+
+                    ax_slider_fwhm = fig_fwhm.add_axes([0.15, 0.02, 0.7, 0.03])
+                    self.fwhm_range_slider = RangeSlider(
+                        ax_slider_fwhm,
+                        self._('filter_fwhm'),
+                        valmin=min(fwhm_values),
+                        valmax=max(fwhm_values),
+                        valinit=(min(fwhm_values), max(fwhm_values))
+                    )
+                    self.fwhm_range_slider.on_changed(
+                        lambda val: self._on_fwhm_slider_change(val))
+                else:
+                    ax_fwhm.text(0.5, 0.5, self._('visu_fwhm_no_data'), ha='center', va='center', fontsize=12, color='red')
+
+                canvas_fwhm = FigureCanvasTkAgg(fig_fwhm, master=fwhm_tab)
+                canvas_fwhm.draw()
+                canvas_fwhm.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                canvas_list.append(canvas_fwhm)
+            except Exception as e:
+                print(f"Erreur Histogramme FWHM: {e}")
+                ttk.Label(fwhm_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig_fwhm:
+                    plt.close(fig_fwhm)
+
+            # --- Onglet Distribution Excentricité ---
+            ecc_tab = ttk.Frame(notebook)
+            notebook.add(ecc_tab, text=self._('visu_tab_ecc_dist'))
+            fig_ecc = None
+            try:
+                ecc_values = [r['ecc'] for r in self.analysis_results if is_finite_number(r.get('ecc', np.nan))]
+                fig_ecc, ax_ecc = plt.subplots(figsize=(7, 5))
+                figures_list.append(fig_ecc)
+                if ecc_values:
+                    ax_ecc.hist(ecc_values, bins=20, range=(0,1), color='skyblue', edgecolor='black')
+                    ax_ecc.set_title(self._('ecc_distribution_title'))
+                    ax_ecc.set_xlabel('e')
+                    ax_ecc.set_ylabel(self._('number_of_images'))
+                    ax_ecc.grid(axis='y', linestyle='--', alpha=0.7)
+
+                    self.current_ecc_min = min(ecc_values)
+                    self.current_ecc_max = max(ecc_values)
+
+                    ax_slider_ecc = fig_ecc.add_axes([0.15, 0.02, 0.7, 0.03])
+                    self.ecc_range_slider = RangeSlider(
+                        ax_slider_ecc,
+                        self._('filter_ecc'),
+                        valmin=0.0,
+                        valmax=1.0,
+                        valinit=(min(ecc_values), max(ecc_values))
+                    )
+                    self.ecc_range_slider.on_changed(
+                        lambda val: self._on_ecc_slider_change(val))
+                else:
+                    ax_ecc.text(0.5, 0.5, self._('visu_ecc_no_data'), ha='center', va='center', fontsize=12, color='red')
+
+                canvas_ecc = FigureCanvasTkAgg(fig_ecc, master=ecc_tab)
+                canvas_ecc.draw()
+                canvas_ecc.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                canvas_list.append(canvas_ecc)
+            except Exception as e:
+                print(f"Erreur Histogramme Eccentricite: {e}")
+                ttk.Label(ecc_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig_ecc:
+                    plt.close(fig_ecc)
+
+            # --- Onglet FWHM vs Excentricité ---
+            scatter_tab = ttk.Frame(notebook)
+            notebook.add(scatter_tab, text='FWHM vs e')
+            fig_scatter = None
+            try:
+                valid_pairs = [
+                    (r['fwhm'], r['ecc'])
+                    for r in self.analysis_results
+                    if is_finite_number(r.get('fwhm', np.nan)) and is_finite_number(r.get('ecc', np.nan))
+                ]
+                fig_scatter, ax_scatt = plt.subplots(figsize=(7,5))
+                figures_list.append(fig_scatter)
+                if valid_pairs:
+                    fwhm_vals, ecc_vals = zip(*valid_pairs)
+                    ax_scatt.scatter(fwhm_vals, ecc_vals, alpha=0.6)
+                    ax_scatt.set_xlabel('FWHM')
+                    ax_scatt.set_ylabel('e')
+                    ax_scatt.set_title('FWHM vs e')
+                    ax_scatt.grid(True, linestyle='--', alpha=0.7)
+                else:
+                    ax_scatt.text(0.5,0.5,self._('visu_snr_dist_no_data'),ha='center',va='center',fontsize=12,color='red')
+                canvas_scatter = FigureCanvasTkAgg(fig_scatter, master=scatter_tab)
+                canvas_scatter.draw()
+                canvas_scatter.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                canvas_list.append(canvas_scatter)
+            except Exception as e:
+                print(f"Erreur Scatter FWHM vs Ecc: {e}")
+                ttk.Label(scatter_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
+                if fig_scatter:
+                    plt.close(fig_scatter)
+
             # --- Onglet Comparaison SNR (Top/Bottom N) ---
             comp_tab = ttk.Frame(notebook)
             notebook.add(comp_tab, text=self._("visu_tab_snr_comp"))
             fig2 = None
             try:
-                valid_res = [r for r in self.analysis_results if r.get('status')=='ok' and 'snr' in r and np.isfinite(r['snr']) and 'file' in r]
+                valid_res = [
+                    r
+                    for r in self.analysis_results
+                    if r.get('status') == 'ok'
+                    and 'snr' in r
+                    and is_finite_number(r['snr'])
+                    and 'file' in r
+                ]
                 if len(valid_res) >= 2:
                     sorted_res = sorted(valid_res, key=lambda x: x['snr'], reverse=True)
                     num_total = len(sorted_res); num_show = min(10, num_total // 2 if num_total >= 2 else 1)
@@ -811,15 +1336,40 @@ class AstroImageAnalyzerGUI:
                 if detect_trails_was_active: cols = cols + ('trails', 'nbseg'); cols = cols + ('action', 'reason', 'comment'); col_names = [col_names_map.get(c, c.capitalize()) for c in cols]
                 tree = ttk.Treeview(data_tab, columns=cols, show='headings')
                 for col_id, col_name in zip(cols, col_names): tree.heading(col_id, text=col_name, command=lambda _col=col_id: self.sort_treeview(tree, _col, False)); tree.column(col_id, width=col_widths.get(col_id, 80), anchor=col_anchors.get(col_id, tk.CENTER), stretch=tk.NO)
-                display_res = sorted(self.analysis_results, key=lambda x: x.get('snr', -np.inf) if np.isfinite(x.get('snr', -np.inf)) else -np.inf, reverse=True) if self.sort_by_snr.get() else self.analysis_results
+                display_res = (
+                    sorted(
+                        self.analysis_results,
+                        key=lambda x: x.get('snr', -np.inf)
+                        if is_finite_number(x.get('snr', -np.inf))
+                        else -np.inf,
+                        reverse=True,
+                    )
+                    if self.sort_by_snr.get()
+                    else self.analysis_results
+                )
                 for r in display_res:
                     status = r.get('status','?'); vals = []
                     for col_id in cols:
                         if col_id == 'file': vals.append(r.get('rel_path', os.path.basename(r.get('file','?'))));
                         elif col_id == 'status': vals.append(status)
-                        elif col_id == 'snr': vals.append(f"{r.get('snr',0.0):.2f}" if np.isfinite(r.get('snr', np.nan)) else "N/A")
-                        elif col_id == 'bg': vals.append(f"{r.get('sky_bg',0.0):.2f}" if np.isfinite(r.get('sky_bg', np.nan)) else "N/A")
-                        elif col_id == 'noise': vals.append(f"{r.get('sky_noise',0.0):.2f}" if np.isfinite(r.get('sky_noise', np.nan)) else "N/A")
+                        elif col_id == 'snr':
+                            vals.append(
+                                f"{r.get('snr', 0.0):.2f}"
+                                if is_finite_number(r.get('snr', np.nan))
+                                else "N/A"
+                            )
+                        elif col_id == 'bg':
+                            vals.append(
+                                f"{r.get('sky_bg', 0.0):.2f}"
+                                if is_finite_number(r.get('sky_bg', np.nan))
+                                else "N/A"
+                            )
+                        elif col_id == 'noise':
+                            vals.append(
+                                f"{r.get('sky_noise', 0.0):.2f}"
+                                if is_finite_number(r.get('sky_noise', np.nan))
+                                else "N/A"
+                            )
                         elif col_id == 'pixsig': vals.append(f"{r.get('signal_pixels',0)}")
                         elif col_id == 'trails': vals.append(self._("logic_trail_yes") if r.get('has_trails',False) else self._("logic_trail_no"))
                         elif col_id == 'nbseg': vals.append(f"{r.get('num_trails',0)}" if 'num_trails' in r else "N/A")
@@ -836,17 +1386,205 @@ class AstroImageAnalyzerGUI:
             stack_tab = ttk.Frame(notebook); notebook.add(stack_tab, text=self._("visu_tab_recom")); fig4=None # Placeholder fig
             try:
                 recom_frame = ttk.LabelFrame(stack_tab, text=self._("visu_recom_frame_title"), padding=10); recom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-                valid_kept_results = [r for r in self.analysis_results if r.get('status')=='ok' and r.get('action')=='kept' and r.get('rejected_reason') is None and 'snr' in r and np.isfinite(r['snr'])]; valid_kept_snrs = [r['snr'] for r in valid_kept_results]
-                if len(valid_kept_snrs) >= 5:
-                    p25_threshold = np.percentile(valid_kept_snrs, 25); good_img = [r for r in valid_kept_results if r['snr'] >= p25_threshold]
+                valid_kept_results = [
+                    r for r in self.analysis_results
+                    if r.get('status') == 'ok'
+                    and r.get('action') == 'kept'
+                    and r.get('rejected_reason') is None
+                    and 'snr' in r and is_finite_number(r['snr'])
+                ]
+                valid_kept_snrs = [r['snr'] for r in valid_kept_results]
+                sc_vals = [
+                    r['starcount']
+                    for r in valid_kept_results
+                    if r.get('starcount') is not None and is_finite_number(r['starcount'])
+                ]
+                fwhm_vals = [
+                    r['fwhm']
+                    for r in valid_kept_results
+                    if is_finite_number(r.get('fwhm', np.nan))
+                ]
+                ecc_vals = [
+                    r['ecc']
+                    for r in valid_kept_results
+                    if is_finite_number(r.get('ecc', np.nan))
+                ]
+
+                if len(valid_kept_snrs) >= 5 and len(fwhm_vals) >= 5 and len(ecc_vals) >= 5:
+                    snr_p25 = np.percentile(valid_kept_snrs, 25)
+                    fwhm_p75 = np.percentile(fwhm_vals, 75)
+                    ecc_p75 = np.percentile(ecc_vals, 75)
+                    good_img = [
+                        r for r in valid_kept_results
+                        if r['snr'] >= snr_p25 and r.get('fwhm', np.inf) <= fwhm_p75 and r.get('ecc', np.inf) <= ecc_p75
+                    ]
+                    ttk.Label(
+                        recom_frame,
+                        text=self._(
+                            "visu_recom_text_all",
+                            count=len(good_img),
+                        ),
+                    ).pack(anchor=tk.W, pady=(0, 5))
+                    rec_cols = ("file", "snr", "fwhm", "ecc")
+                    rec_tree = ttk.Treeview(
+                        recom_frame, columns=rec_cols, show="headings", height=10
+                    )
+                    rec_tree.heading("file", text=self._("visu_recom_col_file"))
+                    rec_tree.heading("snr", text=self._("visu_recom_col_snr"))
+                    rec_tree.heading("fwhm", text="FWHM")
+                    rec_tree.heading("ecc", text="e")
+                    rec_tree.column("file", width=450, anchor="w")
+                    rec_tree.column("snr", width=80, anchor="center")
+                    rec_tree.column("fwhm", width=80, anchor="center")
+                    rec_tree.column("ecc", width=80, anchor="center")
+                    for img in sorted(good_img, key=lambda x: x['snr'], reverse=True):
+                        rec_tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                img.get("rel_path", os.path.basename(img["file"])),
+                                f"{img['snr']:.2f}",
+                                f"{img['fwhm']:.2f}",
+                                f"{img['ecc']:.2f}",
+                            ),
+                        )
+                    rec_scr = ttk.Scrollbar(
+                        recom_frame, orient=tk.VERTICAL, command=rec_tree.yview
+                    )
+                    rec_tree.configure(yscroll=rec_scr.set)
+                    rec_scr.pack(side=tk.RIGHT, fill=tk.Y)
+                    rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                    export_cmd = lambda gi=good_img, p=(snr_p25, fwhm_p75, ecc_p75): self.export_recommended_list(gi, p)
+                    export_button = ttk.Button(
+                        recom_frame, text=self._("export_button"), command=export_cmd
+                    )
+                    export_button.pack(pady=5)
+                elif len(valid_kept_snrs) >= 5 and len(sc_vals) >= 5:
+                    snr_p25 = np.percentile(valid_kept_snrs, 25)
+                    sc_p25 = np.percentile(sc_vals, 25)
+                    good_img = [
+                        r for r in valid_kept_results
+                        if r['snr'] >= snr_p25 and r['starcount'] >= sc_p25
+                    ]
+
+                    ttk.Label(
+                        recom_frame,
+                        text=self._(
+                            "visu_recom_text_both",
+                            count=len(good_img),
+                            snr_p25=snr_p25,
+                            sc_p25=sc_p25,
+                        ),
+                    ).pack(anchor=tk.W, pady=(0, 5))
+
+                    rec_cols = ("file", "snr", "starcount")
+                    rec_tree = ttk.Treeview(
+                        recom_frame, columns=rec_cols, show="headings", height=10
+                    )
+                    rec_tree.heading("file", text=self._("visu_recom_col_file"))
+                    rec_tree.heading("snr", text=self._("visu_recom_col_snr"))
+                    rec_tree.heading(
+                        "starcount", text=self._("visu_recom_col_starcount")
+                    )
+                    rec_tree.column("file", width=450, anchor="w")
+                    rec_tree.column("snr", width=80, anchor="center")
+                    rec_tree.column("starcount", width=90, anchor="center")
+
+                    for img in sorted(good_img, key=lambda x: x['snr'], reverse=True):
+                        rec_tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                img.get("rel_path", os.path.basename(img["file"])),
+                                f"{img['snr']:.2f}",
+                                f"{img['starcount']:.0f}",
+                            ),
+                        )
+
+                    rec_scr = ttk.Scrollbar(
+                        recom_frame, orient=tk.VERTICAL, command=rec_tree.yview
+                    )
+                    rec_tree.configure(yscroll=rec_scr.set)
+                    rec_scr.pack(side=tk.RIGHT, fill=tk.Y)
+                    rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+                    export_cmd = lambda gi=good_img, p=(snr_p25, sc_p25): self.export_recommended_list(gi, p)
+                    export_button = ttk.Button(
+                        recom_frame, text=self._("export_button"), command=export_cmd
+                    )
+                    export_button.pack(pady=5)
+
+                elif len(valid_kept_snrs) >= 5:
+                    p25_threshold = np.percentile(valid_kept_snrs, 25)
+                    good_img = [r for r in valid_kept_results if r['snr'] >= p25_threshold]
                     if good_img:
-                        good_img_sorted = sorted(good_img, key=lambda x: x['snr'], reverse=True); ttk.Label(recom_frame, text=self._("visu_recom_text", count=len(good_img_sorted), p75=p25_threshold)).pack(anchor=tk.W, pady=(0,5)); rec_cols = ("file", "snr"); rec_tree = ttk.Treeview(recom_frame, columns=rec_cols, show='headings', height=10); rec_tree.heading("file", text=self._("visu_recom_col_file")); rec_tree.column("file", width=450, anchor='w'); rec_tree.heading("snr", text=self._("visu_recom_col_snr")); rec_tree.column("snr", width=100, anchor='center')
-                        for img in good_img_sorted: rec_tree.insert('', tk.END, values=(img.get('rel_path', os.path.basename(img.get('file', '?'))), f"{img.get('snr', 0.0):.2f}"));
-                        rec_scr = ttk.Scrollbar(recom_frame, orient=tk.VERTICAL, command=rec_tree.yview); rec_tree.configure(yscroll=rec_scr.set); rec_scr.pack(side=tk.RIGHT, fill=tk.Y); rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0,10)); export_cmd = lambda gi=good_img_sorted, p=p25_threshold: self.export_recommended_list(gi, p); export_button = ttk.Button(recom_frame, text=self._("export_button"), command=export_cmd); export_button.pack(pady=5)
-                    else: ttk.Label(recom_frame, text=self._("visu_recom_no_selection")).pack(padx=10, pady=10)
+                        good_img_sorted = sorted(good_img, key=lambda x: x['snr'], reverse=True)
+                        ttk.Label(
+                            recom_frame,
+                            text=self._(
+                                "visu_recom_text",
+                                count=len(good_img_sorted),
+                                p75=p25_threshold,
+                            ),
+                        ).pack(anchor=tk.W, pady=(0, 5))
+
+                        rec_cols = ("file", "snr")
+                        rec_tree = ttk.Treeview(
+                            recom_frame, columns=rec_cols, show="headings", height=10
+                        )
+                        rec_tree.heading("file", text=self._("visu_recom_col_file"))
+                        rec_tree.heading("snr", text=self._("visu_recom_col_snr"))
+                        rec_tree.column("file", width=450, anchor="w")
+                        rec_tree.column("snr", width=100, anchor="center")
+
+                        for img in good_img_sorted:
+                            rec_tree.insert(
+                                "",
+                                tk.END,
+                                values=(
+                                    img.get(
+                                        "rel_path", os.path.basename(img.get("file", "?"))
+                                    ),
+                                    f"{img.get('snr', 0.0):.2f}",
+                                ),
+                            )
+
+                        rec_scr = ttk.Scrollbar(
+                            recom_frame, orient=tk.VERTICAL, command=rec_tree.yview
+                        )
+                        rec_tree.configure(yscroll=rec_scr.set)
+                        rec_scr.pack(side=tk.RIGHT, fill=tk.Y)
+                        rec_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+                        export_cmd = lambda gi=good_img_sorted, p=p25_threshold: self.export_recommended_list(gi, p)
+                        export_button = ttk.Button(
+                            recom_frame,
+                            text=self._("export_button"),
+                            command=export_cmd,
+                        )
+                        export_button.pack(pady=5)
+                    else:
+                        ttk.Label(
+                            recom_frame, text=self._("visu_recom_no_selection")
+                        ).pack(padx=10, pady=10)
+
                 elif len(valid_kept_snrs) > 0:
-                    ttk.Label(recom_frame, text=self._("visu_recom_not_enough")).pack(padx=10, pady=10); export_all_kept_cmd = lambda gi=valid_kept_results: self.export_recommended_list(gi, -1); export_all_button = ttk.Button(recom_frame, text=self._("Exporter Toutes Conservées", default="Export All Kept"), command=export_all_kept_cmd); export_all_button.pack(pady=5)
-                else: ttk.Label(recom_frame, text=self._("visu_recom_no_data")).pack(padx=10, pady=10)
+                    ttk.Label(
+                        recom_frame, text=self._("visu_recom_not_enough")
+                    ).pack(padx=10, pady=10)
+
+                    export_all_kept_cmd = lambda gi=valid_kept_results: self.export_recommended_list(gi, -1)
+                    export_all_button = ttk.Button(
+                        recom_frame,
+                        text=self._("Exporter Toutes Conservées", default="Export All Kept"),
+                        command=export_all_kept_cmd,
+                    )
+                    export_all_button.pack(pady=5)
+
+                else:
+                    ttk.Label(
+                        recom_frame, text=self._("visu_recom_no_data")
+                    ).pack(padx=10, pady=10)
             except Exception as e:
                  print(f"Erreur Recommandations: {e}"); traceback.print_exc(); ttk.Label(stack_tab, text=f"{self._('msg_error')}:\n{e}\n{traceback.format_exc()}").pack()
                  # Pas de fig4 à fermer ici pour l'instant
@@ -901,25 +1639,74 @@ class AstroImageAnalyzerGUI:
                     except Exception as e_other_win:
                         print(f"  Erreur détruisant vis_window: {e_other_win}")
 
-            # Boutons d'action en bas de la fenêtre
-            bottom_frame = ttk.Frame(vis_window)
+            # --- Action buttons at the bottom of the window ---
+            top = vis_window  # existing toplevel window for the visualization
+
+            bottom_frame = ttk.Frame(top)
             bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
 
+            # Apply Starcount Rejection button
+            self.apply_starcount_button = ttk.Button(
+                bottom_frame,
+                text=self._('apply_starcount_rejection', default='Apply Starcount Rejection'),
+                state=tk.DISABLED,
+                command=self._on_visual_apply_starcount
+            )
+            self.apply_starcount_button.pack(side=tk.RIGHT, padx=5)
+            self.tooltips['apply_starcount_button'] = ToolTip(
+                self.apply_starcount_button,
+                lambda: self._('tooltip_apply_starcount_rejection', default='Apply pending starcount actions')
+            )
+
+            # Apply FWHM filter button
+            self.apply_fwhm_button = ttk.Button(
+                bottom_frame,
+                text=self._('filter_fwhm', default='Filter FWHM'),
+                state=tk.DISABLED,
+                command=self._on_visual_apply_fwhm
+            )
+            self.apply_fwhm_button.pack(side=tk.RIGHT, padx=5)
+
+            # Apply eccentricity filter button
+            self.apply_ecc_button = ttk.Button(
+                bottom_frame,
+                text=self._('filter_ecc', default='Filter Eccentricity'),
+                state=tk.DISABLED,
+                command=self._on_visual_apply_ecc
+            )
+            self.apply_ecc_button.pack(side=tk.RIGHT, padx=5)
+
+            # cloned Apply SNR Rejection button
             self.visual_apply_button = ttk.Button(
                 bottom_frame,
-                text="Apply SNR Rejection",
+                text=self._("visual_apply_snr_button", default="Apply SNR Rejection"),
                 state=tk.DISABLED,
                 command=self._on_visual_apply_snr
             )
             self.visual_apply_button.pack(side=tk.RIGHT, padx=5)
+            self.tooltips['visual_apply_button'] = ToolTip(
+                self.visual_apply_button,
+                lambda: self._('tooltip_apply_snr_rejection', default='Apply pending SNR actions')
+            )
 
+            self.visual_apply_reco_button = ttk.Button(
+                bottom_frame,
+                text=self._('visual_apply_reco_button'),
+                state=tk.DISABLED,
+                command=self._apply_recommendations_gui
+            )
+            self.visual_apply_reco_button.pack(side=tk.RIGHT, padx=5)
+            if self.recommended_images:
+                self.visual_apply_reco_button.config(state=tk.NORMAL)
+
+            # existing Close button
             close_button = ttk.Button(
                 bottom_frame,
                 text=self._("Fermer", default="Close"),
                 command=cleanup_vis_window
             )
             close_button.pack(side=tk.RIGHT)
-            vis_window.protocol("WM_DELETE_WINDOW", cleanup_vis_window)  # Lier bouton X
+            top.protocol("WM_DELETE_WINDOW", cleanup_vis_window)  # Bind window X button
 
             # Attendre que la fenêtre de visualisation soit fermée
             self.root.wait_window(vis_window)
@@ -1341,6 +2128,15 @@ class AstroImageAnalyzerGUI:
                 # Arrêter si une erreur Tkinter se produit
                 self._stop_timer()
 
+    def _format_seconds(self, seconds):
+        """Formatte un nombre de secondes en HH:MM:SS ou MM:SS."""
+        if seconds < 0:
+            seconds = 0
+        if seconds < 3600:
+            return time.strftime('%M:%S', time.gmtime(seconds))
+        else:
+            return time.strftime('%H:%M:%S', time.gmtime(seconds))
+
     # --- Création des Widgets ---
 
     def create_widgets(self):
@@ -1379,21 +2175,23 @@ class AstroImageAnalyzerGUI:
         self.widgets_refs['include_subfolders_label'] = subfolder_check
 
         # Ligne 3: Sélection Langue (Aligné à droite)
-        lang_frame = ttk.Frame(config_frame)
-        lang_frame.grid(row=3, column=0, columnspan=3, sticky=tk.E, pady=5, padx=5)
-        lang_label = ttk.Label(lang_frame, text="")
-        lang_label.pack(side=tk.LEFT, padx=(0, 5))
-        self.widgets_refs['lang_label'] = lang_label
-        lang_options = sorted([lang for lang in translations.keys()]) # Options de langue disponibles
-        combo_state = "disabled" if self.lock_language else "readonly"
-        self.lang_combobox = ttk.Combobox(
-            lang_frame,
-            textvariable=self.current_lang,
-            values=lang_options,
-            state=combo_state,
-            width=5,
-        )
-        self.lang_combobox.pack(side=tk.LEFT)
+        if not self.lock_language:
+            lang_frame = ttk.Frame(config_frame)
+            lang_frame.grid(row=3, column=0, columnspan=3, sticky=tk.E, pady=5, padx=5)
+            lang_label = ttk.Label(lang_frame, text="")
+            lang_label.pack(side=tk.LEFT, padx=(0, 5))
+            self.widgets_refs['lang_label'] = lang_label
+            lang_options = sorted([lang for lang in translations.keys()])
+            self.lang_combobox = ttk.Combobox(
+                lang_frame,
+                textvariable=self.current_lang,
+                values=lang_options,
+                state="readonly",
+                width=5,
+            )
+            self.lang_combobox.pack(side=tk.LEFT)
+        else:
+            self.lang_combobox = None
 
         # --- Cadre Analyse SNR ---
         snr_frame = ttk.LabelFrame(main_frame, text="", padding="10")
@@ -1576,6 +2374,16 @@ class AstroImageAnalyzerGUI:
         self.manage_markers_button.pack(side=tk.LEFT, padx=5)
         self.widgets_refs['manage_markers_button'] = self.manage_markers_button
 
+        self.apply_reco_button = ttk.Button(
+            button_frame,
+            text=self._('apply_reco_button'),
+            command=self._apply_recommendations_gui,
+            width=18,
+            state=tk.DISABLED
+        )
+        self.apply_reco_button.pack(side=tk.RIGHT, padx=5)
+        self.widgets_refs['apply_reco_button'] = self.apply_reco_button
+
         self.return_button = ttk.Button(button_frame, text="", command=self.return_or_quit, width=12)
         self.return_button.pack(side=tk.RIGHT, padx=5)
         # La référence pour le bouton Retour/Quitter sera ajoutée dans change_language
@@ -1590,6 +2398,12 @@ class AstroImageAnalyzerGUI:
         status_frame.pack(fill=tk.X)
         self.status_label = ttk.Label(status_frame, textvariable=self.status_text)
         self.status_label.pack(side=tk.LEFT, padx=5)
+        self.remaining_label = ttk.Label(status_frame, text="")
+        self.remaining_label.pack(side=tk.RIGHT, padx=5)
+        self.elapsed_label = ttk.Label(status_frame, text="")
+        self.elapsed_label.pack(side=tk.RIGHT, padx=5)
+        self.widgets_refs['elapsed_label'] = self.elapsed_label
+        self.widgets_refs['remaining_label'] = self.remaining_label
 
         # --- Cadre Résultats / Journal ---
         results_frame = ttk.LabelFrame(main_frame, text="", padding="10")
@@ -1684,6 +2498,11 @@ class AstroImageAnalyzerGUI:
 
         # Mettre à jour l'état activé/désactivé des sections
         self.toggle_sections_state()
+
+        if hasattr(self, 'elapsed_label'):
+            self.elapsed_label.config(text=f"{self._('elapsed_time_label')} 00:00:00")
+        if hasattr(self, 'remaining_label'):
+            self.remaining_label.config(text=f"{self._('remaining_time_label')} 00:00:00")
 
     # --- Gestion des Chemins (Parcourir) ---
 
@@ -1825,6 +2644,7 @@ class AstroImageAnalyzerGUI:
         """Réinitialise les éléments UI pour une nouvelle analyse."""
         self.status_text.set(self._("status_ready"))
         self.progress_var.set(0.0)
+        self.progress_start_time = None
         # ... (gestion progress_bar) ...
         if hasattr(self, 'progress_bar') and self.progress_bar: # Copié d'une version précédente
              try:
@@ -1911,7 +2731,27 @@ class AstroImageAnalyzerGUI:
                         self.progress_bar.start(10) # Démarrer animation
                 # Si on reçoit une valeur numérique
                 elif isinstance(value, (int, float)):
-                    self.progress_var.set(value) # Mettre à jour la variable liée
+                    clamped = max(0.0, min(100.0, float(value)))
+                    self.progress_var.set(clamped)
+                    if clamped > 0:
+                        if self.progress_start_time is None:
+                            self.progress_start_time = time.time()
+                        elapsed = time.time() - self.progress_start_time
+                        if clamped > 0:
+                            est_total = elapsed / (clamped / 100.0)
+                            remaining = max(0.0, est_total - elapsed)
+                        else:
+                            remaining = 0.0
+                        elapsed_str = self._format_seconds(elapsed)
+                        remaining_str = self._format_seconds(remaining)
+                        if hasattr(self, 'elapsed_label'):
+                            self.elapsed_label.config(text=f"{self._('elapsed_time_label')} {elapsed_str}")
+                        if hasattr(self, 'remaining_label'):
+                            self.remaining_label.config(text=f"{self._('remaining_time_label')} {remaining_str}")
+                    else:
+                        self.progress_start_time = None
+                    if clamped >= 100:
+                        self.progress_start_time = None
 
                 # Forcer mise à jour UI si nécessaire (souvent utile pour voir la barre bouger)
                 if self.root.winfo_exists():
@@ -1992,15 +2832,29 @@ class AstroImageAnalyzerGUI:
 
     def export_recommended_list(self, images_to_export, criterion_value):
         """
-        Ouvre une boîte de dialogue pour enregistrer la liste des images recommandées 
+        Ouvre une boîte de dialogue pour enregistrer la liste des images recommandées
         dans un fichier texte.
         """
         if not images_to_export:
             messagebox.showwarning(self._("msg_warning"), self._("msg_export_no_images"), parent=self.root)
             return
 
-        # Proposer un nom de fichier par défaut
-        default_filename = f"recommended_images_snr_gt_{criterion_value:.2f}.txt" if criterion_value != -1 else "all_kept_images.txt"
+        # Générer un nom de fichier par défaut
+        if isinstance(criterion_value, tuple):
+            if len(criterion_value) == 3:
+                snr_val, fwhm_val, ecc_val = criterion_value
+                default_filename = (
+                    f"recommended_images_snr_ge_{snr_val:.2f}_fwhm_le_{fwhm_val:.2f}_ecc_le_{ecc_val:.2f}.txt"
+                )
+            else:
+                snr_val, sc_val = criterion_value
+                default_filename = (
+                    f"recommended_images_snr_gt_{snr_val:.2f}_sc_gt_{sc_val:.0f}.txt"
+                )
+        elif criterion_value != -1:
+            default_filename = f"recommended_images_snr_gt_{criterion_value:.2f}.txt"
+        else:
+            default_filename = "all_kept_images.txt"
         
         save_path = filedialog.asksaveasfilename(
             parent=self.root, # Assurer que la fenêtre de dialogue est modale à la fenêtre de visu si elle est ouverte
@@ -2015,17 +2869,48 @@ class AstroImageAnalyzerGUI:
             try:
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(f"# {self._('Liste dimages recommandées', default='Recommended image list')}\n")
-                    if criterion_value != -1: # -1 est un marqueur pour "toutes les conservées"
-                        f.write(f"# {self._('Critère', default='Criterion')}: SNR >= {criterion_value:.2f} (P25)\n")
+                    if criterion_value != -1:
+                        if isinstance(criterion_value, tuple):
+                            if len(criterion_value) == 3:
+                                snr_val, fwhm_val, ecc_val = criterion_value
+                                f.write(
+                                    f"# {self._('Critère', default='Criterion')}: SNR >= {snr_val:.2f} (P25); FWHM <= {fwhm_val:.2f} (P75); e <= {ecc_val:.2f} (P75)\n"
+                                )
+                            else:
+                                snr_val, sc_val = criterion_value
+                                f.write(
+                                    f"# {self._('Critère', default='Criterion')}: SNR >= {snr_val:.2f} (P25); Starcount >= {sc_val:.0f} (P25)\n"
+                                )
+                        else:
+                            f.write(
+                                f"# {self._('Critère', default='Criterion')}: SNR >= {criterion_value:.2f} (P25)\n"
+                            )
                     else:
                         f.write(f"# {self._('Critère', default='Criterion')}: {self._('Toutes les images conservées valides', default='All valid kept images')}\n")
                     f.write(f"# {self._('Généré le', default='Generated on')}: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"# {self._('Nombre dimages', default='Number of images')}: {len(images_to_export)}\n\n")
-                    
+
+                    header_parts = ["file", "snr"]
+                    if any(r.get('fwhm') is not None for r in images_to_export):
+                        header_parts.append("fwhm")
+                    if any(r.get('ecc') is not None for r in images_to_export):
+                        header_parts.append("ecc")
+                    if any(r.get('starcount') is not None for r in images_to_export):
+                        header_parts.append("starcount")
+                    f.write("\t".join(header_parts) + "\n")
+
                     for img_data in images_to_export:
-                        # Utiliser 'rel_path' s'il existe, sinon 'file'
                         file_to_write = img_data.get('rel_path', os.path.basename(img_data.get('file', 'UNKNOWN_FILE')))
-                        f.write(f"{file_to_write}\n")
+                        line_parts = [file_to_write]
+                        if img_data.get('snr') is not None:
+                            line_parts.append(f"{img_data['snr']:.2f}")
+                        if img_data.get('fwhm') is not None:
+                            line_parts.append(f"{img_data['fwhm']:.2f}")
+                        if img_data.get('ecc') is not None:
+                            line_parts.append(f"{img_data['ecc']:.2f}")
+                        if img_data.get('starcount') is not None:
+                            line_parts.append(f"{img_data['starcount']:.0f}")
+                        f.write("\t".join(line_parts) + "\n")
                 
                 messagebox.showinfo(
                     self._("msg_info"), 
@@ -2089,6 +2974,14 @@ class AstroImageAnalyzerGUI:
         self.analysis_results = results if results else []
         self.analysis_completed_successfully = success
         self.best_reference_path = self._get_best_reference()
+        if success and self.analysis_results:
+            (self.recommended_images,
+             self.reco_snr_min,
+             self.reco_fwhm_max,
+             self.reco_ecc_max) = analyse_logic.build_recommended_images(self.analysis_results)
+        else:
+            self.recommended_images = []
+            self.reco_snr_min = self.reco_fwhm_max = self.reco_ecc_max = None
         self._set_widget_state(self.send_reference_button, tk.NORMAL if self.best_reference_path else tk.DISABLED)
         final_status_key = ""
         processed_count = 0 ; action_count = 0 ; errors_count = 0
@@ -2147,8 +3040,12 @@ class AstroImageAnalyzerGUI:
                 )
                 if self.reject_action.get() == 'move' and not self.snr_reject_dir.get():
                     can_apply_snr_action = False # Ne pas activer si déplacement requis mais dossier non spécifié
-                    
+
                 self._set_widget_state(self.apply_snr_button, tk.NORMAL if can_apply_snr_action else tk.DISABLED)
+            # Activer/désactiver bouton recommandations
+            if hasattr(self, 'apply_reco_button') and self.apply_reco_button:
+                state = tk.NORMAL if (success and self.recommended_images) else tk.DISABLED
+                self.apply_reco_button.config(state=state)
             # --- FIN NOUVEAU ---
         
         if should_write_command and folder_to_stack:
@@ -2186,11 +3083,45 @@ class AstroImageAnalyzerGUI:
         print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
 
     def _get_best_reference(self):
-        valid = [r for r in self.analysis_results
-                 if r.get('status') == 'ok' and r.get('action') == 'kept'
-                    and r.get('rejected_reason') is None
-                    and 'snr' in r and np.isfinite(r['snr'])]
+        valid = [
+            r
+            for r in self.analysis_results
+            if r.get('status') == 'ok'
+            and r.get('action') == 'kept'
+            and r.get('rejected_reason') is None
+            and 'snr' in r
+            and is_finite_number(r['snr'])
+        ]
         return max(valid, key=lambda r: r['snr'])['path'] if valid else None
+
+    def _compute_recommendations(self):
+        """Return a list of recommended images based on percentiles."""
+        valid_kept = [
+            r for r in self.analysis_results
+            if r.get('status') == 'ok'
+            and r.get('action') == 'kept'
+            and r.get('rejected_reason') is None
+            and 'snr' in r and is_finite_number(r['snr'])
+        ]
+        snrs = [r['snr'] for r in valid_kept]
+        sc_vals = [r['starcount'] for r in valid_kept
+                   if r.get('starcount') is not None and is_finite_number(r['starcount'])]
+        fwhm_vals = [r['fwhm'] for r in valid_kept if is_finite_number(r.get('fwhm', np.nan))]
+        ecc_vals = [r['ecc'] for r in valid_kept if is_finite_number(r.get('ecc', np.nan))]
+
+        if len(snrs) >= 5 and len(fwhm_vals) >= 5 and len(ecc_vals) >= 5:
+            snr_p25 = np.percentile(snrs, 25)
+            fwhm_p75 = np.percentile(fwhm_vals, 75)
+            ecc_p75 = np.percentile(ecc_vals, 75)
+            return [r for r in valid_kept if r['snr'] >= snr_p25 and r.get('fwhm', np.inf) <= fwhm_p75 and r.get('ecc', np.inf) <= ecc_p75]
+        if len(snrs) >= 5 and len(sc_vals) >= 5:
+            snr_p25 = np.percentile(snrs, 25)
+            sc_p25 = np.percentile(sc_vals, 25)
+            return [r for r in valid_kept if r['snr'] >= snr_p25 and r.get('starcount', -np.inf) >= sc_p25]
+        if len(snrs) >= 5:
+            snr_p25 = np.percentile(snrs, 25)
+            return [r for r in valid_kept if r['snr'] >= snr_p25]
+        return []
 
     def send_reference_to_main(self):
         """Envoie le chemin de référence calculé au GUI principal."""
@@ -2219,7 +3150,7 @@ class AstroImageAnalyzerGUI:
 
         for r in self.analysis_results:
             snr = r.get('snr')
-            if r.get('status') == 'ok' and snr is not None and np.isfinite(snr):
+            if r.get('status') == 'ok' and snr is not None and is_finite_number(snr):
                 if snr < lo or snr > hi:
                     r['rejected_reason'] = 'low_snr_pending_action'
                     r['action'] = 'pending_snr_action'
@@ -2246,23 +3177,262 @@ class AstroImageAnalyzerGUI:
         if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
             self._refresh_treeview()
 
+    def apply_pending_starcount_actions_gui(self):
+        """Applique les actions Starcount sélectionnées via le RangeSlider."""
+        lo = self.current_sc_min
+        hi = self.current_sc_max
+        if lo is None or hi is None:
+            return
+
+        for r in self.analysis_results:
+            sc = r.get('starcount')
+            if r.get('status') == 'ok' and sc is not None:
+                if sc < lo or sc > hi:
+                    r['rejected_reason'] = 'starcount_pending_action'
+                    r['action'] = 'pending_starcount_action'
+
+        if hasattr(analyse_logic, 'apply_pending_starcount_actions'):
+            analyse_logic.apply_pending_starcount_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda v: None,
+                input_dir_abs=self.input_dir.get()
+            )
+
+        if self.apply_starcount_button:
+            self.apply_starcount_button.config(state=tk.DISABLED)
+        if self.starcount_range_slider:
+            try:
+                self.starcount_range_slider.disconnect_events()
+            except Exception:
+                pass
+
+    def apply_pending_fwhm_actions_gui(self):
+        """Apply FWHM filter based on slider."""
+        lo = self.current_fwhm_min
+        hi = self.current_fwhm_max
+        if lo is None or hi is None:
+            return
+        for r in self.analysis_results:
+            fv = r.get('fwhm')
+            if r.get('status') == 'ok' and fv is not None and is_finite_number(fv):
+                if fv < lo or fv > hi:
+                    r['rejected_reason'] = 'high_fwhm_pending_action'
+                    r['action'] = 'pending_fwhm_action'
+
+        if hasattr(analyse_logic, 'apply_pending_fwhm_actions'):
+            analyse_logic.apply_pending_fwhm_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda v: None,
+                input_dir_abs=self.input_dir.get()
+            )
+
+        if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
+            self._refresh_treeview()
+
+    def apply_pending_ecc_actions_gui(self):
+        """Apply eccentricity filter based on slider."""
+        lo = self.current_ecc_min
+        hi = self.current_ecc_max
+        if lo is None or hi is None:
+            return
+        for r in self.analysis_results:
+            ev = r.get('ecc')
+            if r.get('status') == 'ok' and ev is not None and is_finite_number(ev):
+                if ev < lo or ev > hi:
+                    r['rejected_reason'] = 'high_ecc_pending_action'
+                    r['action'] = 'pending_ecc_action'
+
+        if hasattr(analyse_logic, 'apply_pending_ecc_actions'):
+            analyse_logic.apply_pending_ecc_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda v: None,
+                input_dir_abs=self.input_dir.get()
+            )
+
+        if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
+            self._refresh_treeview()
+
+    def _apply_recommendations_gui(self):
+        """Keep only recommended images and apply reject actions."""
+        if not getattr(self, 'recommended_images', None):
+            messagebox.showinfo("Info", "Aucune recommandation calculée.")
+            return
+
+        reco_files = {os.path.abspath(img['file']) for img in self.recommended_images}
+
+        for r in self.analysis_results:
+            if r.get('status') == 'ok' and r.get('action') == 'kept':
+                if os.path.abspath(r['file']) not in reco_files:
+                    r['rejected_reason'] = 'not_in_recommendation'
+                    r['action'] = 'pending_reco_action'
+
+        analyse_logic.apply_pending_reco_actions(
+            self.analysis_results,
+            self.snr_reject_dir.get(),
+            delete_rejected_flag=self.reject_action.get() == 'delete',
+            move_rejected_flag=self.reject_action.get() == 'move',
+            log_callback=lambda *a, **k: None,
+            status_callback=lambda *a, **k: None,
+            progress_callback=lambda p: None,
+            input_dir_abs=self.input_dir.get()
+        )
+
+        # Apply any pending SNR/FWHM/Starcount/Eccentricity actions as well
+        try:
+            analyse_logic.apply_pending_snr_actions(
+                self.analysis_results,
+                self.snr_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda p: None,
+                input_dir_abs=self.input_dir.get(),
+            )
+        except Exception:
+            pass
+
+        if hasattr(analyse_logic, 'apply_pending_starcount_actions'):
+            analyse_logic.apply_pending_starcount_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda p: None,
+                input_dir_abs=self.input_dir.get(),
+            )
+
+        if hasattr(analyse_logic, 'apply_pending_fwhm_actions'):
+            analyse_logic.apply_pending_fwhm_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda p: None,
+                input_dir_abs=self.input_dir.get(),
+            )
+
+        if hasattr(analyse_logic, 'apply_pending_ecc_actions'):
+            analyse_logic.apply_pending_ecc_actions(
+                self.analysis_results,
+                self.starcount_reject_dir.get(),
+                delete_rejected_flag=self.reject_action.get() == 'delete',
+                move_rejected_flag=self.reject_action.get() == 'move',
+                log_callback=lambda *a, **k: None,
+                status_callback=lambda *a, **k: None,
+                progress_callback=lambda p: None,
+                input_dir_abs=self.input_dir.get(),
+            )
+
+        if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
+            self._refresh_treeview()
+        if hasattr(self, 'apply_reco_button') and self.apply_reco_button:
+            self.apply_reco_button.config(state=tk.DISABLED)
+        if hasattr(self, 'visual_apply_reco_button') and self.visual_apply_reco_button:
+            self.visual_apply_reco_button.config(state=tk.DISABLED)
+
     def _on_visual_apply_snr(self):
         """Handler pour le bouton d'application SNR de la fenêtre de visualisation."""
-        # Reuse the existing logic
+        # 1) réutilise la logique existante
         self.apply_pending_snr_actions_gui()
 
-        # Disable both buttons
+        # 2) désactive les deux boutons
         if self.apply_snr_button:
             self.apply_snr_button.config(state=tk.DISABLED)
         if self.visual_apply_button:
             self.visual_apply_button.config(state=tk.DISABLED)
 
-        # Disable the slider if possible
+        # 3) désactive le RangeSlider pour verrouiller la plage
         try:
             if self.snr_range_slider:
                 self.snr_range_slider.set_active(False)
         except Exception:
             pass
+
+    def _on_visual_apply_starcount(self):
+        """Handler pour le bouton d'application Starcount de la fenêtre de visualisation."""
+        self.apply_pending_starcount_actions_gui()
+        if self.apply_starcount_button:
+            self.apply_starcount_button.config(state=tk.DISABLED)
+        try:
+            if self.starcount_range_slider:
+                self.starcount_range_slider.set_active(False)
+        except Exception:
+            pass
+
+    def _on_visual_apply_fwhm(self):
+        """Handler for FWHM apply button."""
+        self.apply_pending_fwhm_actions_gui()
+        if self.apply_fwhm_button:
+            self.apply_fwhm_button.config(state=tk.DISABLED)
+        try:
+            if self.fwhm_range_slider:
+                self.fwhm_range_slider.set_active(False)
+        except Exception:
+            pass
+
+    def _on_visual_apply_ecc(self):
+        """Handler for eccentricity apply button."""
+        self.apply_pending_ecc_actions_gui()
+        if self.apply_ecc_button:
+            self.apply_ecc_button.config(state=tk.DISABLED)
+        try:
+            if self.ecc_range_slider:
+                self.ecc_range_slider.set_active(False)
+        except Exception:
+            pass
+
+    def _on_starcount_slider_change(self, val, patches):
+        """Mise à jour visuelle lors du déplacement du RangeSlider Starcount."""
+        lo, hi = val
+        for p in patches:
+            x_left = p.get_x()
+            x_right = x_left + p.get_width()
+            if x_right < lo or x_left > hi:
+                p.set_alpha(0.2)
+            else:
+                p.set_alpha(1.0)
+        if patches:
+            patches[0].figure.canvas.draw_idle()
+        self.current_sc_min = lo
+        self.current_sc_max = hi
+        if self.apply_starcount_button:
+            self.apply_starcount_button.config(state=tk.NORMAL)
+
+    def _on_fwhm_slider_change(self, val):
+        """Update when moving the FWHM slider."""
+        lo, hi = val
+        self.current_fwhm_min = lo
+        self.current_fwhm_max = hi
+        if self.apply_fwhm_button:
+            self.apply_fwhm_button.config(state=tk.NORMAL)
+
+    def _on_ecc_slider_change(self, val):
+        """Update when moving the eccentricity slider."""
+        lo, hi = val
+        self.current_ecc_min = lo
+        self.current_ecc_max = hi
+        if self.apply_ecc_button:
+            self.apply_ecc_button.config(state=tk.NORMAL)
 
     def run_apply_actions_thread(self, results_list, snr_reject_abs, delete_flag, move_flag, callbacks, input_dir_abs):
         """
