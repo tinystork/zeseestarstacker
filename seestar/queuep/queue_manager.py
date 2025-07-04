@@ -96,7 +96,7 @@ logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
 from time import monotonic
 from time import monotonic as _mono
-_DRZ_PREV_MIN_DT = 0.5  # secondes
+_DRZ_PREV_MIN_DT = 2.0  # secondes
 _last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0           # horodatage du dernier push
@@ -196,6 +196,20 @@ def _stack_worker(args):
     else:
         return _stack_mean(images, weights)
 
+
+def drizzle_batch_worker(args):
+    """Wrapper used by the drizzle process pool."""
+    self = args[0]
+    batch_temp_filepaths_list = args[1]
+    current_batch_num = args[2] if len(args) > 2 else 0
+    total_batches_est = args[3] if len(args) > 3 else 0
+    weight_map_override = args[4] if len(args) > 4 else None
+    return self._process_incremental_drizzle_batch(
+        batch_temp_filepaths_list,
+        current_batch_num,
+        total_batches_est,
+        weight_map_override,
+    )
 
 def _quality_metrics_worker(image_data):
     """Compute SNR and star count in a separate process."""
@@ -690,10 +704,13 @@ class SeestarQueuedStacker:
         """Launch incremental drizzle processing using the dedicated executor."""
 
         fut = self.drizzle_executor.submit(
-            self._process_incremental_drizzle_batch,
-            batch_temp_filepaths_list,
-            current_batch_num,
-            total_batches_est,
+            drizzle_batch_worker,
+            (
+                self,
+                batch_temp_filepaths_list,
+                current_batch_num,
+                total_batches_est,
+            ),
         )
         self.drizzle_processes.append(fut)
 
@@ -798,7 +815,8 @@ class SeestarQueuedStacker:
         # the parent process is not a daemon.
         parent_is_daemon = multiprocessing.current_process().daemon
         if platform.system() in {"Windows", "Darwin"}:
-            Executor = ThreadPoolExecutor
+            # ⚠ le ThreadPool fige le GUI – on force un ProcessPool
+            Executor = ProcessPoolExecutor
         else:
             Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
 
