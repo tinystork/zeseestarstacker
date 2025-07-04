@@ -267,6 +267,8 @@ class SeestarStackerGUI:
         self.logger.info("DEBUG (GUI __init__): Dictionnaire self.tooltips initialisé.")
         self.batches_processed_for_preview_refresh = 0
         self.preview_auto_refresh_batch_interval = 10
+        # Track when histogram range should be refreshed from sliders
+        self._hist_range_update_pending = False
         self.mosaic_mode_active = False
         self.logger.info(
             "DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False."
@@ -3605,6 +3607,7 @@ class SeestarStackerGUI:
             pass
 
         # Appeler un refresh léger de l'aperçu qui ne recalcule pas l'histogramme
+        self._hist_range_update_pending = True
         self._debounce_refresh_preview(recalculate_histogram=False)
 
     def refresh_preview(self, recalculate_histogram=True):
@@ -3719,10 +3722,11 @@ class SeestarStackerGUI:
 
             # Mettre à jour les lignes de l'histogramme pour refléter les sliders UI (qui sont 0-1)
             # HistogramWidget.set_range s'attend à des valeurs 0-1 et les convertit en interne.
-            if self.histogram_widget:
+            if self.histogram_widget and self._hist_range_update_pending:
                 self.histogram_widget.set_range(
                     preview_params["black_point"], preview_params["white_point"]
                 )
+                self._hist_range_update_pending = False
 
         except Exception as e:
             print(

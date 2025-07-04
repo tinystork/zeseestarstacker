@@ -35,6 +35,8 @@ class HistogramWidget(ttk.Frame):
         self._current_hist_data_details = None
         self._current_data = None
         self.auto_zoom_enabled = False
+        # When True, the X axis range is preserved across batches
+        self.freeze_x_range = False
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -82,6 +84,10 @@ class HistogramWidget(ttk.Frame):
         else:
             print("  -> data_for_analysis est None.")
 
+        if data_for_analysis is None or data_for_analysis.size == 0:
+            # Keep current histogram if no new data is provided
+            return
+
         self._current_data = data_for_analysis
         now = time.monotonic()
         if now - self._last_hist_req < 0.40 and self._hist_future:
@@ -114,7 +120,9 @@ class HistogramWidget(ttk.Frame):
             return
         res = fut.result()
         if res is None:
-            self.plot_histogram(None)
+            # Keep previous display if worker returned nothing
+            if self._current_hist_data_details:
+                self.plot_histogram(self._current_hist_data_details)
             return
         self._current_hist_data_details = res
         self.plot_histogram(res)
@@ -163,8 +171,13 @@ class HistogramWidget(ttk.Frame):
                 current_plot_min = calculated_min
                 current_plot_max = calculated_max
             
-            self.data_min_for_current_plot = current_plot_min
-            self.data_max_for_current_plot = current_plot_max + (current_plot_max - current_plot_min) * 0.001 if (current_plot_max - current_plot_min) > 1e-9 else current_plot_max + 1e-5
+            if not self.freeze_x_range or self._current_hist_data_details is None:
+                self.data_min_for_current_plot = current_plot_min
+                self.data_max_for_current_plot = (
+                    current_plot_max * 1.001
+                    if (current_plot_max - current_plot_min) > 1e-9
+                    else current_plot_max + 1e-5
+                )
             
             print(f"DEBUG HistoWidget._calculate_hist_data (V_HistoCalc_AddInputShape_1): Plage données pour histo (self.data_min/max_for_current_plot): [{self.data_min_for_current_plot:.4g}, {self.data_max_for_current_plot:.4g}]")
             
