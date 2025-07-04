@@ -814,19 +814,11 @@ class SeestarQueuedStacker:
         self.use_gpu = bool(gpu)
         # Keep track of background drizzle processes
         self.drizzle_processes = []
-        # Dedicated pool for drizzle tasks.  On platforms that require the
-        # ``spawn`` start method (Windows/macOS) using a ``ProcessPoolExecutor``
-        # with bound instance methods would fail because ``self`` contains
-        # objects like ``threading.Lock`` that cannot be pickled.  To remain
-        # cross-platform we fall back to a ``ThreadPoolExecutor`` in those
-        # cases.  On Linux we can still leverage ``ProcessPoolExecutor`` when
-        # the parent process is not a daemon.
-        parent_is_daemon = multiprocessing.current_process().daemon
-        if platform.system() in {"Windows", "Darwin"}:
-            # ⚠ le ThreadPool fige le GUI – on force un ProcessPool
-            Executor = ProcessPoolExecutor
-        else:
-            Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
+        # Dedicated pool for drizzle tasks.  Instance methods are made
+        # picklable via ``__getstate__``/``__setstate__`` so we can always rely
+        # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
+        # platform.
+        Executor = ProcessPoolExecutor
 
         self.drizzle_executor = Executor(
             max_workers=max(1, self.num_threads // 2),
@@ -3994,7 +3986,9 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             f"💧 Traitement Drizzle (mode Final) du dernier lot partiel {progress_info_partial_log}..."
                         )
-                        with ThreadPoolExecutor(max_workers=1) as driz_exec:
+                        # Utilisation d'un ProcessPoolExecutor pour ne pas bloquer
+                        # le thread principal lorsque le lot est volumineux.
+                        with ProcessPoolExecutor(max_workers=1) as driz_exec:
                             (
                                 batch_sci_path,
                                 batch_wht_paths,
