@@ -711,7 +711,16 @@ class SeestarQueuedStacker:
                     result = None
             if result and isinstance(result, tuple) and len(result) == 2:
                 sci_path, wht_paths = result
-                if sci_path and wht_paths:
+                if isinstance(sci_path, list) and isinstance(wht_paths, list):
+                    # Result from _process_incremental_drizzle_batch - update
+                    # our persistent drizzle arrays
+                    for idx, driz in enumerate(self.incremental_drizzle_objects or []):
+                        if idx < len(sci_path) and idx < len(wht_paths):
+                            driz.out_img = sci_path[idx]
+                            driz.out_wht = wht_paths[idx]
+                    self.incremental_drizzle_sci_arrays = sci_path
+                    self.incremental_drizzle_wht_arrays = wht_paths
+                elif sci_path and wht_paths:
                     self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
         self.drizzle_processes = []
 
@@ -3986,7 +3995,15 @@ class SeestarQueuedStacker:
                             self.stacked_batches_count,
                             self.total_batches_estimated,
                         )
-                        fut.result()
+                        result = fut.result()
+                        if result and isinstance(result, tuple) and len(result) == 2:
+                            sci_arrs, wht_arrs = result
+                            for idx, driz in enumerate(self.incremental_drizzle_objects or []):
+                                if idx < len(sci_arrs) and idx < len(wht_arrs):
+                                    driz.out_img = sci_arrs[idx]
+                                    driz.out_wht = wht_arrs[idx]
+                            self.incremental_drizzle_sci_arrays = sci_arrs
+                            self.incremental_drizzle_wht_arrays = wht_arrs
 
                     self._move_to_stacked(self._current_batch_paths)
                     self._save_partial_stack()
@@ -6901,6 +6918,12 @@ class SeestarQueuedStacker:
             "======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #%d - %s) ========",
             current_batch_num,
             GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
+        )
+
+        # Return updated drizzle arrays so the parent process can sync state
+        return (
+            [d.out_img for d in self.incremental_drizzle_objects],
+            [d.out_wht for d in self.incremental_drizzle_objects],
         )
 
     #################################################################################################################################################
