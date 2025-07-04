@@ -211,6 +211,14 @@ def drizzle_batch_worker(args):
         weight_map_override,
     )
 
+def drizzle_final_worker(args):
+    """Wrapper used for the final drizzle combination."""
+    self = args[0]
+    files_list = args[1]
+    wcs = args[2]
+    shape = args[3]
+    return self._combine_intermediate_drizzle_batches(files_list, wcs, shape)
+
 def _quality_metrics_worker(image_data):
     """Compute SNR and star count in a separate process."""
     import numpy as np
@@ -4056,14 +4064,19 @@ class SeestarQueuedStacker:
                         self.processing_error = "Drizzle Final: Aucun lot intermédiaire"
                         self.final_stacked_path = None
                     else:
+                        fut = self.drizzle_executor.submit(
+                            drizzle_final_worker,
+                            (
+                                self,
+                                self.intermediate_drizzle_batch_files,
+                                self.drizzle_output_wcs,
+                                self.drizzle_output_shape_hw,
+                            ),
+                        )
                         (
                             final_drizzle_sci_hxwxc,
                             final_drizzle_wht_hxwxc,
-                        ) = self._combine_intermediate_drizzle_batches(
-                            self.intermediate_drizzle_batch_files,
-                            self.drizzle_output_wcs,
-                            self.drizzle_output_shape_hw,
-                        )
+                        ) = fut.result()
                         if final_drizzle_sci_hxwxc is not None:
                             self.update_progress(
                                 "   Drizzle Final combiné. Préparation sauvegarde..."
