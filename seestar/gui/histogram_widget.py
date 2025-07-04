@@ -309,8 +309,41 @@ class HistogramWidget(ttk.Frame):
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
-            
+
             self.canvas.draw_idle()
+            # --- NEW: restore BP/WP lines if they existed ---
+            try:
+                plot_span = self.data_max_for_current_plot - self.data_min_for_current_plot
+                if plot_span < 1e-9:
+                    plot_span = 1.0
+
+                if self.line_min_obj is None:
+                    self.line_min_obj = self.ax.axvline(
+                        self._min_line_val_data_scale,
+                        color="#FFAAAA",
+                        linestyle="--",
+                        linewidth=1.2,
+                        alpha=0.8,
+                        picker=5,
+                    )
+                else:
+                    self.line_min_obj.set_xdata([self._min_line_val_data_scale] * 2)
+
+                if self.line_max_obj is None:
+                    self.line_max_obj = self.ax.axvline(
+                        self._max_line_val_data_scale,
+                        color="#AAAAFF",
+                        linestyle="--",
+                        linewidth=1.2,
+                        alpha=0.8,
+                        picker=5,
+                    )
+                else:
+                    self.line_max_obj.set_xdata([self._max_line_val_data_scale] * 2)
+
+                self.canvas.draw_idle()
+            except Exception as e_redraw:
+                print(f"[Histo] Erreur redraw lignes : {e_redraw}")
             if self.auto_zoom_enabled:
                 try:
                     self.zoom_histogram()
