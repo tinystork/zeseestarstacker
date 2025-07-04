@@ -716,8 +716,8 @@ class SeestarQueuedStacker:
                     # our persistent drizzle arrays
                     for idx, driz in enumerate(self.incremental_drizzle_objects or []):
                         if idx < len(sci_path) and idx < len(wht_paths):
-                            driz.out_img = sci_path[idx]
-                            driz.out_wht = wht_paths[idx]
+                            driz.out_img[...] = sci_path[idx]
+                            driz.out_wht[...] = wht_paths[idx]
                     self.incremental_drizzle_sci_arrays = sci_path
                     self.incremental_drizzle_wht_arrays = wht_paths
                 elif sci_path and wht_paths:
@@ -4003,8 +4003,8 @@ class SeestarQueuedStacker:
                             sci_arrs, wht_arrs = result
                             for idx, driz in enumerate(self.incremental_drizzle_objects or []):
                                 if idx < len(sci_arrs) and idx < len(wht_arrs):
-                                    driz.out_img = sci_arrs[idx]
-                                    driz.out_wht = wht_arrs[idx]
+                                    driz.out_img[...] = sci_arrs[idx]
+                                    driz.out_wht[...] = wht_arrs[idx]
                             self.incremental_drizzle_sci_arrays = sci_arrs
                             self.incremental_drizzle_wht_arrays = wht_arrs
 
