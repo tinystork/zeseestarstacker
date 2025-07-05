@@ -7010,6 +7010,7 @@ class SeestarStackerGUI:
             "save_as_float32": self.settings.save_final_as_float32,
             "preserve_linear_output": self.settings.preserve_linear_output,
             "reproject_between_batches": self.settings.reproject_between_batches,
+            "reproject_coadd_final": self.settings.reproject_coadd_final,
         }
         import inspect
 
