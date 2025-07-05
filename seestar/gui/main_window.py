@@ -4100,7 +4100,7 @@ class SeestarStackerGUI:
             if self.drizzle_mode_var.get() == "Incremental":
                 self.current_preview_data = preview_display
                 self.current_preview_hist_data = preview_hist
-                self.apply_auto_stretch()
+                self.refresh_preview()
                 return
             # Non-drizzle modes keep existing behaviour
             self.refresh_preview()
