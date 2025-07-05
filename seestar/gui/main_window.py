@@ -3715,6 +3715,14 @@ class SeestarStackerGUI:
                     print(
                         "    [RefreshPreview] Returned from histogram_widget.update_histogram."
                     )
+                    try:
+                        bp_ui = self.preview_black_point.get()
+                        wp_ui = self.preview_white_point.get()
+                    except tk.TclError:
+                        bp_ui = None
+                        wp_ui = None
+                    if bp_ui is not None and wp_ui is not None:
+                        self.histogram_widget.set_range(bp_ui, wp_ui)
             else:
                 print(
                     "  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False)."
@@ -4232,6 +4240,14 @@ class SeestarStackerGUI:
                     print(
                         "    [RefreshPreview] Returned from histogram_widget.update_histogram."
                     )
+                    try:
+                        bp_ui = self.preview_black_point.get()
+                        wp_ui = self.preview_white_point.get()
+                    except tk.TclError:
+                        bp_ui = None
+                        wp_ui = None
+                    if bp_ui is not None and wp_ui is not None:
+                        self.histogram_widget.set_range(bp_ui, wp_ui)
             else:
                 print(
                     "  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False)."
