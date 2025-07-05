@@ -9150,6 +9150,7 @@ class SeestarQueuedStacker:
             "_classic_reproject",
             drizzle_final_sci_data=final_img_hwc,
             drizzle_final_wht_data=final_cov,
+            preserve_linear_output=True,
         )
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
@@ -9262,6 +9263,7 @@ class SeestarQueuedStacker:
             "_classic_reproject_zm",
             drizzle_final_sci_data=data_hwc,
             drizzle_final_wht_data=cov_hw,
+            preserve_linear_output=True,
         )
         return True
     def _finalize_single_classic_batch(self, batch_file_tuple):
@@ -9284,6 +9286,7 @@ class SeestarQueuedStacker:
             "_classic_reproject",
             drizzle_final_sci_data=data,
             drizzle_final_wht_data=cov,
+            preserve_linear_output=True,
         )
 
     ############################################################################################################################################
