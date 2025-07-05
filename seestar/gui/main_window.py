@@ -593,6 +593,11 @@ class SeestarStackerGUI:
 
         self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0)
 
+        # --- nouveaux toggles Expert ---
+        self.apply_bn_var = tk.BooleanVar(value=True)
+        self.apply_cb_var = tk.BooleanVar(value=True)
+        self.apply_final_crop_var = tk.BooleanVar(value=True)
+
         print(
             "DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées."
         )
@@ -1612,9 +1617,17 @@ class SeestarStackerGUI:
         self.bn_frame.pack(fill=tk.X, padx=5, pady=5)
         self.bn_frame.columnconfigure(1, weight=0)
         self.bn_frame.columnconfigure(3, weight=0)
+
+        self.apply_bn_check = ttk.Checkbutton(
+            self.bn_frame,
+            text="Enable BN",
+            variable=self.apply_bn_var,
+            command=self._update_bn_options_state,
+        )
+        self.apply_bn_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text="Grid Size:")
         self.bn_grid_size_actual_label.grid(
-            row=0, column=0, sticky=tk.W, padx=2, pady=2
+            row=1, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.bn_grid_size_combo = ttk.Combobox(
             self.bn_frame,
@@ -1623,9 +1636,9 @@ class SeestarStackerGUI:
             width=7,
             state="readonly",
         )
-        self.bn_grid_size_combo.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_grid_size_combo.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_low_actual_label = ttk.Label(self.bn_frame, text="BG Perc. Low:")
-        self.bn_perc_low_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_low_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_low_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=0,
@@ -1634,10 +1647,10 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.bn_perc_low_var,
         )
-        self.bn_perc_low_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_low_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text="BG Perc. High:")
         self.bn_perc_high_actual_label.grid(
-            row=1, column=2, sticky=tk.W, padx=2, pady=2
+            row=2, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.bn_perc_high_spinbox = ttk.Spinbox(
             self.bn_frame,
@@ -1647,12 +1660,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.bn_perc_high_var,
         )
-        self.bn_perc_high_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_high_spinbox.grid(row=2, column=3, sticky=tk.W, padx=2, pady=2)
         self.bn_std_factor_actual_label = ttk.Label(
             self.bn_frame, text="BG Std Factor:"
         )
         self.bn_std_factor_actual_label.grid(
-            row=2, column=0, sticky=tk.W, padx=2, pady=2
+            row=3, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.bn_std_factor_spinbox = ttk.Spinbox(
             self.bn_frame,
@@ -1663,9 +1676,9 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_std_factor_var,
         )
-        self.bn_std_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_std_factor_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_min_gain_actual_label = ttk.Label(self.bn_frame, text="Min Gain:")
-        self.bn_min_gain_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2)
+        self.bn_min_gain_actual_label.grid(row=4, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_min_gain_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=0.1,
@@ -1675,9 +1688,9 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_min_gain_var,
         )
-        self.bn_min_gain_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_min_gain_spinbox.grid(row=4, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_max_gain_actual_label = ttk.Label(self.bn_frame, text="Max Gain:")
-        self.bn_max_gain_actual_label.grid(row=3, column=2, sticky=tk.W, padx=2, pady=2)
+        self.bn_max_gain_actual_label.grid(row=4, column=2, sticky=tk.W, padx=2, pady=2)
         self.bn_max_gain_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=1.0,
@@ -1687,7 +1700,7 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_max_gain_var,
         )
-        self.bn_max_gain_spinbox.grid(row=3, column=3, sticky=tk.W, padx=2, pady=2)
+        self.bn_max_gain_spinbox.grid(row=4, column=3, sticky=tk.W, padx=2, pady=2)
         print("DEBUG (GUI create_layout): Cadre BN créé.")
 
         self.cb_frame = ttk.LabelFrame(
@@ -1698,11 +1711,19 @@ class SeestarStackerGUI:
         self.cb_frame.pack(fill=tk.X, padx=5, pady=5)
         self.cb_frame.columnconfigure(1, weight=0)
         self.cb_frame.columnconfigure(3, weight=0)
+
+        self.apply_cb_check = ttk.Checkbutton(
+            self.cb_frame,
+            text="Enable Edge/Chroma Correction",
+            variable=self.apply_cb_var,
+            command=self._update_cb_options_state,
+        )
+        self.apply_cb_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
         self.cb_border_size_actual_label = ttk.Label(
             self.cb_frame, text="Border Size (px):"
         )
         self.cb_border_size_actual_label.grid(
-            row=0, column=0, sticky=tk.W, padx=2, pady=2
+            row=1, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.cb_border_size_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1712,12 +1733,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.cb_border_size_var,
         )
-        self.cb_border_size_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.cb_border_size_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
         self.cb_blur_radius_actual_label = ttk.Label(
             self.cb_frame, text="Blur Radius (px):"
         )
         self.cb_blur_radius_actual_label.grid(
-            row=0, column=2, sticky=tk.W, padx=2, pady=2
+            row=1, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.cb_blur_radius_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1727,12 +1748,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.cb_blur_radius_var,
         )
-        self.cb_blur_radius_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2)
+        self.cb_blur_radius_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
         self.cb_min_b_factor_actual_label = ttk.Label(
             self.cb_frame, text="Min Blue Factor:"
         )
         self.cb_min_b_factor_actual_label.grid(
-            row=1, column=0, sticky=tk.W, padx=2, pady=2
+            row=2, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.cb_min_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1743,12 +1764,12 @@ class SeestarStackerGUI:
             format="%.2f",
             textvariable=self.cb_min_b_factor_var,
         )
-        self.cb_min_b_factor_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.cb_min_b_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
         self.cb_max_b_factor_actual_label = ttk.Label(
             self.cb_frame, text="Max Blue Factor:"
         )
         self.cb_max_b_factor_actual_label.grid(
-            row=1, column=2, sticky=tk.W, padx=2, pady=2
+            row=2, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.cb_max_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1759,7 +1780,7 @@ class SeestarStackerGUI:
             format="%.2f",
             textvariable=self.cb_max_b_factor_var,
         )
-        self.cb_max_b_factor_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.cb_max_b_factor_spinbox.grid(row=2, column=3, sticky=tk.W, padx=2, pady=2)
         print("DEBUG (GUI create_layout): Cadre CB créé.")
 
         self.crop_frame = ttk.LabelFrame(
@@ -1768,6 +1789,13 @@ class SeestarStackerGUI:
             padding=5,
         )
         self.crop_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.apply_crop_check = ttk.Checkbutton(
+            self.crop_frame,
+            text="Enable Final Cropping",
+            variable=self.apply_final_crop_var,
+            command=self._update_crop_options_state,
+        )
+        self.apply_crop_check.pack(anchor=tk.W, padx=5, pady=(0, 3))
         self.final_edge_crop_actual_label = ttk.Label(
             self.crop_frame, text="Edge Crop (%):"
         )
@@ -2255,6 +2283,9 @@ class SeestarStackerGUI:
         self._update_photutils_bn_options_state()
         self._update_feathering_options_state()
         self._update_low_wht_mask_options_state()
+        self._update_bn_options_state()
+        self._update_cb_options_state()
+        self._update_crop_options_state()
         print(
             "DEBUG (GUI create_layout V_SaveAsFloat32_1): Fin création layout et appels _update_..._state."
         )  # Version Log
@@ -2394,6 +2425,38 @@ class SeestarStackerGUI:
     #        except tk.TclError: pass
     #        except AttributeError: pass # Si photutils_params_frame n'est pas encore créé
     #        except Exception as e: print(f"ERREUR inattendue dans _update_photutils_bn_options_state: {e}")
+
+    ###############################################################################
+
+    def _update_bn_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_bn_var.get() else tk.DISABLED
+        for w in self.bn_frame.winfo_children():
+            if w is self.apply_bn_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
+
+    def _update_cb_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_cb_var.get() else tk.DISABLED
+        for w in self.cb_frame.winfo_children():
+            if w is self.apply_cb_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
+
+    def _update_crop_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_final_crop_var.get() else tk.DISABLED
+        for w in self.crop_frame.winfo_children():
+            if w is self.apply_crop_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
 
     ###############################################################################
 
@@ -3832,6 +3895,8 @@ class SeestarStackerGUI:
                 self.bn_min_gain_var.set(default_settings.bn_min_gain)
             if hasattr(self, "bn_max_gain_var"):
                 self.bn_max_gain_var.set(default_settings.bn_max_gain)
+            if hasattr(self, "apply_bn_var"):
+                self.apply_bn_var.set(default_settings.apply_bn)
 
             # ChromaticBalancer (CB)
             if hasattr(self, "cb_border_size_var"):
@@ -3842,12 +3907,16 @@ class SeestarStackerGUI:
                 self.cb_min_b_factor_var.set(default_settings.cb_min_b_factor)
             if hasattr(self, "cb_max_b_factor_var"):
                 self.cb_max_b_factor_var.set(default_settings.cb_max_b_factor)
+            if hasattr(self, "apply_cb_var"):
+                self.apply_cb_var.set(default_settings.apply_cb)
 
             # Rognage Final
             if hasattr(self, "final_edge_crop_percent_var"):
                 self.final_edge_crop_percent_var.set(
                     default_settings.final_edge_crop_percent
                 )
+            if hasattr(self, "apply_final_crop_var"):
+                self.apply_final_crop_var.set(default_settings.apply_final_crop)
 
             # --- Réinitialiser Feathering ---
             if hasattr(self, "apply_feathering_var"):
@@ -3889,6 +3958,12 @@ class SeestarStackerGUI:
                 self._update_photutils_bn_options_state()
             if hasattr(self, "_update_feathering_options_state"):
                 self._update_feathering_options_state()
+            if hasattr(self, "_update_bn_options_state"):
+                self._update_bn_options_state()
+            if hasattr(self, "_update_cb_options_state"):
+                self._update_cb_options_state()
+            if hasattr(self, "_update_crop_options_state"):
+                self._update_crop_options_state()
             # Si d'autres groupes d'options dans l'onglet expert ont des états dépendants,
             # appelez leurs méthodes _update_..._state() ici aussi.
 
