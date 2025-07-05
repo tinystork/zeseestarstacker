@@ -4258,9 +4258,12 @@ class SeestarQueuedStacker:
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
                     if self.intermediate_classic_batch_files:
-                        self._reproject_classic_batches(
+                        if not self._reproject_classic_batches_zm(
                             self.intermediate_classic_batch_files
-                        )
+                        ):
+                            self._reproject_classic_batches(
+                                self.intermediate_classic_batch_files
+                            )
                     else:
                         self.update_progress(
                             "   Aucune batch sauvegardé pour reproject&coadd."
@@ -9077,6 +9080,119 @@ class SeestarQueuedStacker:
             drizzle_final_sci_data=final_img_hwc,
             drizzle_final_wht_data=final_cov,
         )
+
+    def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
+        """Crop a mosaic to the current reference WCS if available."""
+        if self.reference_wcs_object is None or self.reference_shape is None:
+            return img_hwc, cov_hw, mosaic_wcs
+        try:
+            ref_wcs = self.reference_wcs_object
+            h_ref, w_ref = self.reference_shape
+            corners = np.array(
+                [[0, 0], [w_ref - 1, 0], [w_ref - 1, h_ref - 1], [0, h_ref - 1]],
+                dtype=float,
+            )
+            sky = ref_wcs.pixel_to_world(corners[:, 0], corners[:, 1])
+            x, y = mosaic_wcs.world_to_pixel(sky)
+            left = int(np.floor(np.nanmin(x)))
+            right = int(np.ceil(np.nanmax(x)))
+            top = int(np.floor(np.nanmin(y)))
+            bottom = int(np.ceil(np.nanmax(y)))
+            left = max(left, 0)
+            top = max(top, 0)
+            right = min(right, img_hwc.shape[1] - 1)
+            bottom = min(bottom, img_hwc.shape[0] - 1)
+            cropped_img = img_hwc[top : bottom + 1, left : right + 1]
+            cropped_cov = None
+            if cov_hw is not None and cov_hw.shape == img_hwc.shape[:2]:
+                cropped_cov = cov_hw[top : bottom + 1, left : right + 1]
+            new_wcs = mosaic_wcs.deepcopy()
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [
+                    new_wcs.wcs.crpix[0] - left,
+                    new_wcs.wcs.crpix[1] - top,
+                ]
+            new_wcs.pixel_shape = (cropped_img.shape[1], cropped_img.shape[0])
+            try:
+                new_wcs._naxis1 = cropped_img.shape[1]
+                new_wcs._naxis2 = cropped_img.shape[0]
+            except Exception:
+                pass
+            return cropped_img, cropped_cov, new_wcs
+        except Exception as e:
+            self.update_progress(f"⚠️ crop_to_reference_wcs: {e}", "WARN")
+            return img_hwc, cov_hw, mosaic_wcs
+
+    def _reproject_classic_batches_zm(self, batch_files):
+        """Attempt reproject&coadd using ZeMosaic. Return True if successful."""
+        try:
+            from zemosaic import zemosaic_worker
+        except Exception as e:
+            self.update_progress(f"⚠️ ZeMosaic indisponible: {e}", "WARN")
+            return False
+        if not hasattr(zemosaic_worker, "assemble_final_mosaic_with_reproject_coadd"):
+            return False
+
+        master_tiles = []
+        wcs_list = []
+        headers = []
+        for sci_path, _wht_paths in batch_files:
+            try:
+                hdr = fits.getheader(sci_path, memmap=False)
+                wcs = WCS(hdr, naxis=2)
+                h = int(hdr.get("NAXIS2"))
+                w = int(hdr.get("NAXIS1"))
+                wcs.pixel_shape = (w, h)
+                master_tiles.append((str(sci_path), wcs))
+                wcs_list.append(wcs)
+                headers.append(hdr)
+            except Exception as e:
+                self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
+
+        if len(master_tiles) < 2:
+            return False
+
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        else:
+            out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                wcs_list,
+                headers,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+            if out_wcs is None:
+                return False
+
+        try:
+            data_hwc, cov_hw = zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
+                master_tile_fits_with_wcs_list=master_tiles,
+                final_output_wcs=out_wcs,
+                final_output_shape_hw=out_shape,
+                progress_callback=lambda m, p=None: self.update_progress(f"   {m}"),
+                n_channels=3,
+                match_bg=True,
+                apply_crop=False,
+                use_gpu=False,
+            )
+        except Exception as e:
+            self.update_progress(f"⚠️ Échec ZeMosaic: {e}", "WARN")
+            return False
+
+        if data_hwc is None:
+            return False
+
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
+
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        self._save_final_stack(
+            "_classic_reproject_zm",
+            drizzle_final_sci_data=data_hwc,
+            drizzle_final_wht_data=cov_hw,
+        )
+        return True
 
     ############################################################################################################################################
 
