@@ -10789,6 +10789,7 @@ class SeestarQueuedStacker:
                 self.drizzle_active_session
                 or self.is_mosaic_run
                 or self.reproject_between_batches
+                or self.reproject_coadd_final
             ):
                 logger.debug(
                     "DEBUG QM (start_processing): Plate-solving de la référence principale requis..."
