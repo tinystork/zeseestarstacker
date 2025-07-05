@@ -32,8 +32,18 @@ from seestar.tools import (
 
 from seestar.enhancement import reproject_utils
 
-# GUI (expose the main class)
-from seestar.gui import SeestarStackerGUI
+# GUI (optional)
+try:
+    from seestar.gui import SeestarStackerGUI
+    _GUI_AVAILABLE = True
+except Exception as e:  # pragma: no cover - GUI might not be present in tests
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Seestar GUI not available (%s). Running in headless mode.", e
+    )
+    SeestarStackerGUI = None
+    _GUI_AVAILABLE = False
 
 __all__ = [
     # Core
@@ -53,10 +63,11 @@ __all__ = [
     'apply_enhanced_stretch',
     'save_fits_as_png',
     'reproject_utils',
-    # GUI
-    'SeestarStackerGUI',
     # Package Info
     '__version__',
     '__author__'
 ]
+
+if _GUI_AVAILABLE:
+    __all__.append('SeestarStackerGUI')
 # --- END OF FILE seestar/__init__.py ---
