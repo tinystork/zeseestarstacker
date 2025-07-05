@@ -53,6 +53,21 @@ from typing import Literal
 import astroalign as aa
 import cv2
 import numpy as np
+try:
+    from seestar.enhancement.weight_utils import make_radial_weight_map
+except Exception:
+    def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
+        Y, X = np.ogrid[:h, :w]
+        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+        r = np.hypot(Y - cy, X - cx) / np.hypot(cy, cx)
+        w_map = np.ones((h, w), dtype=np.float32)
+        m = r >= feather_fraction
+        w_map[m] = np.clip(
+            1.0 - (r[m] - feather_fraction) / (1.0 - feather_fraction),
+            floor,
+            1.0,
+        )
+        return w_map
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from astropy.coordinates import concatenate as skycoord_concatenate
@@ -993,6 +1008,7 @@ class SeestarQueuedStacker:
         self.stars_exponent = 0.5
         self.min_weight = 0.01
         self.apply_feathering = False
+        self.apply_batch_feathering = True
         self.feather_blur_px = 256
 
         self.current_batch_data = []
@@ -5220,12 +5236,13 @@ class SeestarQueuedStacker:
                 if panel_image_data is None or wcs_for_panel is None:
                     continue
                 input_data_for_reproject.append((panel_image_data, wcs_for_panel))
+                h, w = panel_image_data.shape[:2]
                 if pixel_mask is not None:
-                    input_footprints_for_reproject.append(pixel_mask.astype(np.float32))
+                    footprint = pixel_mask.astype(np.float32)
                 else:
-                    input_footprints_for_reproject.append(
-                        np.ones(panel_image_data.shape[:2], dtype=np.float32)
-                    )
+                    footprint = np.ones((h, w), np.float32)
+                radial = make_radial_weight_map(h, w)
+                input_footprints_for_reproject.append(footprint * radial)
                 all_wcs_for_grid_calc.append(wcs_for_panel)
                 all_headers_for_grid_calc.append(panel_header)
             except Exception as e_unpack:
@@ -7537,8 +7554,9 @@ class SeestarQueuedStacker:
                 )
                 batch_wht = batch_wht.reshape(self.memmap_shape[:2])
 
-            self.cumulative_sum_memmap[:] += batch_sum.astype(self.memmap_dtype_sum)
-            self.cumulative_wht_memmap[:] += batch_wht.astype(self.memmap_dtype_wht)
+            mask = batch_wht > 0
+            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[mask]
+            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[mask]
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -8137,6 +8155,14 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
                     np.float32
                 )
+                if getattr(self, "apply_batch_feathering", True):
+                    h, w = batch_coverage_map_2d.shape
+                    if (
+                        not hasattr(self, "_radial_w_base")
+                        or self._radial_w_base.shape != (h, w)
+                    ):
+                        self._radial_w_base = make_radial_weight_map(h, w)
+                    batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "winsorized sigma clip"
             elif (
                 mode == "kappa-sigma"
@@ -8155,6 +8181,14 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
                     np.float32
                 )
+                if getattr(self, "apply_batch_feathering", True):
+                    h, w = batch_coverage_map_2d.shape
+                    if (
+                        not hasattr(self, "_radial_w_base")
+                        or self._radial_w_base.shape != (h, w)
+                    ):
+                        self._radial_w_base = make_radial_weight_map(h, w)
+                    batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "kappa sigma"
             elif (
                 mode == "linear_fit_clip"
@@ -8171,6 +8205,14 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
                     np.float32
                 )
+                if getattr(self, "apply_batch_feathering", True):
+                    h, w = batch_coverage_map_2d.shape
+                    if (
+                        not hasattr(self, "_radial_w_base")
+                        or self._radial_w_base.shape != (h, w)
+                    ):
+                        self._radial_w_base = make_radial_weight_map(h, w)
+                    batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "linear fit clip"
             elif mode == "median":
                 images_for_stack = [
@@ -8184,6 +8226,14 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
                     np.float32
                 )
+                if getattr(self, "apply_batch_feathering", True):
+                    h, w = batch_coverage_map_2d.shape
+                    if (
+                        not hasattr(self, "_radial_w_base")
+                        or self._radial_w_base.shape != (h, w)
+                    ):
+                        self._radial_w_base = make_radial_weight_map(h, w)
+                    batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "median"
             else:
                 # ------------------------------------------------------------------
@@ -8226,6 +8276,14 @@ class SeestarQueuedStacker:
                 ).astype(np.float32)
 
                 batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
+                if getattr(self, "apply_batch_feathering", True):
+                    h, w = batch_coverage_map_2d.shape
+                    if (
+                        not hasattr(self, "_radial_w_base")
+                        or self._radial_w_base.shape != (h, w)
+                    ):
+                        self._radial_w_base = make_radial_weight_map(h, w)
+                    batch_coverage_map_2d *= self._radial_w_base
 
                 stack_note = f"mean ({max_workers} threads)"
             stack_info_header = fits.Header()
@@ -9016,6 +9074,8 @@ class SeestarQueuedStacker:
             try:
                 coverage = fits.getdata(wht_paths[0]).astype(np.float32)
                 np.nan_to_num(coverage, copy=False)
+                h, w = coverage.shape
+                coverage *= make_radial_weight_map(h, w)
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
@@ -10424,6 +10484,7 @@ class SeestarQueuedStacker:
         photutils_bn_filter_size=5,
         photutils_bn_sigma_clip=3.0,
         photutils_bn_exclude_percentile=98.0,
+        apply_batch_feathering=True,
         apply_feathering=False,
         feather_blur_px=256,
         apply_low_wht_mask=False,
@@ -10649,6 +10710,7 @@ class SeestarQueuedStacker:
         self.photutils_bn_filter_size = int(photutils_bn_filter_size)
         self.photutils_bn_sigma_clip = float(photutils_bn_sigma_clip)
         self.photutils_bn_exclude_percentile = float(photutils_bn_exclude_percentile)
+        self.apply_batch_feathering = bool(apply_batch_feathering)
         self.apply_feathering = bool(apply_feathering)
         self.feather_blur_px = int(feather_blur_px)
         self.apply_low_wht_mask = bool(apply_low_wht_mask)
