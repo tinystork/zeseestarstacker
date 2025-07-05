@@ -2705,6 +2705,19 @@ class SeestarQueuedStacker:
             )
             self.total_batches_estimated = 0
 
+    ##########################################################################
+
+    def _get_quality_executor(self) -> ProcessPoolExecutor:
+        """Return a valid executor for quality metrics."""
+        if (
+            getattr(self, "quality_executor", None) is None
+            or getattr(self.quality_executor, "_shutdown", False)
+        ):
+            max_workers = _suggest_pool_size(0.75)
+            self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
+            logger.debug("Quality pool (re)started with %d workers", max_workers)
+        return self.quality_executor
+
     ################################################################################################################################################
 
     def _calculate_quality_metrics(self, image_data):
@@ -2713,7 +2726,11 @@ class SeestarQueuedStacker:
             return {"snr": 0.0, "stars": 0.0}
 
         try:
-            future = self.quality_executor.submit(_quality_metrics_worker, image_data)
+            if hasattr(self, "_get_quality_executor"):
+                executor = self._get_quality_executor()
+            else:
+                executor = self.quality_executor
+            future = executor.submit(_quality_metrics_worker, image_data)
             scores, star_msg, num_stars = future.result()
         except Exception as e:
             self.update_progress(
@@ -4308,6 +4325,7 @@ class SeestarQueuedStacker:
             )  # Transmettre l'état d'arrêt à l'UI
             if self.autotuner:
                 self.autotuner.stop()
+            self.__class__.stop_processing(self)
             gc.collect()
             logger.debug(
                 f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False."
@@ -11246,8 +11264,15 @@ class SeestarQueuedStacker:
         self.aligner.stop_processing = True
         if self.autotuner:
             self.autotuner.stop()
+        self.__class__.stop_processing(self)
+
+    ##########################################################################
+
+    def stop_processing(self) -> None:
+        """Shutdown the quality metrics executor if running."""
         if getattr(self, "quality_executor", None):
-            self.quality_executor.shutdown(wait=True)
+            self.quality_executor.shutdown(wait=True, cancel_futures=True)
+            self.quality_executor = None
 
     ################################################################################################################################################
 
