@@ -106,6 +106,8 @@ EN_TRANSLATIONS = {
     # Final Cropping Section
     "crop_frame_title": "Final Cropping",
     "final_edge_crop_label": "Edge Crop (%):",
+    "crop_master_tiles_label": "Crop master tiles",
+    "crop_percent_side_label": "Crop % per side",
     # Reset Expert Button
     "reset_expert_button": "Reset Expert Settings",
     ### Translations for Photutils Background Subtraction (Expert Tab) ###

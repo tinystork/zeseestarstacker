@@ -1056,24 +1056,28 @@ class SeestarStackerGUI:
         zoom_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         ttk.Label(zoom_frame, text="Zoom (%)").grid(row=0, column=0, sticky=tk.W)
         self.zoom_percent_var = tk.IntVar(value=0)
-        ttk.Combobox(
+        self.zoom_slider = ttk.Scale(
             zoom_frame,
-            values=[0, 10, 20, 30, 40, 50],
-            textvariable=self.zoom_percent_var,
-            width=6,
-            state="readonly",
-        ).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+            from_=-50,
+            to=50,
+            variable=self.zoom_percent_var,
+            orient=tk.HORIZONTAL,
+        )
+        self.zoom_slider.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
 
         crop_frame = ttk.Frame(tab_stacking)
         crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         self.crop_master_check = ttk.Checkbutton(
             crop_frame,
-            text="Crop master tiles",
+            text=self.tr("crop_master_tiles_label", default="Crop master tiles"),
             variable=self.apply_master_tile_crop_var,
             command=self._update_master_tile_crop_state,
         )
         self.crop_master_check.grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(crop_frame, text="Crop % per side").grid(
+        ttk.Label(
+            crop_frame,
+            text=self.tr("crop_percent_side_label", default="Crop % per side"),
+        ).grid(
             row=0, column=1, sticky=tk.W, padx=(10, 2)
         )
         self.master_tile_crop_spinbox = ttk.Spinbox(
