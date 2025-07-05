@@ -9453,7 +9453,10 @@ class SeestarQueuedStacker:
             and drizzle_final_sci_data is None
         )
         is_classic_reproject_mode = (
-            self.reproject_between_batches
+            (
+                self.reproject_between_batches
+                or getattr(self, "reproject_coadd_final", False)
+            )
             and drizzle_final_sci_data is not None
             and drizzle_final_wht_data is not None
         )
