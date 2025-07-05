@@ -8304,6 +8304,46 @@ class SeestarQueuedStacker:
             )
             stack_info_header["STK_NOTE"] = f"Stacked with {stack_note}"
 
+            stack_info_header["NEXP_SUM"] = (
+                num_valid_images_for_processing,
+                "Number of exposures summed",
+            )
+            tot_exp = 0.0
+            for _hdr in valid_headers_for_ccdproc:
+                if _hdr is None:
+                    continue
+                for k in ("EXPTIME", "EXPOSURE"):
+                    if k in _hdr:
+                        try:
+                            tot_exp += float(_hdr[k])
+                            break
+                        except Exception:
+                            continue
+            stack_info_header["EXPTOTAL"] = (
+                round(tot_exp, 2),
+                "[s] Sum of EXPTIME for this batch",
+            )
+
+            if valid_headers_for_ccdproc:
+                first_hdr = valid_headers_for_ccdproc[0]
+                for key in [
+                    "OBJECT",
+                    "FILTER",
+                    "INSTRUME",
+                    "FOCALLEN",
+                    "XPIXSZ",
+                    "YPIXSZ",
+                    "GAIN",
+                ]:
+                    if key in first_hdr and key not in stack_info_header:
+                        try:
+                            stack_info_header[key] = (
+                                first_hdr[key],
+                                first_hdr.comments.get(key, ""),
+                            )
+                        except Exception:
+                            stack_info_header[key] = first_hdr[key]
+
             if self.reproject_between_batches and self.reference_wcs_object is not None:
                 try:
                     wcs_hdr = self.reference_wcs_object.to_header(relax=True)
@@ -9046,7 +9086,10 @@ class SeestarQueuedStacker:
         header["NAXIS1"] = data_cxhxw.shape[2]
         header["NAXIS2"] = data_cxhxw.shape[1]
         header["NAXIS3"] = data_cxhxw.shape[0]
-        header["CTYPE3"] = "CHANNEL"
+        header["CTYPE3"] = "RGB"
+        header["EXTNAME"] = "RGB"
+        header["BITPIX"] = -32
+        header["SIMPLE"] = True
         try:
             header["CHNAME1"] = "R"
             header["CHNAME2"] = "G"
