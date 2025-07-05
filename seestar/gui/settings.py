@@ -412,6 +412,20 @@ class SettingsManager:
                     value=default_values_from_code.get("final_edge_crop_percent", 2.0)
                 ),
             ).get()
+            self.apply_master_tile_crop = getattr(
+                gui_instance,
+                "apply_master_tile_crop_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get("apply_master_tile_crop", False)
+                ),
+            ).get()
+            self.master_tile_crop_percent = getattr(
+                gui_instance,
+                "master_tile_crop_percent_var",
+                tk.DoubleVar(
+                    value=default_values_from_code.get("master_tile_crop_percent", 18.0)
+                ),
+            ).get()
             self.apply_final_crop = getattr(
                 gui_instance,
                 "apply_final_crop_var",
@@ -968,6 +982,12 @@ class SettingsManager:
             getattr(gui_instance, "apply_cb_var", tk.BooleanVar()).set(
                 self.apply_cb
             )
+            getattr(gui_instance, "apply_master_tile_crop_var", tk.BooleanVar()).set(
+                self.apply_master_tile_crop
+            )
+            getattr(gui_instance, "master_tile_crop_percent_var", tk.DoubleVar()).set(
+                self.master_tile_crop_percent
+            )
             getattr(gui_instance, "final_edge_crop_percent_var", tk.DoubleVar()).set(
                 self.final_edge_crop_percent
             )
@@ -1246,6 +1266,8 @@ class SettingsManager:
         defaults_dict["cb_min_b_factor"] = 0.4
         defaults_dict["cb_max_b_factor"] = 1.5
         defaults_dict["apply_cb"] = True
+        defaults_dict["apply_master_tile_crop"] = False
+        defaults_dict["master_tile_crop_percent"] = 18.0
         defaults_dict["final_edge_crop_percent"] = 2.0
         defaults_dict["apply_final_crop"] = True
         defaults_dict["apply_photutils_bn"] = False
@@ -1901,6 +1923,24 @@ class SettingsManager:
             self.apply_cb = bool(
                 getattr(self, "apply_cb", defaults_fallback["apply_cb"])
             )
+            self.apply_master_tile_crop = bool(
+                getattr(
+                    self,
+                    "apply_master_tile_crop",
+                    defaults_fallback["apply_master_tile_crop"],
+                )
+            )
+            self.master_tile_crop_percent = float(
+                np.clip(
+                    getattr(
+                        self,
+                        "master_tile_crop_percent",
+                        defaults_fallback["master_tile_crop_percent"],
+                    ),
+                    0.0,
+                    25.0,
+                )
+            )
             self.final_edge_crop_percent = float(
                 np.clip(
                     getattr(
@@ -2431,6 +2471,8 @@ class SettingsManager:
             "cb_min_b_factor": float(self.cb_min_b_factor),
             "cb_max_b_factor": float(self.cb_max_b_factor),
             "apply_cb": bool(self.apply_cb),
+            "apply_master_tile_crop": bool(self.apply_master_tile_crop),
+            "master_tile_crop_percent": float(self.master_tile_crop_percent),
             "final_edge_crop_percent": float(self.final_edge_crop_percent),
             "apply_final_crop": bool(self.apply_final_crop),
             "apply_photutils_bn": bool(self.apply_photutils_bn),

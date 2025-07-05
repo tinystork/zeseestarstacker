@@ -9005,6 +9005,7 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
+
         if self.solve_batches:
             # Always attempt to solve the intermediate batch with ASTAP so that a
             # valid WCS is present on each stacked batch file. This is required for
@@ -9080,6 +9081,26 @@ class SeestarQueuedStacker:
         final_stacked = stacked_np
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
+
+        if (
+            getattr(self, "apply_master_tile_crop", False)
+            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
+        ):
+            try:
+                cp = self.master_tile_crop_percent_decimal
+                dh = int(final_stacked.shape[0] * cp)
+                dw = int(final_stacked.shape[1] * cp)
+                if dh > 0 or dw > 0:
+                    end_h = -dh if dh != 0 else None
+                    end_w = -dw if dw != 0 else None
+                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
+                    final_wht = final_wht[dh:end_h, dw:end_w]
+                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
+                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+            except Exception:
+                pass
 
         data_cxhxw = np.moveaxis(final_stacked, -1, 0)
         header["NAXIS"] = 3
@@ -10569,6 +10590,8 @@ class SeestarQueuedStacker:
         cb_blur_radius=8,
         cb_min_b_factor=0.4,
         cb_max_b_factor=1.5,
+        apply_master_tile_crop=False,
+        master_tile_crop_percent=18.0,
         final_edge_crop_percent=2.0,
         apply_photutils_bn=False,
         photutils_bn_box_size=128,
@@ -10799,6 +10822,8 @@ class SeestarQueuedStacker:
         self.cb_blur_radius = int(cb_blur_radius)
         self.cb_min_b_factor = float(cb_min_b_factor)
         self.cb_max_b_factor = float(cb_max_b_factor)
+        self.apply_master_tile_crop = bool(apply_master_tile_crop)
+        self.master_tile_crop_percent_decimal = float(master_tile_crop_percent) / 100.0
         self.final_edge_crop_percent_decimal = float(final_edge_crop_percent) / 100.0
         self.apply_photutils_bn = bool(apply_photutils_bn)
         self.photutils_bn_box_size = int(photutils_bn_box_size)

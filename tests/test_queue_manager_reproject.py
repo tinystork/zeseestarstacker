@@ -585,6 +585,54 @@ def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
     assert len(wht_paths) == data.shape[2]
 
 
+def test_save_classic_batch_crop(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+        settings_mod.SettingsManager = object
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.apply_master_tile_crop = True
+    obj.master_tile_crop_percent_decimal = 0.1
+    obj.output_folder = str(tmp_path)
+    obj.solve_batches = False
+
+    hdr = qm.fits.Header()
+    hdr["CRPIX1"] = 5.0
+    hdr["CRPIX2"] = 5.0
+
+    data = np.ones((10, 10, 3), dtype=np.float32)
+    wht = np.ones((10, 10), dtype=np.float32)
+
+    sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
+
+    saved = qm.fits.getdata(sci)
+    header = qm.fits.getheader(sci)
+
+    assert saved.shape == (3, 8, 8)
+    assert header["CRPIX1"] == 4.0
+    assert header["CRPIX2"] == 4.0
+
+
 def test_calculate_fixed_orientation_grid():
     sys.path.insert(0, str(ROOT))
     import importlib
