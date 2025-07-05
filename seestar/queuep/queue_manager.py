@@ -4870,20 +4870,12 @@ class SeestarQueuedStacker:
             else:  # dim1 est plus vertical, donc on tourne de 90 deg pour que dim2 devienne "horizontal"
                 final_wcs_rotation_deg = angle_cv_deg + 90.0
 
-            # Maintenant, on "snappe" cet angle à 0 ou 90 pour que ce soit vraiment droit
-            # Mais attention, si on snappe l'angle WCS, les dimensions de l'OMBB ne correspondent plus.
-            # L'objectif de l'OMBB était de minimiser l'aire. Si on force l'angle WCS à 0 ou 90,
-            # alors on devrait utiliser les dimensions de l'AABB (Axis Aligned Bounding Box) sur le plan tangent.
-
-            # REVENONS À L'IDÉE SIMPLE : PAS DE ROTATION PAR RAPPORT AUX AXES RA/DEC
-            # L'OMBB sert uniquement à trouver le CRVAL.
-            # La SHAPE est ensuite calculée pour englober tout.
-
-            final_wcs_rotation_deg = 0.0  # Forcer l'alignement avec les axes RA/Dec
-            self.update_progress(f"   -> Orientation WCS forcée à 0° (alignée RA/Dec).")
-            logger.debug(
-                f"DEBUG QM: Angle de rotation WCS final forcé à: {final_wcs_rotation_deg:.1f}°"
-            )
+            # On pourrait "snapper" cet angle à 0 ou 90 pour aligner parfaitement
+            # le WCS sur les axes, mais cela casserait la cohérence avec les
+            # matrices d'alignement déjà calculées. L'OMBB reste donc utilisé
+            # uniquement pour déterminer le CRVAL et l'orientation naturelle est
+            # conservée. La shape finale sera calculée par reprojection de tous
+            # les coins.
 
             # CRVAL vient du centre de l'OMBB (calculé avant)
             crval_skycoord_list = SeestarQueuedStacker._deproject_from_tangent_plane(
