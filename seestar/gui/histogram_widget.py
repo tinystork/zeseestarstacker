@@ -62,6 +62,11 @@ class HistogramWidget(ttk.Frame):
 
     def _configure_plot_style(self):
         self.ax.clear()
+        # Clear any references to the BP/WP lines since clearing the axis
+        # removes them from the canvas. Mark them as None so that they are
+        # recreated on the next draw call.
+        self.line_min_obj = None
+        self.line_max_obj = None
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='x', colors='lightgray', labelsize=8)
         self.ax.tick_params(axis='y', colors='lightgray', labelsize=8)
