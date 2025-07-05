@@ -1064,6 +1064,13 @@ class SeestarStackerGUI:
             orient=tk.HORIZONTAL,
         )
         self.zoom_slider.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+        self.zoom_value_label = ttk.Label(
+            zoom_frame,
+            textvariable=self.zoom_percent_var,
+            width=4,
+            anchor="e",
+        )
+        self.zoom_value_label.grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
 
         crop_frame = ttk.Frame(tab_stacking)
         crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
