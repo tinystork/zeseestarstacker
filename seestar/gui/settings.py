@@ -651,6 +651,16 @@ class SettingsManager:
                 ),
             ).get()
 
+            self.reproject_coadd_final = getattr(
+                gui_instance,
+                "reproject_coadd_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get(
+                        "reproject_coadd_final", False
+                    )
+                ),
+            ).get()
+
             # In classic stacking mode this option defaults to disabled unless
             # the user explicitly checked the box in the Local Solver window.
             if self.stacking_mode == "classic":
@@ -1100,6 +1110,10 @@ class SettingsManager:
                 self.reproject_between_batches
             )
 
+            getattr(gui_instance, "reproject_coadd_var", tk.BooleanVar()).set(
+                self.reproject_coadd_final
+            )
+
             logger.debug(
                 "DEBUG (Settings apply_to_ui V_SaveAsFloat32_1): Fin application paramètres UI."
             )  # Version Log
@@ -1247,6 +1261,7 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
+        defaults_dict["reproject_coadd_final"] = False
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {
@@ -2050,6 +2065,20 @@ class SettingsManager:
                 self.use_third_party_solver = current_use_solver_val
             # --- FIN NOUVEAU ---
 
+            logger.debug("    -> Validating reproject_coadd_final...")
+            current_rc_val = getattr(
+                self,
+                "reproject_coadd_final",
+                defaults_fallback["reproject_coadd_final"],
+            )
+            if not isinstance(current_rc_val, bool):
+                messages.append(
+                    f"Option 'Reproject Coadd Final' ('{current_rc_val}') invalide, réinitialisée à {defaults_fallback['reproject_coadd_final']}." 
+                )
+                self.reproject_coadd_final = defaults_fallback["reproject_coadd_final"]
+            else:
+                self.reproject_coadd_final = current_rc_val
+
             # --- Local Solver Paths and ASTAP Search Radius ---
             # ... (inchangé) ...
             logger.debug("  -> Validating Local Solver Settings...")
@@ -2396,6 +2425,9 @@ class SettingsManager:
             ),
             "reproject_between_batches": bool(
                 getattr(self, "reproject_between_batches", False)
+            ),
+            "reproject_coadd_final": bool(
+                getattr(self, "reproject_coadd_final", False)
             ),
         }
 

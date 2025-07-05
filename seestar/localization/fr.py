@@ -69,6 +69,7 @@ FR_TRANSLATIONS = {
     "combine_method_median": "Médiane",
     "combine_method_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "combine_method_reproject": "Reprojection",
+    "combine_method_reproject_coadd": "Reproject & Coadd",
     "stack_method_label": "Méthode :",
     "method_mean": "Moyenne",
     "method_median": "Médiane",
