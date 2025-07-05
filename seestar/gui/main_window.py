@@ -318,6 +318,9 @@ class SeestarStackerGUI:
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
+        self.auto_zoom_histogram_var.trace_add(
+            "write", self._update_histogram_autozoom_state
+        )
         self.initial_auto_stretch_done = False
 
         if (
@@ -2184,6 +2187,9 @@ class SeestarStackerGUI:
         )
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
 
+        # Appliquer l'état de verrouillage de l'échelle X selon l'option
+        self._update_histogram_autozoom_state()
+
         self.auto_zoom_histo_check = ttk.Checkbutton(
             self.histo_toolbar,
             text=self.tr("auto_zoom_histo_check", default="Auto zoom histogram"),
@@ -2388,6 +2394,14 @@ class SeestarStackerGUI:
     #        except tk.TclError: pass
     #        except AttributeError: pass # Si photutils_params_frame n'est pas encore créé
     #        except Exception as e: print(f"ERREUR inattendue dans _update_photutils_bn_options_state: {e}")
+
+    ###############################################################################
+
+    def _update_histogram_autozoom_state(self, *args):
+        """Verrouille ou libère l'échelle X de l'histogramme selon l'option."""
+        freeze = not self.auto_zoom_histogram_var.get()
+        if hasattr(self, "histogram_widget"):
+            self.histogram_widget.freeze_x_range = freeze
 
     ##############################################################################################################################
     def _toggle_kappa_visibility(self, event=None):
