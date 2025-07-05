@@ -593,6 +593,10 @@ class SeestarStackerGUI:
 
         self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0)
 
+        # Option to crop master tiles before stacking
+        self.apply_master_tile_crop_var = tk.BooleanVar(value=False)
+        self.master_tile_crop_percent_var = tk.DoubleVar(value=18.0)
+
         # --- nouveaux toggles Expert ---
         self.apply_bn_var = tk.BooleanVar(value=True)
         self.apply_cb_var = tk.BooleanVar(value=True)
@@ -1059,6 +1063,30 @@ class SeestarStackerGUI:
             width=6,
             state="readonly",
         ).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+
+        crop_frame = ttk.Frame(tab_stacking)
+        crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.crop_master_check = ttk.Checkbutton(
+            crop_frame,
+            text="Crop master tiles",
+            variable=self.apply_master_tile_crop_var,
+            command=self._update_master_tile_crop_state,
+        )
+        self.crop_master_check.grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(crop_frame, text="Crop % per side").grid(
+            row=0, column=1, sticky=tk.W, padx=(10, 2)
+        )
+        self.master_tile_crop_spinbox = ttk.Spinbox(
+            crop_frame,
+            from_=0.0,
+            to=25.0,
+            increment=0.5,
+            textvariable=self.master_tile_crop_percent_var,
+            width=6,
+            format="%.1f",
+        )
+        self.master_tile_crop_spinbox.grid(row=0, column=2, sticky=tk.W)
+        self._update_master_tile_crop_state()
         self.options_frame = ttk.LabelFrame(tab_stacking, text="Stacking Options")
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
 
@@ -2296,6 +2324,7 @@ class SeestarStackerGUI:
         self._update_bn_options_state()
         self._update_cb_options_state()
         self._update_crop_options_state()
+        self._update_master_tile_crop_state()
         print(
             "DEBUG (GUI create_layout V_SaveAsFloat32_1): Fin création layout et appels _update_..._state."
         )  # Version Log
@@ -2474,6 +2503,13 @@ class SeestarStackerGUI:
                 w.config(state=new_state)
             except tk.TclError:
                 pass
+
+    def _update_master_tile_crop_state(self, *args):
+        new_state = tk.NORMAL if self.apply_master_tile_crop_var.get() else tk.DISABLED
+        try:
+            self.master_tile_crop_spinbox.config(state=new_state)
+        except tk.TclError:
+            pass
 
     ###############################################################################
 
@@ -3929,6 +3965,11 @@ class SeestarStackerGUI:
             if hasattr(self, "apply_cb_var"):
                 self.apply_cb_var.set(default_settings.apply_cb)
 
+            if hasattr(self, "apply_master_tile_crop_var"):
+                self.apply_master_tile_crop_var.set(default_settings.apply_master_tile_crop)
+            if hasattr(self, "master_tile_crop_percent_var"):
+                self.master_tile_crop_percent_var.set(default_settings.master_tile_crop_percent)
+
             # Rognage Final
             if hasattr(self, "final_edge_crop_percent_var"):
                 self.final_edge_crop_percent_var.set(
@@ -3988,6 +4029,8 @@ class SeestarStackerGUI:
                 self._update_cb_options_state()
             if hasattr(self, "_update_crop_options_state"):
                 self._update_crop_options_state()
+            if hasattr(self, "_update_master_tile_crop_state"):
+                self._update_master_tile_crop_state()
             # Si d'autres groupes d'options dans l'onglet expert ont des états dépendants,
             # appelez leurs méthodes _update_..._state() ici aussi.
 
@@ -6985,6 +7028,8 @@ class SeestarStackerGUI:
             "cb_blur_radius": self.settings.cb_blur_radius,
             "cb_min_b_factor": self.settings.cb_min_b_factor,
             "cb_max_b_factor": self.settings.cb_max_b_factor,
+            "apply_master_tile_crop": self.settings.apply_master_tile_crop,
+            "master_tile_crop_percent": self.settings.master_tile_crop_percent,
             "final_edge_crop_percent": self.settings.final_edge_crop_percent,
             "apply_photutils_bn": self.settings.apply_photutils_bn,
             "photutils_bn_box_size": self.settings.photutils_bn_box_size,
