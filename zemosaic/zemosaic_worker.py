@@ -1752,7 +1752,48 @@ def assemble_final_mosaic_reproject_coadd(
         _pcb("assemble_error_no_tiles_provided_reproject_coadd", prog=None, lvl="ERROR")
         return None, None
 
+    if (
+        not isinstance(final_output_shape_hw, (tuple, list))
+        or len(final_output_shape_hw) != 2
+    ):
+        _pcb(
+            "assemble_error_invalid_final_shape_reproj_coadd",
+            prog=None,
+            lvl="ERROR",
+            shape=str(final_output_shape_hw),
+        )
+        return None, None
 
+    h, w = map(int, final_output_shape_hw)
+
+    try:
+        w_wcs = int(getattr(final_output_wcs, "pixel_shape", (w, h))[0])
+        h_wcs = int(getattr(final_output_wcs, "pixel_shape", (w, h))[1])
+    except Exception:
+        w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", w)) if hasattr(final_output_wcs, "wcs") else w
+        h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", h)) if hasattr(final_output_wcs, "wcs") else h
+
+    expected_hw = (h_wcs, w_wcs)
+    if (h, w) != expected_hw:
+        if (w, h) == expected_hw:
+            _pcb(
+                "assemble_warn_swapped_final_shape_reproj_coadd",
+                prog=None,
+                lvl="WARN",
+                provided=str(final_output_shape_hw),
+                expected=str(expected_hw),
+            )
+            h, w = expected_hw
+            final_output_shape_hw = (h, w)
+        else:
+            _pcb(
+                "assemble_error_mismatch_final_shape_reproj_coadd",
+                prog=None,
+                lvl="ERROR",
+                provided=str(final_output_shape_hw),
+                expected=str(expected_hw),
+            )
+            return None, None
 
     # Convertir la sortie WCS en header FITS si possible une seule fois
     output_header = (

@@ -9202,6 +9202,23 @@ class SeestarQueuedStacker:
             )
             return
 
+        # Validate output shape against the WCS to avoid orientation issues
+        if out_wcs.pixel_shape is not None:
+            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            if out_shape != expected_hw:
+                if out_shape == expected_hw[::-1]:
+                    self.update_progress(
+                        "⚠️ Final grid shape transposée, correction automatique.",
+                        "WARN",
+                    )
+                    out_shape = expected_hw
+                else:
+                    self.update_progress(
+                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
+                        "ERROR",
+                    )
+                    return
+
         final_channels = []
         final_cov = None
         for ch in range(3):
@@ -9308,6 +9325,22 @@ class SeestarQueuedStacker:
             )
             if out_wcs is None:
                 return False
+
+        if out_wcs.pixel_shape is not None:
+            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            if out_shape != expected_hw:
+                if out_shape == expected_hw[::-1]:
+                    self.update_progress(
+                        "⚠️ Final grid shape transposée, correction automatique.",
+                        "WARN",
+                    )
+                    out_shape = expected_hw
+                else:
+                    self.update_progress(
+                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
+                        "ERROR",
+                    )
+                    return False
 
         try:
             data_hwc, cov_hw = zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
