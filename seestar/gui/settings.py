@@ -461,6 +461,13 @@ class SettingsManager:
                     value=default_values_from_code.get("apply_feathering", True)
                 ),
             ).get()
+            self.apply_batch_feathering = getattr(
+                gui_instance,
+                "apply_batch_feathering_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get("apply_batch_feathering", True)
+                ),
+            ).get()
             self.feather_blur_px = getattr(
                 gui_instance,
                 "feather_blur_px_var",
@@ -999,6 +1006,10 @@ class SettingsManager:
                 logger.debug(
                     f"DEBUG (Settings apply_to_ui): Apply Feathering appliqué à UI: {self.apply_feathering}"
                 )
+            if hasattr(gui_instance, "apply_batch_feathering_var"):
+                getattr(gui_instance, "apply_batch_feathering_var", tk.BooleanVar()).set(
+                    self.apply_batch_feathering
+                )
             if hasattr(gui_instance, "feather_blur_px_var"):
                 getattr(gui_instance, "feather_blur_px_var", tk.IntVar()).set(
                     self.feather_blur_px
@@ -1244,6 +1255,7 @@ class SettingsManager:
         defaults_dict["photutils_bn_exclude_percentile"] = 95.0
         defaults_dict["apply_feathering"] = True
         defaults_dict["feather_blur_px"] = 256
+        defaults_dict["apply_batch_feathering"] = True
         defaults_dict["apply_low_wht_mask"] = False
         defaults_dict["low_wht_percentile"] = 5
         defaults_dict["low_wht_soften_px"] = 128
@@ -1972,6 +1984,13 @@ class SettingsManager:
             self.apply_feathering = bool(
                 getattr(self, "apply_feathering", defaults_fallback["apply_feathering"])
             )
+            self.apply_batch_feathering = bool(
+                getattr(
+                    self,
+                    "apply_batch_feathering",
+                    defaults_fallback["apply_batch_feathering"],
+                )
+            )
             try:
                 self.feather_blur_px = int(self.feather_blur_px)
                 min_blur, max_blur = 32, 1024
@@ -2433,6 +2452,7 @@ class SettingsManager:
             "window_geometry": str(self.window_geometry),
             "apply_feathering": bool(self.apply_feathering),
             "feather_blur_px": int(self.feather_blur_px),
+            "apply_batch_feathering": bool(self.apply_batch_feathering),
             "apply_low_wht_mask": bool(self.apply_low_wht_mask),
             "low_wht_percentile": int(self.low_wht_percentile),
             "low_wht_soften_px": int(self.low_wht_soften_px),

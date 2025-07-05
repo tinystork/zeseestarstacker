@@ -610,6 +610,7 @@ class SeestarStackerGUI:
 
         self.apply_feathering_var = tk.BooleanVar(value=False)
         self.feather_blur_px_var = tk.IntVar(value=256)
+        self.apply_batch_feathering_var = tk.BooleanVar(value=True)
         print(
             "DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var)."
         )
@@ -1536,6 +1537,14 @@ class SeestarStackerGUI:
         )
         self.warning_label.pack(pady=(5, 10), padx=5, fill=tk.X)
 
+        self.apply_batch_feathering_check = ttk.Checkbutton(
+            expert_content_frame,
+            text=self.tr("feather_inter_batch_label", default="Feather inter-batch (radial blend)"),
+            variable=self.apply_batch_feathering_var,
+            command=self._on_apply_batch_feathering_changed,
+        )
+        self.apply_batch_feathering_check.pack(anchor=tk.W, padx=5, pady=(0, 5))
+
         self.feathering_frame = ttk.LabelFrame(
             expert_content_frame,
             text=self.tr("feathering_frame_title", default="Feathering / Low WHT"),
@@ -2282,6 +2291,7 @@ class SeestarStackerGUI:
         self._update_final_scnr_options_state()
         self._update_photutils_bn_options_state()
         self._update_feathering_options_state()
+        self._on_apply_batch_feathering_changed()
         self._update_low_wht_mask_options_state()
         self._update_bn_options_state()
         self._update_cb_options_state()
@@ -2321,6 +2331,13 @@ class SeestarStackerGUI:
         except Exception as e:
             print(f"ERREUR inattendue dans _update_feathering_options_state: {e}")
             traceback.print_exc(limit=1)
+
+    def _on_apply_batch_feathering_changed(self, *args):
+        """Sync apply_batch_feathering flag with the checkbox."""
+        try:
+            self.apply_batch_feathering = bool(self.apply_batch_feathering_var.get())
+        except tk.TclError:
+            pass
 
     ##############################################################################################################################
 
@@ -3264,6 +3281,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile_label": "photutils_bn_exclude_percentile_label",
             "apply_feathering_label": "apply_feathering_check",
             "feather_blur_px_label": "feather_blur_px_label",
+            "feather_inter_batch_label": "apply_batch_feathering_check",
             "apply_low_wht_mask_label": "low_wht_mask_check",
             "low_wht_percentile_label": "low_wht_pct_label",
             "low_wht_soften_px_label": "low_wht_soften_px_label",
@@ -3378,6 +3396,7 @@ class SeestarStackerGUI:
             ("apply_feathering_check", "tooltip_apply_feathering"),
             ("feather_blur_px_label", "tooltip_feather_blur_px"),
             ("feather_blur_px_spinbox", "tooltip_feather_blur_px"),
+            ("apply_batch_feathering_check", "feather_inter_batch_tooltip"),
             ("low_wht_mask_check", "tooltip_apply_low_wht_mask"),
             ("low_wht_pct_label", "tooltip_low_wht_percentile"),
             ("low_wht_pct_spinbox", "tooltip_low_wht_percentile"),
@@ -3927,6 +3946,11 @@ class SeestarStackerGUI:
                 self.feather_blur_px_var.set(
                     default_settings.feather_blur_px
                 )  # Sera 256 par défaut
+            if hasattr(self, "apply_batch_feathering_var"):
+                self.apply_batch_feathering_var.set(
+                    default_settings.apply_batch_feathering
+                )
+                self._on_apply_batch_feathering_changed()
             # ---  ---
 
             # --- Réinitialiser Photutils BN ---
@@ -6814,6 +6838,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile",
             "apply_feathering",
             "feather_blur_px",
+            "apply_batch_feathering",
             "apply_low_wht_mask",
             "low_wht_percentile",
             "low_wht_soften_px",
@@ -6968,6 +6993,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
             "apply_feathering": self.settings.apply_feathering,
             "feather_blur_px": self.settings.feather_blur_px,
+            "apply_batch_feathering": self.settings.apply_batch_feathering,
             "apply_low_wht_mask": self.settings.apply_low_wht_mask,
             "low_wht_percentile": self.settings.low_wht_percentile,
             "low_wht_soften_px": self.settings.low_wht_soften_px,
