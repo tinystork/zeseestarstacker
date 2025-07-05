@@ -8297,7 +8297,11 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d *= self._radial_w_base
 
                 stack_note = f"mean ({max_workers} threads)"
-            stack_info_header = fits.Header()
+            if self.reference_header_for_wcs is not None:
+                stack_info_header = self.reference_header_for_wcs.copy()
+            else:
+                stack_info_header = fits.Header()
+
             stack_info_header["NIMAGES"] = (
                 num_valid_images_for_processing,
                 "Images in this batch stack",
@@ -8319,9 +8323,9 @@ class SeestarQueuedStacker:
                             break
                         except Exception:
                             continue
-            stack_info_header["EXPTOTAL"] = (
+            stack_info_header["TOTEXP"] = (
                 round(tot_exp, 2),
-                "[s] Sum of EXPTIME for this batch",
+                "[s] Total exposure for this batch",
             )
 
             if valid_headers_for_ccdproc:
