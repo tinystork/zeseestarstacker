@@ -10508,6 +10508,7 @@ class SeestarQueuedStacker:
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=False,
+        reproject_coadd_final=False,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -10518,8 +10519,11 @@ class SeestarQueuedStacker:
 
         """
         Démarre le thread de traitement principal avec la configuration spécifiée.
-        MODIFIED: Ajout arguments save_as_float32 et reproject_between_batches.
-        Version: V_StartProcessing_SaveDtypeOption_1
+        
+        MODIFIED:
+            - Ajout des arguments ``save_as_float32``, ``reproject_between_batches``
+              et ``reproject_coadd_final``.
+        Version: V_StartProcessing_SaveDtypeOption_2
         """
 
         logger.debug(
@@ -10738,6 +10742,11 @@ class SeestarQueuedStacker:
         # intermediate batches are not solved again.
         if self.reproject_between_batches and not self.freeze_reference_wcs:
             self.freeze_reference_wcs = True
+
+        self.reproject_coadd_final = bool(reproject_coadd_final)
+        logger.debug(
+            f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
+        )
 
         # Disable solving of intermediate batches when reprojection is active
         # and the reference WCS should remain fixed.
