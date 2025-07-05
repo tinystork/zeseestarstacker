@@ -6146,6 +6146,13 @@ class SeestarQueuedStacker:
         )
 
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
+            if self.reproject_coadd_final:
+                self._save_and_solve_classic_batch(
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    stack_info_header,
+                    current_batch_num,
+                )
             batch_wcs = None
             try:
                 batch_wcs = (
