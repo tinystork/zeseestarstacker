@@ -9322,7 +9322,9 @@ class SeestarQueuedStacker:
                 master_tile_fits_with_wcs_list=master_tiles,
                 final_output_wcs=out_wcs,
                 final_output_shape_hw=out_shape,
-                progress_callback=lambda m, p=None: self.update_progress(f"   {m}"),
+                progress_callback=lambda m, p=None, lvl=None, **kw: self.update_progress(
+                    f"   {m}", p
+                ),
                 n_channels=3,
                 match_bg=True,
                 apply_crop=getattr(self, "apply_master_tile_crop", False),
