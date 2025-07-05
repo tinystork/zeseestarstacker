@@ -912,6 +912,7 @@ class SeestarQueuedStacker:
         self.stack_final_combine = getattr(settings, "stack_final_combine", "mean")
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
+        self.reproject_coadd_final = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
 
@@ -1040,6 +1041,12 @@ class SeestarQueuedStacker:
                 # When using inter-batch reprojection we want to keep the
                 # reference WCS stable after the first solve.
                 self.freeze_reference_wcs = self.reproject_between_batches
+                self.reproject_coadd_final = bool(
+                    getattr(settings, "reproject_coadd_final", False)
+                )
+                logger.debug(
+                    f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
+                )
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -4246,6 +4253,17 @@ class SeestarQueuedStacker:
                     else:
                         self.update_progress(
                             "   Aucune image accumulée pour sauvegarde."
+                        )
+                        self.final_stacked_path = None
+                elif self.reproject_coadd_final:
+                    self.update_progress("🏁 Finalisation Reproject&Coadd...")
+                    if self.intermediate_classic_batch_files:
+                        self._reproject_classic_batches(
+                            self.intermediate_classic_batch_files
+                        )
+                    else:
+                        self.update_progress(
+                            "   Aucune batch sauvegardé pour reproject&coadd."
                         )
                         self.final_stacked_path = None
                 else:
@@ -8963,6 +8981,9 @@ class SeestarQueuedStacker:
             )
             wht_paths.append(wht_path)
 
+        if self.reproject_coadd_final:
+            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+
         return sci_fits, wht_paths
 
     def _reproject_classic_batches(self, batch_files):
@@ -9009,7 +9030,10 @@ class SeestarQueuedStacker:
             )
             return
 
-        if (
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        elif (
             self.freeze_reference_wcs
             and self.reproject_between_batches
             and self.reference_wcs_object is not None

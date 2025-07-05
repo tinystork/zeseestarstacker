@@ -631,6 +631,7 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
+        self.reproject_coadd_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
@@ -1186,7 +1187,13 @@ class SeestarStackerGUI:
             )
         )
 
-        self.final_keys = ["mean", "median", "winsorized_sigma_clip", "reproject"]
+        self.final_keys = [
+            "mean",
+            "median",
+            "winsorized_sigma_clip",
+            "reproject",
+            "reproject_coadd",
+        ]
         self.final_key_to_label = {}
         self.final_label_to_key = {}
         for k in self.final_keys:
@@ -1197,6 +1204,10 @@ class SeestarStackerGUI:
         if self.reproject_between_batches_var.get():
             self.stack_final_display_var.set(
                 self.final_key_to_label.get("reproject", "reproject")
+            )
+        elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
             )
         else:
             self.stack_final_display_var.set(
@@ -2462,6 +2473,10 @@ class SeestarStackerGUI:
                 self.stack_final_display_var.set(
                     self.final_key_to_label.get("reproject", "reproject")
                 )
+            elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
+                )
             else:
                 current_key = self.stack_final_combine_var.get()
                 self.stack_final_display_var.set(
@@ -2487,9 +2502,15 @@ class SeestarStackerGUI:
         key = self.final_label_to_key.get(display_value, display_value)
         if key == "reproject":
             self.reproject_between_batches_var.set(True)
+            self.reproject_coadd_var.set(False)
+            self.stack_final_combine_var.set("mean")
+        elif key == "reproject_coadd":
+            self.reproject_between_batches_var.set(False)
+            self.reproject_coadd_var.set(True)
             self.stack_final_combine_var.set("mean")
         else:
             self.reproject_between_batches_var.set(False)
+            self.reproject_coadd_var.set(False)
             self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
 
