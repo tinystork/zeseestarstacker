@@ -4274,7 +4274,11 @@ class SeestarQueuedStacker:
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
                     if self.intermediate_classic_batch_files:
-                        if not self._reproject_classic_batches_zm(
+                        if len(self.intermediate_classic_batch_files) == 1:
+                            self._finalize_single_classic_batch(
+                                self.intermediate_classic_batch_files[0]
+                            )
+                        elif not self._reproject_classic_batches_zm(
                             self.intermediate_classic_batch_files
                         ):
                             self._reproject_classic_batches(
@@ -9253,6 +9257,27 @@ class SeestarQueuedStacker:
             drizzle_final_wht_data=cov_hw,
         )
         return True
+    def _finalize_single_classic_batch(self, batch_file_tuple):
+        """Save the single stacked batch as the final stack."""
+        sci_path, wht_paths = batch_file_tuple
+        try:
+            with fits.open(sci_path, memmap=False) as hdul:
+                data = np.moveaxis(hdul[0].data.astype(np.float32), 0, -1)
+                hdr = hdul[0].header
+        except Exception as e:
+            self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
+            return
+        try:
+            cov = fits.getdata(wht_paths[0]).astype(np.float32)
+            np.nan_to_num(cov, copy=False)
+        except Exception:
+            cov = np.ones(data.shape[:2], dtype=np.float32)
+        self.current_stack_header = hdr.copy()
+        self._save_final_stack(
+            "_classic_reproject",
+            drizzle_final_sci_data=data,
+            drizzle_final_wht_data=cov,
+        )
 
     ############################################################################################################################################
 
