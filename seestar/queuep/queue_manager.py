@@ -9325,7 +9325,9 @@ class SeestarQueuedStacker:
                 progress_callback=lambda m, p=None: self.update_progress(f"   {m}"),
                 n_channels=3,
                 match_bg=True,
-                apply_crop=False,
+                apply_crop=getattr(self, "apply_master_tile_crop", False),
+                crop_percent=getattr(self, "master_tile_crop_percent_decimal", 0.0)
+                * 100.0,
                 use_gpu=False,
             )
         except Exception as e:
