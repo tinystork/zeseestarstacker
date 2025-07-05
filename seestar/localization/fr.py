@@ -125,6 +125,8 @@ FR_TRANSLATIONS = {
     # Section Rognage Final
     "crop_frame_title": "Rognage Final",
     "final_edge_crop_label": "Rognage Bords (%) :",
+    "crop_master_tiles_label": "Rogner les tuiles maîtresses",
+    "crop_percent_side_label": "Rognage % par côté",
     # Bouton Réinitialiser Expert
     "reset_expert_button": "Réinitialiser Réglages Expert",
     ### Traductions Photutils Background Subtraction (Onglet Expert) ###
