@@ -9041,7 +9041,20 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-        fits.PrimaryHDU(data=np.moveaxis(final_stacked, -1, 0), header=header).writeto(
+        data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+        header["NAXIS"] = 3
+        header["NAXIS1"] = data_cxhxw.shape[2]
+        header["NAXIS2"] = data_cxhxw.shape[1]
+        header["NAXIS3"] = data_cxhxw.shape[0]
+        header["CTYPE3"] = "CHANNEL"
+        try:
+            header["CHNAME1"] = "R"
+            header["CHNAME2"] = "G"
+            header["CHNAME3"] = "B"
+        except Exception:
+            pass
+
+        fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
             sci_fits, overwrite=True, output_verify="ignore"
         )
         for ch_i in range(final_stacked.shape[2]):
