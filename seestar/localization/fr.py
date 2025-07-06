@@ -374,6 +374,7 @@ FR_TRANSLATIONS = {
     "ok_button": "OK",
     "cancel_button": "Annuler",
     "tooltip_enable_batch_reproject": "Nécessite un solveur fonctionnel (ASTAP, Astrometry.net ou Ansvr)",
+    "reproject_solver_required_error": "Le mode \u00ab Reproject & Coadd \u00bb n\u00e9cessite un solveur astrom\u00e9trique local actif (ASTAP ou Astrometry.net local). Veuillez l'activer dans les param\u00e8tres du solveur.",
     # --- Tooltips pour Feathering ---
     "tooltip_apply_feathering": "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
     "tooltip_feather_blur_px": "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",
