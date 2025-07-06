@@ -28,6 +28,9 @@ photutils
 matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
 psutil
+bottleneck        # Optional: fast nan functions used in stack_methods
+fsspec            # Optional: zemosaic worker file-system abstraction
+threadpoolctl     # Optional: control of BLAS threadpools
 # --- Optional Dependencies ---
             # For automatic batch size estimation (Uncomment if needed)
 acstools          # For satellite trail detection (Uncomment if needed)
@@ -100,7 +103,7 @@ reproject         # For mosaic
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
-# PyQt5                   # GUI framework for the standalone visu.py viewer
+PyQt5                    # GUI framework for the standalone visu.py viewer
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)
