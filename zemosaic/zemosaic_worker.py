@@ -35,6 +35,17 @@ if not logger.handlers:
     logger.addHandler(fh)
 logger.info("Logging pour ZeMosaicWorker initialisé. Logs écrits dans: %s", log_file_path)
 
+# --- Alignment Warning Tracking ---
+# These warnings come from zemosaic_align_stack when an image fails to align.
+# We count them here so a summary can be written at the end of a run.
+ALIGN_WARNING_SUMMARY = {
+    "aligngroup_warn_max_iter_error": "astroalign MaxIterError",
+    "aligngroup_warn_shape_mismatch_after_align": "shape mismatch after align",
+    "aligngroup_warn_register_returned_none": "astroalign returned None",
+    "aligngroup_warn_value_error": "value error during align",
+}
+ALIGN_WARNING_COUNTS = {key: 0 for key in ALIGN_WARNING_SUMMARY}
+
 # --- Third-Party Library Imports ---
 import numpy as np
 import zarr
@@ -182,6 +193,10 @@ def _log_and_callback(
         progress_value = kwargs.pop("prog")
     elif "prog" in kwargs:
         progress_value = kwargs.pop("prog")
+
+    # Count alignment warnings for final summary
+    if isinstance(message_key_or_raw, str) and message_key_or_raw in ALIGN_WARNING_COUNTS:
+        ALIGN_WARNING_COUNTS[message_key_or_raw] += 1
     log_level_map = {
         "INFO": logging.INFO, "DEBUG": logging.DEBUG, "DEBUG_DETAIL": logging.DEBUG,
         "WARN": logging.WARNING, "ERROR": logging.ERROR, "SUCCESS": logging.INFO,
@@ -267,6 +282,21 @@ def _log_memory_usage(progress_callback: callable, context_message: str = ""): #
         
     except Exception as e_mem_log:
         _log_and_callback(f"Erreur lors du logging mémoire ({context_message}): {e_mem_log}", prog=None, lvl="WARN", callback=progress_callback)
+
+
+def _log_alignment_warning_summary():
+    """Write a summary of alignment warnings to the worker log."""
+    total = sum(ALIGN_WARNING_COUNTS.values())
+    if total == 0:
+        logger.info("Alignment summary: no frames ignored due to errors.")
+        return
+
+    logger.info("===== Alignment warning summary =====")
+    logger.info("Total frames ignored: %d", total)
+    for key, count in ALIGN_WARNING_COUNTS.items():
+        if count:
+            human = ALIGN_WARNING_SUMMARY.get(key, key)
+            logger.info("%d frame(s) - %s", count, human)
 
 
 def _wait_for_memmap_files(prefixes, timeout=10.0):
@@ -1374,6 +1404,10 @@ def assemble_final_mosaic_incremental(
     cleanup_memmap: bool = True,
 ):
     """Assemble les master tiles par co-addition sur disque."""
+    import time
+    # Marquer le début de la phase 5 incrémentale
+    start_time_inc = time.monotonic()
+    total_tiles = len(master_tile_fits_with_wcs_list)
     FLUSH_BATCH_SIZE = 10  # nombre de tuiles entre chaque flush sur le memmap
     use_feather = False  # Désactivation du feathering par défaut
     pcb_asm = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1594,14 +1628,28 @@ def assemble_final_mosaic_incremental(
                         progress_callback("phase5_incremental", processed, total_steps)
                     except Exception:
                         pass
-                if processed % 10 == 0 or processed == len(master_tile_fits_with_wcs_list):
+                if processed % FLUSH_BATCH_SIZE == 0 or processed == total_tiles:
                     pcb_asm(
                         "assemble_progress_tiles_processed_inc",
                         prog=None,
                         lvl="INFO_DETAIL",
                         num_done=processed,
-                        total_num=len(master_tile_fits_with_wcs_list),
+                        total_num=total_tiles,
                     )
+
+                    # --- Calcul et mise à jour de l’ETA global ---
+                    elapsed_inc = time.monotonic() - start_time_inc
+                    time_per_tile = elapsed_inc / processed
+                    eta_tiles_sec = (total_tiles - processed) * time_per_tile
+
+                    # Variables définies en amont dans zemosaic_worker.py
+                    # base_progress_phase5, PROGRESS_WEIGHT_PHASE5_ASSEMBLY, time.monotonic()...
+                    current_progress_pct = base_progress_phase5 + (processed / total_tiles) * PROGRESS_WEIGHT_PHASE5_ASSEMBLY
+                    elapsed_total = time.monotonic() - time_run_started  # variable importée ou passée en paramètre
+                    sec_per_pct = elapsed_total / current_progress_pct if current_progress_pct > 0 else 0
+                    total_eta_sec = eta_tiles_sec + (100 - current_progress_pct) * sec_per_pct
+
+                    update_gui_eta(total_eta_sec)
 
             if tiles_since_flush > 0:
                 hsum.flush()
@@ -1713,8 +1761,9 @@ def assemble_final_mosaic_reproject_coadd(
     solver_settings: dict | None = None,
     solver_instance=None,
     use_gpu: bool = False,
-
-
+    base_progress_phase5: float | None = None,
+    progress_weight_phase5: float | None = None,
+    start_time_total_run: float | None = None,
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1726,6 +1775,32 @@ def assemble_final_mosaic_reproject_coadd(
         f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    start_time_phase = time.monotonic()
+
+    def _update_eta(completed_channels: int):
+        if (
+            base_progress_phase5 is not None
+            and progress_weight_phase5 is not None
+            and start_time_total_run is not None
+            and completed_channels > 0
+        ):
+            elapsed_phase = time.monotonic() - start_time_phase
+            time_per_ch = elapsed_phase / completed_channels
+            eta_ch_sec = (n_channels - completed_channels) * time_per_ch
+            current_progress_pct = base_progress_phase5 + (
+                completed_channels / n_channels
+            ) * progress_weight_phase5
+            elapsed_total = time.monotonic() - start_time_total_run
+            sec_per_pct = elapsed_total / current_progress_pct if current_progress_pct > 0 else 0
+            total_eta_sec = eta_ch_sec + (100 - current_progress_pct) * sec_per_pct
+            h, rem = divmod(int(total_eta_sec), 3600)
+            m, s = divmod(rem, 60)
+            _pcb(
+                f"ETA_UPDATE:{h:02d}:{m:02d}:{s:02d}",
+                prog=None,
+                lvl="ETA_LEVEL",
+            )
 
     # Ensure wrapper uses the possibly monkeypatched CPU implementation
     try:
@@ -1935,6 +2010,7 @@ def assemble_final_mosaic_reproject_coadd(
                     progress_callback("phase5_reproject", ch + 1, total_steps)
                 except Exception:
                     pass
+            _update_eta(ch + 1)
     except Exception as e_reproject:
         _pcb("assemble_error_reproject_coadd_call_failed", lvl="ERROR", error=str(e_reproject))
         logger.error(
@@ -1973,6 +2049,8 @@ def assemble_final_mosaic_reproject_coadd(
         lvl="INFO",
         shape=mosaic_data.shape if mosaic_data is not None else "N/A",
     )
+
+    _update_eta(n_channels)
 
     return mosaic_data.astype(np.float32), coverage.astype(np.float32)
 
@@ -2058,6 +2136,10 @@ def run_hierarchical_mosaic(
         Nombre maximal de workers pour la phase de rejet Winsorized.
     """
     pcb = lambda msg_key, prog=None, lvl="INFO", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
+
+    # Reset alignment warning counters at start of run
+    for k in ALIGN_WARNING_COUNTS:
+        ALIGN_WARNING_COUNTS[k] = 0
     
     def update_gui_eta(eta_seconds_total):
         if progress_callback and callable(progress_callback):
@@ -2687,6 +2769,9 @@ def run_hierarchical_mosaic(
                     match_bg=True,
                     apply_crop=apply_master_tile_crop_config,
                     crop_percent=master_tile_crop_percent_config,
+                    base_progress_phase5=base_progress_phase5,
+                    progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                    start_time_total_run=start_time_total_run,
                 )
             except Exception as e_gpu:
                 logger.warning("GPU reproject_coadd failed, falling back to CPU: %s", e_gpu)
@@ -2700,6 +2785,9 @@ def run_hierarchical_mosaic(
                     apply_crop=apply_master_tile_crop_config,
                     crop_percent=master_tile_crop_percent_config,
                     use_gpu=False,
+                    base_progress_phase5=base_progress_phase5,
+                    progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                    start_time_total_run=start_time_total_run,
                 )
         else:
             final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
@@ -2712,6 +2800,9 @@ def run_hierarchical_mosaic(
                 apply_crop=apply_master_tile_crop_config,
                 crop_percent=master_tile_crop_percent_config,
                 use_gpu=use_gpu_phase5_flag,
+                base_progress_phase5=base_progress_phase5,
+                progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                start_time_total_run=start_time_total_run,
             )
 
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
@@ -2894,6 +2985,7 @@ def run_hierarchical_mosaic(
     total_duration_sec = time.monotonic() - start_time_total_run
     pcb("run_success_processing_completed", prog=current_global_progress, lvl="SUCCESS", duration=f"{total_duration_sec:.2f}")
     gc.collect(); _log_memory_usage(progress_callback, "Fin Run Hierarchical Mosaic (après GC final)")
+    _log_alignment_warning_summary()
     logger.info(f"===== Run Hierarchical Mosaic COMPLETED in {total_duration_sec:.2f}s =====")
 ################################################################################
 ################################################################################

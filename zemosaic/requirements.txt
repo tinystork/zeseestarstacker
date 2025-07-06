@@ -6,6 +6,9 @@ astroalign
 opencv-python-headless
 tk
 psutil
+fsspec
+bottleneck
+threadpoolctl
 Photutils
 zarr>=2
 packaging
@@ -16,7 +19,8 @@ acstools          # For satellite trail detection (Uncomment if needed)
 #                          # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
                            # Uncomment and adjust if you have a compatible NVIDIA GPU and CUDA installed.
-# wmi                      # for zemosaic gpu support (windows only)
+wmi                      # for zemosaic gpu support (windows only)
+shapely # Geometry operations (used by ccdproc)
 
 # ---------------------------------------------------------------------------
 # NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
@@ -81,7 +85,7 @@ acstools          # For satellite trail detection (Uncomment if needed)
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
-# PyQt5                   # GUI framework for the standalone visu.py viewer
+PyQt5                    # GUI framework for the standalone visu.py viewer
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)

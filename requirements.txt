@@ -27,15 +27,25 @@ photutils
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
-
+astroutils
+packaging
+reproject
+shapely
+tk
+zarr
+psutil (la racine spécifie psutil>=5.9)
+Photutils
 # --- Optional Dependencies ---
-psutil>=5.9       # Optional: Auto-Tune CPU/I-O
+psutil      # Optional: Auto-Tune CPU/I-O
 acstools          # For satellite trail detection (Uncomment if needed)
+bottleneck        # Optional: fast nan functions used in stack_methods
+fsspec            # Optional: zemosaic worker file-system abstraction
+threadpoolctl     # Optional: control of BLAS threadpools
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
 #                          # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
                            # Uncomment and adjust if you have a compatible NVIDIA GPU and CUDA installed.
-# wmi                      # for zemosaic gpu support (windows only)
+wmi                      # for zemosaic gpu support (windows only)
 
 # ---------------------------------------------------------------------------
 # NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
@@ -100,7 +110,7 @@ acstools          # For satellite trail detection (Uncomment if needed)
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
-# PyQt5                   # GUI framework for the standalone visu.py viewer
+PyQt5                    # GUI framework for the standalone visu.py viewer
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)
