@@ -1731,8 +1731,9 @@ def assemble_final_mosaic_reproject_coadd(
     solver_settings: dict | None = None,
     solver_instance=None,
     use_gpu: bool = False,
-
-
+    base_progress_phase5: float | None = None,
+    progress_weight_phase5: float | None = None,
+    start_time_total_run: float | None = None,
 ):
     """Assemble les master tiles en utilisant ``reproject_and_coadd``."""
     _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1744,6 +1745,32 @@ def assemble_final_mosaic_reproject_coadd(
         f"ASM_REPROJ_COADD: Options de rognage - Appliquer: {apply_crop}, Pourcentage: {crop_percent if apply_crop else 'N/A'}",
         lvl="DEBUG_DETAIL",
     )
+
+    start_time_phase = time.monotonic()
+
+    def _update_eta(completed_channels: int):
+        if (
+            base_progress_phase5 is not None
+            and progress_weight_phase5 is not None
+            and start_time_total_run is not None
+            and completed_channels > 0
+        ):
+            elapsed_phase = time.monotonic() - start_time_phase
+            time_per_ch = elapsed_phase / completed_channels
+            eta_ch_sec = (n_channels - completed_channels) * time_per_ch
+            current_progress_pct = base_progress_phase5 + (
+                completed_channels / n_channels
+            ) * progress_weight_phase5
+            elapsed_total = time.monotonic() - start_time_total_run
+            sec_per_pct = elapsed_total / current_progress_pct if current_progress_pct > 0 else 0
+            total_eta_sec = eta_ch_sec + (100 - current_progress_pct) * sec_per_pct
+            h, rem = divmod(int(total_eta_sec), 3600)
+            m, s = divmod(rem, 60)
+            _pcb(
+                f"ETA_UPDATE:{h:02d}:{m:02d}:{s:02d}",
+                prog=None,
+                lvl="ETA_LEVEL",
+            )
 
     # Ensure wrapper uses the possibly monkeypatched CPU implementation
     try:
@@ -1953,6 +1980,7 @@ def assemble_final_mosaic_reproject_coadd(
                     progress_callback("phase5_reproject", ch + 1, total_steps)
                 except Exception:
                     pass
+            _update_eta(ch + 1)
     except Exception as e_reproject:
         _pcb("assemble_error_reproject_coadd_call_failed", lvl="ERROR", error=str(e_reproject))
         logger.error(
@@ -1991,6 +2019,8 @@ def assemble_final_mosaic_reproject_coadd(
         lvl="INFO",
         shape=mosaic_data.shape if mosaic_data is not None else "N/A",
     )
+
+    _update_eta(n_channels)
 
     return mosaic_data.astype(np.float32), coverage.astype(np.float32)
 
@@ -2705,6 +2735,9 @@ def run_hierarchical_mosaic(
                     match_bg=True,
                     apply_crop=apply_master_tile_crop_config,
                     crop_percent=master_tile_crop_percent_config,
+                    base_progress_phase5=base_progress_phase5,
+                    progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                    start_time_total_run=start_time_total_run,
                 )
             except Exception as e_gpu:
                 logger.warning("GPU reproject_coadd failed, falling back to CPU: %s", e_gpu)
@@ -2718,6 +2751,9 @@ def run_hierarchical_mosaic(
                     apply_crop=apply_master_tile_crop_config,
                     crop_percent=master_tile_crop_percent_config,
                     use_gpu=False,
+                    base_progress_phase5=base_progress_phase5,
+                    progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                    start_time_total_run=start_time_total_run,
                 )
         else:
             final_mosaic_data_HWC, final_mosaic_coverage_HW = assemble_final_mosaic_reproject_coadd(
@@ -2730,6 +2766,9 @@ def run_hierarchical_mosaic(
                 apply_crop=apply_master_tile_crop_config,
                 crop_percent=master_tile_crop_percent_config,
                 use_gpu=use_gpu_phase5_flag,
+                base_progress_phase5=base_progress_phase5,
+                progress_weight_phase5=PROGRESS_WEIGHT_PHASE5_ASSEMBLY,
+                start_time_total_run=start_time_total_run,
             )
 
         log_key_phase5_failed = "run_error_phase5_assembly_failed_reproject_coadd"
