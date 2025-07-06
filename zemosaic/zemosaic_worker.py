@@ -1374,6 +1374,10 @@ def assemble_final_mosaic_incremental(
     cleanup_memmap: bool = True,
 ):
     """Assemble les master tiles par co-addition sur disque."""
+    import time
+    # Marquer le début de la phase 5 incrémentale
+    start_time_inc = time.monotonic()
+    total_tiles = len(master_tile_fits_with_wcs_list)
     FLUSH_BATCH_SIZE = 10  # nombre de tuiles entre chaque flush sur le memmap
     use_feather = False  # Désactivation du feathering par défaut
     pcb_asm = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: _log_and_callback(
@@ -1594,14 +1598,28 @@ def assemble_final_mosaic_incremental(
                         progress_callback("phase5_incremental", processed, total_steps)
                     except Exception:
                         pass
-                if processed % 10 == 0 or processed == len(master_tile_fits_with_wcs_list):
+                if processed % FLUSH_BATCH_SIZE == 0 or processed == total_tiles:
                     pcb_asm(
                         "assemble_progress_tiles_processed_inc",
                         prog=None,
                         lvl="INFO_DETAIL",
                         num_done=processed,
-                        total_num=len(master_tile_fits_with_wcs_list),
+                        total_num=total_tiles,
                     )
+
+                    # --- Calcul et mise à jour de l’ETA global ---
+                    elapsed_inc = time.monotonic() - start_time_inc
+                    time_per_tile = elapsed_inc / processed
+                    eta_tiles_sec = (total_tiles - processed) * time_per_tile
+
+                    # Variables définies en amont dans zemosaic_worker.py
+                    # base_progress_phase5, PROGRESS_WEIGHT_PHASE5_ASSEMBLY, time.monotonic()...
+                    current_progress_pct = base_progress_phase5 + (processed / total_tiles) * PROGRESS_WEIGHT_PHASE5_ASSEMBLY
+                    elapsed_total = time.monotonic() - time_run_started  # variable importée ou passée en paramètre
+                    sec_per_pct = elapsed_total / current_progress_pct if current_progress_pct > 0 else 0
+                    total_eta_sec = eta_tiles_sec + (100 - current_progress_pct) * sec_per_pct
+
+                    update_gui_eta(total_eta_sec)
 
             if tiles_since_flush > 0:
                 hsum.flush()
