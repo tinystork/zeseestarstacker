@@ -33,7 +33,7 @@ shapely
 tk
 zarr
 psutil #(la racine spécifie psutil>=5.9)
-Photutils
+
 # --- Optional Dependencies ---
 acstools          # For satellite trail detection (Uncomment if needed)
 bottleneck        # Optional: fast nan functions used in stack_methods
