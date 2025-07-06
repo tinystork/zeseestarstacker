@@ -355,6 +355,7 @@ EN_TRANSLATIONS = {
     "ok_button": "OK",
     "cancel_button": "Cancel",
     "tooltip_enable_batch_reproject": "Requires a working solver (ASTAP, Astrometry.net, or Ansvr)",
+    "reproject_solver_required_error": "Reproject & Coadd requires an active local astrometric solver (ASTAP or local Astrometry.net). Please enable it in the solver settings.",
     # final log popup
     "Post-Processing Applied": "Post-Processing Applied",
     "Photutils 2D Background": "Photutils 2D Background",

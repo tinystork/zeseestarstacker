@@ -315,5 +315,6 @@
     "assemble_error_mismatch_final_shape_inc": "Incremental assembly ERROR: provided dimensions {provided} do not match mosaic grid {expected}.",
     "assemble_error_invalid_final_shape_reproj_coadd": "Reproject & Coadd ERROR: invalid final output shape {shape}.",
     "assemble_warn_swapped_final_shape_reproj_coadd": "Reproject & Coadd WARNING: provided dimensions {provided} were swapped, expected {expected}. Automatically corrected.",
-    "assemble_error_mismatch_final_shape_reproj_coadd": "Reproject & Coadd ERROR: provided dimensions {provided} do not match mosaic grid {expected}."
+    "assemble_error_mismatch_final_shape_reproj_coadd": "Reproject & Coadd ERROR: provided dimensions {provided} do not match mosaic grid {expected}.",
+    "reproject_solver_required_error": "Reproject & Coadd requires an active local astrometric solver (ASTAP or local Astrometry.net). Please enable it in the solver settings."
 }

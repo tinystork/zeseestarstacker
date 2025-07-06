@@ -6966,6 +6966,29 @@ class SeestarStackerGUI:
             self.settings.astap_data_dir = ""
             self.settings.astrometry_solve_field_dir = ""
 
+        # ---------------------------------------------------------
+        # Guard: require local solver for Reproject & Coadd
+        # ---------------------------------------------------------
+        if self.settings.stacking_mode == "reproject_coadd":
+            solver_pref = getattr(self.settings, "local_solver_preference", "none")
+            if solver_pref == "none":
+                messagebox.showerror(
+                    self.tr("error"),
+                    self.tr(
+                        "reproject_solver_required_error",
+                        default=(
+                            "Reproject & Coadd requires an active local astrometric "
+                            "solver (ASTAP or local Astrometry.net). "
+                            "Please enable it in the solver settings."
+                        ),
+                    ),
+                    parent=self.root,
+                )
+                # re-enable Start button if it was disabled
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.NORMAL)
+                return  # abort start_processing
+
         # --- 6. Appel à queued_stacker.start_processing ---
         print(
             "DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing..."

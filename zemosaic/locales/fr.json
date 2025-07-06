@@ -311,5 +311,6 @@
     "assemble_error_mismatch_final_shape_inc": "ERREUR assemblage incrémental : dimensions fournies {provided} incompatibles avec la grille {expected}.",
     "assemble_error_invalid_final_shape_reproj_coadd": "ERREUR Reproject & Coadd : dimensions finales invalides {shape}.",
     "assemble_warn_swapped_final_shape_reproj_coadd": "AVERTISSEMENT Reproject & Coadd : dimensions fournies {provided} inversées, attendu {expected}. Correction automatique.",
-    "assemble_error_mismatch_final_shape_reproj_coadd": "ERREUR Reproject & Coadd : dimensions fournies {provided} incompatibles avec la grille {expected}."
+    "assemble_error_mismatch_final_shape_reproj_coadd": "ERREUR Reproject & Coadd : dimensions fournies {provided} incompatibles avec la grille {expected}.",
+    "reproject_solver_required_error": "Le mode « Reproject & Coadd » nécessite un solveur astrométrique local actif (ASTAP ou Astrometry.net local). Veuillez l'activer dans les paramètres du solveur."
 }
