@@ -6812,6 +6812,7 @@ class SeestarStackerGUI:
         )
         print("  -> (4A) Appel self.settings.update_from_ui(self)...")
         self.settings.update_from_ui(self)
+
         # ... (logs de vérification des settings après update_from_ui) ...
         print(
             f"  DEBUG GUI SETTINGS (Phase 4A): self.settings.mosaic_settings['alignment_mode'] = {self.settings.mosaic_settings.get('alignment_mode', 'NonTrouve')}"
