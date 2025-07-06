@@ -6,6 +6,9 @@ astroalign
 opencv-python-headless
 tk
 psutil
+fsspec
+bottleneck
+threadpoolctl
 Photutils
 zarr>=2
 packaging
@@ -82,7 +85,7 @@ shapely # Geometry operations (used by ccdproc)
 # ---------------------------------------------------------------------------
 # Dependencies ONLY for visu.py (PyQt5 FITS Viewer Tool)
 # ---------------------------------------------------------------------------
-# PyQt5                   # GUI framework for the standalone visu.py viewer
+PyQt5                    # GUI framework for the standalone visu.py viewer
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)
