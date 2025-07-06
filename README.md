@@ -469,7 +469,7 @@ This software stands on the shoulders of giants — the developers of amazing op
 
 Thank you to everyone whose work, directly or indirectly, made ZeSeestarStacker possible!
 
-💫 Special thanks to Cheems, Astrobider, Clinton, and Qtopplings for their time, sharp eyes, and relentless beta testing — this project wouldn’t be half as solid without your help. You rock! 🌟
+💫 Special thanks to Cheems, Astrobider, Clinton, Drinksalot, 550ml, Zcom et Qtopplings for their time, sharp eyes, and relentless beta testing — this project wouldn’t be half as solid without your help. You rock! 🌟
 Your feedback helped shape features, squash bugs, and push the project further than I could alone.
 Thanks for pointing out the weird stuff... and sometimes creating it too 😉
 
@@ -502,6 +502,6 @@ Ce logiciel repose sur les épaules de géants : les développeurs de bibliothè
 
 Merci à toutes celles et ceux dont le travail, direct ou indirect, a rendu ZeSeestarStacker possible !
 
-💫 Remerciements spéciaux à Cheems, Astrobider, Clinton et Qtopplings pour leur temps, leur œil affûté et leurs tests acharnés — ce projet ne serait pas aussi solide sans votre aide. Vous déchirez ! 🌟
+💫 Remerciements spéciaux à Cheems, Astrobider, Clinton, Drinksalot, 550ml, Zcom et Qtopplings pour leur temps, leur œil affûté et leurs tests acharnés — ce projet ne serait pas aussi solide sans votre aide. Vous déchirez ! 🌟
 Vos retours ont permis de façonner les fonctionnalités, de traquer les bugs, et de faire avancer le projet bien plus loin que je ne l’aurais fait seul.
 Merci d’avoir signalé les bizarreries… et parfois même de les avoir provoquées 😉
