@@ -126,12 +126,14 @@ def _make_worker(tmp_path):
         obj.stop_processing = True
 
     obj._process_incremental_drizzle_batch = fake_incremental
+    obj._start_drizzle_process = lambda batch, num, tot: fake_incremental(batch, num, tot)
     obj._process_and_save_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("final called"))
     obj._process_completed_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("classic called"))
     obj.cleanup_temp_reference = lambda: None
     obj._cleanup_drizzle_temp_files = lambda: None
     obj._cleanup_drizzle_batch_outputs = lambda: None
     obj._cleanup_mosaic_panel_stacks_temp = lambda: None
+    obj._wait_drizzle_processes = lambda: None
 
     return obj, calls
 

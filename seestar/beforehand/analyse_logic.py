@@ -12,6 +12,18 @@ import json
 import concurrent.futures
 
 try:
+    import starcount_module
+except ImportError:
+    print("AVERTISSEMENT (analyse_logic): starcount_module.py introuvable. Le comptage d'etoiles sera désactivé.")
+    starcount_module = None
+
+try:
+    import ecc_module
+except ImportError:
+    print("AVERTISSEMENT (analyse_logic): ecc_module.py introuvable. FWHM/Ecc ne seront pas calculés.")
+    ecc_module = None
+
+try:
     import snr_module
 except ImportError:
     print("ERREUR CRITIQUE (analyse_logic): snr_module.py introuvable.")
@@ -33,6 +45,23 @@ except ImportError:
     print("AVERTISSEMENT (analyse_logic): trail_module.py introuvable. La détection de traînées sera désactivée.")
 except Exception as e:
     print(f"ERREUR (analyse_logic): Erreur lors de l'import ou de la lecture de trail_module: {e}")
+
+
+def sanitize_for_json(obj):
+    """Convertit récursivement les objets pour compatibilité JSON."""
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(elem) for elem in obj]
+    if isinstance(obj, (np.float32, np.float64)):
+        return float(obj) if np.isfinite(obj) else None
+    if isinstance(obj, (np.int32, np.int64, np.int_)):
+        return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return None
+    return obj
 
 
 
@@ -106,42 +135,27 @@ def write_log_summary(log_file_path, input_dir, options,
                 
                 if options.get('analyze_snr'):
                      all_valid_snrs = [r['snr'] for r in results_list if r.get('status') == 'ok' and 'snr' in r and r['snr'] is not None and np.isfinite(r['snr'])]
-                     if all_valid_snrs: 
+                     if all_valid_snrs:
                          log_file.write(f"Statistiques SNR (sur {len(all_valid_snrs)} images valides):\n")
                          mean_snr = np.mean(all_valid_snrs); median_snr = np.median(all_valid_snrs)
                          min_snr = min(all_valid_snrs); max_snr = max(all_valid_snrs)
                          log_file.write(f"  Moy: {mean_snr:.2f}, Med: {median_snr:.2f}, Min: {min_snr:.2f}, Max: {max_snr:.2f}\n")
-                     else: 
+                     else:
                          log_file.write("Statistiques SNR: Aucune donnée SNR valide calculée.\n")
-            
-            # --- AJOUT : Section pour sauvegarder les données de visualisation ---
-            if results_list is not None:
-                log_file.write("\n" + "--- BEGIN VISUALIZATION DATA ---" + "\n")
-                try:
-                    # Remplacer les NaN par None pour une sérialisation JSON valide
-                    # et convertir les booléens numpy en booléens python
-                    def sanitize_for_json(obj):
-                        if isinstance(obj, dict):
-                            return {k: sanitize_for_json(v) for k, v in obj.items()}
-                        elif isinstance(obj, list):
-                            return [sanitize_for_json(elem) for elem in obj]
-                        elif isinstance(obj, (np.float32, np.float64)):
-                            return float(obj) if np.isfinite(obj) else None
-                        elif isinstance(obj, (np.int32, np.int64, np.int_)):
-                            return int(obj)
-                        elif isinstance(obj, np.bool_):
-                            return bool(obj)
-                        elif isinstance(obj, float) and not np.isfinite(obj): # Gérer NaN/inf float Python
-                            return None
-                        return obj
 
-                    sanitized_results = sanitize_for_json(results_list)
-                    json.dump(sanitized_results, log_file, indent=4) # indent pour lisibilité
-                    log_file.write("\n" + "--- END VISUALIZATION DATA ---" + "\n")
-                except Exception as e_json:
-                    log_file.write(f"ERREUR: Impossible de sauvegarder les données de visualisation en JSON: {e_json}\n")
-                    log_file.write("--- END VISUALIZATION DATA (ERROR) ---" + "\n")
-            # --- FIN AJOUT ---
+                starcounts = [r['starcount'] for r in results_list if r.get('status') == 'ok' and r.get('starcount') is not None]
+                if starcounts:
+                    log_file.write(f"Statistiques Starcount (sur {len(starcounts)} images valides):\n")
+                    mean_sc = np.mean(starcounts); median_sc = np.median(starcounts)
+                    min_sc = min(starcounts); max_sc = max(starcounts)
+                    log_file.write(f"  Moy: {mean_sc:.2f}, Med: {median_sc:.2f}, Min: {min_sc:.2f}, Max: {max_sc:.2f}\n")
+                else:
+                    log_file.write("Statistiques Starcount: Aucune donnée valide.\n")
+            
+            if results_list is not None:
+                log_file.write("\n--- BEGIN VISUALIZATION DATA ---\n")
+                json.dump(sanitize_for_json(results_list), log_file, indent=4)
+                log_file.write("\n--- END VISUALIZATION DATA ---\n")
 
     except Exception as e:
         print(f"ERREUR CRITIQUE lors de l'écriture du résumé du log ({log_file_path}): {e}"); traceback.print_exc()
@@ -279,20 +293,163 @@ def apply_pending_snr_actions(results_list, snr_reject_abs_path,
     return actions_count
 
 
+def apply_pending_reco_actions(results_list, reject_abs_path,
+                               delete_rejected_flag, move_rejected_flag,
+                               log_callback, status_callback, progress_callback,
+                               input_dir_abs):
+    """Apply actions for images not in recommendations."""
+    actions_count = 0
+    if not results_list:
+        return actions_count
+
+    _log = log_callback if callable(log_callback) else lambda k, **kw: None
+    _status = status_callback if callable(status_callback) else lambda k, **kw: None
+    _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+    to_process = [r for r in results_list if r.get('rejected_reason') == 'not_in_recommendation' and r.get('action') == 'pending_reco_action' and r.get('status') == 'ok']
+    total = len(to_process)
+    if total == 0:
+        _log('logic_info_prefix', text="Aucune action recommandation en attente.")
+        return 0
+
+    _status('status_custom', text=f'Application des actions recommandation sur {total} fichiers...')
+    _progress(0)
+
+    for i, r in enumerate(to_process):
+        _progress(((i + 1) / total) * 100)
+        try:
+            rel_path = os.path.relpath(r.get('path'), input_dir_abs) if r.get('path') and input_dir_abs else r.get('file', 'N/A')
+        except ValueError:
+            rel_path = r.get('file', 'N/A')
+
+        _status('status_custom', text=f'Action reco sur {rel_path} ({i+1}/{total})')
+
+        current_path = r.get('path')
+        if not current_path or not os.path.exists(current_path):
+            _log('logic_move_skipped', file=rel_path, e='Fichier source introuvable pour action recommandation.')
+            r['action_comment'] = r.get('action_comment', '') + ' Source non trouvée pour action différée.'
+            r['action'] = 'error_action_deferred'
+            r['status'] = 'error'
+            continue
+
+        action_done = False
+        original_reason = r['rejected_reason']
+        if delete_rejected_flag:
+            try:
+                os.remove(current_path)
+                _log('logic_info_prefix', text=f'Fichier supprimé (reco): {rel_path}')
+                r['path'] = None
+                r['action'] = 'deleted_reco'
+                r['rejected_reason'] = 'not_in_recommendation'
+                r['status'] = 'processed_action'
+                actions_count += 1
+                action_done = True
+            except Exception as del_e:
+                _log('logic_error_prefix', text=f'Erreur suppression reco {rel_path}: {del_e}')
+                r['action_comment'] = r.get('action_comment', '') + f' Erreur suppression différée: {del_e}'
+                r['action'] = 'error_delete'
+                r['rejected_reason'] = original_reason
+        elif move_rejected_flag and reject_abs_path:
+            if not os.path.isdir(reject_abs_path):
+                try:
+                    os.makedirs(reject_abs_path)
+                    _log('logic_dir_created', path=reject_abs_path)
+                except OSError as e_mkdir:
+                    _log('logic_dir_create_error', path=reject_abs_path, e=e_mkdir)
+                    r['action_comment'] = r.get('action_comment', '') + f' Dossier rejet reco inaccessible: {e_mkdir}'
+                    r['action'] = 'error_move'
+                    r['rejected_reason'] = original_reason
+                    continue
+
+            dest_path = os.path.join(reject_abs_path, os.path.basename(current_path))
+            try:
+                if os.path.normpath(current_path) != os.path.normpath(dest_path):
+                    shutil.move(current_path, dest_path)
+                    _log('logic_moved_info', folder=os.path.basename(reject_abs_path), text_key_suffix='_deferred_reco', file_rel_path=rel_path)
+                    r['path'] = dest_path
+                    r['action'] = 'moved_reco'
+                    r['rejected_reason'] = 'not_in_recommendation'
+                    r['status'] = 'processed_action'
+                    actions_count += 1
+                    action_done = True
+                else:
+                    r['action_comment'] = r.get('action_comment', '') + ' Déjà dans dossier cible (différé)?'
+                    r['action'] = 'kept'
+                    r['rejected_reason'] = 'not_in_recommendation'
+                    r['status'] = 'processed_action'
+                    action_done = True
+            except Exception as move_e:
+                _log('logic_move_error', file=rel_path, e=move_e)
+                r['action_comment'] = r.get('action_comment', '') + f' Erreur déplacement différé: {move_e}'
+                r['action'] = 'error_move'
+                r['rejected_reason'] = original_reason
+
+        if not action_done and not delete_rejected_flag and not move_rejected_flag:
+            r['action'] = 'kept_pending_reco_no_action'
+            r['rejected_reason'] = 'not_in_recommendation'
+            r['status'] = 'processed_action'
+            r['action_comment'] = r.get('action_comment', '') + ' Action recommandation différée mais aucune opération configurée.'
+
+    _progress(100)
+    _status('status_custom', text=f'{actions_count} actions recommandation appliquées.')
+    _log('logic_info_prefix', text=f'{actions_count} actions recommandation appliquées.')
+    return actions_count
+
+
+def build_recommended_images(results):
+    """Return list of files meeting SNR/FWHM/Ecc criteria."""
+    kept = [r for r in results if r.get('action') == 'kept']
+
+    snrs = np.array([r.get('snr', np.nan) for r in kept], dtype=float)
+    fwhms = np.array([r.get('fwhm', np.nan) for r in kept], dtype=float)
+    eccs = np.array([r.get('ecc', r.get('e', np.nan)) for r in kept], dtype=float)
+
+    if kept:
+        snr_min = float(np.nanpercentile(snrs, 25))
+        fwhm_max = float(np.nanpercentile(fwhms, 75))
+        ecc_max = float(np.nanpercentile(eccs, 75))
+    else:
+        snr_min = fwhm_max = ecc_max = float('nan')
+
+    reco = [
+        r for r in kept
+        if (r.get('snr') is not None and float(r.get('snr', np.nan)) >= snr_min)
+        and (float(r.get('fwhm', np.nan)) <= fwhm_max)
+        and (float(r.get('ecc', r.get('e', np.nan))) <= ecc_max)
+    ]
+    return reco, snr_min, fwhm_max, ecc_max
+
+
+def debug_counts(results):
+    total = len(results)
+    low_snr = sum(r.get('rejected_reason') == 'low_snr' for r in results)
+    high_fwhm = sum(r.get('rejected_reason') == 'high_fwhm' for r in results)
+    starcount = sum(r.get('rejected_reason') == 'starcount_out' for r in results)
+    ecc = sum(r.get('rejected_reason') == 'high_eccentricity' for r in results)
+    pending = sum(str(r.get('action', '')).startswith('pending') for r in results)
+    print(f"total={total} | snr={low_snr} | fwhm={high_fwhm} | stars={starcount} | e={ecc} | pending={pending}")
+
+
 
 # --- Helpers for parallel processing ---
+
 def _snr_worker(path):
-    """Worker to compute SNR for a FITS file."""
+    """Worker to compute SNR and star count for a FITS file."""
+
     result = {
         'path': path,
         'snr': np.nan,
         'sky_bg': np.nan,
         'sky_noise': np.nan,
         'signal_pixels': 0,
+        'starcount': None,
         'exposure': 'N/A',
         'filter': 'N/A',
         'temperature': 'N/A',
         'error': None,
+        'fwhm': np.nan,
+        'ecc': np.nan,
+        'n_star_ecc': 0,
     }
     hdul = None
     try:
@@ -307,6 +464,25 @@ def _snr_worker(path):
                 result['temperature'] = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
                 snr, sky_bg, sky_noise, signal_pixels = snr_module.calculate_snr(data)
                 result.update({'snr': snr, 'sky_bg': sky_bg, 'sky_noise': sky_noise, 'signal_pixels': signal_pixels})
+
+                if starcount_module is not None:
+
+                    try:
+                        result['starcount'] = starcount_module.calculate_starcount(data)
+                    except Exception:
+                        result['starcount'] = None
+
+                if ecc_module is not None:
+
+                    try:
+                        fwhm_val, ecc_val, n_det = ecc_module.calculate_fwhm_ecc(data)
+                        result['fwhm'] = fwhm_val
+                        result['ecc'] = ecc_val
+                        result['n_star_ecc'] = n_det
+                    except Exception:
+                        result['fwhm'] = np.nan
+                        result['ecc'] = np.nan
+                        result['n_star_ecc'] = 0
             else:
                 result['error'] = 'Pas de données image valides dans HDU 0.'
     except Exception as e:
@@ -496,7 +672,9 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     snr_loop_errors = 0
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+
             future_map = {ex.submit(_snr_worker, p): p for p in fits_files_to_process}
+
             for idx, future in enumerate(concurrent.futures.as_completed(future_map)):
                 fits_file_path = future_map[future]
                 progress = ((idx + 1) / total_files) * 50
@@ -517,6 +695,10 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                     'error_message': '',
                     'has_trails': False,
                     'num_trails': 0,
+                    'starcount': None,
+                    'fwhm': np.nan,
+                    'ecc': np.nan,
+                    'n_star_ecc': 0,
                 }
                 try:
                     worker_res = future.result()
@@ -533,6 +715,14 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                             'temperature': worker_res['temperature'],
                         }
                         result_base.update(snr_data)
+                        if 'starcount' in worker_res:
+                            result_base['starcount'] = worker_res['starcount']
+                        if 'fwhm' in worker_res:
+                            result_base['fwhm'] = worker_res['fwhm']
+                        if 'ecc' in worker_res:
+                            result_base['ecc'] = worker_res['ecc']
+                        if 'n_star_ecc' in worker_res:
+                            result_base['n_star_ecc'] = worker_res['n_star_ecc']
                         result_base['status'] = 'ok'
                         _log("logic_snr_info", file=result_base['rel_path'], snr=worker_res['snr'], bg=worker_res['sky_bg'])
                     else:
@@ -549,6 +739,7 @@ def perform_analysis(input_dir, output_log, options, callbacks):
         _log("logic_warn_prefix", text=f"Echec pool SNR ({pool_e}), fallback séquentiel")
         all_results_list = []
         snr_loop_errors = 0
+
         for i, fits_file_path in enumerate(fits_files_to_process):
             progress = ((i + 1) / total_files) * 50
             try:
@@ -568,6 +759,7 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                 'error_message': '',
                 'has_trails': False,
                 'num_trails': 0,
+                'starcount': None,
             }
             try:
                 if options.get('analyze_snr'):
@@ -594,6 +786,25 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                                         'temperature': temperature,
                                     }
                                     result.update(snr_data)
+
+                                    if starcount_module is not None:
+
+                                        try:
+                                            result['starcount'] = starcount_module.calculate_starcount(data)
+                                        except Exception:
+                                            result['starcount'] = None
+
+                                    if ecc_module is not None:
+
+                                        try:
+                                            fwhm_val, ecc_val, n_det = ecc_module.calculate_fwhm_ecc(data)
+                                            result['fwhm'] = fwhm_val
+                                            result['ecc'] = ecc_val
+                                            result['n_star_ecc'] = n_det
+                                        except Exception:
+                                            result['fwhm'] = np.nan
+                                            result['ecc'] = np.nan
+                                            result['n_star_ecc'] = 0
                                     result['status'] = 'ok'
                                     _log("logic_snr_info", file=result['rel_path'], snr=snr, bg=sky_bg)
                                 else:
@@ -634,6 +845,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     # ... (cette section reste identique) ...
     snr_threshold = -np.inf
     selection_stats = None
+    starcount_threshold = options.get('starcount_threshold')
+    fwhm_max_slider = options.get('fwhm_max')
+    fwhm_min_slider = options.get('fwhm_min')
+    ecc_max_slider = options.get('ecc_max')
+    ecc_min_slider = options.get('ecc_min')
     if options.get('analyze_snr') and options.get('snr_selection_mode') != 'none':
         mode = options.get('snr_selection_mode')
         value_str = options.get('snr_selection_value')
@@ -727,9 +943,29 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                         # Il sera toujours considéré pour l'analyse des traînées car process_for_trails est True.
                         pass 
                     # --- FIN MODIFICATION ---
-                else: # r['snr'] >= snr_threshold
-                    kept_by_snr_initial += 1 
+                else:  # r['snr'] >= snr_threshold
+                    kept_by_snr_initial += 1
             # else: Fichier OK mais pas de filtre SNR actif, ou SNR non valide (process_for_trails reste True)
+
+            if starcount_threshold is not None and r.get('starcount') is not None:
+                if r['starcount'] < starcount_threshold:
+                    r['rejected_reason'] = 'starcount_pending_action'
+                    r['action'] = 'pending_starcount_action'
+                    process_for_trails = False
+
+            if options.get('analyse_fwhm') and np.isfinite(r.get('fwhm', np.nan)):
+                if (fwhm_max_slider is not None and r['fwhm'] > fwhm_max_slider) or \
+                   (fwhm_min_slider is not None and r['fwhm'] < fwhm_min_slider):
+                    r['rejected_reason'] = 'high_fwhm_pending_action'
+                    r['action'] = 'pending_fwhm_action'
+                    process_for_trails = False
+
+            if options.get('analyse_ecc') and np.isfinite(r.get('ecc', np.nan)):
+                if (ecc_max_slider is not None and r['ecc'] > ecc_max_slider) or \
+                   (ecc_min_slider is not None and r['ecc'] < ecc_min_slider):
+                    r['rejected_reason'] = 'high_ecc_pending_action'
+                    r['action'] = 'pending_ecc_action'
+                    process_for_trails = False
         
         # Ajouter à la liste pour analyse des traînées si applicable
         # Un fichier marqué 'low_snr_pending_action' EST toujours candidat pour l'analyse des traînées.
@@ -919,7 +1155,7 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     try:
          with open(output_log, 'a', encoding='utf-8') as log_file: # Mode 'a' pour ajouter au log existant
             log_file.write("\n--- Analyse individuelle des fichiers (État final après actions) ---\n")
-            header_parts = ["Fichier (Relatif)", "Statut", "SNR", "Fond", "Bruit", "PixSig"]
+            header_parts = ["Fichier (Relatif)", "Statut", "SNR", "Fond", "Bruit", "PixSig", "Starcount"]
             if options.get('detect_trails') and SATDET_AVAILABLE: header_parts.extend(["Traînée", "NbSeg"])
             header_parts.extend(["Expo", "Filtre", "Temp", "Action Finale", "Rejet", "Commentaire"])
             header = "\t".join(header_parts) + "\n"; log_file.write(header)
@@ -928,10 +1164,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                  log_line_parts = [
                      str(r.get('rel_path','?')),
                      str(r.get('status','?')),
-                     f"{r.get('snr', np.nan):.2f}",
-                     f"{r.get('sky_bg', np.nan):.2f}",
-                     f"{r.get('sky_noise', np.nan):.2f}",
-                     str(r.get('signal_pixels',0))
+                    f"{r.get('snr', np.nan):.2f}",
+                    f"{r.get('sky_bg', np.nan):.2f}",
+                    f"{r.get('sky_noise', np.nan):.2f}",
+                    str(r.get('signal_pixels',0)),
+                    str(r.get('starcount', 'N/A'))
                  ]
                  if options.get('detect_trails') and SATDET_AVAILABLE:
                      trail_status = 'N/A'

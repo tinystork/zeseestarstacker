@@ -258,6 +258,7 @@ class SeestarStackerGUI:
         self.processing = False
         self.thread = None
         self.current_preview_data = None
+        self.current_preview_hist_data = None
         self.current_stack_header = None
         self.debounce_timer_id = None
         self.time_per_image = 0
@@ -267,6 +268,8 @@ class SeestarStackerGUI:
         self.logger.info("DEBUG (GUI __init__): Dictionnaire self.tooltips initialisé.")
         self.batches_processed_for_preview_refresh = 0
         self.preview_auto_refresh_batch_interval = 10
+        # Track when histogram range should be refreshed from sliders
+        self._hist_range_update_pending = False
         self.mosaic_mode_active = False
         self.logger.info(
             "DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False."
@@ -316,6 +319,9 @@ class SeestarStackerGUI:
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
+        self.auto_zoom_histogram_var.trace_add(
+            "write", self._update_histogram_autozoom_state
+        )
         self.initial_auto_stretch_done = False
 
         if (
@@ -589,6 +595,15 @@ class SeestarStackerGUI:
 
         self.final_edge_crop_percent_var = tk.DoubleVar(value=2.0)
 
+        # Option to crop master tiles before stacking
+        self.apply_master_tile_crop_var = tk.BooleanVar(value=False)
+        self.master_tile_crop_percent_var = tk.DoubleVar(value=18.0)
+
+        # --- nouveaux toggles Expert ---
+        self.apply_bn_var = tk.BooleanVar(value=True)
+        self.apply_cb_var = tk.BooleanVar(value=True)
+        self.apply_final_crop_var = tk.BooleanVar(value=True)
+
         print(
             "DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées."
         )
@@ -601,6 +616,7 @@ class SeestarStackerGUI:
 
         self.apply_feathering_var = tk.BooleanVar(value=False)
         self.feather_blur_px_var = tk.IntVar(value=256)
+        self.apply_batch_feathering_var = tk.BooleanVar(value=True)
         print(
             "DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var)."
         )
@@ -630,6 +646,7 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
+        self.reproject_coadd_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
@@ -1041,13 +1058,48 @@ class SeestarStackerGUI:
         zoom_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         ttk.Label(zoom_frame, text="Zoom (%)").grid(row=0, column=0, sticky=tk.W)
         self.zoom_percent_var = tk.IntVar(value=0)
-        ttk.Combobox(
+        self.zoom_slider = ttk.Scale(
             zoom_frame,
-            values=[0, 10, 20, 30, 40, 50],
+            from_=-50,
+            to=50,
+            variable=self.zoom_percent_var,
+            orient=tk.HORIZONTAL,
+        )
+        self.zoom_slider.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+        self.zoom_value_label = ttk.Label(
+            zoom_frame,
             textvariable=self.zoom_percent_var,
+            width=4,
+            anchor="e",
+        )
+        self.zoom_value_label.grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
+
+        crop_frame = ttk.Frame(tab_stacking)
+        crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.crop_master_check = ttk.Checkbutton(
+            crop_frame,
+            text=self.tr("crop_master_tiles_label", default="Crop master tiles"),
+            variable=self.apply_master_tile_crop_var,
+            command=self._update_master_tile_crop_state,
+        )
+        self.crop_master_check.grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            crop_frame,
+            text=self.tr("crop_percent_side_label", default="Crop % per side"),
+        ).grid(
+            row=0, column=1, sticky=tk.W, padx=(10, 2)
+        )
+        self.master_tile_crop_spinbox = ttk.Spinbox(
+            crop_frame,
+            from_=0.0,
+            to=25.0,
+            increment=0.5,
+            textvariable=self.master_tile_crop_percent_var,
             width=6,
-            state="readonly",
-        ).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+            format="%.1f",
+        )
+        self.master_tile_crop_spinbox.grid(row=0, column=2, sticky=tk.W)
+        self._update_master_tile_crop_state()
         self.options_frame = ttk.LabelFrame(tab_stacking, text="Stacking Options")
         self.options_frame.pack(fill=tk.X, pady=5, padx=5)
 
@@ -1185,7 +1237,13 @@ class SeestarStackerGUI:
             )
         )
 
-        self.final_keys = ["mean", "median", "winsorized_sigma_clip", "reproject"]
+        self.final_keys = [
+            "mean",
+            "median",
+            "winsorized_sigma_clip",
+            "reproject",
+            "reproject_coadd",
+        ]
         self.final_key_to_label = {}
         self.final_label_to_key = {}
         for k in self.final_keys:
@@ -1196,6 +1254,10 @@ class SeestarStackerGUI:
         if self.reproject_between_batches_var.get():
             self.stack_final_display_var.set(
                 self.final_key_to_label.get("reproject", "reproject")
+            )
+        elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
+            self.stack_final_display_var.set(
+                self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
             )
         else:
             self.stack_final_display_var.set(
@@ -1516,6 +1578,14 @@ class SeestarStackerGUI:
         )
         self.warning_label.pack(pady=(5, 10), padx=5, fill=tk.X)
 
+        self.apply_batch_feathering_check = ttk.Checkbutton(
+            expert_content_frame,
+            text=self.tr("feather_inter_batch_label", default="Feather inter-batch (radial blend)"),
+            variable=self.apply_batch_feathering_var,
+            command=self._on_apply_batch_feathering_changed,
+        )
+        self.apply_batch_feathering_check.pack(anchor=tk.W, padx=5, pady=(0, 5))
+
         self.feathering_frame = ttk.LabelFrame(
             expert_content_frame,
             text=self.tr("feathering_frame_title", default="Feathering / Low WHT"),
@@ -1597,9 +1667,17 @@ class SeestarStackerGUI:
         self.bn_frame.pack(fill=tk.X, padx=5, pady=5)
         self.bn_frame.columnconfigure(1, weight=0)
         self.bn_frame.columnconfigure(3, weight=0)
+
+        self.apply_bn_check = ttk.Checkbutton(
+            self.bn_frame,
+            text="Enable BN",
+            variable=self.apply_bn_var,
+            command=self._update_bn_options_state,
+        )
+        self.apply_bn_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text="Grid Size:")
         self.bn_grid_size_actual_label.grid(
-            row=0, column=0, sticky=tk.W, padx=2, pady=2
+            row=1, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.bn_grid_size_combo = ttk.Combobox(
             self.bn_frame,
@@ -1608,9 +1686,9 @@ class SeestarStackerGUI:
             width=7,
             state="readonly",
         )
-        self.bn_grid_size_combo.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_grid_size_combo.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_low_actual_label = ttk.Label(self.bn_frame, text="BG Perc. Low:")
-        self.bn_perc_low_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_low_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_low_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=0,
@@ -1619,10 +1697,10 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.bn_perc_low_var,
         )
-        self.bn_perc_low_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_low_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text="BG Perc. High:")
         self.bn_perc_high_actual_label.grid(
-            row=1, column=2, sticky=tk.W, padx=2, pady=2
+            row=2, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.bn_perc_high_spinbox = ttk.Spinbox(
             self.bn_frame,
@@ -1632,12 +1710,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.bn_perc_high_var,
         )
-        self.bn_perc_high_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.bn_perc_high_spinbox.grid(row=2, column=3, sticky=tk.W, padx=2, pady=2)
         self.bn_std_factor_actual_label = ttk.Label(
             self.bn_frame, text="BG Std Factor:"
         )
         self.bn_std_factor_actual_label.grid(
-            row=2, column=0, sticky=tk.W, padx=2, pady=2
+            row=3, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.bn_std_factor_spinbox = ttk.Spinbox(
             self.bn_frame,
@@ -1648,9 +1726,9 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_std_factor_var,
         )
-        self.bn_std_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_std_factor_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_min_gain_actual_label = ttk.Label(self.bn_frame, text="Min Gain:")
-        self.bn_min_gain_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2)
+        self.bn_min_gain_actual_label.grid(row=4, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_min_gain_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=0.1,
@@ -1660,9 +1738,9 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_min_gain_var,
         )
-        self.bn_min_gain_spinbox.grid(row=3, column=1, sticky=tk.W, padx=2, pady=2)
+        self.bn_min_gain_spinbox.grid(row=4, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_max_gain_actual_label = ttk.Label(self.bn_frame, text="Max Gain:")
-        self.bn_max_gain_actual_label.grid(row=3, column=2, sticky=tk.W, padx=2, pady=2)
+        self.bn_max_gain_actual_label.grid(row=4, column=2, sticky=tk.W, padx=2, pady=2)
         self.bn_max_gain_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=1.0,
@@ -1672,7 +1750,7 @@ class SeestarStackerGUI:
             format="%.1f",
             textvariable=self.bn_max_gain_var,
         )
-        self.bn_max_gain_spinbox.grid(row=3, column=3, sticky=tk.W, padx=2, pady=2)
+        self.bn_max_gain_spinbox.grid(row=4, column=3, sticky=tk.W, padx=2, pady=2)
         print("DEBUG (GUI create_layout): Cadre BN créé.")
 
         self.cb_frame = ttk.LabelFrame(
@@ -1683,11 +1761,19 @@ class SeestarStackerGUI:
         self.cb_frame.pack(fill=tk.X, padx=5, pady=5)
         self.cb_frame.columnconfigure(1, weight=0)
         self.cb_frame.columnconfigure(3, weight=0)
+
+        self.apply_cb_check = ttk.Checkbutton(
+            self.cb_frame,
+            text="Enable Edge/Chroma Correction",
+            variable=self.apply_cb_var,
+            command=self._update_cb_options_state,
+        )
+        self.apply_cb_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
         self.cb_border_size_actual_label = ttk.Label(
             self.cb_frame, text="Border Size (px):"
         )
         self.cb_border_size_actual_label.grid(
-            row=0, column=0, sticky=tk.W, padx=2, pady=2
+            row=1, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.cb_border_size_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1697,12 +1783,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.cb_border_size_var,
         )
-        self.cb_border_size_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
+        self.cb_border_size_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
         self.cb_blur_radius_actual_label = ttk.Label(
             self.cb_frame, text="Blur Radius (px):"
         )
         self.cb_blur_radius_actual_label.grid(
-            row=0, column=2, sticky=tk.W, padx=2, pady=2
+            row=1, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.cb_blur_radius_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1712,12 +1798,12 @@ class SeestarStackerGUI:
             width=5,
             textvariable=self.cb_blur_radius_var,
         )
-        self.cb_blur_radius_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2)
+        self.cb_blur_radius_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
         self.cb_min_b_factor_actual_label = ttk.Label(
             self.cb_frame, text="Min Blue Factor:"
         )
         self.cb_min_b_factor_actual_label.grid(
-            row=1, column=0, sticky=tk.W, padx=2, pady=2
+            row=2, column=0, sticky=tk.W, padx=2, pady=2
         )
         self.cb_min_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1728,12 +1814,12 @@ class SeestarStackerGUI:
             format="%.2f",
             textvariable=self.cb_min_b_factor_var,
         )
-        self.cb_min_b_factor_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+        self.cb_min_b_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
         self.cb_max_b_factor_actual_label = ttk.Label(
             self.cb_frame, text="Max Blue Factor:"
         )
         self.cb_max_b_factor_actual_label.grid(
-            row=1, column=2, sticky=tk.W, padx=2, pady=2
+            row=2, column=2, sticky=tk.W, padx=2, pady=2
         )
         self.cb_max_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
@@ -1744,7 +1830,7 @@ class SeestarStackerGUI:
             format="%.2f",
             textvariable=self.cb_max_b_factor_var,
         )
-        self.cb_max_b_factor_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
+        self.cb_max_b_factor_spinbox.grid(row=2, column=3, sticky=tk.W, padx=2, pady=2)
         print("DEBUG (GUI create_layout): Cadre CB créé.")
 
         self.crop_frame = ttk.LabelFrame(
@@ -1753,6 +1839,13 @@ class SeestarStackerGUI:
             padding=5,
         )
         self.crop_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.apply_crop_check = ttk.Checkbutton(
+            self.crop_frame,
+            text="Enable Final Cropping",
+            variable=self.apply_final_crop_var,
+            command=self._update_crop_options_state,
+        )
+        self.apply_crop_check.pack(anchor=tk.W, padx=5, pady=(0, 3))
         self.final_edge_crop_actual_label = ttk.Label(
             self.crop_frame, text="Edge Crop (%):"
         )
@@ -2172,6 +2265,9 @@ class SeestarStackerGUI:
         )
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
 
+        # Appliquer l'état de verrouillage de l'échelle X selon l'option
+        self._update_histogram_autozoom_state()
+
         self.auto_zoom_histo_check = ttk.Checkbutton(
             self.histo_toolbar,
             text=self.tr("auto_zoom_histo_check", default="Auto zoom histogram"),
@@ -2236,7 +2332,12 @@ class SeestarStackerGUI:
         self._update_final_scnr_options_state()
         self._update_photutils_bn_options_state()
         self._update_feathering_options_state()
+        self._on_apply_batch_feathering_changed()
         self._update_low_wht_mask_options_state()
+        self._update_bn_options_state()
+        self._update_cb_options_state()
+        self._update_crop_options_state()
+        self._update_master_tile_crop_state()
         print(
             "DEBUG (GUI create_layout V_SaveAsFloat32_1): Fin création layout et appels _update_..._state."
         )  # Version Log
@@ -2272,6 +2373,13 @@ class SeestarStackerGUI:
         except Exception as e:
             print(f"ERREUR inattendue dans _update_feathering_options_state: {e}")
             traceback.print_exc(limit=1)
+
+    def _on_apply_batch_feathering_changed(self, *args):
+        """Sync apply_batch_feathering flag with the checkbox."""
+        try:
+            self.apply_batch_feathering = bool(self.apply_batch_feathering_var.get())
+        except tk.TclError:
+            pass
 
     ##############################################################################################################################
 
@@ -2377,6 +2485,53 @@ class SeestarStackerGUI:
     #        except AttributeError: pass # Si photutils_params_frame n'est pas encore créé
     #        except Exception as e: print(f"ERREUR inattendue dans _update_photutils_bn_options_state: {e}")
 
+    ###############################################################################
+
+    def _update_bn_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_bn_var.get() else tk.DISABLED
+        for w in self.bn_frame.winfo_children():
+            if w is self.apply_bn_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
+
+    def _update_cb_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_cb_var.get() else tk.DISABLED
+        for w in self.cb_frame.winfo_children():
+            if w is self.apply_cb_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
+
+    def _update_crop_options_state(self, *args):
+        new_state = tk.NORMAL if self.apply_final_crop_var.get() else tk.DISABLED
+        for w in self.crop_frame.winfo_children():
+            if w is self.apply_crop_check:
+                continue
+            try:
+                w.config(state=new_state)
+            except tk.TclError:
+                pass
+
+    def _update_master_tile_crop_state(self, *args):
+        new_state = tk.NORMAL if self.apply_master_tile_crop_var.get() else tk.DISABLED
+        try:
+            self.master_tile_crop_spinbox.config(state=new_state)
+        except tk.TclError:
+            pass
+
+    ###############################################################################
+
+    def _update_histogram_autozoom_state(self, *args):
+        """Verrouille ou libère l'échelle X de l'histogramme selon l'option."""
+        freeze = not self.auto_zoom_histogram_var.get()
+        if hasattr(self, "histogram_widget"):
+            self.histogram_widget.freeze_x_range = freeze
+
     ##############################################################################################################################
     def _toggle_kappa_visibility(self, event=None):
         """Affiche ou cache les widgets Kappa en fonction de la méthode de stacking, en utilisant grid."""
@@ -2461,6 +2616,10 @@ class SeestarStackerGUI:
                 self.stack_final_display_var.set(
                     self.final_key_to_label.get("reproject", "reproject")
                 )
+            elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
+                )
             else:
                 current_key = self.stack_final_combine_var.get()
                 self.stack_final_display_var.set(
@@ -2486,9 +2645,15 @@ class SeestarStackerGUI:
         key = self.final_label_to_key.get(display_value, display_value)
         if key == "reproject":
             self.reproject_between_batches_var.set(True)
+            self.reproject_coadd_var.set(False)
+            self.stack_final_combine_var.set("mean")
+        elif key == "reproject_coadd":
+            self.reproject_between_batches_var.set(False)
+            self.reproject_coadd_var.set(True)
             self.stack_final_combine_var.set("mean")
         else:
             self.reproject_between_batches_var.set(False)
+            self.reproject_coadd_var.set(False)
             self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
 
@@ -3165,6 +3330,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile_label": "photutils_bn_exclude_percentile_label",
             "apply_feathering_label": "apply_feathering_check",
             "feather_blur_px_label": "feather_blur_px_label",
+            "feather_inter_batch_label": "apply_batch_feathering_check",
             "apply_low_wht_mask_label": "low_wht_mask_check",
             "low_wht_percentile_label": "low_wht_pct_label",
             "low_wht_soften_px_label": "low_wht_soften_px_label",
@@ -3279,6 +3445,7 @@ class SeestarStackerGUI:
             ("apply_feathering_check", "tooltip_apply_feathering"),
             ("feather_blur_px_label", "tooltip_feather_blur_px"),
             ("feather_blur_px_spinbox", "tooltip_feather_blur_px"),
+            ("apply_batch_feathering_check", "feather_inter_batch_tooltip"),
             ("low_wht_mask_check", "tooltip_apply_low_wht_mask"),
             ("low_wht_pct_label", "tooltip_low_wht_percentile"),
             ("low_wht_pct_spinbox", "tooltip_low_wht_percentile"),
@@ -3606,6 +3773,7 @@ class SeestarStackerGUI:
             pass
 
         # Appeler un refresh léger de l'aperçu qui ne recalcule pas l'histogramme
+        self._hist_range_update_pending = True
         self._debounce_refresh_preview(recalculate_histogram=False)
 
     def refresh_preview(self, recalculate_histogram=True):
@@ -3675,7 +3843,7 @@ class SeestarStackerGUI:
             print("  [RefreshPreview] Calling preview_manager.update_preview...")
             # PreviewManager.update_preview retourne l'image PIL pour l'affichage
             # et les données (après WB, avant stretch) pour l'analyse de l'histogramme.
-            processed_pil_image, data_for_histogram_analysis = (
+            processed_pil_image, _ = (
                 self.preview_manager.update_preview(
                     self.current_preview_data,
                     preview_params,
@@ -3685,6 +3853,16 @@ class SeestarStackerGUI:
                     total_batches=self.preview_total_batches,
                 )
             )
+
+            if self.current_preview_hist_data is not None:
+                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
+                    self.current_preview_hist_data.copy(),
+                    r=preview_params["r_gain"],
+                    g=preview_params["g_gain"],
+                    b=preview_params["b_gain"],
+                )
+            else:
+                data_for_histogram_analysis = None
             print("  [RefreshPreview] Returned from preview_manager.update_preview.")
 
             if recalculate_histogram:  # Recalculer l'histogramme seulement si demandé
@@ -3703,6 +3881,14 @@ class SeestarStackerGUI:
                     print(
                         "    [RefreshPreview] Returned from histogram_widget.update_histogram."
                     )
+                    try:
+                        bp_ui = self.preview_black_point.get()
+                        wp_ui = self.preview_white_point.get()
+                    except tk.TclError:
+                        bp_ui = None
+                        wp_ui = None
+                    if bp_ui is not None and wp_ui is not None:
+                        self.histogram_widget.set_range(bp_ui, wp_ui)
             else:
                 print(
                     "  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False)."
@@ -3710,10 +3896,11 @@ class SeestarStackerGUI:
 
             # Mettre à jour les lignes de l'histogramme pour refléter les sliders UI (qui sont 0-1)
             # HistogramWidget.set_range s'attend à des valeurs 0-1 et les convertit en interne.
-            if self.histogram_widget:
+            if self.histogram_widget and self._hist_range_update_pending:
                 self.histogram_widget.set_range(
                     preview_params["black_point"], preview_params["white_point"]
                 )
+                self._hist_range_update_pending = False
 
         except Exception as e:
             print(
@@ -3776,6 +3963,8 @@ class SeestarStackerGUI:
                 self.bn_min_gain_var.set(default_settings.bn_min_gain)
             if hasattr(self, "bn_max_gain_var"):
                 self.bn_max_gain_var.set(default_settings.bn_max_gain)
+            if hasattr(self, "apply_bn_var"):
+                self.apply_bn_var.set(default_settings.apply_bn)
 
             # ChromaticBalancer (CB)
             if hasattr(self, "cb_border_size_var"):
@@ -3786,12 +3975,21 @@ class SeestarStackerGUI:
                 self.cb_min_b_factor_var.set(default_settings.cb_min_b_factor)
             if hasattr(self, "cb_max_b_factor_var"):
                 self.cb_max_b_factor_var.set(default_settings.cb_max_b_factor)
+            if hasattr(self, "apply_cb_var"):
+                self.apply_cb_var.set(default_settings.apply_cb)
+
+            if hasattr(self, "apply_master_tile_crop_var"):
+                self.apply_master_tile_crop_var.set(default_settings.apply_master_tile_crop)
+            if hasattr(self, "master_tile_crop_percent_var"):
+                self.master_tile_crop_percent_var.set(default_settings.master_tile_crop_percent)
 
             # Rognage Final
             if hasattr(self, "final_edge_crop_percent_var"):
                 self.final_edge_crop_percent_var.set(
                     default_settings.final_edge_crop_percent
                 )
+            if hasattr(self, "apply_final_crop_var"):
+                self.apply_final_crop_var.set(default_settings.apply_final_crop)
 
             # --- Réinitialiser Feathering ---
             if hasattr(self, "apply_feathering_var"):
@@ -3802,6 +4000,11 @@ class SeestarStackerGUI:
                 self.feather_blur_px_var.set(
                     default_settings.feather_blur_px
                 )  # Sera 256 par défaut
+            if hasattr(self, "apply_batch_feathering_var"):
+                self.apply_batch_feathering_var.set(
+                    default_settings.apply_batch_feathering
+                )
+                self._on_apply_batch_feathering_changed()
             # ---  ---
 
             # --- Réinitialiser Photutils BN ---
@@ -3833,6 +4036,14 @@ class SeestarStackerGUI:
                 self._update_photutils_bn_options_state()
             if hasattr(self, "_update_feathering_options_state"):
                 self._update_feathering_options_state()
+            if hasattr(self, "_update_bn_options_state"):
+                self._update_bn_options_state()
+            if hasattr(self, "_update_cb_options_state"):
+                self._update_cb_options_state()
+            if hasattr(self, "_update_crop_options_state"):
+                self._update_crop_options_state()
+            if hasattr(self, "_update_master_tile_crop_state"):
+                self._update_master_tile_crop_state()
             # Si d'autres groupes d'options dans l'onglet expert ont des états dépendants,
             # appelez leurs méthodes _update_..._state() ici aussi.
 
@@ -3883,12 +4094,19 @@ class SeestarStackerGUI:
             return
         self.logger.debug("[DEBUG-GUI] update_preview_from_stacker: Called.")
 
+        if isinstance(preview_array, (tuple, list)) and len(preview_array) == 2:
+            preview_display, preview_hist = preview_array
+        else:
+            preview_display = preview_array
+            preview_hist = preview_array
+
         if self._final_stretch_set_by_processing_finished:
             self.logger.info(
                 "  [update_preview] Verrou final actif. Mise à jour des données uniquement."
             )
             if preview_array is not None:
-                self.current_preview_data = preview_array.copy()
+                self.current_preview_data = preview_display.copy()
+                self.current_preview_hist_data = preview_hist.copy()
                 self.current_stack_header = (
                     stack_header.copy() if stack_header else None
                 )
@@ -3905,7 +4123,8 @@ class SeestarStackerGUI:
             )
             return
 
-        self.current_preview_data = preview_array.copy()
+        self.current_preview_data = preview_display.copy()
+        self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
         self.preview_total_imgs = total_imgs
@@ -3935,8 +4154,9 @@ class SeestarStackerGUI:
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
             )
             if self.drizzle_mode_var.get() == "Incremental":
-                self.current_preview_data = preview_array
-                self.apply_auto_stretch()
+                self.current_preview_data = preview_display
+                self.current_preview_hist_data = preview_hist
+                self.refresh_preview()
                 return
             # Non-drizzle modes keep existing behaviour
             self.refresh_preview()
@@ -4172,7 +4392,7 @@ class SeestarStackerGUI:
 
         try:
             print("  [RefreshPreview] Calling preview_manager.update_preview...")
-            processed_pil_image, data_for_histogram_analysis = (
+            processed_pil_image, _ = (
                 self.preview_manager.update_preview(
                     self.current_preview_data,
                     preview_params,
@@ -4182,6 +4402,16 @@ class SeestarStackerGUI:
                     total_batches=self.preview_total_batches,
                 )
             )
+
+            if self.current_preview_hist_data is not None:
+                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
+                    self.current_preview_hist_data.copy(),
+                    r=preview_params["r_gain"],
+                    g=preview_params["g_gain"],
+                    b=preview_params["b_gain"],
+                )
+            else:
+                data_for_histogram_analysis = None
             print("  [RefreshPreview] Returned from preview_manager.update_preview.")
 
             if recalculate_histogram:
@@ -4200,6 +4430,14 @@ class SeestarStackerGUI:
                     print(
                         "    [RefreshPreview] Returned from histogram_widget.update_histogram."
                     )
+                    try:
+                        bp_ui = self.preview_black_point.get()
+                        wp_ui = self.preview_white_point.get()
+                    except tk.TclError:
+                        bp_ui = None
+                        wp_ui = None
+                    if bp_ui is not None and wp_ui is not None:
+                        self.histogram_widget.set_range(bp_ui, wp_ui)
             else:
                 print(
                     "  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False)."
@@ -4396,6 +4634,7 @@ class SeestarStackerGUI:
                     )
 
             self.current_preview_data = img_for_preview.copy()
+            self.current_preview_hist_data = img_for_preview.copy()
             self.current_stack_header = (
                 header_from_load.copy() if header_from_load else fits.Header()
             )
@@ -5793,6 +6032,7 @@ class SeestarStackerGUI:
 
             if data_final is not None:
                 self.current_preview_data = data_final
+                self.current_preview_hist_data = data_final
                 self._temp_data_for_final_histo = data_final
                 self.current_stack_header = (
                     header_final if header_final else fits.Header()
@@ -6654,6 +6894,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile",
             "apply_feathering",
             "feather_blur_px",
+            "apply_batch_feathering",
             "apply_low_wht_mask",
             "low_wht_percentile",
             "low_wht_soften_px",
@@ -6800,6 +7041,8 @@ class SeestarStackerGUI:
             "cb_blur_radius": self.settings.cb_blur_radius,
             "cb_min_b_factor": self.settings.cb_min_b_factor,
             "cb_max_b_factor": self.settings.cb_max_b_factor,
+            "apply_master_tile_crop": self.settings.apply_master_tile_crop,
+            "master_tile_crop_percent": self.settings.master_tile_crop_percent,
             "final_edge_crop_percent": self.settings.final_edge_crop_percent,
             "apply_photutils_bn": self.settings.apply_photutils_bn,
             "photutils_bn_box_size": self.settings.photutils_bn_box_size,
@@ -6808,6 +7051,7 @@ class SeestarStackerGUI:
             "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
             "apply_feathering": self.settings.apply_feathering,
             "feather_blur_px": self.settings.feather_blur_px,
+            "apply_batch_feathering": self.settings.apply_batch_feathering,
             "apply_low_wht_mask": self.settings.apply_low_wht_mask,
             "low_wht_percentile": self.settings.low_wht_percentile,
             "low_wht_soften_px": self.settings.low_wht_soften_px,
@@ -6824,6 +7068,7 @@ class SeestarStackerGUI:
             "save_as_float32": self.settings.save_final_as_float32,
             "preserve_linear_output": self.settings.preserve_linear_output,
             "reproject_between_batches": self.settings.reproject_between_batches,
+            "reproject_coadd_final": self.settings.reproject_coadd_final,
         }
         import inspect
 

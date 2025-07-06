@@ -10,6 +10,9 @@ matplotlib.use('TkAgg') # Explicitly use TkAgg backend for compatibility
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import traceback
+import concurrent.futures, time
+
+_HIST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 class HistogramWidget(ttk.Frame):
     """
@@ -32,6 +35,8 @@ class HistogramWidget(ttk.Frame):
         self._current_hist_data_details = None
         self._current_data = None
         self.auto_zoom_enabled = False
+        # When True, the X axis range is preserved across batches
+        self.freeze_x_range = False
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -44,6 +49,9 @@ class HistogramWidget(ttk.Frame):
         self._pan_start_coord_x = None
         self._pan_initial_xlim = None
 
+        self._last_hist_req = 0.0
+        self._hist_future = None
+
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('button_release_event', self._on_release)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
@@ -54,6 +62,11 @@ class HistogramWidget(ttk.Frame):
 
     def _configure_plot_style(self):
         self.ax.clear()
+        # Clear any references to the BP/WP lines since clearing the axis
+        # removes them from the canvas. Mark them as None so that they are
+        # recreated on the next draw call.
+        self.line_min_obj = None
+        self.line_max_obj = None
         self.ax.set_facecolor('#2E2E2E')
         self.ax.tick_params(axis='x', colors='lightgray', labelsize=8)
         self.ax.tick_params(axis='y', colors='lightgray', labelsize=8)
@@ -66,14 +79,58 @@ class HistogramWidget(ttk.Frame):
         self.figure.subplots_adjust(left=0.12, right=0.98, bottom=0.18, top=0.95)
 
     def update_histogram(self, data_for_analysis):
-        print(f"DEBUG HistoWidget.update_histogram: Reçu data_for_analysis.")
+        """Version async : lance le calcul dans le pool, puis revient
+        via Tk `after` pour tracer. 100 % thread-safe."""
+        print("DEBUG HistoWidget.update_histogram: Reçu data_for_analysis.")
         if data_for_analysis is not None:
-            print(f"  -> data_for_analysis - Shape: {data_for_analysis.shape}, Dtype: {data_for_analysis.dtype}, Range: [{np.nanmin(data_for_analysis):.4g} - {np.nanmax(data_for_analysis):.4g}]")
+            print(
+                f"  -> data_for_analysis - Shape: {data_for_analysis.shape}, Dtype: {data_for_analysis.dtype}, Range: [{np.nanmin(data_for_analysis):.4g} - {np.nanmax(data_for_analysis):.4g}]"
+            )
         else:
-            print(f"  -> data_for_analysis est None.")
+            print("  -> data_for_analysis est None.")
+
+        if data_for_analysis is None or data_for_analysis.size == 0:
+            # Keep current histogram if no new data is provided
+            return
+
         self._current_data = data_for_analysis
-        self._current_hist_data_details = self._calculate_hist_data(data_for_analysis)
-        self.plot_histogram(self._current_hist_data_details)
+        now = time.monotonic()
+        if now - self._last_hist_req < 0.40 and self._hist_future:
+            return
+        self._last_hist_req = now
+
+        small = None
+        if data_for_analysis is not None and data_for_analysis.size:
+            small = (
+                data_for_analysis[::4, ::4]
+                if data_for_analysis.ndim == 2
+                else data_for_analysis[::4, ::4, :]
+            )
+
+        if self._hist_future and not self._hist_future.done():
+            self._hist_future.cancel()
+
+        self._hist_future = _HIST_EXECUTOR.submit(self._calculate_hist_data, small)
+        self._hist_future.add_done_callback(
+            lambda fut: self.after(0, self._apply_histogram, fut)
+        )
+
+    def _compute_histogram(self, img):
+        """Worker thread: compute histogram details using _calculate_hist_data."""
+        return self._calculate_hist_data(img)
+
+    def _apply_histogram(self, fut):
+        """Thread GUI : reçoit le résultat, trace sans recalculer les bins."""
+        if fut.cancelled() or fut.exception():
+            return
+        res = fut.result()
+        if res is None:
+            # Keep previous display if worker returned nothing
+            if self._current_hist_data_details:
+                self.plot_histogram(self._current_hist_data_details)
+            return
+        self._current_hist_data_details = res
+        self.plot_histogram(res)
 
 
 
@@ -119,8 +176,13 @@ class HistogramWidget(ttk.Frame):
                 current_plot_min = calculated_min
                 current_plot_max = calculated_max
             
-            self.data_min_for_current_plot = current_plot_min
-            self.data_max_for_current_plot = current_plot_max + (current_plot_max - current_plot_min) * 0.001 if (current_plot_max - current_plot_min) > 1e-9 else current_plot_max + 1e-5
+            if not self.freeze_x_range or self._current_hist_data_details is None:
+                self.data_min_for_current_plot = current_plot_min
+                self.data_max_for_current_plot = (
+                    current_plot_max * 1.001
+                    if (current_plot_max - current_plot_min) > 1e-9
+                    else current_plot_max + 1e-5
+                )
             
             print(f"DEBUG HistoWidget._calculate_hist_data (V_HistoCalc_AddInputShape_1): Plage données pour histo (self.data_min/max_for_current_plot): [{self.data_min_for_current_plot:.4g}, {self.data_max_for_current_plot:.4g}]")
             
@@ -252,8 +314,41 @@ class HistogramWidget(ttk.Frame):
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
-            
+
             self.canvas.draw_idle()
+            # --- NEW: restore BP/WP lines if they existed ---
+            try:
+                plot_span = self.data_max_for_current_plot - self.data_min_for_current_plot
+                if plot_span < 1e-9:
+                    plot_span = 1.0
+
+                if self.line_min_obj is None:
+                    self.line_min_obj = self.ax.axvline(
+                        self._min_line_val_data_scale,
+                        color="#FFAAAA",
+                        linestyle="--",
+                        linewidth=1.2,
+                        alpha=0.8,
+                        picker=5,
+                    )
+                else:
+                    self.line_min_obj.set_xdata([self._min_line_val_data_scale] * 2)
+
+                if self.line_max_obj is None:
+                    self.line_max_obj = self.ax.axvline(
+                        self._max_line_val_data_scale,
+                        color="#AAAAFF",
+                        linestyle="--",
+                        linewidth=1.2,
+                        alpha=0.8,
+                        picker=5,
+                    )
+                else:
+                    self.line_max_obj.set_xdata([self._max_line_val_data_scale] * 2)
+
+                self.canvas.draw_idle()
+            except Exception as e_redraw:
+                print(f"[Histo] Erreur redraw lignes : {e_redraw}")
             if self.auto_zoom_enabled:
                 try:
                     self.zoom_histogram()
@@ -500,9 +595,14 @@ class HistogramWidget(ttk.Frame):
             needs_redraw_flag = True
             print(f"  -> Ylim réinitialisé à {target_ylim_reset}")
             
-        if needs_redraw_flag: 
+        if needs_redraw_flag:
             self.canvas.draw_idle()
             print("  -> Histogramme redessiné après reset_zoom.")
+
+    def destroy(self):
+        if _HIST_EXECUTOR:
+            _HIST_EXECUTOR.shutdown(wait=False)
+        super().destroy()
 
 
 

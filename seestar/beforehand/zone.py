@@ -39,6 +39,8 @@ translations = {
         'include_subfolders_label': "Inclure les sous-dossiers",
         'lang_label': "Langue:",
         'status_label': "Statut :",
+        'elapsed_time_label': "Temps écoulé :",
+        'remaining_time_label': "Temps restant :",
         'analyze_snr_check_label': "Activer l'analyse SNR",
         'snr_select_mode_label': "Mode de Sélection SNR:",
         'snr_mode_percent': "Top Pourcentage (%)",
@@ -66,6 +68,10 @@ translations = {
         'use_best_reference_button': 'Envoyer Référence',
         'Exporter Toutes Conservées': "Exporter Toutes Conservées",
         'apply_snr_rejection_button': "Appliquer Rejet SNR",
+        'visual_apply_snr_button': "Appliquer Rejet SNR",
+        'apply_starcount_rejection': "Appliquer Rejet Starcount",
+        'apply_reco_button': "Appliquer Recommandations",
+        'visual_apply_reco_button': "Appliquer Recommandations",
 
         # --- Textes acstools status ---
         'acstools_ok': "(acstools disponible)", 'acstools_missing': "(acstools non trouvé ou incompatible)", 'acstools_sig_error': "(fonction detsat incompatible)",
@@ -84,16 +90,38 @@ translations = {
         # --- Fenêtre Visualisation ---
         'visu_window_title': "Visualisation des résultats", 'visu_tab_snr_dist': "Distribution SNR", 'visu_tab_snr_comp': "Comparaison SNR", 'visu_tab_sat_trails': "Traînées Détectées", 'visu_tab_raw_data': "Données Détaillées", 'visu_tab_recom': "Recommandations Stacking",
         'visu_snr_dist_title': 'Distribution du Rapport Signal/Bruit (SNR)', 'visu_snr_dist_xlabel': 'SNR', 'visu_snr_dist_ylabel': 'Nombre d\'images', 'visu_snr_dist_no_data': "Aucune donnée SNR valide",
+        'starcount_distribution_tab': "Distribution Starcount",
+        'starcount_distribution_title': "Distribution Starcount",
+        'starcount_label': "Nombre d'étoiles",
+        'number_of_images': "Nombre d'images",
+        'visu_tab_fwhm_dist': "Distribution FWHM",
+        'visu_tab_ecc_dist': "Distribution Excentricité",
+        'fwhm_distribution_title': "Distribution du FWHM",
+        'ecc_distribution_title': "Distribution de l'excentricité",
+        'visu_fwhm_no_data': "Aucune donnée FWHM valide",
+        'visu_ecc_no_data': "Aucune donnée e valide",
+        'filter_fwhm': "Filtre FWHM",
+        'filter_ecc': "Filtre Excentricité",
         'visu_snr_comp_best_title': 'Top {n} Images (Meilleur SNR)', 'visu_snr_comp_worst_title': 'Bottom {n} Images (Pire SNR)', 'visu_snr_comp_xlabel': 'SNR', 'visu_snr_comp_no_data': "Pas assez d'images avec SNR valide pour comparer.",
         'visu_sat_pie_title': 'Proportion d\'images avec/sans traînées détectées', 'visu_sat_pie_with': 'Avec Traînées', 'visu_sat_pie_without': 'Sans Traînées', 'visu_sat_pie_no_data': "Aucune image analysée pour les traînées.",
         'visu_data_col_file': "Fichier (Relatif)", 'visu_data_col_snr': "SNR", 'visu_data_col_bg': "Fond", 'visu_data_col_noise': "Bruit", 'visu_data_col_pixsig': "PixSig", 'visu_data_col_trails': "Traînées?", 'visu_data_col_nbseg': "Nb Seg.",
         'Statut': "Statut", 'Action': "Action", 'Raison Rejet': "Raison Rejet", 'Commentaire': "Commentaire",
-        'visu_recom_frame_title': "Recommandation (Images Conservées)", 'visu_recom_text': "Suggestion: Utiliser les {count} images conservées avec SNR >= {p75:.2f} (P25)", 'visu_recom_col_file': "Fichier (Relatif)", 'visu_recom_col_snr': "SNR", 'visu_recom_no_selection': "Aucune image conservée ne dépasse le seuil de recommandation.", 'visu_recom_not_enough': "Moins de 5 images conservées valides. Utilisez/Exportez toutes les images conservées.", 'visu_recom_no_data': "Aucune donnée SNR valide pour recommandation.",
+        'visu_recom_frame_title': "Recommandation (Images Conservées)",
+        'visu_recom_text': "Suggestion: Utiliser les {count} images conservées avec SNR >= {p75:.2f} (P25)",
+        'visu_recom_text_both': "Suggestion: Utiliser les {count} images conservées avec SNR ≥ {snr_p25:.2f} (P25) et Starcount ≥ {sc_p25:.0f} (P25)",
+        'visu_recom_text_all': "Suggestion : utiliser {count} images avec SNR ≥ P25, FWHM ≤ P75 et e ≤ P75",
+        'visu_recom_col_file': "Fichier (Relatif)",
+        'visu_recom_col_snr': "SNR",
+        'visu_recom_col_starcount': "Starcount",
+        'visu_recom_no_selection': "Aucune image conservée ne dépasse le seuil de recommandation.",
+        'visu_recom_not_enough': "Moins de 5 images conservées valides. Utilisez/Exportez toutes les images conservées.",
+        'visu_recom_no_data': "Aucune donnée SNR valide pour recommandation.",
         'Toutes les images conservées valides': "Toutes les images conservées valides",
 
         # --- Infobulles (Tooltips) ---
         'tooltip_sigma': "Sigma du filtre Gaussien avant détection contours (flou). Défaut: 2.0", 'tooltip_low_thresh': "Seuil bas Canny (0-1). Détecte bords potentiels. Bas=Sensible bruit. Défaut acstools: 0.1", 'tooltip_h_thresh': "Seuil haut Canny (0-1). Ancre bords forts. >= Low Thr. Bas=Permissif. Défaut acstools: 0.5", 'tooltip_line_len': "Longueur min. (px) segment final pour être une traînée. Défaut acstools: 150", 'tooltip_small_edge': "Longueur min. (px) contour initial (par Canny). Filtre bruit avant Hough. Défaut acstools: 60", 'tooltip_line_gap': "Écart max (px) pour joindre segments. Défaut acstools: 75", 'tooltip_snr_value': "Entrez % (ex: 80) ou seuil SNR (ex: 5.5). Ignoré si Tout Garder.",
         'tooltip_apply_snr_rejection': "Appliquer les rejets SNR différés",
+        'tooltip_apply_starcount_rejection': "Appliquer les actions Starcount différées",
 
         # --- Textes Logique ---
         'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Avertissement: ", 'logic_error_prefix': "Erreur: ",
@@ -161,6 +189,8 @@ translations = {
         'include_subfolders_label': "Include Subfolders", # <-- NEW
         'lang_label': "Language:",
         'status_label': "Status:",
+        'elapsed_time_label': "Elapsed:",
+        'remaining_time_label': "Remaining:",
         'analyze_snr_check_label': "Enable SNR analysis", 'snr_select_mode_label': "SNR Selection Mode:", 'snr_mode_percent': "Top Percent (%)", 'snr_mode_threshold': "SNR Threshold (>)",
         'snr_mode_none': "Keep All", 'snr_reject_dir_label': "Reject Folder (Low SNR):",
         'detect_trails_check_label': "Enable trail detection",
@@ -196,16 +226,38 @@ translations = {
         # --- Visualization Window ---
         'visu_window_title': "Results Visualization", 'visu_tab_snr_dist': "SNR Distribution", 'visu_tab_snr_comp': "SNR Comparison", 'visu_tab_sat_trails': "Detected Trails", 'visu_tab_raw_data': "Detailed Data", 'visu_tab_recom': "Stacking Recommendations",
         'visu_snr_dist_title': 'Signal-to-Noise Ratio (SNR) Distribution', 'visu_snr_dist_xlabel': 'SNR', 'visu_snr_dist_ylabel': 'Number of images', 'visu_snr_dist_no_data': "No valid SNR data",
+        'starcount_distribution_tab': "Starcount Distribution",
+        'starcount_distribution_title': "Starcount Distribution",
+        'starcount_label': "Starcount",
+        'number_of_images': "Number of images",
+        'visu_tab_fwhm_dist': "FWHM Distribution",
+        'visu_tab_ecc_dist': "Eccentricity Distribution",
+        'fwhm_distribution_title': "FWHM Distribution",
+        'ecc_distribution_title': "Eccentricity Distribution",
+        'visu_fwhm_no_data': "No valid FWHM data",
+        'visu_ecc_no_data': "No valid e data",
+        'filter_fwhm': "FWHM Filter",
+        'filter_ecc': "Eccentricity Filter",
         'visu_snr_comp_best_title': 'Top {n} Images (Best SNR)', 'visu_snr_comp_worst_title': 'Bottom {n} Images (Worst SNR)', 'visu_snr_comp_xlabel': 'SNR', 'visu_snr_comp_no_data': "Not enough images with valid SNR to compare.",
         'visu_sat_pie_title': 'Proportion of images with/without detected trails', 'visu_sat_pie_with': 'With Trails', 'visu_sat_pie_without': 'Without Trails', 'visu_sat_pie_no_data': "No images analyzed for trails.",
         'visu_data_col_file': "File (Relative)", 'visu_data_col_snr': "SNR", 'visu_data_col_bg': "BG", 'visu_data_col_noise': "Noise", 'visu_data_col_pixsig': "SigPix", 'visu_data_col_trails': "Trails?", 'visu_data_col_nbseg': "Nb Seg.",
         'Statut': "Status", 'Action': "Action", 'Raison Rejet': "Reject Reason", 'Commentaire': "Comment",
-        'visu_recom_frame_title': "Recommendation (Kept Images)", 'visu_recom_text': "Suggestion: Use the {count} kept images with SNR >= {p75:.2f} (P25)", 'visu_recom_col_file': "File (Relative)", 'visu_recom_col_snr': "SNR", 'visu_recom_no_selection': "No kept images meet the recommendation threshold.", 'visu_recom_not_enough': "Fewer than 5 valid kept images. Use/Export all valid kept images.", 'visu_recom_no_data': "No valid SNR data for recommendation.",
+        'visu_recom_frame_title': "Recommendation (Kept Images)",
+        'visu_recom_text': "Suggestion: Use the {count} kept images with SNR >= {p75:.2f} (P25)",
+        'visu_recom_text_both': "Suggestion: Use the {count} kept images with SNR \u2265 {snr_p25:.2f} (P25) and Starcount \u2265 {sc_p25:.0f} (P25)",
+        'visu_recom_text_all': "Suggestion: use {count} images with SNR \u2265 P25, FWHM \u2264 P75 and e \u2264 P75",
+        'visu_recom_col_file': "File (Relative)",
+        'visu_recom_col_snr': "SNR",
+        'visu_recom_col_starcount': "Starcount",
+        'visu_recom_no_selection': "No kept images meet the recommendation threshold.",
+        'visu_recom_not_enough': "Fewer than 5 valid kept images. Use/Export all valid kept images.",
+        'visu_recom_no_data': "No valid SNR data for recommendation.",
         'Toutes les images conservées valides': "All valid kept images",
 
         # --- Tooltips ---
         'tooltip_sigma': "Sigma of Gaussian filter before edge detection (blur). Default: 2.0", 'tooltip_low_thresh': "Lower Canny threshold (0-1). Detects potential edges. Lower=Noisier. acstools default: 0.1", 'tooltip_h_thresh': "Upper Canny threshold (0-1). Anchors strong edges. >= Low Thr. Lower=Permissive. acstools default: 0.5", 'tooltip_line_len': "Min. length (px) of final line segment to be a trail. acstools default: 150", 'tooltip_small_edge': "Min. length (px) of initial edge segment (Canny). Filters noise before Hough. acstools default: 60", 'tooltip_line_gap': "Max allowed gap (px) to link segments. acstools default: 75", 'tooltip_snr_value': "Enter % (e.g., 80) or SNR threshold (e.g., 5.5). Ignored if Keep All.",
         'tooltip_apply_snr_rejection': "Apply pending SNR rejections",
+        'tooltip_apply_starcount_rejection': "Apply pending starcount actions",
 
         # --- Logic Texts ---
         'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Warning: ", 'logic_error_prefix': "Error: ",
@@ -233,9 +285,13 @@ translations = {
         'marker_delete_errors': "Errors occurred while deleting some markers:\n",
         'marker_delete_selected_success': "{count} marker(s) deleted.",
         'marker_delete_all_success': "All {count} found marker(s) deleted.",
-        
+        'apply_starcount_rejection': "Apply Starcount Rejection",
+        'apply_reco_button': "Apply Recommendations",
+        'visual_apply_reco_button': "Apply Recommendations",
+
         #--- Apply SNR
         'apply_snr_rejection_button': "Apply SNR Rejection",
+        'visual_apply_snr_button': "Apply SNR Rejection",
         'Des actions SNR sont en attente.': "Pending SNR actions.", # Message de statut
         'Aucune action SNR en attente à appliquer.': "No pending SNR actions to apply.",
         "L'action sur rejet est 'Ne Rien Faire'. Aucune action ne sera appliquée.": "Reject action is 'Do Nothing'. No file actions will be performed.",
@@ -251,6 +307,15 @@ translations = {
         "Échec application rejets SNR.": "Failed applying SNR rejections.",
 
 
+# Fin du dictionnaire de traductions
     }
 }
+
+# Fallback pour la fonction de traduction
+try:
+    from zeseestarstacker.i18n import _
+except ImportError:
+    def _(key, *args, **kwargs):
+        return translations.get('fr', {}).get(key, key)
+
 # --- FIN DU FICHIER zone.py ---

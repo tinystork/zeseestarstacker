@@ -1,7 +1,53 @@
-import cv2
+"""Image stack enhancement utilities.
+
+This module relies on optional dependencies like OpenCV and scikit-image.  If
+those libraries are missing the module still imports but the affected features
+will gracefully fall back to slower numpy/scipy implementations.
+"""
+
+import logging
 import numpy as np
-from skimage import exposure
-import traceback # Garder pour les logs d'erreur
+
+try:  # Optional dependency
+    import cv2
+    _CV2_AVAILABLE = True
+except Exception as e:  # pragma: no cover - environment specific
+    cv2 = None
+    _CV2_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "OpenCV not available (%s). Using scipy.ndimage as fallback.", e,
+    )
+
+_scipy_gaussian = None
+if not _CV2_AVAILABLE:
+    try:
+        from scipy.ndimage import gaussian_filter as _scipy_gaussian
+    except Exception:
+        _scipy_gaussian = None
+
+try:  # Optional dependency
+    from skimage import exposure
+    _SKIMAGE_AVAILABLE = True
+except Exception as e:  # pragma: no cover - environment specific
+    exposure = None
+    _SKIMAGE_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "scikit-image not available (%s). Using basic intensity scaling.", e,
+    )
+
+import traceback  # Garder pour les logs d'erreur
+
+
+def _blur(img: np.ndarray, ksize: int) -> np.ndarray:
+    """Gaussian blur using cv2 or scipy if available."""
+    if ksize <= 1:
+        return img.astype(np.float32, copy=False)
+    if _CV2_AVAILABLE:
+        return cv2.GaussianBlur(img, (ksize, ksize), 0)
+    if _scipy_gaussian is not None:
+        sigma = max(ksize / 6.0, 0.1)
+        return _scipy_gaussian(img, sigma=sigma)
+    raise RuntimeError("No Gaussian blur implementation available")
 
 
 # ... (autres fonctions comme feather_by_weight_map, StackEnhancer, etc.) ...
@@ -114,7 +160,14 @@ class StackEnhancer:
                     normalized = (img - median) / sigma_robust
                     normalized_images.append(normalized)
                 elif method == 'skimage':
-                    normalized = exposure.rescale_intensity(img, out_range=(0.0, 1.0))
+                    if _SKIMAGE_AVAILABLE:
+                        normalized = exposure.rescale_intensity(img, out_range=(0.0, 1.0))
+                    else:
+                        min_val, max_val = np.nanmin(img), np.nanmax(img)
+                        if max_val > min_val:
+                            normalized = (img - min_val) / (max_val - min_val)
+                        else:
+                            normalized = np.zeros_like(img, dtype=np.float32)
                     normalized_images.append(normalized.astype(np.float32))
                 else: # Méthode 'basic' ou inconnue -> Min-Max standard
                     min_val, max_val = np.nanmin(img), np.nanmax(img)
@@ -228,8 +281,12 @@ class StackEnhancer:
         ATTENTION: Attend une image en float32 [0, 1].
                    Retourne une image en float32 [0, 1].
         """
-        if img is None: return None
-        print("... Application CLAHE...") # Garder ce log
+        if img is None:
+            return None
+        if not _CV2_AVAILABLE:
+            print("   -> OpenCV non disponible, CLAHE ignoré.")
+            return img
+        print("... Application CLAHE...")  # Garder ce log
 
         # Convertir l'image float [0,1] en uint8 [0,255] pour OpenCV CLAHE
         img_uint8 = (np.clip(np.nan_to_num(img), 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -255,7 +312,7 @@ class StackEnhancer:
             print("... CLAHE terminé.")
             return final_uint8.astype(np.float32) / 255.0
 
-        except cv2.error as cv_err:
+        except Exception as cv_err:
              print(f"   -> ERREUR OpenCV pendant CLAHE: {cv_err}")
              return img # Retourner l'original en cas d'erreur CLAHE
         except Exception as e:
@@ -327,10 +384,11 @@ def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gai
     try:
         img_f32 = img.astype(np.float32, copy=False)
         wht_f32 = wht.astype(np.float32, copy=False)
-        blur_px = max(1, int(blur_px)); kernel_size = (blur_px // 2) * 2 + 1
+        blur_px = max(1, int(blur_px))
+        kernel_size = (blur_px // 2) * 2 + 1
         print(f"DEBUG [feather_by_weight_map]: Kernel: {kernel_size}x{kernel_size}")
 
-        wht_blurred = cv2.GaussianBlur(wht_f32, (kernel_size, kernel_size), 0)
+        wht_blurred = _blur(wht_f32, kernel_size)
         wht_min_for_gain = np.percentile(wht_f32[wht_f32 > eps], 1) # Prendre le 1er percentile des poids non nuls comme seuil min
         wht_min_for_gain = max(wht_min_for_gain, eps * 10) # Assurer qu'il est un peu au-dessus de epsilon
         
@@ -341,7 +399,7 @@ def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gai
         print(f"DEBUG [feather_by_weight_map]: GainMapNonClipped Range: [{np.min(gain_map):.2f}-{np.max(gain_map):.2f}]")
         print(f"DEBUG [feather_by_weight_map]: GainMapClipped   Range: [{np.min(gain_map_clipped):.2f}-{np.max(gain_map_clipped):.2f}]")
         
-        gain_map_blurred = cv2.GaussianBlur(gain_map_clipped, (kernel_size, kernel_size), 0) # Flouter le gain clippé
+        gain_map_blurred = _blur(gain_map_clipped, kernel_size)  # Flouter le gain clippé
         print(f"DEBUG [feather_by_weight_map]: GainMapBlurred(Clipped) Range: [{np.min(gain_map_blurred):.2f}-{np.max(gain_map_blurred):.2f}]")
 
         feathered_image = img_f32 * gain_map_blurred[..., None]
@@ -432,8 +490,8 @@ def apply_low_wht_mask(
         _log("Masque > max_mask_fraction – opération annulée.")
         return img
 
-    k = max(1, soften_px // 2) * 2 + 1  # noyau impair obligatoire pour cv2
-    soft_mask = cv2.GaussianBlur(binary_mask, (k, k), 0)
+    k = max(1, soften_px // 2) * 2 + 1  # noyau impair obligatoire
+    soft_mask = _blur(binary_mask, k)
     _log(f"Masque adouci : min={soft_mask.min():.3f} max={soft_mask.max():.3f}")
 
     # --- 3. Couleur de remplissage -------------------------------------------
@@ -467,38 +525,6 @@ def apply_low_wht_mask(
 
 
 
-def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
-    print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")
-    # ... (vérifications initiales img, wht, etc. inchangées) ...
-    if img is None or wht is None: return img
-    if img.ndim != 3 or img.shape[2] != 3 or wht.ndim != 2 or img.shape[:2] != wht.shape: return img
-
-    try:
-        img_f32 = img.astype(np.float32, copy=False)
-        wht_f32 = wht.astype(np.float32, copy=False)
-        blur_px = max(1, int(blur_px)); kernel_size = (blur_px // 2) * 2 + 1
-        print(f"DEBUG [feather_by_weight_map]: Kernel: {kernel_size}x{kernel_size}")
-
-        wht_blurred = cv2.GaussianBlur(wht_f32, (kernel_size, kernel_size), 0)
-        wht_min_for_gain = np.percentile(wht_f32[wht_f32 > eps], 1) # Prendre le 1er percentile des poids non nuls comme seuil min
-        wht_min_for_gain = max(wht_min_for_gain, eps * 10) # Assurer qu'il est un peu au-dessus de epsilon
-        
-        gain_map = wht_blurred / np.maximum(wht_f32, wht_min_for_gain) # Utiliser un wht minimum plus élevé
-        
-        # --- CLIPPING DU GAIN ---
-        gain_map_clipped = np.clip(gain_map, min_gain, max_gain)
-        print(f"DEBUG [feather_by_weight_map]: GainMapNonClipped Range: [{np.min(gain_map):.2f}-{np.max(gain_map):.2f}]")
-        print(f"DEBUG [feather_by_weight_map]: GainMapClipped   Range: [{np.min(gain_map_clipped):.2f}-{np.max(gain_map_clipped):.2f}]")
-        
-        gain_map_blurred = cv2.GaussianBlur(gain_map_clipped, (kernel_size, kernel_size), 0) # Flouter le gain clippé
-        print(f"DEBUG [feather_by_weight_map]: GainMapBlurred(Clipped) Range: [{np.min(gain_map_blurred):.2f}-{np.max(gain_map_blurred):.2f}]")
-
-        feathered_image = img_f32 * gain_map_blurred[..., None]
-        feathered_image_clipped = np.clip(feathered_image, 0., 1.)
-        return feathered_image_clipped.astype(np.float32)
-    except Exception as e:
-        print(f"ERREUR [feather_by_weight_map]: {e}"); traceback.print_exc(limit=2)
-        return img
 
 
 

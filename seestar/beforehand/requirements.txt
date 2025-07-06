@@ -1,0 +1,21 @@
+# Core scientific stack
+numpy
+matplotlib
+astropy
+
+# Image I/O / GUI
+Pillow            # pour ImageTk
+
+# Traitement astrométrique / drizzle
+drizzle           # pour drizzle.resample.Drizzle
+
+# Outils instrumentaux (optionnel : détection de traînées)
+acstools
+
+# Détection de sources (star-counting, à venir)
+photutils
+
+# Détection de traînées via Hough  
+scipy
+scikit-image
+

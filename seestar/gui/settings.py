@@ -371,6 +371,11 @@ class SettingsManager:
                 "bn_max_gain_var",
                 tk.DoubleVar(value=default_values_from_code.get("bn_max_gain", 7.0)),
             ).get()
+            self.apply_bn = getattr(
+                gui_instance,
+                "apply_bn_var",
+                tk.BooleanVar(value=default_values_from_code.get("apply_bn", True)),
+            ).get()
             self.cb_border_size = getattr(
                 gui_instance,
                 "cb_border_size_var",
@@ -395,12 +400,36 @@ class SettingsManager:
                     value=default_values_from_code.get("cb_max_b_factor", 1.5)
                 ),
             ).get()
+            self.apply_cb = getattr(
+                gui_instance,
+                "apply_cb_var",
+                tk.BooleanVar(value=default_values_from_code.get("apply_cb", True)),
+            ).get()
             self.final_edge_crop_percent = getattr(
                 gui_instance,
                 "final_edge_crop_percent_var",
                 tk.DoubleVar(
                     value=default_values_from_code.get("final_edge_crop_percent", 2.0)
                 ),
+            ).get()
+            self.apply_master_tile_crop = getattr(
+                gui_instance,
+                "apply_master_tile_crop_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get("apply_master_tile_crop", False)
+                ),
+            ).get()
+            self.master_tile_crop_percent = getattr(
+                gui_instance,
+                "master_tile_crop_percent_var",
+                tk.DoubleVar(
+                    value=default_values_from_code.get("master_tile_crop_percent", 18.0)
+                ),
+            ).get()
+            self.apply_final_crop = getattr(
+                gui_instance,
+                "apply_final_crop_var",
+                tk.BooleanVar(value=default_values_from_code.get("apply_final_crop", True)),
             ).get()
             self.apply_photutils_bn = getattr(
                 gui_instance,
@@ -444,6 +473,13 @@ class SettingsManager:
                 "apply_feathering_var",
                 tk.BooleanVar(
                     value=default_values_from_code.get("apply_feathering", True)
+                ),
+            ).get()
+            self.apply_batch_feathering = getattr(
+                gui_instance,
+                "apply_batch_feathering_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get("apply_batch_feathering", True)
                 ),
             ).get()
             self.feather_blur_px = getattr(
@@ -647,6 +683,16 @@ class SettingsManager:
                 tk.BooleanVar(
                     value=default_values_from_code.get(
                         "reproject_between_batches", False
+                    )
+                ),
+            ).get()
+
+            self.reproject_coadd_final = getattr(
+                gui_instance,
+                "reproject_coadd_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get(
+                        "reproject_coadd_final", False
                     )
                 ),
             ).get()
@@ -918,6 +964,9 @@ class SettingsManager:
             getattr(gui_instance, "bn_max_gain_var", tk.DoubleVar()).set(
                 self.bn_max_gain
             )
+            getattr(gui_instance, "apply_bn_var", tk.BooleanVar()).set(
+                self.apply_bn
+            )
             getattr(gui_instance, "cb_border_size_var", tk.IntVar()).set(
                 self.cb_border_size
             )
@@ -930,8 +979,20 @@ class SettingsManager:
             getattr(gui_instance, "cb_max_b_factor_var", tk.DoubleVar()).set(
                 self.cb_max_b_factor
             )
+            getattr(gui_instance, "apply_cb_var", tk.BooleanVar()).set(
+                self.apply_cb
+            )
+            getattr(gui_instance, "apply_master_tile_crop_var", tk.BooleanVar()).set(
+                self.apply_master_tile_crop
+            )
+            getattr(gui_instance, "master_tile_crop_percent_var", tk.DoubleVar()).set(
+                self.master_tile_crop_percent
+            )
             getattr(gui_instance, "final_edge_crop_percent_var", tk.DoubleVar()).set(
                 self.final_edge_crop_percent
+            )
+            getattr(gui_instance, "apply_final_crop_var", tk.BooleanVar()).set(
+                self.apply_final_crop
             )
 
             logger.debug(
@@ -964,6 +1025,10 @@ class SettingsManager:
                 )
                 logger.debug(
                     f"DEBUG (Settings apply_to_ui): Apply Feathering appliqué à UI: {self.apply_feathering}"
+                )
+            if hasattr(gui_instance, "apply_batch_feathering_var"):
+                getattr(gui_instance, "apply_batch_feathering_var", tk.BooleanVar()).set(
+                    self.apply_batch_feathering
                 )
             if hasattr(gui_instance, "feather_blur_px_var"):
                 getattr(gui_instance, "feather_blur_px_var", tk.IntVar()).set(
@@ -1078,6 +1143,12 @@ class SettingsManager:
                 gui_instance._update_feathering_options_state()
             if hasattr(gui_instance, "_update_low_wht_mask_options_state"):
                 gui_instance._update_low_wht_mask_options_state()
+            if hasattr(gui_instance, "_update_bn_options_state"):
+                gui_instance._update_bn_options_state()
+            if hasattr(gui_instance, "_update_cb_options_state"):
+                gui_instance._update_cb_options_state()
+            if hasattr(gui_instance, "_update_crop_options_state"):
+                gui_instance._update_crop_options_state()
 
             getattr(gui_instance, "astap_search_radius_var", tk.DoubleVar()).set(
                 self.astap_search_radius
@@ -1098,6 +1169,10 @@ class SettingsManager:
 
             getattr(gui_instance, "reproject_between_batches_var", tk.BooleanVar()).set(
                 self.reproject_between_batches
+            )
+
+            getattr(gui_instance, "reproject_coadd_var", tk.BooleanVar()).set(
+                self.reproject_coadd_final
             )
 
             logger.debug(
@@ -1185,11 +1260,16 @@ class SettingsManager:
         defaults_dict["bn_std_factor"] = 1.5
         defaults_dict["bn_min_gain"] = 0.2
         defaults_dict["bn_max_gain"] = 7.0
+        defaults_dict["apply_bn"] = True
         defaults_dict["cb_border_size"] = 25
         defaults_dict["cb_blur_radius"] = 8
         defaults_dict["cb_min_b_factor"] = 0.4
         defaults_dict["cb_max_b_factor"] = 1.5
+        defaults_dict["apply_cb"] = True
+        defaults_dict["apply_master_tile_crop"] = False
+        defaults_dict["master_tile_crop_percent"] = 18.0
         defaults_dict["final_edge_crop_percent"] = 2.0
+        defaults_dict["apply_final_crop"] = True
         defaults_dict["apply_photutils_bn"] = False
         defaults_dict["photutils_bn_box_size"] = 128
         defaults_dict["photutils_bn_filter_size"] = 11
@@ -1197,6 +1277,7 @@ class SettingsManager:
         defaults_dict["photutils_bn_exclude_percentile"] = 95.0
         defaults_dict["apply_feathering"] = True
         defaults_dict["feather_blur_px"] = 256
+        defaults_dict["apply_batch_feathering"] = True
         defaults_dict["apply_low_wht_mask"] = False
         defaults_dict["low_wht_percentile"] = 5
         defaults_dict["low_wht_soften_px"] = 128
@@ -1247,6 +1328,7 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
+        defaults_dict["reproject_coadd_final"] = False
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {
@@ -1799,6 +1881,9 @@ class SettingsManager:
                     20.0,
                 )
             )
+            self.apply_bn = bool(
+                getattr(self, "apply_bn", defaults_fallback["apply_bn"])
+            )
             self.cb_border_size = int(
                 np.clip(
                     getattr(
@@ -1835,6 +1920,27 @@ class SettingsManager:
                     5.0,
                 )
             )
+            self.apply_cb = bool(
+                getattr(self, "apply_cb", defaults_fallback["apply_cb"])
+            )
+            self.apply_master_tile_crop = bool(
+                getattr(
+                    self,
+                    "apply_master_tile_crop",
+                    defaults_fallback["apply_master_tile_crop"],
+                )
+            )
+            self.master_tile_crop_percent = float(
+                np.clip(
+                    getattr(
+                        self,
+                        "master_tile_crop_percent",
+                        defaults_fallback["master_tile_crop_percent"],
+                    ),
+                    0.0,
+                    25.0,
+                )
+            )
             self.final_edge_crop_percent = float(
                 np.clip(
                     getattr(
@@ -1845,6 +1951,9 @@ class SettingsManager:
                     0.0,
                     25.0,
                 )
+            )
+            self.apply_final_crop = bool(
+                getattr(self, "apply_final_crop", defaults_fallback["apply_final_crop"])
             )
             logger.debug("    -> Validating Photutils BN...")
             self.apply_photutils_bn = bool(
@@ -1914,6 +2023,13 @@ class SettingsManager:
             logger.debug("    -> Validating Feathering...")
             self.apply_feathering = bool(
                 getattr(self, "apply_feathering", defaults_fallback["apply_feathering"])
+            )
+            self.apply_batch_feathering = bool(
+                getattr(
+                    self,
+                    "apply_batch_feathering",
+                    defaults_fallback["apply_batch_feathering"],
+                )
             )
             try:
                 self.feather_blur_px = int(self.feather_blur_px)
@@ -2049,6 +2165,20 @@ class SettingsManager:
             else:
                 self.use_third_party_solver = current_use_solver_val
             # --- FIN NOUVEAU ---
+
+            logger.debug("    -> Validating reproject_coadd_final...")
+            current_rc_val = getattr(
+                self,
+                "reproject_coadd_final",
+                defaults_fallback["reproject_coadd_final"],
+            )
+            if not isinstance(current_rc_val, bool):
+                messages.append(
+                    f"Option 'Reproject Coadd Final' ('{current_rc_val}') invalide, réinitialisée à {defaults_fallback['reproject_coadd_final']}." 
+                )
+                self.reproject_coadd_final = defaults_fallback["reproject_coadd_final"]
+            else:
+                self.reproject_coadd_final = current_rc_val
 
             # --- Local Solver Paths and ASTAP Search Radius ---
             # ... (inchangé) ...
@@ -2335,11 +2465,16 @@ class SettingsManager:
             "bn_std_factor": float(self.bn_std_factor),
             "bn_min_gain": float(self.bn_min_gain),
             "bn_max_gain": float(self.bn_max_gain),
+            "apply_bn": bool(self.apply_bn),
             "cb_border_size": int(self.cb_border_size),
             "cb_blur_radius": int(self.cb_blur_radius),
             "cb_min_b_factor": float(self.cb_min_b_factor),
             "cb_max_b_factor": float(self.cb_max_b_factor),
+            "apply_cb": bool(self.apply_cb),
+            "apply_master_tile_crop": bool(self.apply_master_tile_crop),
+            "master_tile_crop_percent": float(self.master_tile_crop_percent),
             "final_edge_crop_percent": float(self.final_edge_crop_percent),
+            "apply_final_crop": bool(self.apply_final_crop),
             "apply_photutils_bn": bool(self.apply_photutils_bn),
             "photutils_bn_box_size": int(self.photutils_bn_box_size),
             "photutils_bn_filter_size": int(self.photutils_bn_filter_size),
@@ -2359,6 +2494,7 @@ class SettingsManager:
             "window_geometry": str(self.window_geometry),
             "apply_feathering": bool(self.apply_feathering),
             "feather_blur_px": int(self.feather_blur_px),
+            "apply_batch_feathering": bool(self.apply_batch_feathering),
             "apply_low_wht_mask": bool(self.apply_low_wht_mask),
             "low_wht_percentile": int(self.low_wht_percentile),
             "low_wht_soften_px": int(self.low_wht_soften_px),
@@ -2396,6 +2532,9 @@ class SettingsManager:
             ),
             "reproject_between_batches": bool(
                 getattr(self, "reproject_between_batches", False)
+            ),
+            "reproject_coadd_final": bool(
+                getattr(self, "reproject_coadd_final", False)
             ),
         }
 

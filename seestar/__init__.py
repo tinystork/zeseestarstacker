@@ -5,7 +5,7 @@ Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
 """
 
-__version__ = "5.0.0"  # zemosaic version 2.0.0 included
+__version__ = "5.5.0"  # zemosaic version 2.2.0 included and zeanalyser version 1.0.0
 __author__ = "Tinystork"
 
 # Core functionalities (unchanged from your original structure)
@@ -32,8 +32,18 @@ from seestar.tools import (
 
 from seestar.enhancement import reproject_utils
 
-# GUI (expose the main class)
-from seestar.gui import SeestarStackerGUI
+# GUI (optional)
+try:
+    from seestar.gui import SeestarStackerGUI
+    _GUI_AVAILABLE = True
+except Exception as e:  # pragma: no cover - GUI might not be present in tests
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Seestar GUI not available (%s). Running in headless mode.", e
+    )
+    SeestarStackerGUI = None
+    _GUI_AVAILABLE = False
 
 __all__ = [
     # Core
@@ -53,10 +63,11 @@ __all__ = [
     'apply_enhanced_stretch',
     'save_fits_as_png',
     'reproject_utils',
-    # GUI
-    'SeestarStackerGUI',
     # Package Info
     '__version__',
     '__author__'
 ]
+
+if _GUI_AVAILABLE:
+    __all__.append('SeestarStackerGUI')
 # --- END OF FILE seestar/__init__.py ---

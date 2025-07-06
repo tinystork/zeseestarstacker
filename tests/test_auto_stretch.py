@@ -74,4 +74,5 @@ def test_dynamic_autostretch_triggers():
         2,
     )
 
-    assert gui.preview_black_point.get() == 0.1
+    assert gui.preview_black_point.get() == 0.25
+    assert gui.preview_white_point.get() == 0.75
