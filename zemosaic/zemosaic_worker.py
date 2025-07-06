@@ -35,6 +35,17 @@ if not logger.handlers:
     logger.addHandler(fh)
 logger.info("Logging pour ZeMosaicWorker initialisé. Logs écrits dans: %s", log_file_path)
 
+# --- Alignment Warning Tracking ---
+# These warnings come from zemosaic_align_stack when an image fails to align.
+# We count them here so a summary can be written at the end of a run.
+ALIGN_WARNING_SUMMARY = {
+    "aligngroup_warn_max_iter_error": "astroalign MaxIterError",
+    "aligngroup_warn_shape_mismatch_after_align": "shape mismatch after align",
+    "aligngroup_warn_register_returned_none": "astroalign returned None",
+    "aligngroup_warn_value_error": "value error during align",
+}
+ALIGN_WARNING_COUNTS = {key: 0 for key in ALIGN_WARNING_SUMMARY}
+
 # --- Third-Party Library Imports ---
 import numpy as np
 import zarr
@@ -182,6 +193,10 @@ def _log_and_callback(
         progress_value = kwargs.pop("prog")
     elif "prog" in kwargs:
         progress_value = kwargs.pop("prog")
+
+    # Count alignment warnings for final summary
+    if isinstance(message_key_or_raw, str) and message_key_or_raw in ALIGN_WARNING_COUNTS:
+        ALIGN_WARNING_COUNTS[message_key_or_raw] += 1
     log_level_map = {
         "INFO": logging.INFO, "DEBUG": logging.DEBUG, "DEBUG_DETAIL": logging.DEBUG,
         "WARN": logging.WARNING, "ERROR": logging.ERROR, "SUCCESS": logging.INFO,
@@ -267,6 +282,21 @@ def _log_memory_usage(progress_callback: callable, context_message: str = ""): #
         
     except Exception as e_mem_log:
         _log_and_callback(f"Erreur lors du logging mémoire ({context_message}): {e_mem_log}", prog=None, lvl="WARN", callback=progress_callback)
+
+
+def _log_alignment_warning_summary():
+    """Write a summary of alignment warnings to the worker log."""
+    total = sum(ALIGN_WARNING_COUNTS.values())
+    if total == 0:
+        logger.info("Alignment summary: no frames ignored due to errors.")
+        return
+
+    logger.info("===== Alignment warning summary =====")
+    logger.info("Total frames ignored: %d", total)
+    for key, count in ALIGN_WARNING_COUNTS.items():
+        if count:
+            human = ALIGN_WARNING_SUMMARY.get(key, key)
+            logger.info("%d frame(s) - %s", count, human)
 
 
 def _wait_for_memmap_files(prefixes, timeout=10.0):
@@ -2106,6 +2136,10 @@ def run_hierarchical_mosaic(
         Nombre maximal de workers pour la phase de rejet Winsorized.
     """
     pcb = lambda msg_key, prog=None, lvl="INFO", **kwargs: _log_and_callback(msg_key, prog, lvl, callback=progress_callback, **kwargs)
+
+    # Reset alignment warning counters at start of run
+    for k in ALIGN_WARNING_COUNTS:
+        ALIGN_WARNING_COUNTS[k] = 0
     
     def update_gui_eta(eta_seconds_total):
         if progress_callback and callable(progress_callback):
@@ -2951,6 +2985,7 @@ def run_hierarchical_mosaic(
     total_duration_sec = time.monotonic() - start_time_total_run
     pcb("run_success_processing_completed", prog=current_global_progress, lvl="SUCCESS", duration=f"{total_duration_sec:.2f}")
     gc.collect(); _log_memory_usage(progress_callback, "Fin Run Hierarchical Mosaic (après GC final)")
+    _log_alignment_warning_summary()
     logger.info(f"===== Run Hierarchical Mosaic COMPLETED in {total_duration_sec:.2f}s =====")
 ################################################################################
 ################################################################################
