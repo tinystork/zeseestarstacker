@@ -1,6 +1,6 @@
 {
   "solver_choice": "ASTAP",
-  "api_key": "apgjydxhqbprdljz",
+  "api_key": "",
   "timeout": 60,
   "downsample": 2,
   "force_lum": false
