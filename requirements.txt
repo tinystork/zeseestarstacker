@@ -23,7 +23,6 @@ ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
 photoutils #stack enhancement
-photutils
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
@@ -33,10 +32,9 @@ reproject
 shapely
 tk
 zarr
-psutil (la racine spécifie psutil>=5.9)
+psutil #(la racine spécifie psutil>=5.9)
 Photutils
 # --- Optional Dependencies ---
-psutil      # Optional: Auto-Tune CPU/I-O
 acstools          # For satellite trail detection (Uncomment if needed)
 bottleneck        # Optional: fast nan functions used in stack_methods
 fsspec            # Optional: zemosaic worker file-system abstraction
