@@ -5,7 +5,7 @@ Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
 """
 
-__version__ = "5.0.0"  # zemosaic version 2.0.0 included
+__version__ = "5.5.0"  # zemosaic version 2.2.0 included and zeanalyser version 1.0.0
 __author__ = "Tinystork"
 
 # Core functionalities (unchanged from your original structure)
