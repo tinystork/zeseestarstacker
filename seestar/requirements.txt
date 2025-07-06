@@ -18,7 +18,7 @@ scikit-image     # Image algorithms (skimage)
 colour-demosaicing # Debayering algorithms
 astroalign       # Image alignment
 ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
-
+shapely # Geometry operations (used by ccdproc)
 # --- Drizzle & Related (STScI) ---
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
