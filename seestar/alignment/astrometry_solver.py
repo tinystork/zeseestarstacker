@@ -1045,7 +1045,7 @@ class AstrometrySolver:
             if isinstance(wcs_solution_header_text, fits.Header):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", FITSFixedWarning)
-                    solved_wcs_object = WCS(wcs_solution_header_text)
+                    solved_wcs_object = WCS(wcs_solution_header_text, naxis=2)
                 
                 if solved_wcs_object and solved_wcs_object.is_celestial:
                     self._log("WebANET: Objet WCS créé avec succès.", "DEBUG")

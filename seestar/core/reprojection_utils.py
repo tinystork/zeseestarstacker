@@ -21,7 +21,7 @@ def collect_headers(filepaths: Iterable[str]) -> List[HeaderInfo]:
     for path in filepaths:
         try:
             hdr = fits.getheader(path, memmap=False)
-            wcs = WCS(hdr)
+            wcs = WCS(hdr, naxis=2)
             if not wcs.is_celestial:
                 continue
             naxis1 = int(hdr.get("NAXIS1"))
