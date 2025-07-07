@@ -53,9 +53,11 @@ from typing import Literal
 import astroalign as aa
 import cv2
 import numpy as np
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
+
     def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
         Y, X = np.ogrid[:h, :w]
         cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
@@ -68,6 +70,8 @@ except Exception:
             1.0,
         )
         return w_map
+
+
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from astropy.coordinates import concatenate as skycoord_concatenate
@@ -2529,17 +2533,15 @@ class SeestarQueuedStacker:
                 out_wcs, out_shape_hw = find_optimal_celestial_wcs(
                     inputs_for_optimal,
                     resolution=Angle(target_res_deg_per_pix, unit=u.deg),
-                    auto_rotate=True,
+                    auto_rotate=False,
                     projection="TAN",
                     reference=None,
                     frame="icrs",
                 )
                 if (
                     len(valid_wcs) > 1
-                    and out_shape_hw[0]
-                    <= max(s[0] for s in valid_shapes_hw) + 4
-                    and out_shape_hw[1]
-                    <= max(s[1] for s in valid_shapes_hw) + 4
+                    and out_shape_hw[0] <= max(s[0] for s in valid_shapes_hw) + 4
+                    and out_shape_hw[1] <= max(s[1] for s in valid_shapes_hw) + 4
                 ):
                     raise ValueError("optimal grid too small")
             else:
@@ -2740,9 +2742,8 @@ class SeestarQueuedStacker:
 
     def _get_quality_executor(self) -> ProcessPoolExecutor:
         """Return a valid executor for quality metrics."""
-        if (
-            getattr(self, "quality_executor", None) is None
-            or getattr(self.quality_executor, "_shutdown", False)
+        if getattr(self, "quality_executor", None) is None or getattr(
+            self.quality_executor, "_shutdown", False
         ):
             max_workers = _suggest_pool_size(0.75)
             self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
@@ -7566,8 +7567,12 @@ class SeestarQueuedStacker:
                 batch_wht = batch_wht.reshape(self.memmap_shape[:2])
 
             mask = batch_wht > 0
-            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[mask]
-            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[mask]
+            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[
+                mask
+            ]
+            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[
+                mask
+            ]
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -8168,10 +8173,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "winsorized sigma clip"
@@ -8194,10 +8198,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "kappa sigma"
@@ -8218,10 +8221,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "linear fit clip"
@@ -8239,10 +8241,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "median"
@@ -8289,10 +8290,9 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
 
@@ -9009,7 +9009,6 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
-
         if self.solve_batches:
             # Always attempt to solve the intermediate batch with ASTAP so that a
             # valid WCS is present on each stacked batch file. This is required for
@@ -9351,19 +9350,21 @@ class SeestarQueuedStacker:
                     return False
 
         try:
-            data_hwc, cov_hw = zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
-                master_tile_fits_with_wcs_list=master_tiles,
-                final_output_wcs=out_wcs,
-                final_output_shape_hw=out_shape,
-                progress_callback=lambda m, p=None, lvl=None, **kw: self.update_progress(
-                    f"   {m}", p
-                ),
-                n_channels=3,
-                match_bg=True,
-                apply_crop=getattr(self, "apply_master_tile_crop", False),
-                crop_percent=getattr(self, "master_tile_crop_percent_decimal", 0.0)
-                * 100.0,
-                use_gpu=False,
+            data_hwc, cov_hw = (
+                zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
+                    master_tile_fits_with_wcs_list=master_tiles,
+                    final_output_wcs=out_wcs,
+                    final_output_shape_hw=out_shape,
+                    progress_callback=lambda m, p=None, lvl=None, **kw: self.update_progress(
+                        f"   {m}", p
+                    ),
+                    n_channels=3,
+                    match_bg=True,
+                    apply_crop=getattr(self, "apply_master_tile_crop", False),
+                    crop_percent=getattr(self, "master_tile_crop_percent_decimal", 0.0)
+                    * 100.0,
+                    use_gpu=False,
+                )
             )
         except Exception as e:
             self.update_progress(f"⚠️ Échec ZeMosaic: {e}", "WARN")
@@ -9372,7 +9373,9 @@ class SeestarQueuedStacker:
         if data_hwc is None:
             return False
 
-        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
+            data_hwc, cov_hw, out_wcs
+        )
 
         self.current_stack_header = fits.Header()
         self.current_stack_header.update(out_wcs.to_header(relax=True))
@@ -9384,6 +9387,7 @@ class SeestarQueuedStacker:
             preserve_linear_output=True,
         )
         return True
+
     def _finalize_single_classic_batch(self, batch_file_tuple):
         """Save the single stacked batch as the final stack."""
         sci_path, wht_paths = batch_file_tuple
@@ -9806,7 +9810,6 @@ class SeestarQueuedStacker:
 
         if final_wht_map_for_postproc is not None and (
             is_classic_reproject_mode
-            or is_reproject_mosaic_mode
             or is_true_incremental_drizzle_from_objects
             or is_drizzle_final_mode_with_data
         ):
