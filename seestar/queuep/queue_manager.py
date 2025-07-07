@@ -8955,10 +8955,15 @@ class SeestarQueuedStacker:
 
         wcs_list = [w for _, w, _ in cache_list if w is not None]
         headers = [h for _, _, h in cache_list]
+        scale_factor = (
+            self.drizzle_scale + 1.0
+            if self.drizzle_active_session
+            else self.drizzle_scale
+        )
         out_wcs, out_shape = self._calculate_final_mosaic_grid(
             wcs_list,
             headers,
-            scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            scale_factor=scale_factor,
         )
         if out_wcs is None or out_shape is None:
             self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
@@ -10134,14 +10139,14 @@ class SeestarQueuedStacker:
             )
             raw_data = self.raw_adu_data_for_ui_histogram
             max_val = np.nanmax(raw_data)
-            if max_val <= 1.0 + 1e-5:
-                # When the dynamic range is extremely small (< 1/65535) the
-                # previous logic would round everything to zero. Adapt the
-                # scaling factor so that the brightest pixel maps to 65535.
-                if max_val < (1.0 / 65535.0):
-                    scale = 65535.0 / max(max_val, 1e-9)
-                else:
-                    scale = 65535.0
+            if not np.isfinite(max_val) or max_val <= 0:
+                data_scaled_uint16 = np.zeros_like(raw_data, dtype=np.uint16)
+            elif max_val <= 65535.0 + 1e-5:
+                # Scale the maximum value to 65535 to utilise the full
+                # uint16 range. Prevent extremely small max_val from
+                # collapsing to all zeros.
+                effective_max = max(max_val, 1.0 / 65535.0)
+                scale = 65535.0 / effective_max
                 data_scaled_uint16 = (
                     np.clip(raw_data, 0.0, None) * scale
                 ).astype(np.uint16)
