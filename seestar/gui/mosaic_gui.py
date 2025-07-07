@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 # import traceback # Décommentez si besoin pour le debug
 import numpy as np 
 import os   # Pour les chemins de fichiers
