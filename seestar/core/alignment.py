@@ -419,35 +419,55 @@ class SeestarAligner:
 
         # --- Étape 3: Sauvegarde de l'image de référence sélectionnée (manuelle ou auto) ---
         if reference_image_data is not None: # Si on a une image de référence à ce stade
-            if output_folder_for_saving_temp_ref and os.path.isdir(os.path.dirname(output_folder_for_saving_temp_ref)):
-                if header_for_temp_ref_file is None: # Cas où la réf manuelle a été utilisée, mais on n'a pas explicitement créé header_for_temp_ref_file
-                    header_for_temp_ref_file = fits.Header() # Un header minimal pour la sauvegarde
-                    if final_reference_header_for_worker: # Essayer de copier quelques infos de base si dispo
-                        safe_keys_to_copy = ['DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'OBJECT']
-                        for k_safe in safe_keys_to_copy:
-                            if k_safe in final_reference_header_for_worker:
-                                header_for_temp_ref_file[k_safe] = final_reference_header_for_worker[k_safe]
-                
-                # S'assurer qu'aucune clé potentiellement problématique (comme _SOURCE_PATH original)
-                # n'est dans header_for_temp_ref_file avant de le passer à _save_reference_image.
-                # Les clés HIERARCH ne devraient pas y être si on part de ref_hdr_loaded_manual ou best_header_data_auto_original.
-                # Mais par sécurité, on peut vérifier :
-                keys_to_remove_from_temp_header = ['_SOURCE_PATH', 'HIERARCH SEESTAR REF SRCFILE']
-                for key_rem in keys_to_remove_from_temp_header:
-                    if key_rem in header_for_temp_ref_file:
-                        try:
-                            del header_for_temp_ref_file[key_rem]
-                            print(f"DEBUG ALIGNER: Clé '{key_rem}' supprimée du header pour reference_image.fit")
-                        except KeyError: # Peut arriver si HIERARCH est un tuple et n'est pas trouvé directement
-                            pass
+            if output_folder_for_saving_temp_ref:
+                parent_dir = os.path.dirname(output_folder_for_saving_temp_ref)
+                try:
+                    os.makedirs(parent_dir, exist_ok=True)
+                except Exception as mk_err:
+                    warning_msg_save_final = (
+                        f"Output_folder_for_saving_temp_ref ('{output_folder_for_saving_temp_ref}') non acces"
+                        f"sible ou création impossible: {mk_err}. L'image de référence finale en mémoire sera "
+                        "retournée, mais pas sauvegardée par _get_reference_image."
+                    )
+                    if hasattr(self, 'update_progress'):
+                        self.update_progress(warning_msg_save_final)
+                    print(f"AVERTISSEMENT ALIGNER [_get_reference_image]: {warning_msg_save_final}")
+                else:
+                    if header_for_temp_ref_file is None:  # Cas où la réf manuelle a été utilisée, mais on n'a pas explicitement créé header_for_temp_ref_file
+                        header_for_temp_ref_file = fits.Header()  # Un header minimal pour la sauvegarde
+                        if final_reference_header_for_worker:  # Essayer de copier quelques infos de base si dispo
+                            safe_keys_to_copy = ['DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'OBJECT']
+                            for k_safe in safe_keys_to_copy:
+                                if k_safe in final_reference_header_for_worker:
+                                    header_for_temp_ref_file[k_safe] = final_reference_header_for_worker[k_safe]
 
+                    # S'assurer qu'aucune clé potentiellement problématique (comme _SOURCE_PATH original)
+                    # n'est dans header_for_temp_ref_file avant de le passer à _save_reference_image.
+                    # Les clés HIERARCH ne devraient pas y être si on part de ref_hdr_loaded_manual ou best_header_data_auto_original.
+                    # Mais par sécurité, on peut vérifier :
+                    keys_to_remove_from_temp_header = ['_SOURCE_PATH', 'HIERARCH SEESTAR REF SRCFILE']
+                    for key_rem in keys_to_remove_from_temp_header:
+                        if key_rem in header_for_temp_ref_file:
+                            try:
+                                del header_for_temp_ref_file[key_rem]
+                                print(f"DEBUG ALIGNER: Clé '{key_rem}' supprimée du header pour reference_image.fit")
+                            except KeyError:  # Peut arriver si HIERARCH est un tuple et n'est pas trouvé directement
+                                pass
 
-                print(f"DEBUG ALIGNER [_get_reference_image]: Appel final à _save_reference_image avec base_output_folder='{output_folder_for_saving_temp_ref}' pour source '{source_basename_of_selected_ref}'")
-                self._save_reference_image(reference_image_data, header_for_temp_ref_file, output_folder_for_saving_temp_ref)
+                    print(
+                        f"DEBUG ALIGNER [_get_reference_image]: Appel final à _save_reference_image avec base_output_folder='{output_folder_for_saving_temp_ref}'"
+                        f" pour source '{source_basename_of_selected_ref}'"
+                    )
+                    self._save_reference_image(
+                        reference_image_data, header_for_temp_ref_file, output_folder_for_saving_temp_ref
+                    )
             else:
-                warning_msg_save_final = f"Output_folder_for_saving_temp_ref ('{output_folder_for_saving_temp_ref}') non valide ou son parent n'existe pas. " \
-                                         "L'image de référence finale en mémoire sera retournée, mais pas sauvegardée par _get_reference_image."
-                if hasattr(self, 'update_progress'): self.update_progress(warning_msg_save_final)
+                warning_msg_save_final = (
+                    f"Output_folder_for_saving_temp_ref ('{output_folder_for_saving_temp_ref}') non valide. "
+                    "L'image de référence finale en mémoire sera retournée, mais pas sauvegardée par _get_reference_image."
+                )
+                if hasattr(self, 'update_progress'):
+                    self.update_progress(warning_msg_save_final)
                 print(f"AVERTISSEMENT ALIGNER [_get_reference_image]: {warning_msg_save_final}")
         else: 
             print("DEBUG ALIGNER [_get_reference_image]: Données de référence finales non disponibles pour sauvegarde.")
