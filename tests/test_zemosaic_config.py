@@ -33,3 +33,14 @@ def test_config_round_trip_preserves_new_keys(tmp_path, monkeypatch):
     assert loaded["solver_method"] == "ansvr"
     assert loaded["astrometry_local_path"] == "/tmp/ansvr"
     assert loaded["astrometry_api_key"] == "XYZ123"
+
+
+def test_resolve_astap_app(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin", raising=False)
+    app_path = "/Applications/ASTAP.app"
+    internal = "/Applications/ASTAP.app/Contents/MacOS/astap"
+    monkeypatch.setattr(zemosaic_config.os.path, "isdir", lambda p: p == app_path)
+    monkeypatch.setattr(zemosaic_config.os.path, "isfile", lambda p: p == internal)
+
+    resolved = zemosaic_config.resolve_astap_executable_path(app_path)
+    assert resolved == internal

@@ -34,8 +34,10 @@ It was born out of a need from an astrophotography Discord community called the 
 
 ### Mandatory:
 
-- Python ≥ 3.9  
+- Python ≥ 3.9
 - [ASTAP](https://www.hnsky.org/astap.htm) installed with G17/H17 star catalogs
+- Works on Linux, Windows and **macOS**. On macOS select `ASTAP.app` and
+  ZeMosaic will automatically resolve the internal executable.
 
 ### Recommended Python packages:
 
