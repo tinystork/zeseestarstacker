@@ -9806,7 +9806,6 @@ class SeestarQueuedStacker:
 
         if final_wht_map_for_postproc is not None and (
             is_classic_reproject_mode
-            or is_reproject_mosaic_mode
             or is_true_incremental_drizzle_from_objects
             or is_drizzle_final_mode_with_data
         ):
