@@ -56,7 +56,8 @@ __all__ = [
     'reproject_and_combine',
     'resolve_all_wcs',
     'collect_headers',
-    'compute_final_output_grid'
+    'compute_final_output_grid',
+    'downsample_image'
 ]
 
 # Tentative d'importation du nouvel aligneur local
