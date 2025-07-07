@@ -2986,6 +2986,11 @@ class SeestarQueuedStacker:
             logger.debug(
                 f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale..."
             )
+            # Préparer le dossier temporaire utilisé par l'aligner pour la référence
+            ref_temp_processing_dir = os.path.join(
+                self.output_folder, "temp_processing"
+            )
+            os.makedirs(ref_temp_processing_dir, exist_ok=True)
             # _get_reference_image DOIT s'assurer que s'il ajoute _SOURCE_PATH à son header interne
             # avant de sauvegarder reference_image.fit, il utilise os.path.basename().
             # C'est la source de l'erreur "keyword too long".
@@ -2993,7 +2998,7 @@ class SeestarQueuedStacker:
                 reference_image_data_for_global_alignment,
                 reference_header_for_global_alignment,
             ) = self.aligner._get_reference_image(
-                folder_for_ref_scan, files_for_ref_scan, self.output_folder
+                folder_for_ref_scan, files_for_ref_scan, ref_temp_processing_dir
             )
             if (
                 reference_image_data_for_global_alignment is None
@@ -3044,9 +3049,6 @@ class SeestarQueuedStacker:
                         "unknown_reference_panel.fits"  # Fallback
                     )
 
-            ref_temp_processing_dir = os.path.join(
-                self.output_folder, "temp_processing"
-            )
             reference_image_path_for_solver = os.path.join(
                 ref_temp_processing_dir, "reference_image.fit"
             )
@@ -11094,13 +11096,19 @@ class SeestarQueuedStacker:
             self.aligner.bayer_pattern = self.bayer_pattern
             self.aligner.reference_image_path = reference_path_ui or None
 
+            # Préparer et créer le dossier temporaire où _get_reference_image écrira
+            ref_temp_processing_dir = os.path.join(
+                self.output_folder, "temp_processing"
+            )
+            os.makedirs(ref_temp_processing_dir, exist_ok=True)
+
             (
                 reference_image_data_for_shape_determination,
                 reference_header_for_shape_determination,
             ) = self.aligner._get_reference_image(
                 current_folder_to_scan_for_shape,
                 files_in_folder_for_shape,
-                self.output_folder,
+                ref_temp_processing_dir,
             )
 
             if (
@@ -11132,9 +11140,6 @@ class SeestarQueuedStacker:
                 f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}"
             )
 
-            ref_temp_processing_dir = os.path.join(
-                self.output_folder, "temp_processing"
-            )
             reference_image_path_for_solving = os.path.join(
                 ref_temp_processing_dir, "reference_image.fit"
             )
