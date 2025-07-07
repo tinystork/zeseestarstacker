@@ -41,9 +41,18 @@ def _resolve_astap_executable(path: str) -> str:
 
     # Allow the user to provide the path to the .app bundle on macOS
     if expanded.endswith(".app") and os.path.isdir(expanded):
-        candidate = os.path.join(expanded, "Contents", "MacOS", "astap")
-        if os.path.isfile(candidate):
-            return candidate
+        # Typical macOS bundle layout. The binary may be named ``astap`` or
+        # ``ASTAP`` depending on the distribution.
+        cand_lower = os.path.join(expanded, "Contents", "MacOS", "astap")
+        cand_upper = os.path.join(expanded, "Contents", "MacOS", "ASTAP")
+        if os.path.isfile(cand_lower):
+            return cand_lower
+        if os.path.isfile(cand_upper):
+            return cand_upper
+        # Fallback: some packages might place the binary at the root
+        cand_root = os.path.join(expanded, "astap")
+        if os.path.isfile(cand_root):
+            return cand_root
 
     return expanded
 # --- Dépendances Astropy/Astroquery (comme avant) ---
