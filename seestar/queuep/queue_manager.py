@@ -9270,10 +9270,14 @@ class SeestarQueuedStacker:
             )
             sky = ref_wcs.pixel_to_world(corners[:, 0], corners[:, 1])
             x, y = mosaic_wcs.world_to_pixel(sky)
-            left = int(np.floor(np.nanmin(x)))
-            right = int(np.ceil(np.nanmax(x)))
-            top = int(np.floor(np.nanmin(y)))
-            bottom = int(np.ceil(np.nanmax(y)))
+            # Use rounding to avoid systematic +/-1 errors when the
+            # reference WCS corners fall between pixel centers. Using
+            # ``floor``/``ceil`` alone can lead to slight shifts in the
+            # resulting WCS that accumulate when batches are combined.
+            left = int(np.round(np.nanmin(x)))
+            right = int(np.round(np.nanmax(x)))
+            top = int(np.round(np.nanmin(y)))
+            bottom = int(np.round(np.nanmax(y)))
             left = max(left, 0)
             top = max(top, 0)
             right = min(right, img_hwc.shape[1] - 1)
