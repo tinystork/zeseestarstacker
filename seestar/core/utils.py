@@ -292,3 +292,23 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         return default_batch_size
 
 
+def downsample_image(image: np.ndarray, factor: int = 2) -> np.ndarray:
+    """Downsample an image by an integer factor using OpenCV."""
+
+    if image is None or factor <= 1:
+        return image
+
+    try:
+        h, w = image.shape[:2]
+        new_w, new_h = w // factor, h // factor
+        if new_w < 1 or new_h < 1:
+            return image
+
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return resized
+    except Exception:
+        print("Warning: downsample_image failed; returning original image")
+        traceback.print_exc(limit=1)
+        return image
+
+

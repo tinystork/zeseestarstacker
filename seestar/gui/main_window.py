@@ -64,6 +64,7 @@ except Exception as gen_err:
 logger.debug("-" * 20)
 # Seestar imports
 from ..core.image_processing import debayer_image, load_and_validate_fits
+from ..core.utils import downsample_image
 from ..localization import Localization
 from .local_solver_gui import LocalSolverSettingsWindow
 from .mosaic_gui import MosaicSettingsWindow
@@ -6031,9 +6032,13 @@ class SeestarStackerGUI:
                 self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
             if data_final is not None:
-                self.current_preview_data = data_final
-                self.current_preview_hist_data = data_final
-                self._temp_data_for_final_histo = data_final
+                try:
+                    data_final_ds = downsample_image(data_final, factor=2)
+                except Exception:
+                    data_final_ds = data_final
+                self.current_preview_data = data_final_ds
+                self.current_preview_hist_data = data_final_ds
+                self._temp_data_for_final_histo = data_final_ds
                 self.current_stack_header = (
                     header_final if header_final else fits.Header()
                 )
