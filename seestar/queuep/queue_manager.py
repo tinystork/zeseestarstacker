@@ -174,7 +174,7 @@ def _reproject_worker(
         from seestar.enhancement.reproject_utils import reproject_interp
 
         reproj, footprint = reproject_interp(
-            (data, None), WCS(ref_wcs_header), shape_out, parallel=False
+            (data, None), WCS(ref_wcs_header, naxis=2), shape_out, parallel=False
         )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
@@ -2534,6 +2534,14 @@ class SeestarQueuedStacker:
                     reference=None,
                     frame="icrs",
                 )
+                if (
+                    len(valid_wcs) > 1
+                    and out_shape_hw[0]
+                    <= max(s[0] for s in valid_shapes_hw) + 4
+                    and out_shape_hw[1]
+                    <= max(s[1] for s in valid_shapes_hw) + 4
+                ):
+                    raise ValueError("optimal grid too small")
             else:
                 raise ImportError("find_optimal_celestial_wcs unavailable")
         except Exception as e:
@@ -8821,7 +8829,7 @@ class SeestarQueuedStacker:
         data = fits.getdata(fits_path, memmap=False).astype(np.float32)
         hdr = fits.getheader(fits_path)
         try:
-            input_wcs = WCS(hdr)
+            input_wcs = WCS(hdr, naxis=2)
         except Exception:
             input_wcs = None
         if data.ndim == 2:
