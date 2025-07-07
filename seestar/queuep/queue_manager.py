@@ -10133,12 +10133,22 @@ class SeestarQueuedStacker:
                 "   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)..."
             )
             raw_data = self.raw_adu_data_for_ui_histogram
-            if np.nanmax(raw_data) <= 1.0 + 1e-5:
-                data_scaled_uint16 = (np.clip(raw_data, 0.0, 1.0) * 65535.0).astype(
+            max_val = np.nanmax(raw_data)
+            if max_val <= 1.0 + 1e-5:
+                # When the dynamic range is extremely small (< 1/65535) the
+                # previous logic would round everything to zero. Adapt the
+                # scaling factor so that the brightest pixel maps to 65535.
+                if max_val < (1.0 / 65535.0):
+                    scale = 65535.0 / max(max_val, 1e-9)
+                else:
+                    scale = 65535.0
+                data_scaled_uint16 = (
+                    np.clip(raw_data, 0.0, None) * scale
+                ).astype(np.uint16)
+            else:
+                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(
                     np.uint16
                 )
-            else:
-                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
             # Convertir en int16 décalé pour conformité FITS
             data_for_primary_hdu_save = (
                 data_scaled_uint16.astype(np.int32) - 32768
