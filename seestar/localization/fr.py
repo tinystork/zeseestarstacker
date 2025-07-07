@@ -347,6 +347,7 @@ FR_TRANSLATIONS = {
     "local_solver_info_text": "Laissez les chemins vides si le solveur n'est pas utilisé ou est dans le PATH système.\nConsultez la documentation du solveur pour les chemins spécifiques requis.",
     "executable_files": "Fichiers Exécutables",
     "astap_executable_win": "Exécutable ASTAP",  # Spécifique pour .exe Windows
+    "astap_app_mac": "Application ASTAP",
     "all_files": "Tous les Fichiers",
     "select_astap_executable_title": "Sélectionner l'Exécutable ASTAP",
     "select_astap_data_dir_title": "Sélectionner le Répertoire des Données d'Index Stellaires ASTAP",

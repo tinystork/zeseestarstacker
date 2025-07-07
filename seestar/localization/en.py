@@ -328,6 +328,7 @@ EN_TRANSLATIONS = {
     "local_solver_info_text": "Leave paths empty if the solver is not used or is in system PATH.\nConsult solver documentation for specific path requirements.",
     "executable_files": "Executable Files",
     "astap_executable_win": "ASTAP Executable",  # Specific for Windows .exe
+    "astap_app_mac": "ASTAP Application",
     "all_files": "All Files",
     "select_astap_executable_title": "Select ASTAP Executable",
     "select_astap_data_dir_title": "Select ASTAP Star Index Data Directory",

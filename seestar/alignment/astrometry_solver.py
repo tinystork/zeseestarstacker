@@ -22,6 +22,30 @@ if not logger.hasHandlers():
 # through solver settings. Loaded from ``zemosaic_config`` so tests and
 # documentation stay in sync with application defaults.
 ASTAP_DEFAULT_SEARCH_RADIUS = zemosaic_config.get_astap_default_search_radius()
+
+
+def _resolve_astap_executable(path: str) -> str:
+    """Return the actual executable path for ASTAP.
+
+    On macOS the application is typically distributed as an ``.app`` bundle. In
+    that case the real binary resides inside ``Contents/MacOS/astap``. This
+    helper expands ``~`` and converts ``.app`` paths to the binary inside so the
+    rest of the code can simply call the executable.
+    """
+    if not path:
+        return ""
+
+    expanded = os.path.expanduser(path)
+    if os.path.isfile(expanded):
+        return expanded
+
+    # Allow the user to provide the path to the .app bundle on macOS
+    if expanded.endswith(".app") and os.path.isdir(expanded):
+        candidate = os.path.join(expanded, "Contents", "MacOS", "astap")
+        if os.path.isfile(candidate):
+            return candidate
+
+    return expanded
 # --- Dépendances Astropy/Astroquery (comme avant) ---
 _ASTROQUERY_AVAILABLE = False
 _ASTROPY_AVAILABLE = False
@@ -390,13 +414,14 @@ class AstrometrySolver:
         local_solver_attempted_and_failed = False
 
         if solver_preference == "astap":
-            if astap_exe and os.path.isfile(astap_exe):
+            resolved_astap = _resolve_astap_executable(astap_exe)
+            if astap_exe and os.path.isfile(resolved_astap):
                 self._log("Priorité au solveur local: ASTAP.", "INFO")
                 t0 = time.time()
                 wcs_solution = self._try_solve_astap(
                     image_path,
                     fits_header,
-                    astap_exe,
+                    resolved_astap,
                     astap_data,
                     astap_search_radius_from_settings,  # Utiliser la valeur lue
                     scale_est,
