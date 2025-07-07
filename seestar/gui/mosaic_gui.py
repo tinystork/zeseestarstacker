@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 # import traceback # Décommentez si besoin pour le debug
 import numpy as np 
-
+import os   # Pour les chemins de fichiers
 # VALID_DRIZZLE_KERNELS est déjà défini dans votre fichier, je le garde.
 VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'gaussian', 'lanczos2', 'lanczos3'] 
 
