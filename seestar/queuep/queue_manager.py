@@ -12135,7 +12135,7 @@ class SeestarQueuedStacker:
         return out_filepath_sci, out_filepaths_wht
 
     def finish(self):
-        """Export the cumulative weight map to a FITS file."""
+        """Export and cleanup the cumulative weight map."""
         from astropy.io import fits
 
         if self.cumulative_wht_memmap is not None:
@@ -12146,6 +12146,20 @@ class SeestarQueuedStacker:
                 self.cumulative_wht_memmap,
                 overwrite=True,
             )
+
+        # Close memmaps to release the underlying file handles
+        if hasattr(self, "_close_memmaps"):
+            self._close_memmaps()
+
+        # Remove the temporary cumulative weight file
+        if getattr(self, "cumulative_wht_path", None):
+            try:
+                if os.path.isfile(self.cumulative_wht_path):
+                    os.remove(self.cumulative_wht_path)
+            except Exception as e:
+                logger.debug(
+                    f"WARN QM [finish]: Failed to remove cumulative weight file: {e}"
+                )
 
 
 ######################################################################################################################################################
