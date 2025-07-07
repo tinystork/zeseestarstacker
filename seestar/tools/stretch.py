@@ -6,9 +6,8 @@ inspirés de visu.py et adaptés pour Seestar Stacker.
 import numpy as np
 import cv2
 from PIL import Image, ImageEnhance, ImageFilter
-import os # For save_fits_as_png
-import traceback # For error reporting
-from ..core.utils import check_cuda
+import os  # For save_fits_as_png
+import traceback  # For error reporting
 from astropy.stats import sigma_clipped_stats # Pour des statistiques robustes
 
 # --- Presets d'Étirement ---
@@ -187,6 +186,11 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
     if data is None: return None
 
     # --- Check CUDA availability ---
+    try:
+        from ..core.utils import check_cuda
+    except Exception:
+        def check_cuda():
+            return False
     use_cuda = check_cuda()
 
     try:

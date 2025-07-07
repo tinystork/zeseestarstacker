@@ -9,16 +9,25 @@ __version__ = "5.6.0"  # bug fix unint16
 __author__ = "Tinystork"
 
 # Core functionalities (unchanged from your original structure)
-from seestar.core import (
-    SeestarAligner,
-    load_and_validate_fits,
-    debayer_image,
-    detect_and_correct_hot_pixels,
-    save_fits_image,
-    save_preview_image,
-    estimate_batch_size,
-    apply_denoise,  # Keep apply_denoise available if GUI option removed
-)
+try:
+    from seestar.core import (
+        SeestarAligner,
+        load_and_validate_fits,
+        debayer_image,
+        detect_and_correct_hot_pixels,
+        save_fits_image,
+        save_preview_image,
+        estimate_batch_size,
+        apply_denoise,  # Keep apply_denoise available if GUI option removed
+    )
+    _CORE_AVAILABLE = True
+except Exception as e:  # pragma: no cover - optional dependency may be missing
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Seestar core not available (%s). Some functionality is disabled.", e
+    )
+    _CORE_AVAILABLE = False
 
 # Tools (updated imports based on the new stretch.py)
 from seestar.tools import (
@@ -34,9 +43,12 @@ from seestar.enhancement import reproject_utils
 
 # GUI (optional)
 try:
-    from seestar.gui import SeestarStackerGUI
-    _GUI_AVAILABLE = True
-except Exception as e:  # pragma: no cover - GUI might not be present in tests
+    if _CORE_AVAILABLE:
+        from seestar.gui import SeestarStackerGUI
+        _GUI_AVAILABLE = True
+    else:
+        raise RuntimeError("Core modules missing")
+except BaseException as e:  # pragma: no cover - GUI might not be present
     import logging
 
     logging.getLogger(__name__).warning(
@@ -46,15 +58,6 @@ except Exception as e:  # pragma: no cover - GUI might not be present in tests
     _GUI_AVAILABLE = False
 
 __all__ = [
-    # Core
-    'SeestarAligner',
-    'load_and_validate_fits',
-    'debayer_image',
-    'detect_and_correct_hot_pixels',
-    'save_fits_image',
-    'save_preview_image',
-    'estimate_batch_size',
-    'apply_denoise',
     # Tools
     'StretchPresets',
     'ColorCorrection',
@@ -67,6 +70,18 @@ __all__ = [
     '__version__',
     '__author__'
 ]
+
+if _CORE_AVAILABLE:
+    __all__[0:0] = [
+        'SeestarAligner',
+        'load_and_validate_fits',
+        'debayer_image',
+        'detect_and_correct_hot_pixels',
+        'save_fits_image',
+        'save_preview_image',
+        'estimate_batch_size',
+        'apply_denoise',
+    ]
 
 if _GUI_AVAILABLE:
     __all__.append('SeestarStackerGUI')
