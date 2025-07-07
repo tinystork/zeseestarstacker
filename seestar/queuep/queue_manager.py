@@ -9241,6 +9241,15 @@ class SeestarQueuedStacker:
                 final_cov = cov.astype(np.float32)
 
         final_img_hwc = np.stack(final_channels, axis=-1)
+
+        # Crop the mosaic to the reference WCS like the ZeMosaic path
+        final_img_hwc, final_cov, out_wcs = self._crop_to_reference_wcs(
+            final_img_hwc, final_cov, out_wcs
+        )
+
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
         self._save_final_stack(
             "_classic_reproject",
             drizzle_final_sci_data=final_img_hwc,
