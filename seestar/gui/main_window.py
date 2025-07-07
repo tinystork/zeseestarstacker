@@ -29,6 +29,7 @@ from astropy.io import fits
 from PIL import Image, ImageTk
 
 from zemosaic import zemosaic_config
+from seestar.alignment.astrometry_solver import _resolve_astap_executable
 
 from .ui_utils import ToolTip
 
@@ -5340,7 +5341,9 @@ class SeestarStackerGUI:
             env = os.environ.copy()
             if self.settings.use_third_party_solver:
                 if getattr(self.settings, "astap_path", ""):
-                    env["ZEMOSAIC_ASTAP_PATH"] = str(self.settings.astap_path)
+                    env["ZEMOSAIC_ASTAP_PATH"] = str(
+                        _resolve_astap_executable(self.settings.astap_path)
+                    )
                 if getattr(self.settings, "astap_data_dir", ""):
                     env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
                 if getattr(self.settings, "local_ansvr_path", ""):

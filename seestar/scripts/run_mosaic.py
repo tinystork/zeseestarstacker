@@ -8,6 +8,7 @@ via command-line arguments.
 """
 import argparse
 import logging
+from seestar.alignment.astrometry_solver import _resolve_astap_executable
 
 from zemosaic import zemosaic_config, zemosaic_worker
 
@@ -49,7 +50,7 @@ def main() -> None:
     config = zemosaic_config.load_config()
 
     solver_settings = {
-        "astap_path": args.astap_path,
+        "astap_path": _resolve_astap_executable(args.astap_path) if args.astap_path else None,
         "astap_data_dir": args.astap_data_dir,
         "astap_search_radius": args.search_radius,
         "local_ansvr_path": args.local_ansvr_path,
