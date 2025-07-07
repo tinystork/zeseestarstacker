@@ -9155,8 +9155,14 @@ class SeestarQueuedStacker:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
                 batch_wcs = WCS(hdr, naxis=2)
-                h, w = data_cxhxw.shape[-2:]
+                h = int(hdr.get("NAXIS2", data_cxhxw.shape[-2]))
+                w = int(hdr.get("NAXIS1", data_cxhxw.shape[-1]))
                 batch_wcs.pixel_shape = (w, h)
+                try:
+                    batch_wcs.wcs.naxis1 = w
+                    batch_wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
             except Exception:
                 continue
 
