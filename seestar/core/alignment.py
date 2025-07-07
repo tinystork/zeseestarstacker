@@ -469,7 +469,13 @@ class SeestarAligner:
         dans le dossier temporaire DEDANS base_output_folder.
         """
         if reference_image is None: return
-        temp_folder_ref = os.path.join(base_output_folder, "temp_processing")
+        # `base_output_folder` is expected to already point to the temporary
+        # processing directory (typically `<output>/temp_processing`).
+        # Older versions appended an additional "temp_processing" subfolder
+        # which caused paths like `<output>/temp_processing/temp_processing`.  
+        # To keep compatibility across OSes we now directly use the provided
+        # folder without adding another subdirectory.
+        temp_folder_ref = base_output_folder
         try:
             os.makedirs(temp_folder_ref, exist_ok=True)
             ref_output_path = os.path.join(temp_folder_ref, "reference_image.fit")
