@@ -9154,6 +9154,9 @@ class SeestarQueuedStacker:
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
+                for k in list(hdr.keys()):
+                    if k in {"NAXIS3", "CTYPE3", "CRVAL3", "CRPIX3", "CDELT3", "CUNIT3", "WCSAXES", "NAXIS"} or k.startswith("CD3_") or k.startswith("PC3_"):
+                        hdr.pop(k, None)
                 batch_wcs = WCS(hdr, naxis=2)
                 h, w = data_cxhxw.shape[-2:]
                 batch_wcs.pixel_shape = (w, h)
@@ -9306,6 +9309,9 @@ class SeestarQueuedStacker:
         for sci_path, _wht_paths in batch_files:
             try:
                 hdr = fits.getheader(sci_path, memmap=False)
+                for k in list(hdr.keys()):
+                    if k in {"NAXIS3", "CTYPE3", "CRVAL3", "CRPIX3", "CDELT3", "CUNIT3", "WCSAXES", "NAXIS"} or k.startswith("CD3_") or k.startswith("PC3_"):
+                        hdr.pop(k, None)
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
