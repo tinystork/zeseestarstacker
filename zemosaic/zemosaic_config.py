@@ -1,6 +1,7 @@
 # zemosaic_config.py
 import json
 import os
+import sys
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 
@@ -41,8 +42,23 @@ DEFAULT_CONFIG = {
     # --- CLES POUR LE ROGNAGE DES MASTER TUILES ---
     "apply_master_tile_crop": True,       # Désactivé par défaut
     "master_tile_crop_percent": 18.0      # Pourcentage par côté si activé (ex: 10%)
-    # --- FIN CLES POUR LE ROGNAGE --- 
+    # --- FIN CLES POUR LE ROGNAGE ---
 }
+
+def resolve_astap_executable_path(path: str) -> str:
+    """Return platform-correct ASTAP executable path.
+
+    On macOS the user may select the ``ASTAP.app`` bundle. This helper
+    resolves it to the actual binary inside ``Contents/MacOS`` if present.
+    """
+    if not path:
+        return ""
+    path = os.path.expanduser(path)
+    if sys.platform == "darwin" and path.endswith(".app") and os.path.isdir(path):
+        candidate = os.path.join(path, "Contents", "MacOS", "astap")
+        if os.path.isfile(candidate):
+            return candidate
+    return path
 
 def get_config_path():
     """
@@ -136,16 +152,20 @@ def save_config(config_data):
 
 def ask_and_set_astap_path(current_config):
     """Demande à l'utilisateur le chemin de l'exécutable ASTAP et met à jour la config."""
-    astap_path = fd.askopenfilename(
-        title="Sélectionner l'exécutable ASTAP",
-        filetypes=(("Fichiers exécutables", "*.exe"), ("Tous les fichiers", "*.*"))
-    )
+    if sys.platform == 'darwin':
+        ft = (("Applications", "*.app"), ("Tous les fichiers", "*"))
+    elif os.name == 'nt':
+        ft = (("Fichiers exécutables", "*.exe"), ("Tous les fichiers", "*.*"))
+    else:
+        ft = (("Tous les fichiers", "*"),)
+    astap_path = fd.askopenfilename(title="Sélectionner l'exécutable ASTAP", filetypes=ft)
     if astap_path:
-        current_config["astap_executable_path"] = astap_path
+        resolved = resolve_astap_executable_path(astap_path)
+        current_config["astap_executable_path"] = resolved
         if save_config(current_config):
-            mb.showinfo("Chemin ASTAP Défini", f"Chemin ASTAP défini à : {astap_path}", parent=None) # Spécifier parent si possible
-        return astap_path
-    return current_config.get("astap_executable_path", "")
+            mb.showinfo("Chemin ASTAP Défini", f"Chemin ASTAP défini à : {resolved}", parent=None)
+        return resolved
+    return resolve_astap_executable_path(current_config.get("astap_executable_path", ""))
 
 
 def ask_and_set_astap_data_dir_path(current_config):
@@ -163,7 +183,7 @@ def ask_and_set_astap_data_dir_path(current_config):
 
 def get_astap_executable_path():
     config = load_config()
-    return config.get("astap_executable_path", "")
+    return resolve_astap_executable_path(config.get("astap_executable_path", ""))
 
 def get_astap_data_directory_path():
     config = load_config()

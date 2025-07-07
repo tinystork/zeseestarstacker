@@ -1053,9 +1053,17 @@ class ZeMosaicGUI:
                                        self._tr("astap_exe_not_set_warning", "ASTAP executable path is not set."),
                                        parent=self.root)
         else:
-            filetypes_loc = [(self._tr("executable_files", "Executable Files"), "*.exe"), (self._tr("all_files", "All Files"), "*.*")] if os.name == 'nt' else [(self._tr("all_files", "All Files"), "*")]
+            if sys.platform == 'darwin':
+                filetypes_loc = [(self._tr("application_files", "Application Bundles"), "*.app"), (self._tr("all_files", "All Files"), "*")]
+            elif os.name == 'nt':
+                filetypes_loc = [(self._tr("executable_files", "Executable Files"), "*.exe"), (self._tr("all_files", "All Files"), "*.*")]
+            else:
+                filetypes_loc = [(self._tr("all_files", "All Files"), "*")]
             exe_path = filedialog.askopenfilename(title=self._tr("select_astap_exe_no_save_title", "Select ASTAP Executable (Not Saved)"), filetypes=filetypes_loc)
-            if exe_path: self.astap_exe_path_var.set(exe_path)
+            if exe_path:
+                if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
+                    exe_path = zemosaic_config.resolve_astap_executable_path(exe_path)
+                self.astap_exe_path_var.set(exe_path)
 
     def _browse_and_save_astap_data_dir(self):
         title = self._tr("select_astap_data_dir_title", "Select ASTAP Data Directory")
