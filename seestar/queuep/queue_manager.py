@@ -9467,6 +9467,8 @@ class SeestarQueuedStacker:
             self.drizzle_active_session
             and self.drizzle_mode == "Final"
             and not self.is_mosaic_run
+            and not self.reproject_between_batches
+            and not getattr(self, "reproject_coadd_final", False)
             and drizzle_final_sci_data is not None
             and drizzle_final_wht_data is not None
             and not is_reproject_mosaic_mode
