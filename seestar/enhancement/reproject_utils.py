@@ -12,6 +12,11 @@ except Exception:  # pragma: no cover - fallback when reproject missing
     _reproject_interp = _missing_function
     _missing = _reproject_interp
 
+try:  # Prefer the reference implementation when available
+    from reproject.mosaicking import reproject_and_coadd as _astropy_reproject_and_coadd
+except Exception:  # pragma: no cover - gracefully handle absence of reproject
+    _astropy_reproject_and_coadd = None
+
 from astropy.wcs import WCS
 import numpy as np
 
@@ -55,6 +60,19 @@ def reproject_and_coadd(
     if reproject_function is _missing:
         # reproject not available
         _reproject_interp()
+
+    if _astropy_reproject_and_coadd is not None:
+        # Use the reference implementation when possible
+        return _astropy_reproject_and_coadd(
+            input_data,
+            output_projection=output_projection,
+            shape_out=shape_out,
+            input_weights=input_weights,
+            reproject_function=reproject_function,
+            combine_function=combine_function,
+            match_background=match_background,
+            **kwargs,
+        )
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(shape_out)
