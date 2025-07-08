@@ -54,11 +54,7 @@ def assemble_final_mosaic_with_reproject_coadd(
         else:
             return None, None
 
-    output_header = (
-        final_output_wcs.to_header()
-        if hasattr(final_output_wcs, "to_header")
-        else final_output_wcs
-    )
+
 
     data_all = []
 
@@ -103,13 +99,13 @@ def assemble_final_mosaic_with_reproject_coadd(
                 data_list=data_list,
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
-                output_projection=output_header,
+
+                output_projection=final_output_wcs,
 
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
-
 
                 **kwargs,
             )
