@@ -7,6 +7,7 @@ import numpy as np
 from astropy.io import fits
 import cv2
 import astroalign as aa
+from skimage.transform import SimilarityTransform
 import warnings
 import logging
 import gc
@@ -178,22 +179,21 @@ class SeestarAligner:
                 raise aa.MaxIterError("aa.find_transform a échoué (pas de transformation trouvée)")
             print(f"    Transformation skimage trouvée. Nb matches: {len(source_matches)}. Type de transform_skimage_obj: {type(transform_skimage_obj)}")
 
-            # --- CORRECTION DE L'EXTRACTION DE LA MATRICE ---
-            if hasattr(transform_skimage_obj, 'params') and isinstance(transform_skimage_obj.params, np.ndarray) and transform_skimage_obj.params.shape == (3,3):
-                M_sk = transform_skimage_obj.params
-                cv2_M = M_sk[0:2, :] # Prendre les 2 premières lignes pour une matrice affine 2x3
-                print(f"    Matrice (depuis .params de l'objet skimage) pour OpenCV:\n{cv2_M}")
-            else:
-                # Si astroalign retourne directement la matrice (moins probable pour find_transform mais sécurité)
-                if isinstance(transform_skimage_obj, np.ndarray) and transform_skimage_obj.shape == (3,3):
-                    cv2_M = transform_skimage_obj[0:2, :]
-                    print(f"    Matrice (directement ndarray 3x3) pour OpenCV:\n{cv2_M}")
-                elif isinstance(transform_skimage_obj, np.ndarray) and transform_skimage_obj.shape == (2,3):
-                    cv2_M = transform_skimage_obj # C'est déjà le bon format
-                    print(f"    Matrice (directement ndarray 2x3) pour OpenCV:\n{cv2_M}")
-                else:
-                    raise TypeError(f"Type de matrice de transformation inattendu de find_transform: {type(transform_skimage_obj)}, et .params non utilisable.")
-            # --- FIN CORRECTION ---
+            # --- NEW: force scale = 1 (Euclidean transform) -----------------
+            a, b = transform_skimage_obj.params[0, 0], transform_skimage_obj.params[1, 0]
+            theta = np.arctan2(b, a)
+            tx = transform_skimage_obj.params[0, 2]
+            ty = transform_skimage_obj.params[1, 2]
+
+            transform_no_scale = SimilarityTransform(rotation=theta,
+                                                     translation=(tx, ty))
+            cv2_M = transform_no_scale.params[:2, :]
+
+            logger.info(
+                "[Align] Similarity scale forced to 1.0 – keeping rotation "
+                f"{np.degrees(theta):.2f}° and translation ({tx:.1f}, {ty:.1f}) px"
+            )
+            # ---------------------------------------------------------------
             
             h_ref, w_ref = reference_image_float.shape[:2]
 
