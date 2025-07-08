@@ -203,11 +203,6 @@ class SettingsManager:
                 "cleanup_temp_var",
                 tk.BooleanVar(value=default_values_from_code.get("cleanup_temp", True)),
             ).get()
-            self.zoom_percent = getattr(
-                gui_instance,
-                "zoom_percent_var",
-                tk.IntVar(value=default_values_from_code.get("zoom_percent", 0)),
-            ).get()
             self.bayer_pattern = getattr(
                 gui_instance,
                 "bayer_pattern_var",
@@ -826,9 +821,6 @@ class SettingsManager:
             getattr(gui_instance, "cleanup_temp_var", tk.BooleanVar()).set(
                 self.cleanup_temp
             )
-            getattr(gui_instance, "zoom_percent_var", tk.IntVar()).set(
-                self.zoom_percent
-            )
 
             if not hasattr(self, "local_solver_preference"):
                 self.local_solver_preference = self.get_default_values()[
@@ -1229,7 +1221,6 @@ class SettingsManager:
         defaults_dict["hot_pixel_threshold"] = 3.0
         defaults_dict["neighborhood_size"] = 5
         defaults_dict["cleanup_temp"] = True
-        defaults_dict["zoom_percent"] = 0
 
         # --- Paramètres de Pondération par Qualité ---
         defaults_dict["use_quality_weighting"] = True
@@ -2434,7 +2425,6 @@ class SettingsManager:
             "hot_pixel_threshold": float(self.hot_pixel_threshold),
             "neighborhood_size": int(self.neighborhood_size),
             "cleanup_temp": bool(self.cleanup_temp),
-            "zoom_percent": int(self.zoom_percent),
             "use_quality_weighting": bool(self.use_quality_weighting),
             "weight_by_snr": bool(self.weight_by_snr),
             "weight_by_stars": bool(self.weight_by_stars),
