@@ -9005,6 +9005,11 @@ class SeestarQueuedStacker:
         final_stacked = stacked_np
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
+        input_wcs = None
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            pass
 
         # Crop the stacked tile before solving so the WCS corresponds
         # to the final data saved on disk.
@@ -9050,6 +9055,26 @@ class SeestarQueuedStacker:
                 header.update(solved_hdr)
             else:
                 if self.reference_header_for_wcs is not None:
+                    if (
+                        input_wcs is not None
+                        and self.reference_wcs_object is not None
+                        and self.reference_shape is not None
+                    ):
+                        try:
+                            final_stacked = reproject_to_reference_wcs(
+                                final_stacked,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                            final_wht = reproject_to_reference_wcs(
+                                final_wht,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                        except Exception:
+                            pass
                     header.update(
                         {
                             k: self.reference_header_for_wcs[k]
@@ -9078,6 +9103,26 @@ class SeestarQueuedStacker:
             os.remove(tmp.name)
         else:
             if self.reference_header_for_wcs is not None:
+                if (
+                    input_wcs is not None
+                    and self.reference_wcs_object is not None
+                    and self.reference_shape is not None
+                ):
+                    try:
+                        final_stacked = reproject_to_reference_wcs(
+                            final_stacked,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                        final_wht = reproject_to_reference_wcs(
+                            final_wht,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                    except Exception:
+                        pass
                 header.update(
                     {
                         k: self.reference_header_for_wcs[k]
