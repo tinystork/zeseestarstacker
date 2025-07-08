@@ -2450,6 +2450,18 @@ class SeestarQueuedStacker:
             scale of the mosaic is divided by this factor. Defaults to ``1.0``.
         """
 
+        if (
+            self.freeze_reference_wcs
+            and self.reference_wcs_object is not None
+            and self.reference_header_for_wcs is not None
+        ):
+            out_wcs = self.reference_wcs_object
+            out_shape = (
+                int(self.reference_header_for_wcs.get("NAXIS2", 0)),
+                int(self.reference_header_for_wcs.get("NAXIS1", 0)),
+            )
+            return out_wcs, out_shape
+
         num_wcs = len(all_input_wcs_list)
         logger.debug(
             f"DEBUG (Backend _calculate_final_mosaic_grid - Optimal): Appel avec {num_wcs} WCS (scale={scale_factor})."
@@ -2529,7 +2541,7 @@ class SeestarQueuedStacker:
                 out_wcs, out_shape_hw = find_optimal_celestial_wcs(
                     inputs_for_optimal,
                     resolution=Angle(target_res_deg_per_pix, unit=u.deg),
-                    auto_rotate=True,
+                    auto_rotate=False,
                     projection="TAN",
                     reference=None,
                     frame="icrs",
@@ -2568,6 +2580,11 @@ class SeestarQueuedStacker:
                 expected_wh[1],
                 target_res_deg_per_pix,
             )
+
+            self.reference_wcs_object = out_wcs
+            self.reference_header_for_wcs = out_wcs.to_header(relax=True)
+            self.ref_wcs_header = self.reference_header_for_wcs
+            self.freeze_reference_wcs = True
 
         return out_wcs, out_shape_hw
 
