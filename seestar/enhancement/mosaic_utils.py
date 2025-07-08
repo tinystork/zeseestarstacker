@@ -14,6 +14,7 @@ def assemble_final_mosaic_with_reproject_coadd(
     final_output_wcs: WCS,
     final_output_shape_hw: tuple,
     match_bg: bool = True,
+    weight_arrays=None,
 ):
     """Assemble master tiles using ``reproject_and_coadd``.
 
@@ -27,6 +28,8 @@ def assemble_final_mosaic_with_reproject_coadd(
         Shape ``(H, W)`` of the final mosaic.
     match_bg : bool, optional
         Forwarded to ``reproject_and_coadd``.
+    weight_arrays : list of ndarray, optional
+        Optional per-tile weight maps passed to ``reproject_and_coadd``.
 
     Returns
     -------
@@ -97,6 +100,10 @@ def assemble_final_mosaic_with_reproject_coadd(
 
             data_list = [arr[..., ch] for arr in data_all]
 
+            kwargs_local = dict(kwargs)
+            if weight_arrays is not None:
+                kwargs_local["input_weights"] = weight_arrays
+
             sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
                 data_list=data_list,
                 wcs_list=wcs_list,
@@ -109,7 +116,7 @@ def assemble_final_mosaic_with_reproject_coadd(
                 reproject_function=reproject_interp,
                 combine_function="mean",
 
-                **kwargs,
+                **kwargs_local,
             )
         except Exception:
             return None, None
