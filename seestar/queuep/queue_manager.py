@@ -3668,6 +3668,11 @@ class SeestarQueuedStacker:
                                         batch_wcs = None
                                         try:
                                             batch_wcs = WCS(hdr, naxis=2)
+                                            h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
+                                            w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
+                                            batch_wcs.pixel_shape = (w, h)
+                                            batch_wcs.wcs.naxis1 = w
+                                            batch_wcs.wcs.naxis2 = h
                                         except Exception:
                                             batch_wcs = None
 
@@ -4181,6 +4186,11 @@ class SeestarQueuedStacker:
                         batch_wcs = None
                         try:
                             batch_wcs = WCS(hdr, naxis=2)
+                            h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
+                            w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
+                            batch_wcs.pixel_shape = (w, h)
+                            batch_wcs.wcs.naxis1 = w
+                            batch_wcs.wcs.naxis2 = h
                         except Exception:
                             batch_wcs = None
 
@@ -8801,10 +8811,11 @@ class SeestarQueuedStacker:
 
         try:
             new_wcs = WCS(hdr, naxis=2)
-            new_wcs.pixel_shape = (
-                stack.shape[1],
-                stack.shape[0],
-            )
+            h = stack.shape[0]
+            w = stack.shape[1]
+            new_wcs.pixel_shape = (w, h)
+            new_wcs.wcs.naxis1 = w
+            new_wcs.wcs.naxis2 = h
         except Exception:
             new_wcs = None
 
@@ -9007,7 +9018,12 @@ class SeestarQueuedStacker:
         np.nan_to_num(final_wht, copy=False)
 
 
-        if self.solve_batches:
+        solve_needed = (
+            self.solve_batches
+            or self.reproject_between_batches
+            or self.reproject_coadd_final
+        )
+        if solve_needed:
             # Always attempt to solve the intermediate batch with ASTAP so that a
             # valid WCS is present on each stacked batch file. This is required for
             # the optional inter-batch reprojection step (performed on stacked batches).
@@ -9155,8 +9171,14 @@ class SeestarQueuedStacker:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
                 batch_wcs = WCS(hdr, naxis=2)
-                h, w = data_cxhxw.shape[-2:]
+                h = int(hdr.get("NAXIS2", data_cxhxw.shape[-2]))
+                w = int(hdr.get("NAXIS1", data_cxhxw.shape[-1]))
                 batch_wcs.pixel_shape = (w, h)
+                try:
+                    batch_wcs.wcs.naxis1 = w
+                    batch_wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
             except Exception:
                 continue
 
@@ -9310,6 +9332,11 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
+                try:
+                    wcs.wcs.naxis1 = w
+                    wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
                 headers.append(hdr)
@@ -10907,8 +10934,7 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = bool(reproject_between_batches)
         # When inter-batch reprojection is requested we typically want to keep
         # the reference WCS stable. If the caller did not explicitly set
-        # ``freeze_reference_wcs`` beforehand, enable it automatically so that
-        # intermediate batches are not solved again.
+        # ``freeze_reference_wcs`` beforehand, enable it automatically.
         if self.reproject_between_batches and not self.freeze_reference_wcs:
             self.freeze_reference_wcs = True
 
@@ -10917,11 +10943,9 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
 
-        # Disable solving of intermediate batches when reprojection is active
-        # and the reference WCS should remain fixed.
-        self.solve_batches = not (
-            self.reproject_between_batches and self.freeze_reference_wcs
-        )
+        # Always solve intermediate batches when reprojection is requested so
+        # that a valid WCS is available for each stacked batch.
+        self.solve_batches = True
 
         # Determine if we should keep the original input frame size when
         # reprojection between batches is enabled (to avoid changing the
