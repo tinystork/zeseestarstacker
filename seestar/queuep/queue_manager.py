@@ -3671,7 +3671,9 @@ class SeestarQueuedStacker:
                                             h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
                                             w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
                                             batch_wcs.pixel_shape = (w, h)
+
                                             batch_wcs.array_shape = (h, w)
+
                                         except Exception:
                                             batch_wcs = None
 
@@ -4188,7 +4190,9 @@ class SeestarQueuedStacker:
                             h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
                             w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
                             batch_wcs.pixel_shape = (w, h)
+
                             batch_wcs.array_shape = (h, w)
+
                         except Exception:
                             batch_wcs = None
 
@@ -8812,7 +8816,9 @@ class SeestarQueuedStacker:
             h = stack.shape[0]
             w = stack.shape[1]
             new_wcs.pixel_shape = (w, h)
+
             new_wcs.array_shape = (h, w)
+
         except Exception:
             new_wcs = None
 
@@ -9171,7 +9177,9 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2", data_cxhxw.shape[-2]))
                 w = int(hdr.get("NAXIS1", data_cxhxw.shape[-1]))
                 batch_wcs.pixel_shape = (w, h)
+
                 batch_wcs.array_shape = (h, w)
+
             except Exception:
                 continue
 
@@ -9326,7 +9334,9 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
+
                 wcs.array_shape = (h, w)
+
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
                 headers.append(hdr)
