@@ -978,41 +978,20 @@ def gpu_assemble_final_mosaic_incremental(*args, **kwargs):
     raise NotImplementedError("GPU implementation not available")
 
 
-def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
-    """Simplified GPU implementation using CuPy."""
-    import cupy as cp
-    data_gpu = [cp.asarray(d) for d in data_list]
-    mosaic_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    weight_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    for img in data_gpu:
-        # Placeholder for GPU interpolation logic
-        pass
-    return cp.asnumpy(mosaic_gpu), cp.asnumpy(weight_gpu)
-
-
-def reproject_and_coadd_wrapper(
-    data_list,
-    wcs_list,
-    shape_out,
-    use_gpu=False,
-    cpu_function=None,
-    **kwargs,
-):
+def reproject_and_coadd_wrapper(data_list, wcs_list, shape_out, use_gpu=False, cpu_func=None, **kwargs):
+    # Dispatch to CPU or GPU ``reproject_and_coadd`` depending on availability."""
     if use_gpu and GPU_AVAILABLE:
         try:
             return gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs)
-        except Exception as e:  # pragma: no cover - GPU failures
+        except Exception as e:  # pragma: no cover - GPU errors
             import logging
-
             logging.getLogger(__name__).warning(
                 "GPU reprojection failed (%s), fallback CPU", e
             )
-    if cpu_function is None:
-        cpu_function = cpu_reproject_and_coadd
-    inputs = list(zip(data_list, wcs_list))
-    output_proj = kwargs.pop("output_projection")
-    return cpu_function(inputs, output_proj, shape_out, **kwargs)
-
+    input_pairs = list(zip(data_list, wcs_list))
+    output_projection = kwargs.pop("output_projection", None)
+    func = cpu_func or cpu_reproject_and_coadd
+    return func(input_pairs, output_projection, shape_out, **kwargs)
 
 
 def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
@@ -1032,20 +1011,6 @@ def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
     return cp.asnumpy(mosaic_gpu), cp.asnumpy(weight_gpu)
 
 
-def reproject_and_coadd_wrapper(data_list, wcs_list, shape_out, use_gpu=False, cpu_func=None, **kwargs):
-    """Dispatch to CPU or GPU ``reproject_and_coadd`` depending on availability."""
-    if use_gpu and GPU_AVAILABLE:
-        try:
-            return gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs)
-        except Exception as e:  # pragma: no cover - GPU errors
-            import logging
-            logging.getLogger(__name__).warning(
-                "GPU reprojection failed (%s), fallback CPU", e
-            )
-    input_pairs = list(zip(data_list, wcs_list))
-    output_projection = kwargs.pop("output_projection", None)
-    func = cpu_func or cpu_reproject_and_coadd
-    return func(input_pairs, output_projection, shape_out, **kwargs)
 
 
 

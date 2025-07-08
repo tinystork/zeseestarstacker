@@ -13,6 +13,7 @@ __pycache__/
 *.tmp
 *.swp
 *.bak
+*.dat
 
 # === Fichiers systèmes / éditeurs ===
 .DS_Store

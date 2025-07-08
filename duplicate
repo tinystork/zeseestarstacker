@@ -1,0 +1,107 @@
+import ast
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+
+class DuplicateDefFinder(ast.NodeVisitor):
+    """Walk the AST and collect all function & class definitions.
+
+    Attributes
+    ----------
+    defs : dict[str, list[int]]
+        Maps each definition name to the line numbers where it appears.
+    """
+
+    def __init__(self) -> None:
+        self.defs: dict[str, list[int]] = defaultdict(list)
+
+    # --- Visitors -----------------------------------------------------
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self._add(node.name, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self._add(node.name, node.lineno)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        self._add(node.name, node.lineno)
+        self.generic_visit(node)
+
+    # -----------------------------------------------------------------
+    def _add(self, name: str, lineno: int) -> None:
+        self.defs[name].append(lineno)
+
+    # -----------------------------------------------------------------
+    def duplicates(self) -> dict[str, list[int]]:
+        """Return only names defined more than once."""
+        return {n: lns for n, lns in self.defs.items() if len(lns) > 1}
+
+
+# ----------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------
+
+def find_duplicates(path: Path) -> dict[str, list[int]]:
+    """Parse *path* and return duplicate defs.
+
+    Parameters
+    ----------
+    path : Path
+        Path to a Python source file.
+
+    Returns
+    -------
+    dict[str, list[int]]
+        Mapping of duplicate names to the list of line numbers where
+        each duplicate was encountered.
+    """
+
+    try:
+        source = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source = path.read_text(encoding="latin-1")
+
+    tree = ast.parse(source, filename=str(path))
+    finder = DuplicateDefFinder()
+    finder.visit(tree)
+    return finder.duplicates()
+
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv:
+        print("Usage: python duplicate_definitions_finder.py <file_or_dir> [<file_or_dir> ...]")
+        sys.exit(1)
+
+    # Expand supplied paths (recursively list *.py inside directories)
+    files: list[Path] = []
+    for arg in argv:
+        p = Path(arg)
+        if p.is_dir():
+            files.extend(p.rglob("*.py"))
+        else:
+            files.append(p)
+
+    any_duplicates = False
+    for file in files:
+        dupes = find_duplicates(file)
+        if dupes:
+            any_duplicates = True
+            print(f"{file}:")
+            for name, lines in dupes.items():
+                locs = ", ".join(map(str, sorted(lines)))
+                print(f"  {name} → {len(lines)} fois (lignes {locs})")
+    if not any_duplicates:
+        print("✅ Aucun doublon trouvé !")
+
+
+if __name__ == "__main__":
+    main()
