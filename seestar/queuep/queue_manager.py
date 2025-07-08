@@ -11481,6 +11481,19 @@ class SeestarQueuedStacker:
             # --- Sauvegarde ---
             hdu = fits.PrimaryHDU(data=data_to_save, header=header_to_save)
             hdul = fits.HDUList([hdu])
+
+            from astropy.wcs import WCS
+            import numpy as np
+
+            a, b = tf.params[0, 0], tf.params[1, 0]
+            tx, ty = tf.params[0, 2], tf.params[1, 2]
+
+            w = WCS(hdul[0].header)
+            R = np.array([[a, -b], [b, a]])
+            w.pixel_scale_matrix = w.pixel_scale_matrix @ R
+            w.wcs.crpix -= [tx, ty]
+            hdul[0].header.update(w.to_header())
+
             hdul.writeto(
                 temp_filepath, overwrite=True, checksum=False, output_verify="ignore"
             )
