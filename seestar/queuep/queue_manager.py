@@ -31,6 +31,7 @@ import tempfile
 import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
+import inspect
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
@@ -1074,6 +1075,10 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
                 )
+                if self.reproject_coadd_final and not self.freeze_reference_wcs:
+                    # Ensure final reprojection uses the same orientation as the
+                    # reference frame when combining with reproject_and_coadd
+                    self.freeze_reference_wcs = True
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -3774,9 +3779,20 @@ class SeestarQueuedStacker:
                                     logger.debug(
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'."
                                     )
-                                    temp_driz_file_path = self._save_drizzle_input_temp(
-                                        aligned_data, header_orig, matrix_M_val
-                                    )
+                                    try:
+                                        sig = inspect.signature(self._save_drizzle_input_temp)
+                                        if len(sig.parameters) >= 3:
+                                            temp_driz_file_path = self._save_drizzle_input_temp(
+                                                aligned_data, header_orig, matrix_M_val
+                                            )
+                                        else:
+                                            temp_driz_file_path = self._save_drizzle_input_temp(
+                                                aligned_data, header_orig
+                                            )
+                                    except Exception:
+                                        temp_driz_file_path = self._save_drizzle_input_temp(
+                                            aligned_data, header_orig, matrix_M_val
+                                        )
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(
                                             temp_driz_file_path
@@ -10824,6 +10840,10 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
+        if self.reproject_coadd_final and not self.freeze_reference_wcs:
+            # Reproject & coadd should align to the initial reference just like
+            # inter-batch reprojection. Ensure the reference WCS is frozen.
+            self.freeze_reference_wcs = True
 
         # Disable solving of intermediate batches when reprojection is active
         # and the reference WCS should remain fixed.
