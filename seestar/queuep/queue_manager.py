@@ -9211,7 +9211,16 @@ class SeestarQueuedStacker:
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
-            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            if (
+                data_cxhxw.ndim == 3
+                and data_cxhxw.shape[0] in (1, 3)
+                and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+            ):
+                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            else:
+                img_hwc = data_cxhxw
+                if img_hwc.ndim == 2:
+                    img_hwc = img_hwc[..., np.newaxis]
             wcs_for_grid.append(batch_wcs)
             headers_for_grid.append(hdr)
             for ch in range(img_hwc.shape[2]):
