@@ -1,0 +1,78 @@
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+
+from .reproject_utils import reproject_and_coadd, reproject_interp
+from .weight_utils import make_radial_weight_map
+
+
+def assemble_final_mosaic_with_reproject_coadd(
+    master_tile_fits_with_wcs_list,
+    final_output_wcs: WCS,
+    final_output_shape_hw: tuple,
+    match_bg: bool = True,
+):
+    """Assemble master tiles using ``reproject_and_coadd``.
+
+    Parameters
+    ----------
+    master_tile_fits_with_wcs_list : list
+        List of ``(path, WCS)`` tuples for stacked batches.
+    final_output_wcs : astropy.wcs.WCS
+        Target WCS of the mosaic.
+    final_output_shape_hw : tuple
+        Shape ``(H, W)`` of the final mosaic.
+    match_bg : bool, optional
+        Forwarded to ``reproject_and_coadd``.
+
+    Returns
+    -------
+    tuple
+        (mosaic_hwc, coverage_hw) both ``np.ndarray`` or ``(None, None)`` on
+        failure.
+    """
+
+    if not master_tile_fits_with_wcs_list:
+        return None, None
+
+    channel_data = [[] for _ in range(3)]
+    channel_wht = [[] for _ in range(3)]
+
+    for path, wcs in master_tile_fits_with_wcs_list:
+        try:
+            with fits.open(path, memmap=False) as hdul:
+                data = hdul[0].data.astype(np.float32)
+        except Exception:
+            continue
+
+        if data.ndim == 3 and data.shape[0] in (1, 3):
+            data = np.moveaxis(data, 0, -1)
+
+        cov = np.ones(data.shape[:2], dtype=np.float32)
+        cov *= make_radial_weight_map(*cov.shape)
+
+        for ch in range(data.shape[2]):
+            channel_data[ch].append((data[..., ch], wcs))
+            channel_wht[ch].append(cov)
+
+    mosaic_channels = []
+    coverage = None
+    for ch in range(3):
+        try:
+            sci, cov = reproject_and_coadd(
+                channel_data[ch],
+                output_projection=final_output_wcs,
+                shape_out=final_output_shape_hw,
+                input_weights=channel_wht[ch],
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=match_bg,
+            )
+        except Exception:
+            return None, None
+        mosaic_channels.append(sci.astype(np.float32))
+        if coverage is None:
+            coverage = cov.astype(np.float32)
+
+    mosaic = np.stack(mosaic_channels, axis=-1)
+    return mosaic, coverage

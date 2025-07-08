@@ -9291,13 +9291,13 @@ class SeestarQueuedStacker:
             return img_hwc, cov_hw, mosaic_wcs
 
     def _reproject_classic_batches_zm(self, batch_files):
-        """Attempt reproject&coadd using ZeMosaic. Return True if successful."""
+        """Reproject and coadd classic batches without ZeMosaic."""
         try:
-            from zemosaic import zemosaic_worker
+            from seestar.enhancement.mosaic_utils import (
+                assemble_final_mosaic_with_reproject_coadd,
+            )
         except Exception as e:
-            self.update_progress(f"⚠️ ZeMosaic indisponible: {e}", "WARN")
-            return False
-        if not hasattr(zemosaic_worker, "assemble_final_mosaic_with_reproject_coadd"):
+            self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
             return False
 
         master_tiles = []
@@ -9348,22 +9348,14 @@ class SeestarQueuedStacker:
                     return False
 
         try:
-            data_hwc, cov_hw = zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
+            data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
                 master_tile_fits_with_wcs_list=master_tiles,
                 final_output_wcs=out_wcs,
                 final_output_shape_hw=out_shape,
-                progress_callback=lambda m, p=None, lvl=None, **kw: self.update_progress(
-                    f"   {m}", p
-                ),
-                n_channels=3,
                 match_bg=True,
-                apply_crop=getattr(self, "apply_master_tile_crop", False),
-                crop_percent=getattr(self, "master_tile_crop_percent_decimal", 0.0)
-                * 100.0,
-                use_gpu=False,
             )
         except Exception as e:
-            self.update_progress(f"⚠️ Échec ZeMosaic: {e}", "WARN")
+            self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
             return False
 
         if data_hwc is None:
