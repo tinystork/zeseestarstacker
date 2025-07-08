@@ -9244,6 +9244,7 @@ class SeestarQueuedStacker:
         master_tiles = []
         wcs_list = []
         headers = []
+        weight_maps = []
         for sci_path, _wht_paths in batch_files:
             try:
                 hdr = fits.getheader(sci_path, memmap=False)
@@ -9254,6 +9255,13 @@ class SeestarQueuedStacker:
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
                 headers.append(hdr)
+                try:
+                    cov = fits.getdata(_wht_paths[0]).astype(np.float32)
+                    np.nan_to_num(cov, copy=False)
+                    cov *= make_radial_weight_map(h, w)
+                except Exception:
+                    cov = np.ones((h, w), dtype=np.float32)
+                weight_maps.append(cov)
             except Exception as e:
                 self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
 
@@ -9300,6 +9308,7 @@ class SeestarQueuedStacker:
                 final_output_wcs=out_wcs,
                 final_output_shape_hw=out_shape,
                 match_bg=True,
+                weight_arrays=weight_maps,
             )
         except Exception as e:
             self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
