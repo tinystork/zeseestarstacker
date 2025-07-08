@@ -5,7 +5,9 @@ from astropy.wcs import WCS
 from .reproject_utils import reproject_and_coadd, reproject_interp
 from .weight_utils import make_radial_weight_map
 from zemosaic import zemosaic_utils
+
 import inspect
+
 
 
 def assemble_final_mosaic_with_reproject_coadd(
@@ -57,6 +59,23 @@ def assemble_final_mosaic_with_reproject_coadd(
         else final_output_wcs
     )
 
+    # Validate the requested output shape against the WCS
+    try:
+        w_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[0])
+        h_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[1])
+    except Exception:
+        w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", final_output_shape_hw[1])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[1]
+        h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", final_output_shape_hw[0])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[0]
+
+    expected_hw = (h_wcs, w_wcs)
+    h_out, w_out = map(int, final_output_shape_hw)
+    if (h_out, w_out) != expected_hw:
+        if (w_out, h_out) == expected_hw:
+            final_output_shape_hw = expected_hw
+            h_out, w_out = final_output_shape_hw
+        else:
+            return None, None
+
     channel_data = [[] for _ in range(3)]
     channel_wht = [[] for _ in range(3)]
     wcs_list = []
@@ -83,6 +102,7 @@ def assemble_final_mosaic_with_reproject_coadd(
     coverage = None
     for ch in range(3):
         try:
+
             kwargs = {}
             try:
                 sig = inspect.signature(reproject_and_coadd)
@@ -93,11 +113,14 @@ def assemble_final_mosaic_with_reproject_coadd(
             except Exception:
                 kwargs["match_background"] = match_bg
 
+
             sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
                 data_list=channel_data[ch],
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
+
                 output_projection=output_header,
+
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
