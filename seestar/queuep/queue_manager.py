@@ -2450,11 +2450,13 @@ class SeestarQueuedStacker:
             scale of the mosaic is divided by this factor. Defaults to ``1.0``.
         """
 
+
         if self.freeze_reference_wcs and self.reference_wcs_object is not None:
             return self.reference_wcs_object, (
                 int(self.reference_header_for_wcs["NAXIS2"]),
                 int(self.reference_header_for_wcs["NAXIS1"]),
             )
+
 
         num_wcs = len(all_input_wcs_list)
         logger.debug(
@@ -2574,6 +2576,7 @@ class SeestarQueuedStacker:
                 expected_wh[1],
                 target_res_deg_per_pix,
             )
+
 
 
         return out_wcs, out_shape_hw
