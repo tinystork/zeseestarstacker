@@ -10565,8 +10565,8 @@ class SeestarQueuedStacker:
         *,
         save_as_float32=False,
         preserve_linear_output=False,
-        reproject_between_batches=False,
-        reproject_coadd_final=False,
+        reproject_between_batches=None,
+        reproject_coadd_final=None,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -10581,6 +10581,8 @@ class SeestarQueuedStacker:
         MODIFIED:
             - Ajout des arguments ``save_as_float32``, ``reproject_between_batches``
               et ``reproject_coadd_final``.
+            - ``reproject_between_batches`` et ``reproject_coadd_final`` peuvent
+              être ``None`` pour conserver la valeur configurée sur l'instance.
         Version: V_StartProcessing_SaveDtypeOption_2
         """
 
@@ -10795,7 +10797,8 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.preserve_linear_output (attribut d'instance) mis à : {self.preserve_linear_output} (depuis argument {preserve_linear_output})"
         )
 
-        self.reproject_between_batches = bool(reproject_between_batches)
+        if reproject_between_batches is not None:
+            self.reproject_between_batches = bool(reproject_between_batches)
         # When inter-batch reprojection is requested we typically want to keep
         # the reference WCS stable. If the caller did not explicitly set
         # ``freeze_reference_wcs`` beforehand, enable it automatically so that
@@ -10803,7 +10806,8 @@ class SeestarQueuedStacker:
         if self.reproject_between_batches and not self.freeze_reference_wcs:
             self.freeze_reference_wcs = True
 
-        self.reproject_coadd_final = bool(reproject_coadd_final)
+        if reproject_coadd_final is not None:
+            self.reproject_coadd_final = bool(reproject_coadd_final)
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
