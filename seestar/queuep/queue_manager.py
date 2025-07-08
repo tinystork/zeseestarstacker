@@ -2449,7 +2449,11 @@ class SeestarQueuedStacker:
         return output_wcs, (nh, nw)
 
     def _calculate_final_mosaic_grid(
-        self, all_input_wcs_list, all_input_headers_list=None, scale_factor: float = 1.0
+        self,
+        all_input_wcs_list,
+        all_input_headers_list=None,
+        scale_factor: float = 1.0,
+        auto_rotate: bool = False,
     ):
         """Compute the final mosaic grid using ``find_optimal_celestial_wcs``.
 
@@ -2463,6 +2467,9 @@ class SeestarQueuedStacker:
         scale_factor : float, optional
             Drizzle scale factor to apply to the output grid. The final pixel
             scale of the mosaic is divided by this factor. Defaults to ``1.0``.
+        auto_rotate : bool, optional
+            If ``True`` the output grid is allowed to rotate to minimize the
+            final canvas size similar to ZeMosaic's behaviour.
         """
 
 
@@ -2552,7 +2559,7 @@ class SeestarQueuedStacker:
                 out_wcs, out_shape_hw = find_optimal_celestial_wcs(
                     inputs_for_optimal,
                     resolution=Angle(target_res_deg_per_pix, unit=u.deg),
-                    auto_rotate=False,
+                    auto_rotate=auto_rotate,
                     projection="TAN",
                     reference=None,
                     frame="icrs",
@@ -9125,6 +9132,7 @@ class SeestarQueuedStacker:
                 wcs_for_grid,
                 headers_for_grid,
                 scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                auto_rotate=True,
             )
         if out_wcs is None or out_shape is None:
             self.update_progress(
@@ -9167,6 +9175,13 @@ class SeestarQueuedStacker:
                 final_cov = cov.astype(np.float32)
 
         final_img_hwc = np.stack(final_channels, axis=-1)
+
+        if self.reference_wcs_object is not None:
+            final_img_hwc, final_cov, out_wcs = self._crop_to_reference_wcs(
+                final_img_hwc,
+                final_cov,
+                out_wcs,
+            )
         self._save_final_stack(
             "_classic_reproject",
             drizzle_final_sci_data=final_img_hwc,
@@ -9258,6 +9273,7 @@ class SeestarQueuedStacker:
                 wcs_list,
                 headers,
                 scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                auto_rotate=True,
             )
             if out_wcs is None:
                 return False

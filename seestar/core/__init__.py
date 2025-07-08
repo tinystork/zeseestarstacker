@@ -3,6 +3,20 @@ Package core pour Seestar - fournit les fonctionnalités de base pour le traitem
 (stacking.py a été retiré car remplacé par queue_manager.py)
 """
 
+# Compatibilité NumPy 2.x : certaines versions de ``photutils`` s'attendent à
+# ``numpy.lib.index_tricks.index_exp``. Si ce module n'est plus exposé,
+# on crée un équivalent minimal utilisant ``numpy.index_exp``.
+import sys
+import types
+import numpy as np
+
+try:  # pragma: no cover - si la compatibilité est déjà présente
+    from numpy.lib import index_tricks as _idx_mod  # noqa: F401
+except Exception:  # pragma: no cover - pour environnements NumPy 2+
+    stub = types.ModuleType("numpy.lib.index_tricks")
+    stub.index_exp = np.index_exp
+    sys.modules.setdefault("numpy.lib.index_tricks", stub)
+
 from .image_processing import (
     load_and_validate_fits,
     debayer_image,
