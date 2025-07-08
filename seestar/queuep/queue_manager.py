@@ -9006,6 +9006,28 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
+        # Crop the stacked tile before solving so the WCS corresponds
+        # to the final data saved on disk.
+        if (
+            getattr(self, "apply_master_tile_crop", False)
+            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
+        ):
+            try:
+                cp = self.master_tile_crop_percent_decimal
+                dh = int(final_stacked.shape[0] * cp)
+                dw = int(final_stacked.shape[1] * cp)
+                if dh > 0 or dw > 0:
+                    end_h = -dh if dh != 0 else None
+                    end_w = -dw if dw != 0 else None
+                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
+                    final_wht = final_wht[dh:end_h, dw:end_w]
+                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
+                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+            except Exception:
+                pass
+
 
         if self.solve_batches:
             # Always attempt to solve the intermediate batch with ASTAP so that a
@@ -9079,29 +9101,6 @@ class SeestarQueuedStacker:
                 header["NAXIS1"] = stacked_np.shape[1]
                 header["NAXIS2"] = stacked_np.shape[0]
 
-        final_stacked = stacked_np
-        final_wht = wht_2d
-        np.nan_to_num(final_wht, copy=False)
-
-        if (
-            getattr(self, "apply_master_tile_crop", False)
-            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
-        ):
-            try:
-                cp = self.master_tile_crop_percent_decimal
-                dh = int(final_stacked.shape[0] * cp)
-                dw = int(final_stacked.shape[1] * cp)
-                if dh > 0 or dw > 0:
-                    end_h = -dh if dh != 0 else None
-                    end_w = -dw if dw != 0 else None
-                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
-                    final_wht = final_wht[dh:end_h, dw:end_w]
-                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
-                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
-                    header["NAXIS1"] = final_stacked.shape[1]
-                    header["NAXIS2"] = final_stacked.shape[0]
-            except Exception:
-                pass
 
         data_cxhxw = np.moveaxis(final_stacked, -1, 0)
         header["NAXIS"] = 3
@@ -9122,17 +9121,6 @@ class SeestarQueuedStacker:
         fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
             sci_fits, overwrite=True, output_verify="ignore"
         )
-
-        # After cropping, resolve again with ASTAP to ensure the WCS
-        # matches the final saved tile. This avoids misalignment when
-        # assembling with reproject_and_coadd.
-        if self.solve_batches:
-            try:
-                if self._run_astap_and_update_header(sci_fits):
-                    solved_hdr = fits.getheader(sci_fits, memmap=False)
-                    header.update(solved_hdr)
-            except Exception:
-                pass
 
         for ch_i in range(final_stacked.shape[2]):
             wht_path = os.path.join(

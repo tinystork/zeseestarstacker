@@ -681,7 +681,7 @@ def test_save_classic_batch_crop_resolves(monkeypatch, tmp_path):
 
     sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
 
-    assert calls["n"] == 2
+    assert calls["n"] == 1
 
 
 def test_calculate_fixed_orientation_grid():
