@@ -55,7 +55,6 @@ def assemble_final_mosaic_with_reproject_coadd(
             return None, None
 
 
-
     data_all = []
 
     wcs_list = []
@@ -80,6 +79,9 @@ def assemble_final_mosaic_with_reproject_coadd(
     mosaic_channels = []
     coverage = None
     n_ch = data_all[0].shape[2] if data_all else 0
+
+    header = final_output_wcs.to_header(relax=True)
+
     for ch in range(n_ch):
         try:
 
@@ -100,7 +102,7 @@ def assemble_final_mosaic_with_reproject_coadd(
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
 
-                output_projection=final_output_wcs,
+                output_projection=header,
 
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
