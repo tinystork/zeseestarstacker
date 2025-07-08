@@ -49,7 +49,7 @@ from ..tools.file_ops import move_to_stacked
 logger.debug("Imports standard OK.")
 
 
-from typing import Literal
+from typing import Literal, List, Tuple
 
 import astroalign as aa
 import cv2
@@ -118,6 +118,12 @@ _last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0  # horodatage du dernier push
 _QM_DEBOUNCE = 0.20  # secondes mini entre deux messages GUI
+
+# ----------------------------------------------------------------------
+# Type aliases
+# ----------------------------------------------------------------------
+
+tBatchFiles = List[Tuple[str, List[str]]]
 
 # ----------------------------------------------------------------------
 # Pool size helper for CPU reprojection
@@ -9073,20 +9079,31 @@ class SeestarQueuedStacker:
 
         return sci_fits, wht_paths
 
-    def _reproject_classic_batches(self, batch_files):
-        """Reproject saved classic batches to a common grid using reproject_and_coadd."""
+    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> None:
+        """Reproject saved *classic* batches to a common grid and merge them.
+
+        This variant first aligns **every batch** onto ``self.reference_wcs_object``
+        (when provided), ensuring that the subsequent call to
+        :pyfunc:`reproject_and_coadd` only has to *combine* images that are already
+        pixel‑perfectly registered.  This reproduces the behaviour of the simple
+        « Reproject » mode and prevents the blur previously observed in
+        « Reproject + Co‑add ».
+        """
 
         from seestar.enhancement.reproject_utils import (
             reproject_and_coadd,
             reproject_interp,
         )
 
-        channel_arrays_wcs = [[] for _ in range(3)]
-        channel_footprints = [[] for _ in range(3)]
-        wcs_for_grid = []
+        # --- 1. Containers -------------------------------------------------------
+        channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
+        channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
+        wcs_for_grid: List[WCS] = []
         headers_for_grid = []
 
+        # --- 2. Loop over saved batch FITS --------------------------------------
         for sci_path, wht_paths in batch_files:
+            # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
@@ -9095,30 +9112,63 @@ class SeestarQueuedStacker:
                 h, w = data_cxhxw.shape[-2:]
                 batch_wcs.pixel_shape = (w, h)
             except Exception:
-                continue
+                continue  # silently skip unreadable batch
 
+            # 2.2 Load coverage / weight map (or fallback)
             try:
                 coverage = fits.getdata(wht_paths[0]).astype(np.float32)
                 np.nan_to_num(coverage, copy=False)
-                h, w = coverage.shape
-                coverage *= make_radial_weight_map(h, w)
+                coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
-            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            # ------------------------------------------------------------------
+            # 2.3 **NEW** – project the *whole batch* onto the reference WCS
+            # ------------------------------------------------------------------
+            if self.reference_wcs_object is not None:
+                tgt_h, tgt_w = (
+                    self.reference_wcs_object.pixel_shape[1],
+                    self.reference_wcs_object.pixel_shape[0],
+                ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
+
+                # Science image (3‑channels)
+                img_hwc = reproject_to_reference_wcs(
+                    np.moveaxis(data_cxhxw, 0, -1),  # CxHxW ➜ HxWxC
+                    batch_wcs,
+                    self.reference_wcs_object,
+                    (tgt_h, tgt_w),
+                )
+
+                # Weight map – single channel, same helper works
+                coverage = reproject_to_reference_wcs(
+                    coverage,
+                    batch_wcs,
+                    self.reference_wcs_object,
+                    (tgt_h, tgt_w),
+                )
+
+                batch_wcs = self.reference_wcs_object  # Subsequent code must use it
+            else:
+                # Fall back: keep original orientation
+                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+
+            # 2.4 Feed per‑channel lists -------------------------------------
             wcs_for_grid.append(batch_wcs)
             headers_for_grid.append(hdr)
-            for ch in range(img_hwc.shape[2]):
+
+            for ch in range(3):
                 channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
                 channel_footprints[ch].append(coverage)
 
+        # --- 3. Sanity checks ----------------------------------------------------
         if len(wcs_for_grid) < 2:
             self.update_progress(
-                f"⚠️ Reprojection ignorée: seulement {len(wcs_for_grid)} WCS valides.",
+                f"⚠️ Reprojection ignorée : seulement {len(wcs_for_grid)} WCS valides.",
                 "WARN",
             )
             return
 
+        # --- 4. Determine output grid -------------------------------------------
         if self.reference_wcs_object is not None and self.reference_shape is not None:
             out_wcs = self.reference_wcs_object
             out_shape = self.reference_shape
@@ -9136,28 +9186,12 @@ class SeestarQueuedStacker:
             )
         if out_wcs is None or out_shape is None:
             self.update_progress(
-                "⚠️ Reprojection ignorée: échec du calcul de la grille finale.",
+                "⚠️ Reprojection ignorée : échec du calcul de la grille finale.",
                 "WARN",
             )
             return
 
-        # Validate output shape against the WCS to avoid orientation issues
-        if out_wcs.pixel_shape is not None:
-            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
-            if out_shape != expected_hw:
-                if out_shape == expected_hw[::-1]:
-                    self.update_progress(
-                        "⚠️ Final grid shape transposée, correction automatique.",
-                        "WARN",
-                    )
-                    out_shape = expected_hw
-                else:
-                    self.update_progress(
-                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
-                        "ERROR",
-                    )
-                    return
-
+        # --- 5. Combine per‑channel stacks --------------------------------------
         final_channels = []
         final_cov = None
         for ch in range(3):
@@ -9174,20 +9208,11 @@ class SeestarQueuedStacker:
             if final_cov is None:
                 final_cov = cov.astype(np.float32)
 
-        final_img_hwc = np.stack(final_channels, axis=-1)
+        # --- 6. Store results on the instance -----------------------------------
+        self.current_stack = np.stack(final_channels, axis=-1)
+        self.current_coverage = final_cov
 
-        if self.reference_wcs_object is not None:
-            final_img_hwc, final_cov, out_wcs = self._crop_to_reference_wcs(
-                final_img_hwc,
-                final_cov,
-                out_wcs,
-            )
-        self._save_final_stack(
-            "_classic_reproject",
-            drizzle_final_sci_data=final_img_hwc,
-            drizzle_final_wht_data=final_cov,
-            preserve_linear_output=True,
-        )
+        # Caller will take care of saving the FITS file / updating GUI, etc.
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
