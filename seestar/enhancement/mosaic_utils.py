@@ -3,8 +3,10 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from .reproject_utils import reproject_and_coadd, reproject_interp
+
 from zemosaic import zemosaic_utils
 import inspect
+
 
 
 def assemble_final_mosaic_with_reproject_coadd(
@@ -43,6 +45,7 @@ def assemble_final_mosaic_with_reproject_coadd(
         w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", w)) if hasattr(final_output_wcs, "wcs") else w
         h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", h)) if hasattr(final_output_wcs, "wcs") else h
 
+
     expected_hw = (h_wcs, w_wcs)
     if (h, w) != expected_hw:
         if (w, h) == expected_hw:
@@ -53,6 +56,7 @@ def assemble_final_mosaic_with_reproject_coadd(
 
 
     data_all = []
+
     wcs_list = []
 
     for path, wcs in master_tile_fits_with_wcs_list:
@@ -67,16 +71,20 @@ def assemble_final_mosaic_with_reproject_coadd(
         if data.ndim == 2:
             data = data[..., np.newaxis]
 
+
         data_all.append(data)
         wcs_list.append(wcs)
+
 
     mosaic_channels = []
     coverage = None
     n_ch = data_all[0].shape[2] if data_all else 0
+
     header = final_output_wcs.to_header(relax=True)
 
     for ch in range(n_ch):
         try:
+
             kwargs = {}
             try:
                 sig = inspect.signature(reproject_and_coadd)
@@ -93,11 +101,14 @@ def assemble_final_mosaic_with_reproject_coadd(
                 data_list=data_list,
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
+
                 output_projection=header,
+
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
+
                 **kwargs,
             )
         except Exception:
