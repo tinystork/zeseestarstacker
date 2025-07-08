@@ -9115,11 +9115,7 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object is not None and self.reference_shape is not None:
             out_wcs = self.reference_wcs_object
             out_shape = self.reference_shape
-        elif (
-            self.freeze_reference_wcs
-            and self.reproject_between_batches
-            and self.reference_wcs_object is not None
-        ):
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
             out_wcs, out_shape = self._calculate_fixed_orientation_grid(
                 self.reference_wcs_object,
                 scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
@@ -9252,6 +9248,11 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object is not None and self.reference_shape is not None:
             out_wcs = self.reference_wcs_object
             out_shape = self.reference_shape
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
         else:
             out_wcs, out_shape = self._calculate_final_mosaic_grid(
                 wcs_list,
