@@ -3668,6 +3668,11 @@ class SeestarQueuedStacker:
                                         batch_wcs = None
                                         try:
                                             batch_wcs = WCS(hdr, naxis=2)
+                                            h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
+                                            w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
+                                            batch_wcs.pixel_shape = (w, h)
+                                            batch_wcs.wcs.naxis1 = w
+                                            batch_wcs.wcs.naxis2 = h
                                         except Exception:
                                             batch_wcs = None
 
@@ -4181,6 +4186,11 @@ class SeestarQueuedStacker:
                         batch_wcs = None
                         try:
                             batch_wcs = WCS(hdr, naxis=2)
+                            h = int(hdr.get("NAXIS2", stacked_np.shape[0]))
+                            w = int(hdr.get("NAXIS1", stacked_np.shape[1]))
+                            batch_wcs.pixel_shape = (w, h)
+                            batch_wcs.wcs.naxis1 = w
+                            batch_wcs.wcs.naxis2 = h
                         except Exception:
                             batch_wcs = None
 
@@ -8801,10 +8811,11 @@ class SeestarQueuedStacker:
 
         try:
             new_wcs = WCS(hdr, naxis=2)
-            new_wcs.pixel_shape = (
-                stack.shape[1],
-                stack.shape[0],
-            )
+            h = stack.shape[0]
+            w = stack.shape[1]
+            new_wcs.pixel_shape = (w, h)
+            new_wcs.wcs.naxis1 = w
+            new_wcs.wcs.naxis2 = h
         except Exception:
             new_wcs = None
 
@@ -9321,6 +9332,11 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
+                try:
+                    wcs.wcs.naxis1 = w
+                    wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
                 headers.append(hdr)
