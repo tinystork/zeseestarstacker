@@ -35,6 +35,23 @@ def assemble_final_mosaic_with_reproject_coadd(
     if not master_tile_fits_with_wcs_list:
         return None, None
 
+    # Validate the requested output shape against the WCS
+    try:
+        w_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[0])
+        h_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[1])
+    except Exception:
+        w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", final_output_shape_hw[1])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[1]
+        h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", final_output_shape_hw[0])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[0]
+
+    expected_hw = (h_wcs, w_wcs)
+    h_out, w_out = map(int, final_output_shape_hw)
+    if (h_out, w_out) != expected_hw:
+        if (w_out, h_out) == expected_hw:
+            final_output_shape_hw = expected_hw
+            h_out, w_out = final_output_shape_hw
+        else:
+            return None, None
+
     channel_data = [[] for _ in range(3)]
     channel_wht = [[] for _ in range(3)]
 
