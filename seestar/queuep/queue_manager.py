@@ -148,9 +148,18 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
-    """Worker function used by the process pool for reprojection."""
+    """Reproject a FITS image onto ``ref_wcs_header``.
 
-    data = fits.getdata(fits_path, memmap=False)
+    The input file's WCS is read from its header so that reprojection is
+    performed in the correct coordinate system.
+    """
+
+    with fits.open(fits_path, memmap=False) as hdul:
+        data = hdul[0].data
+        try:
+            input_wcs = WCS(hdul[0].header)
+        except Exception:
+            input_wcs = None
 
     if use_gpu:
         import cupy as cp
@@ -174,7 +183,7 @@ def _reproject_worker(
         from seestar.enhancement.reproject_utils import reproject_interp
 
         reproj, footprint = reproject_interp(
-            (data, None), WCS(ref_wcs_header), shape_out, parallel=False
+            (data, input_wcs), WCS(ref_wcs_header), shape_out, parallel=False
         )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
