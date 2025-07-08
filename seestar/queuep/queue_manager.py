@@ -9173,13 +9173,12 @@ class SeestarQueuedStacker:
     def _reproject_classic_batches(self, batch_files):
         """Reproject saved classic batches to a common grid using reproject_and_coadd."""
 
-        from seestar.enhancement.reproject_utils import (
-            reproject_and_coadd,
-            reproject_interp,
+        from seestar.enhancement.reproject_utils import reproject_interp
+        from seestar.core.incremental_reprojection import (
+            initialize_master,
+            reproject_and_combine,
         )
 
-        channel_arrays_wcs = [[] for _ in range(3)]
-        channel_footprints = [[] for _ in range(3)]
         wcs_for_grid = []
         headers_for_grid = []
 
@@ -9223,9 +9222,6 @@ class SeestarQueuedStacker:
                     img_hwc = img_hwc[..., np.newaxis]
             wcs_for_grid.append(batch_wcs)
             headers_for_grid.append(hdr)
-            for ch in range(img_hwc.shape[2]):
-                channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
-                channel_footprints[ch].append(coverage)
 
         if len(wcs_for_grid) < 2:
             self.update_progress(
@@ -9276,23 +9272,65 @@ class SeestarQueuedStacker:
                     )
                     return
 
-        final_channels = []
-        final_cov = None
-        for ch in range(3):
-            sci, cov = reproject_and_coadd(
-                channel_arrays_wcs[ch],
-                output_projection=out_wcs,
-                shape_out=out_shape,
-                input_weights=channel_footprints[ch],
-                reproject_function=reproject_interp,
-                combine_function="mean",
-                match_background=True,
-            )
-            final_channels.append(sci.astype(np.float32))
-            if final_cov is None:
-                final_cov = cov.astype(np.float32)
+        master_sum = None
+        master_cov = None
+        for i, (sci_path, wht_paths) in enumerate(batch_files):
+            try:
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
+                batch_wcs = WCS(hdr, naxis=2)
+                h = int(hdr.get("NAXIS2", data_cxhxw.shape[-2]))
+                w = int(hdr.get("NAXIS1", data_cxhxw.shape[-1]))
+                batch_wcs.pixel_shape = (w, h)
+                batch_wcs.array_shape = (h, w)
+            except Exception:
+                continue
 
-        final_img_hwc = np.stack(final_channels, axis=-1)
+            try:
+                coverage = fits.getdata(wht_paths[0]).astype(np.float32)
+                np.nan_to_num(coverage, copy=False)
+                hh, ww = coverage.shape
+                coverage *= make_radial_weight_map(hh, ww)
+            except Exception:
+                coverage = np.ones((h, w), dtype=np.float32)
+
+            if (
+                data_cxhxw.ndim == 3
+                and data_cxhxw.shape[0] in (1, 3)
+                and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+            ):
+                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            else:
+                img_hwc = data_cxhxw
+                if img_hwc.ndim == 2:
+                    img_hwc = img_hwc[..., np.newaxis]
+
+            if master_sum is None:
+                master_sum, master_cov = initialize_master(
+                    img_hwc,
+                    coverage,
+                    batch_wcs,
+                    out_wcs,
+                    use_gpu=False,
+                )
+            else:
+                master_sum, master_cov = reproject_and_combine(
+                    master_sum,
+                    master_cov,
+                    img_hwc,
+                    coverage,
+                    batch_wcs,
+                    out_wcs,
+                    use_gpu=False,
+                )
+
+        if master_sum is None or master_cov is None:
+            return
+
+        master_cov = np.maximum(master_cov, 1e-6)
+        final_img_hwc = master_sum / master_cov[..., None]
+        final_cov = master_cov
         self._save_final_stack(
             "_classic_reproject",
             drizzle_final_sci_data=final_img_hwc,
