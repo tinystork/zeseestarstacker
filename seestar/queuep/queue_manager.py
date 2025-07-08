@@ -148,11 +148,12 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
-    """Reproject one FITS image onto the reference WCS.
 
-    The function loads the image and its header to obtain the input WCS,
-    then calls :func:`reproject_interp` so that each exposure is properly
-    aligned to the reference grid.
+    """Reproject a FITS image onto ``ref_wcs_header``.
+
+    The input file's WCS is read from its header so that reprojection is
+    performed in the correct coordinate system.
+
     """
 
     with fits.open(fits_path, memmap=False) as hdul:
