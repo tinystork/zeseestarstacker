@@ -3776,7 +3776,7 @@ class SeestarQueuedStacker:
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'."
                                     )
                                     temp_driz_file_path = self._save_drizzle_input_temp(
-                                        aligned_data, header_orig
+                                        aligned_data, header_orig, matrix_M_val
                                     )
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(
@@ -11399,7 +11399,7 @@ class SeestarQueuedStacker:
 
     ###############################################################################################################################################
 
-    def _save_drizzle_input_temp(self, aligned_data, header):
+    def _save_drizzle_input_temp(self, aligned_data, header, tf=None):
         """
         Sauvegarde une image alignée (HxWx3 float32) dans le dossier temp Drizzle,
         en transposant en CxHxW et en INJECTANT l'OBJET WCS DE RÉFÉRENCE stocké
@@ -11408,6 +11408,8 @@ class SeestarQueuedStacker:
         Args:
             aligned_data (np.ndarray): Données alignées (HxWx3 float32, 0-1).
             header (fits.Header): Header FITS ORIGINAL (pour métadonnées non-WCS).
+            tf (array-like, optional): Matrice de transformation affine 2x3
+                appliquée par ``cv2.warpAffine``.
 
         Returns:
             str or None: Chemin complet du fichier sauvegardé, ou None en cas d'erreur.
@@ -11481,6 +11483,20 @@ class SeestarQueuedStacker:
             # --- Sauvegarde ---
             hdu = fits.PrimaryHDU(data=data_to_save, header=header_to_save)
             hdul = fits.HDUList([hdu])
+            if tf is not None:
+                try:
+                    from astropy.wcs import WCS
+                    import numpy as np
+
+                    a, b = tf[0, 0], tf[1, 0]
+                    tx, ty = tf[0, 2], tf[1, 2]
+                    w = WCS(hdul[0].header)
+                    R = np.array([[a, -b], [b, a]])
+                    w.pixel_scale_matrix = w.pixel_scale_matrix @ R
+                    w.wcs.crpix -= [tx, ty]
+                    hdul[0].header.update(w.to_header())
+                except Exception:
+                    pass
             hdul.writeto(
                 temp_filepath, overwrite=True, checksum=False, output_verify="ignore"
             )
