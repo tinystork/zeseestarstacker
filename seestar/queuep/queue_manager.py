@@ -9006,6 +9006,13 @@ class SeestarQueuedStacker:
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
 
+        # Potential WCS present on the incoming header (e.g. from drizzle)
+        input_wcs = None
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            pass
+
         # Crop the stacked tile before solving so the WCS corresponds
         # to the final data saved on disk.
         if (
@@ -9028,80 +9035,14 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
 
+        # Update WCS object after potential cropping adjustments
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            input_wcs = None
 
-        if self.solve_batches:
-            # Always attempt to solve the intermediate batch with ASTAP so that a
-            # valid WCS is present on each stacked batch file. This is required for
-            # the optional inter-batch reprojection step (performed on stacked batches).
-            # When solving fails we fall back to the reference header WCS if available.
-            luminance = (
-                stacked_np[..., 0] * 0.299
-                + stacked_np[..., 1] * 0.587
-                + stacked_np[..., 2] * 0.114
-            ).astype(np.float32)
-            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-            tmp.close()
-            fits.PrimaryHDU(data=luminance, header=header).writeto(
-                tmp.name, overwrite=True, output_verify="ignore"
-            )
-            solved_ok = self._run_astap_and_update_header(tmp.name)
-            if solved_ok:
-                solved_hdr = fits.getheader(tmp.name)
-                header.update(solved_hdr)
-            else:
-                if self.reference_header_for_wcs is not None:
-                    header.update(
-                        {
-                            k: self.reference_header_for_wcs[k]
-                            for k in [
-                                "CRPIX1",
-                                "CRPIX2",
-                                "CDELT1",
-                                "CDELT2",
-                                "CD1_1",
-                                "CD1_2",
-                                "CD2_1",
-                                "CD2_2",
-                                "CTYPE1",
-                                "CTYPE2",
-                                "CRVAL1",
-                                "CRVAL2",
-                            ]
-                            if k in self.reference_header_for_wcs
-                        }
-                    )
-                    header["NAXIS1"] = stacked_np.shape[1]
-                    header["NAXIS2"] = stacked_np.shape[0]
-                else:
-                    os.remove(tmp.name)
-                    return None, None
-            os.remove(tmp.name)
-        else:
-            if self.reference_header_for_wcs is not None:
-                header.update(
-                    {
-                        k: self.reference_header_for_wcs[k]
-                        for k in [
-                            "CRPIX1",
-                            "CRPIX2",
-                            "CDELT1",
-                            "CDELT2",
-                            "CD1_1",
-                            "CD1_2",
-                            "CD2_1",
-                            "CD2_2",
-                            "CTYPE1",
-                            "CTYPE2",
-                            "CRVAL1",
-                            "CRVAL2",
-                        ]
-                        if k in self.reference_header_for_wcs
-                    }
-                )
-                header["NAXIS1"] = stacked_np.shape[1]
-                header["NAXIS2"] = stacked_np.shape[0]
-
-
+        # Save the batch to disk before solving so the WCS can be written
+        # directly to the final FITS file.
         data_cxhxw = np.moveaxis(final_stacked, -1, 0)
         header["NAXIS"] = 3
         header["NAXIS1"] = data_cxhxw.shape[2]
@@ -9130,6 +9071,121 @@ class SeestarQueuedStacker:
                 wht_path, overwrite=True, output_verify="ignore"
             )
             wht_paths.append(wht_path)
+
+        if self.solve_batches:
+            solved_ok = self._run_astap_and_update_header(sci_fits)
+            if solved_ok:
+                header = fits.getheader(sci_fits)
+            else:
+                if self.reference_header_for_wcs is not None:
+                    if (
+                        input_wcs is not None
+                        and self.reference_wcs_object is not None
+                        and self.reference_shape is not None
+                    ):
+                        try:
+                            final_stacked = reproject_to_reference_wcs(
+                                final_stacked,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                            final_wht = reproject_to_reference_wcs(
+                                final_wht,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                        except Exception:
+                            pass
+                    header.update(
+                        {
+                            k: self.reference_header_for_wcs[k]
+                            for k in [
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ]
+                            if k in self.reference_header_for_wcs
+                        }
+                    )
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+                    data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+                    fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+                        sci_fits, overwrite=True, output_verify="ignore"
+                    )
+                    for i, wht_path in enumerate(wht_paths):
+                        fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                            wht_path, overwrite=True, output_verify="ignore"
+                        )
+                else:
+                    os.remove(sci_fits)
+                    for p in wht_paths:
+                        os.remove(p)
+                    return None, None
+        else:
+            if self.reference_header_for_wcs is not None:
+                if (
+                    input_wcs is not None
+                    and self.reference_wcs_object is not None
+                    and self.reference_shape is not None
+                ):
+                    try:
+                        final_stacked = reproject_to_reference_wcs(
+                            final_stacked,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                        final_wht = reproject_to_reference_wcs(
+                            final_wht,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                    except Exception:
+                        pass
+                header.update(
+                    {
+                        k: self.reference_header_for_wcs[k]
+                        for k in [
+                            "CRPIX1",
+                            "CRPIX2",
+                            "CDELT1",
+                            "CDELT2",
+                            "CD1_1",
+                            "CD1_2",
+                            "CD2_1",
+                            "CD2_2",
+                            "CTYPE1",
+                            "CTYPE2",
+                            "CRVAL1",
+                            "CRVAL2",
+                        ]
+                        if k in self.reference_header_for_wcs
+                    }
+                )
+                header["NAXIS1"] = final_stacked.shape[1]
+                header["NAXIS2"] = final_stacked.shape[0]
+                data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+                fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+                    sci_fits, overwrite=True, output_verify="ignore"
+                )
+                for i, wht_path in enumerate(wht_paths):
+                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                        wht_path, overwrite=True, output_verify="ignore"
+                    )
+
 
         if self.reproject_coadd_final:
             self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
