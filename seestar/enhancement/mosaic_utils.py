@@ -6,6 +6,9 @@ from .reproject_utils import reproject_and_coadd, reproject_interp
 from .weight_utils import make_radial_weight_map
 from zemosaic import zemosaic_utils
 
+import inspect
+
+
 
 def assemble_final_mosaic_with_reproject_coadd(
     master_tile_fits_with_wcs_list,
@@ -35,6 +38,26 @@ def assemble_final_mosaic_with_reproject_coadd(
 
     if not master_tile_fits_with_wcs_list:
         return None, None
+    h, w = map(int, final_output_shape_hw)
+    try:
+        w_wcs = int(getattr(final_output_wcs, "pixel_shape", (w, h))[0])
+        h_wcs = int(getattr(final_output_wcs, "pixel_shape", (w, h))[1])
+    except Exception:
+        w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", w)) if hasattr(final_output_wcs, "wcs") else w
+        h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", h)) if hasattr(final_output_wcs, "wcs") else h
+    expected_hw = (h_wcs, w_wcs)
+    if (h, w) != expected_hw:
+        if (w, h) == expected_hw:
+            final_output_shape_hw = expected_hw
+            h, w = final_output_shape_hw
+        else:
+            return None, None
+
+    output_header = (
+        final_output_wcs.to_header()
+        if hasattr(final_output_wcs, "to_header")
+        else final_output_wcs
+    )
 
     # Validate the requested output shape against the WCS
     try:
@@ -79,16 +102,31 @@ def assemble_final_mosaic_with_reproject_coadd(
     coverage = None
     for ch in range(3):
         try:
+
+            kwargs = {}
+            try:
+                sig = inspect.signature(reproject_and_coadd)
+                if "match_background" in sig.parameters:
+                    kwargs["match_background"] = match_bg
+                elif "match_bg" in sig.parameters:
+                    kwargs["match_bg"] = match_bg
+            except Exception:
+                kwargs["match_background"] = match_bg
+
+
             sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
                 data_list=channel_data[ch],
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
-                output_projection=final_output_wcs,
+
+                output_projection=output_header,
+
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
-                match_background=match_bg,
+                input_weights=channel_wht[ch],
+                **kwargs,
             )
         except Exception:
             return None, None
