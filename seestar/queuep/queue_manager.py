@@ -148,10 +148,12 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
+
     """Reproject a FITS image onto ``ref_wcs_header``.
 
     The input file's WCS is read from its header so that reprojection is
     performed in the correct coordinate system.
+
     """
 
     with fits.open(fits_path, memmap=False) as hdul:
