@@ -3673,6 +3673,11 @@ class SeestarQueuedStacker:
                                             batch_wcs.pixel_shape = (w, h)
 
                                             batch_wcs.array_shape = (h, w)
+                                            try:
+                                                batch_wcs.wcs.naxis1 = w
+                                                batch_wcs.wcs.naxis2 = h
+                                            except Exception:
+                                                pass
 
                                         except Exception:
                                             batch_wcs = None
@@ -4192,6 +4197,11 @@ class SeestarQueuedStacker:
                             batch_wcs.pixel_shape = (w, h)
 
                             batch_wcs.array_shape = (h, w)
+                            try:
+                                batch_wcs.wcs.naxis1 = w
+                                batch_wcs.wcs.naxis2 = h
+                            except Exception:
+                                pass
 
                         except Exception:
                             batch_wcs = None
@@ -8818,6 +8828,11 @@ class SeestarQueuedStacker:
             new_wcs.pixel_shape = (w, h)
 
             new_wcs.array_shape = (h, w)
+            try:
+                new_wcs.wcs.naxis1 = w
+                new_wcs.wcs.naxis2 = h
+            except Exception:
+                pass
 
         except Exception:
             new_wcs = None
@@ -9179,6 +9194,11 @@ class SeestarQueuedStacker:
                 batch_wcs.pixel_shape = (w, h)
 
                 batch_wcs.array_shape = (h, w)
+                try:
+                    batch_wcs.wcs.naxis1 = w
+                    batch_wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
 
             except Exception:
                 continue
@@ -9306,7 +9326,12 @@ class SeestarQueuedStacker:
             try:
                 new_wcs._naxis1 = cropped_img.shape[1]
                 new_wcs._naxis2 = cropped_img.shape[0]
-                new_wcs.array_shape = (cropped_img.shape[0], cropped_img.shape[1])
+                new_wcs.array_shape = (
+                    cropped_img.shape[0],
+                    cropped_img.shape[1],
+                )
+                new_wcs.wcs.naxis1 = cropped_img.shape[1]
+                new_wcs.wcs.naxis2 = cropped_img.shape[0]
             except Exception:
                 pass
             return cropped_img, cropped_cov, new_wcs
@@ -9336,6 +9361,11 @@ class SeestarQueuedStacker:
                 wcs.pixel_shape = (w, h)
 
                 wcs.array_shape = (h, w)
+                try:
+                    wcs.wcs.naxis1 = w
+                    wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
 
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
