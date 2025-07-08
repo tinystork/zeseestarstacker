@@ -35,5 +35,5 @@ def test_missing_reproject(monkeypatch):
     spec.loader.exec_module(module)
 
     with pytest.raises(ImportError) as exc:
-        module.reproject_and_coadd(None, None, None)
+        module.reproject_and_coadd([], None, (1, 1))
     assert "pip install reproject" in str(exc.value)
