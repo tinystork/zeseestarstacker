@@ -3,9 +3,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from .reproject_utils import reproject_and_coadd, reproject_interp
-from .weight_utils import make_radial_weight_map
-from zemosaic import zemosaic_utils
 
+from zemosaic import zemosaic_utils
 import inspect
 
 
@@ -45,6 +44,8 @@ def assemble_final_mosaic_with_reproject_coadd(
     except Exception:
         w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", w)) if hasattr(final_output_wcs, "wcs") else w
         h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", h)) if hasattr(final_output_wcs, "wcs") else h
+
+
     expected_hw = (h_wcs, w_wcs)
     if (h, w) != expected_hw:
         if (w, h) == expected_hw:
@@ -59,25 +60,8 @@ def assemble_final_mosaic_with_reproject_coadd(
         else final_output_wcs
     )
 
-    # Validate the requested output shape against the WCS
-    try:
-        w_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[0])
-        h_wcs = int(getattr(final_output_wcs, "pixel_shape", final_output_shape_hw[::-1])[1])
-    except Exception:
-        w_wcs = int(getattr(final_output_wcs.wcs, "naxis1", final_output_shape_hw[1])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[1]
-        h_wcs = int(getattr(final_output_wcs.wcs, "naxis2", final_output_shape_hw[0])) if hasattr(final_output_wcs, "wcs") else final_output_shape_hw[0]
+    data_all = []
 
-    expected_hw = (h_wcs, w_wcs)
-    h_out, w_out = map(int, final_output_shape_hw)
-    if (h_out, w_out) != expected_hw:
-        if (w_out, h_out) == expected_hw:
-            final_output_shape_hw = expected_hw
-            h_out, w_out = final_output_shape_hw
-        else:
-            return None, None
-
-    channel_data = [[] for _ in range(3)]
-    channel_wht = [[] for _ in range(3)]
     wcs_list = []
 
     for path, wcs in master_tile_fits_with_wcs_list:
@@ -87,20 +71,20 @@ def assemble_final_mosaic_with_reproject_coadd(
         except Exception:
             continue
 
-        if data.ndim == 3 and data.shape[0] in (1, 3):
+        if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
             data = np.moveaxis(data, 0, -1)
+        if data.ndim == 2:
+            data = data[..., np.newaxis]
 
-        cov = np.ones(data.shape[:2], dtype=np.float32)
-        cov *= make_radial_weight_map(*cov.shape)
 
+        data_all.append(data)
         wcs_list.append(wcs)
-        for ch in range(data.shape[2]):
-            channel_data[ch].append(data[..., ch])
-            channel_wht[ch].append(cov)
+
 
     mosaic_channels = []
     coverage = None
-    for ch in range(3):
+    n_ch = data_all[0].shape[2] if data_all else 0
+    for ch in range(n_ch):
         try:
 
             kwargs = {}
@@ -113,19 +97,20 @@ def assemble_final_mosaic_with_reproject_coadd(
             except Exception:
                 kwargs["match_background"] = match_bg
 
+            data_list = [arr[..., ch] for arr in data_all]
 
             sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
-                data_list=channel_data[ch],
+                data_list=data_list,
                 wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
-
                 output_projection=output_header,
 
                 use_gpu=False,
                 cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
-                input_weights=channel_wht[ch],
+
+
                 **kwargs,
             )
         except Exception:
