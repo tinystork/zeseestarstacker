@@ -9005,6 +9005,11 @@ class SeestarQueuedStacker:
         final_stacked = stacked_np
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
+        input_wcs = None
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            pass
 
         # Potential WCS present on the incoming header (e.g. from drizzle)
         input_wcs = None
