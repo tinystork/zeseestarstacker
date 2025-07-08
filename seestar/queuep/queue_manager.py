@@ -9007,7 +9007,12 @@ class SeestarQueuedStacker:
         np.nan_to_num(final_wht, copy=False)
 
 
-        if self.solve_batches:
+        solve_needed = (
+            self.solve_batches
+            or self.reproject_between_batches
+            or self.reproject_coadd_final
+        )
+        if solve_needed:
             # Always attempt to solve the intermediate batch with ASTAP so that a
             # valid WCS is present on each stacked batch file. This is required for
             # the optional inter-batch reprojection step (performed on stacked batches).
@@ -10913,8 +10918,7 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = bool(reproject_between_batches)
         # When inter-batch reprojection is requested we typically want to keep
         # the reference WCS stable. If the caller did not explicitly set
-        # ``freeze_reference_wcs`` beforehand, enable it automatically so that
-        # intermediate batches are not solved again.
+        # ``freeze_reference_wcs`` beforehand, enable it automatically.
         if self.reproject_between_batches and not self.freeze_reference_wcs:
             self.freeze_reference_wcs = True
 
@@ -10923,11 +10927,9 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
 
-        # Disable solving of intermediate batches when reprojection is active
-        # and the reference WCS should remain fixed.
-        self.solve_batches = not (
-            self.reproject_between_batches and self.freeze_reference_wcs
-        )
+        # Always solve intermediate batches when reprojection is requested so
+        # that a valid WCS is available for each stacked batch.
+        self.solve_batches = True
 
         # Determine if we should keep the original input frame size when
         # reprojection between batches is enabled (to avoid changing the
