@@ -4,6 +4,7 @@ from astropy.wcs import WCS
 
 from .reproject_utils import reproject_and_coadd, reproject_interp
 from .weight_utils import make_radial_weight_map
+from zemosaic import zemosaic_utils
 
 
 def assemble_final_mosaic_with_reproject_coadd(
@@ -37,6 +38,7 @@ def assemble_final_mosaic_with_reproject_coadd(
 
     channel_data = [[] for _ in range(3)]
     channel_wht = [[] for _ in range(3)]
+    wcs_list = []
 
     for path, wcs in master_tile_fits_with_wcs_list:
         try:
@@ -51,19 +53,22 @@ def assemble_final_mosaic_with_reproject_coadd(
         cov = np.ones(data.shape[:2], dtype=np.float32)
         cov *= make_radial_weight_map(*cov.shape)
 
+        wcs_list.append(wcs)
         for ch in range(data.shape[2]):
-            channel_data[ch].append((data[..., ch], wcs))
+            channel_data[ch].append(data[..., ch])
             channel_wht[ch].append(cov)
 
     mosaic_channels = []
     coverage = None
     for ch in range(3):
         try:
-            sci, cov = reproject_and_coadd(
-                channel_data[ch],
-                output_projection=final_output_wcs,
+            sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
+                data_list=channel_data[ch],
+                wcs_list=wcs_list,
                 shape_out=final_output_shape_hw,
-                input_weights=channel_wht[ch],
+                output_projection=final_output_wcs,
+                use_gpu=False,
+                cpu_func=reproject_and_coadd,
                 reproject_function=reproject_interp,
                 combine_function="mean",
                 match_background=match_bg,
