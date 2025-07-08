@@ -2450,17 +2450,13 @@ class SeestarQueuedStacker:
             scale of the mosaic is divided by this factor. Defaults to ``1.0``.
         """
 
-        if (
-            self.freeze_reference_wcs
-            and self.reference_wcs_object is not None
-            and self.reference_header_for_wcs is not None
-        ):
-            out_wcs = self.reference_wcs_object
-            out_shape = (
-                int(self.reference_header_for_wcs.get("NAXIS2", 0)),
-                int(self.reference_header_for_wcs.get("NAXIS1", 0)),
+
+        if self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            return self.reference_wcs_object, (
+                int(self.reference_header_for_wcs["NAXIS2"]),
+                int(self.reference_header_for_wcs["NAXIS1"]),
             )
-            return out_wcs, out_shape
+
 
         num_wcs = len(all_input_wcs_list)
         logger.debug(
@@ -2581,10 +2577,7 @@ class SeestarQueuedStacker:
                 target_res_deg_per_pix,
             )
 
-            self.reference_wcs_object = out_wcs
-            self.reference_header_for_wcs = out_wcs.to_header(relax=True)
-            self.ref_wcs_header = self.reference_header_for_wcs
-            self.freeze_reference_wcs = True
+
 
         return out_wcs, out_shape_hw
 
@@ -2679,36 +2672,51 @@ class SeestarQueuedStacker:
             )
             return False
 
-        if (
-            len(wcs_list) == 1
-            and self.reproject_between_batches
-            and not self.is_mosaic_run
-        ):
-            # When doing classic stacking with reprojection of a single
-            # file, use the dynamic bounding-box logic to avoid cropping.
-            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
-                wcs_list,
-                header_list,
-                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-            )
-        elif len(wcs_list) == 1:
-            ref_wcs = wcs_list[0]
-            ref_shape = ref_wcs.pixel_shape
-        else:
-            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
-                wcs_list,
-                header_list,
-                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-            )
-            if ref_wcs is None:
-                self.update_progress(
-                    "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
+        if self.reference_wcs_object is None or not self.freeze_reference_wcs:
+            if (
+                len(wcs_list) == 1
+                and self.reproject_between_batches
+                and not self.is_mosaic_run
+            ):
+                # When doing classic stacking with reprojection of a single
+                # file, use the dynamic bounding-box logic to avoid cropping.
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    header_list,
+                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
                 )
-                return False
+            elif len(wcs_list) == 1:
+                ref_wcs = wcs_list[0]
+                ref_shape = ref_wcs.pixel_shape
+            else:
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    header_list,
+                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                )
+                if ref_wcs is None:
+                    self.update_progress(
+                        "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
+                    )
+                    return False
+
+            # Freeze this grid for all following batches
+            self.reference_wcs_object = ref_wcs
+            self.reference_shape = ref_shape
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+            self.ref_wcs_header = self.reference_header_for_wcs
+            self.freeze_reference_wcs = True
+        else:
+            ref_wcs = self.reference_wcs_object
+            ref_shape = (
+                int(self.reference_header_for_wcs["NAXIS2"]),
+                int(self.reference_header_for_wcs["NAXIS1"]),
+            )
 
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
-        self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        if self.reference_header_for_wcs is None:
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
         self.ref_wcs_header = self.reference_header_for_wcs
         try:
             self.reference_wcs_object.pixel_shape = (
