@@ -1055,25 +1055,6 @@ class SeestarStackerGUI:
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
         last_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
 
-        zoom_frame = ttk.Frame(tab_stacking)
-        zoom_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
-        ttk.Label(zoom_frame, text="Zoom (%)").grid(row=0, column=0, sticky=tk.W)
-        self.zoom_percent_var = tk.IntVar(value=0)
-        self.zoom_slider = ttk.Scale(
-            zoom_frame,
-            from_=-50,
-            to=50,
-            variable=self.zoom_percent_var,
-            orient=tk.HORIZONTAL,
-        )
-        self.zoom_slider.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
-        self.zoom_value_label = ttk.Label(
-            zoom_frame,
-            textvariable=self.zoom_percent_var,
-            width=4,
-            anchor="e",
-        )
-        self.zoom_value_label.grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
 
         crop_frame = ttk.Frame(tab_stacking)
         crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -6910,7 +6891,6 @@ class SeestarStackerGUI:
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
-            "zoom_percent": self.settings.zoom_percent,
             "use_weighting": self.settings.stack_weight_method == "quality",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
