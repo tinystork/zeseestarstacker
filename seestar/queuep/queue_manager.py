@@ -12,7 +12,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 # --- AJOUTEZ CES DEUX LIGNES POUR LE DEBUG CRITIQUE ---
-
+# logging.basicConfig(
+#     level=logging.DEBUG,
+#     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+# )
+# logger.setLevel(logging.DEBUG)
 
 # --- FIN AJOUT CRITIQUE ---
 
