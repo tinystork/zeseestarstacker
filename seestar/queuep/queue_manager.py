@@ -9122,6 +9122,18 @@ class SeestarQueuedStacker:
         fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
             sci_fits, overwrite=True, output_verify="ignore"
         )
+
+        # After cropping, resolve again with ASTAP to ensure the WCS
+        # matches the final saved tile. This avoids misalignment when
+        # assembling with reproject_and_coadd.
+        if self.solve_batches:
+            try:
+                if self._run_astap_and_update_header(sci_fits):
+                    solved_hdr = fits.getheader(sci_fits, memmap=False)
+                    header.update(solved_hdr)
+            except Exception:
+                pass
+
         for ch_i in range(final_stacked.shape[2]):
             wht_path = os.path.join(
                 out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
