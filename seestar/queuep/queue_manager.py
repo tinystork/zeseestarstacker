@@ -3498,6 +3498,17 @@ class SeestarQueuedStacker:
                         f"DEBUG QM [_worker V_LoopFocus / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue."
                     )
 
+                    # --- Filtrage automatique des fichiers 'mosaic' ---
+                    if "mosaic" in file_name_for_log.lower():
+                        move_to_stacked([file_path], progress_cb=self.update_progress)
+                        self.update_progress(
+                            f"📦   {file_name_for_log} déplacé vers 'stacked' (mosaic)",
+                            "INFO_DETAIL",
+                        )
+                        self.skipped_files_count += 1
+                        self.queue.task_done()
+                        continue
+
                     if (
                         path_of_processed_ref_panel_basename
                         and file_name_for_log == path_of_processed_ref_panel_basename
