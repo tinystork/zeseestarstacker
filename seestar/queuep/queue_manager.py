@@ -8611,6 +8611,22 @@ class SeestarQueuedStacker:
             "use_radec_hints": getattr(self, "use_radec_hints", False),
         }
 
+
+        # For small stacked batches ASTAP may fail with a limited search radius.
+        # Force a blind search when using Reproject & Coadd to improve success
+        # rates. Use RA/DEC hints from the reference header when available.
+        if self.reproject_coadd_final:
+            solver_settings["astap_search_radius"] = 0.0
+            if (
+                self.reference_header_for_wcs is not None
+                and "CRVAL1" in self.reference_header_for_wcs
+                and "CRVAL2" in self.reference_header_for_wcs
+            ):
+                header.setdefault("RA", self.reference_header_for_wcs["CRVAL1"])
+                header.setdefault("DEC", self.reference_header_for_wcs["CRVAL2"])
+                solver_settings["use_radec_hints"] = True
+
+
         self.update_progress(
             f"   [Solver] Solve {os.path.basename(fits_path)}…"
         )
