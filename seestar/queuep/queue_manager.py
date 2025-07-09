@@ -1085,10 +1085,6 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
                 )
-                if self.reproject_coadd_final and not self.freeze_reference_wcs:
-                    # Ensure final reprojection uses the same orientation as the
-                    # reference frame when combining with reproject_and_coadd
-                    self.freeze_reference_wcs = True
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -10936,10 +10932,6 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
-        if self.reproject_coadd_final and not self.freeze_reference_wcs:
-            # Reproject & coadd should align to the initial reference just like
-            # inter-batch reprojection. Ensure the reference WCS is frozen.
-            self.freeze_reference_wcs = True
 
         # Disable solving of intermediate batches when reprojection is active
         # and the reference WCS should remain fixed.
