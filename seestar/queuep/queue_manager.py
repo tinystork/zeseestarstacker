@@ -1085,10 +1085,6 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
                 )
-                if self.reproject_coadd_final and not self.freeze_reference_wcs:
-                    # Ensure final reprojection uses the same orientation as the
-                    # reference frame when combining with reproject_and_coadd
-                    self.freeze_reference_wcs = True
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -2732,12 +2728,13 @@ class SeestarQueuedStacker:
                     )
                     return False
 
-            # Freeze this grid for all following batches
+            # Store the computed grid for subsequent batches. Whether the
+            # reference WCS remains fixed is decided by ``freeze_reference_wcs``
+            # which may be controlled by the caller.
             self.reference_wcs_object = ref_wcs
             self.reference_shape = ref_shape
             self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
             self.ref_wcs_header = self.reference_header_for_wcs
-            self.freeze_reference_wcs = True
         else:
             ref_wcs = self.reference_wcs_object
             ref_shape = (
@@ -8586,11 +8583,11 @@ class SeestarQueuedStacker:
         return final_sci_image_HWC, final_wht_map_HWC
 
     def _run_astap_and_update_header(self, fits_path: str) -> bool:
-        """Solve the provided FITS with ASTAP and update its header in place."""
+        """Solve the provided FITS with the configured solver and update its header."""
         try:
             header = fits.getheader(fits_path)
         except Exception as e:
-            self.update_progress(f"   [ASTAP] Échec lecture header: {e}", "ERROR")
+            self.update_progress(f"   [Solver] Échec lecture header: {e}", "ERROR")
             return False
 
         solver_settings = {
@@ -8614,19 +8611,46 @@ class SeestarQueuedStacker:
             "use_radec_hints": getattr(self, "use_radec_hints", False),
         }
 
-        self.update_progress(f"   [ASTAP] Solve {os.path.basename(fits_path)}…")
-        wcs = solve_image_wcs(
-            fits_path, header, solver_settings, update_header_with_solution=True
+        # For small stacked batches ASTAP may fail with a limited search radius.
+        # Force a blind search when using Reproject & Coadd to improve success
+        # rates. Use RA/DEC hints from the reference header when available.
+        if self.reproject_coadd_final:
+            solver_settings["astap_search_radius"] = 0.0
+            if (
+                self.reference_header_for_wcs is not None
+                and "CRVAL1" in self.reference_header_for_wcs
+                and "CRVAL2" in self.reference_header_for_wcs
+            ):
+                header.setdefault("RA", self.reference_header_for_wcs["CRVAL1"])
+                header.setdefault("DEC", self.reference_header_for_wcs["CRVAL2"])
+                solver_settings["use_radec_hints"] = True
+
+        self.update_progress(
+            f"   [Solver] Solve {os.path.basename(fits_path)}…"
         )
+        if self.astrometry_solver:
+            wcs = self.astrometry_solver.solve(
+                fits_path,
+                header,
+                solver_settings,
+                update_header_with_solution=True,
+            )
+        else:
+            wcs = solve_image_wcs(
+                fits_path,
+                header,
+                solver_settings,
+                update_header_with_solution=True,
+            )
         if wcs is None:
-            self.update_progress("   [ASTAP] Échec résolution", "WARN")
+            self.update_progress("   [Solver] Échec résolution", "WARN")
             return False
         try:
             with fits.open(fits_path, mode="update") as hdul:
                 hdul[0].header = header
                 hdul.flush()
         except Exception as e:
-            self.update_progress(f"   [ASTAP] Erreur écriture header: {e}", "WARN")
+            self.update_progress(f"   [Solver] Erreur écriture header: {e}", "WARN")
         return True
 
     def _cache_solved_image(self, data, header, wcs_obj, idx):
@@ -8963,7 +8987,9 @@ class SeestarQueuedStacker:
             )
             wht_paths.append(wht_path)
 
-        if self.solve_batches:
+        run_astap = self.solve_batches or self.reproject_coadd_final
+
+        if run_astap:
             solved_ok = self._run_astap_and_update_header(sci_fits)
             if solved_ok:
                 header = fits.getheader(sci_fits)
@@ -10921,10 +10947,6 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
-        if self.reproject_coadd_final and not self.freeze_reference_wcs:
-            # Reproject & coadd should align to the initial reference just like
-            # inter-batch reprojection. Ensure the reference WCS is frozen.
-            self.freeze_reference_wcs = True
 
         # Disable solving of intermediate batches when reprojection is active
         # and the reference WCS should remain fixed.
