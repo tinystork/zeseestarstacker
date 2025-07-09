@@ -5,33 +5,59 @@ from pathlib import Path
 
 
 class DuplicateDefFinder(ast.NodeVisitor):
-    """Walk the AST and collect all function & class definitions.
+    """Walk the AST and collect duplicate function and class definitions.
+
+    The finder records fully qualified names (``module.func`` or
+    ``outer.inner``) for every class or function defined outside of a class.
+    Methods defined inside classes are ignored so that constructs like
+    multiple ``__init__`` methods in different classes do not trigger a
+    duplicate warning.
 
     Attributes
     ----------
     defs : dict[str, list[int]]
-        Maps each definition name to the line numbers where it appears.
+        Maps each fully qualified definition name to the line numbers where it
+        appears.
+    scope : list[tuple[str, str]]
+        Stack of ``("class"|"func", name)`` tuples describing the current
+        traversal scope.  Used to build fully qualified names.
     """
 
     def __init__(self) -> None:
         self.defs: dict[str, list[int]] = defaultdict(list)
+        self.scope: list[tuple[str, str]] = []
 
     # --- Visitors -----------------------------------------------------
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        self._add(node.name, node.lineno)
-        self.generic_visit(node)
+        self._maybe_add_function(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
-        self._add(node.name, node.lineno)
-        self.generic_visit(node)
+        self._maybe_add_function(node)
 
     def visit_ClassDef(self, node: ast.ClassDef):
+        # Record the class definition itself
         self._add(node.name, node.lineno)
+        # Enter the class scope so nested definitions are qualified
+        self.scope.append(("class", node.name))
         self.generic_visit(node)
+        self.scope.pop()
 
     # -----------------------------------------------------------------
     def _add(self, name: str, lineno: int) -> None:
-        self.defs[name].append(lineno)
+        """Add a definition under the current fully qualified name."""
+        qualified = ".".join([n for _, n in self.scope] + [name])
+        self.defs[qualified].append(lineno)
+
+    def _maybe_add_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Record function definitions unless they are methods inside a class."""
+        inside_class = any(t == "class" for t, _ in self.scope)
+        if not inside_class:
+            self._add(node.name, node.lineno)
+        # Regardless of whether it was added, descend into the function to
+        # collect nested definitions using it as part of the scope.
+        self.scope.append(("func", node.name))
+        self.generic_visit(node)
+        self.scope.pop()
 
     # -----------------------------------------------------------------
     def duplicates(self) -> dict[str, list[int]]:
