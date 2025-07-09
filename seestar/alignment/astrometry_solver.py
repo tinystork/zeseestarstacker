@@ -12,6 +12,7 @@ import subprocess  # Pour appeler les solveurs locaux
 import shutil  # Pour trouver les exécutables
 import gc
 import logging
+import platform
 from zemosaic import zemosaic_config
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,29 @@ if not logger.hasHandlers():
 # through solver settings. Loaded from ``zemosaic_config`` so tests and
 # documentation stay in sync with application defaults.
 ASTAP_DEFAULT_SEARCH_RADIUS = zemosaic_config.get_astap_default_search_radius()
+
+
+def resolve_astap_executable(path: str) -> str:
+    """Return the actual ASTAP binary for the provided path.
+
+    On macOS the application is typically distributed as an ``.app`` bundle.
+    In this case the real executable resides under
+    ``<app>/Contents/MacOS/astap`` (or ``ASTAP``).  This helper resolves the
+    path automatically while leaving paths on other systems untouched.
+    """
+    if (
+        path
+        and path.lower().endswith(".app")
+        and os.path.isdir(path)
+        and platform.system() == "Darwin"
+    ):
+        candidate = os.path.join(path, "Contents", "MacOS", "astap")
+        if os.path.isfile(candidate):
+            return candidate
+        candidate_upper = os.path.join(path, "Contents", "MacOS", "ASTAP")
+        if os.path.isfile(candidate_upper):
+            return candidate_upper
+    return path
 # --- Dépendances Astropy/Astroquery (comme avant) ---
 _ASTROQUERY_AVAILABLE = False
 _ASTROPY_AVAILABLE = False
@@ -390,13 +414,19 @@ class AstrometrySolver:
         local_solver_attempted_and_failed = False
 
         if solver_preference == "astap":
-            if astap_exe and os.path.isfile(astap_exe):
+            astap_exe_resolved = resolve_astap_executable(astap_exe)
+            if astap_exe_resolved and os.path.isfile(astap_exe_resolved):
+                if astap_exe_resolved != astap_exe:
+                    self._log(
+                        f"ASTAP: bundle detected, using executable '{astap_exe_resolved}'.",
+                        "DEBUG",
+                    )
                 self._log("Priorité au solveur local: ASTAP.", "INFO")
                 t0 = time.time()
                 wcs_solution = self._try_solve_astap(
                     image_path,
                     fits_header,
-                    astap_exe,
+                    astap_exe_resolved,
                     astap_data,
                     astap_search_radius_from_settings,  # Utiliser la valeur lue
                     scale_est,
@@ -419,8 +449,11 @@ class AstrometrySolver:
                     local_solver_attempted_and_failed = True 
                     self._log("ASTAP a échoué ou n'a pas trouvé de solution.", "WARN")
             else:
-                self._log(f"ASTAP sélectionné mais chemin exécutable '{astap_exe}' invalide ou non fourni. ASTAP ignoré.", "WARN")
-                local_solver_attempted_and_failed = True 
+                self._log(
+                    f"ASTAP sélectionné mais chemin exécutable '{astap_exe}' invalide ou non fourni.",
+                    "WARN",
+                )
+                local_solver_attempted_and_failed = True
 
         elif solver_preference == "ansvr":
             if ansvr_config_path: 

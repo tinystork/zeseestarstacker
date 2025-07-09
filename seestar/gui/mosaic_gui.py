@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox, filedialog
 # import traceback # Décommentez si besoin pour le debug
 import numpy as np 
 import os   # Pour les chemins de fichiers
+import platform
 # VALID_DRIZZLE_KERNELS est déjà défini dans votre fichier, je le garde.
 VALID_DRIZZLE_KERNELS = ['square', 'turbo', 'point', 'gaussian', 'lanczos2', 'lanczos3'] 
 
@@ -552,6 +553,11 @@ class MosaicSettingsWindow(tk.Toplevel):
         if os.name == 'nt':
             file_types = [
                 (self.parent_gui.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"),
+                (self.parent_gui.tr("all_files", default="All Files"), "*.*"),
+            ]
+        elif platform.system() == "Darwin":
+            file_types = [
+                (self.parent_gui.tr("astap_app", default="ASTAP Application"), "*.app"),
                 (self.parent_gui.tr("all_files", default="All Files"), "*.*"),
             ]
 
