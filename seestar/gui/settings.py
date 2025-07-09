@@ -95,6 +95,11 @@ class SettingsManager:
                 "last_stack_path",
                 tk.StringVar(value=default_values_from_code.get("last_stack_path", "")),
             ).get()
+            self.temp_folder = getattr(
+                gui_instance,
+                "temp_folder_path",
+                tk.StringVar(value=default_values_from_code.get("temp_folder", "")),
+            ).get()
             self.stacking_mode = getattr(
                 gui_instance,
                 "stacking_mode",
@@ -772,6 +777,9 @@ class SettingsManager:
             getattr(gui_instance, "last_stack_path", tk.StringVar()).set(
                 self.last_stack_path or ""
             )
+            getattr(gui_instance, "temp_folder_path", tk.StringVar()).set(
+                self.temp_folder or ""
+            )
             getattr(gui_instance, "stacking_mode", tk.StringVar()).set(
                 self.stacking_mode
             )
@@ -1204,6 +1212,7 @@ class SettingsManager:
         defaults_dict["output_filename"] = ""
         defaults_dict["reference_image_path"] = ""
         defaults_dict["last_stack_path"] = ""
+        defaults_dict["temp_folder"] = ""
         defaults_dict["bayer_pattern"] = "GRBG"
         defaults_dict["batch_size"] = 0
         defaults_dict["stacking_mode"] = "kappa-sigma"
@@ -2408,6 +2417,7 @@ class SettingsManager:
             "output_filename": str(self.output_filename),
             "reference_image_path": str(self.reference_image_path),
             "last_stack_path": str(self.last_stack_path),
+            "temp_folder": str(self.temp_folder),
             "bayer_pattern": str(self.bayer_pattern),
             "stacking_mode": str(self.stacking_mode),
             "kappa": float(self.kappa),
