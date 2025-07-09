@@ -2728,12 +2728,13 @@ class SeestarQueuedStacker:
                     )
                     return False
 
-            # Freeze this grid for all following batches
+            # Store the computed grid for subsequent batches. Whether the
+            # reference WCS remains fixed is decided by ``freeze_reference_wcs``
+            # which may be controlled by the caller.
             self.reference_wcs_object = ref_wcs
             self.reference_shape = ref_shape
             self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
             self.ref_wcs_header = self.reference_header_for_wcs
-            self.freeze_reference_wcs = True
         else:
             ref_wcs = self.reference_wcs_object
             ref_shape = (
