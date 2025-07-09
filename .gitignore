@@ -46,3 +46,5 @@ memmap_accumulators/
 
 # === Fichiers de sauvegarde de l'application ===
 *_autosave_*.json
+zemosaic_config.json
+seestar_settings.json
