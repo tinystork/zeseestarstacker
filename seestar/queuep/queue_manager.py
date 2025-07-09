@@ -9348,6 +9348,32 @@ class SeestarQueuedStacker:
 
         data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
 
+        if (
+            self.reference_wcs_object is not None
+            and out_wcs is not self.reference_wcs_object
+            and self.reference_shape is not None
+        ):
+            try:
+                data_hwc = reproject_to_reference_wcs(
+                    data_hwc,
+                    out_wcs,
+                    self.reference_wcs_object,
+                    self.reference_shape,
+                )
+                if cov_hw is not None:
+                    cov_hw = reproject_to_reference_wcs(
+                        cov_hw,
+                        out_wcs,
+                        self.reference_wcs_object,
+                        self.reference_shape,
+                    )
+                out_wcs = self.reference_wcs_object
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Reprojection finale échouée: {e}",
+                    "WARN",
+                )
+
         self.current_stack_header = fits.Header()
         self.current_stack_header.update(out_wcs.to_header(relax=True))
 
