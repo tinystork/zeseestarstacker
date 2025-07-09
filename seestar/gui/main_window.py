@@ -233,6 +233,7 @@ class SeestarStackerGUI:
 
         self.astrometry_api_key_var = tk.StringVar()
         self.last_stack_path = tk.StringVar()
+        self.temp_folder_path = tk.StringVar()
         self.localization = Localization("en")
         self.settings = SettingsManager()
         try:
@@ -513,6 +514,7 @@ class SeestarStackerGUI:
         self.output_filename_var = tk.StringVar()
         self.reference_image_path = tk.StringVar()
         self.last_stack_path = tk.StringVar()
+        self.temp_folder_path = tk.StringVar()
         self.stacking_mode = tk.StringVar(value="kappa-sigma")
         self.kappa = tk.DoubleVar(value=2.5)
         # New unified stacking method variable
@@ -1054,6 +1056,22 @@ class SeestarStackerGUI:
         last_browse.pack(side=tk.RIGHT)
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
         last_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+
+        temp_frame = ttk.Frame(self.folders_frame)
+        temp_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        temp_lbl = ttk.Label(
+            temp_frame,
+            text=self.tr("temporary_folder", default="Temporary:"),
+            width=10,
+            anchor="w",
+        )
+        temp_lbl.pack(side=tk.LEFT)
+        temp_browse = ttk.Button(
+            temp_frame, text="…", command=self.file_handler.browse_temp_folder
+        )
+        temp_browse.pack(side=tk.RIGHT)
+        temp_entry = ttk.Entry(temp_frame, textvariable=self.temp_folder_path, width=42)
+        temp_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
 
 
         crop_frame = ttk.Frame(tab_stacking)
@@ -6868,6 +6886,7 @@ class SeestarStackerGUI:
         start_proc_kwargs = {
             "input_dir": self.settings.input_folder,
             "output_dir": self.settings.output_folder,
+            "temp_folder": self.settings.temp_folder,
             "output_filename": self.settings.output_filename,
             "reference_path_ui": self.settings.reference_image_path,
             "initial_additional_folders": folders_to_pass_to_backend,

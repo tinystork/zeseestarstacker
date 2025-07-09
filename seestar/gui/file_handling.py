@@ -102,6 +102,21 @@ class FileHandlingManager:
             self.gui.settings.last_stack_path = p
             self.gui.settings.save_settings()
 
+    def browse_temp_folder(self):
+        last_path = (
+            self.gui.settings.temp_folder
+            if getattr(self.gui.settings, "temp_folder", None)
+            else self.gui.settings.output_folder or "."
+        )
+        folder = filedialog.askdirectory(
+            title=self.gui.tr("Select Temporary Folder"), initialdir=last_path
+        )
+        if folder:
+            abs_folder = os.path.abspath(folder)
+            self.gui.temp_folder_path.set(abs_folder)
+            self.gui.settings.temp_folder = abs_folder
+            self.gui.settings.save_settings()
+
     def add_folder(self):
         """
         Demande un dossier à l'utilisateur et transmet la requête au GUI principal

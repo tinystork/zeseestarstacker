@@ -9343,6 +9343,8 @@ class SeestarQueuedStacker:
                     )
                     return False
 
+        memmap_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
+        os.makedirs(memmap_dir, exist_ok=True)
         try:
             data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
                 master_tile_fits_with_wcs_list=master_tiles,
@@ -9350,6 +9352,9 @@ class SeestarQueuedStacker:
                 final_output_shape_hw=out_shape,
                 match_bg=True,
                 weight_arrays=weight_maps,
+                use_memmap=True,
+                memmap_dir=memmap_dir,
+                cleanup_memmap=self.perform_cleanup,
             )
         except Exception as e:
             self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
@@ -10496,6 +10501,15 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     f"⚠️ Erreur suppression dossier memmap ({os.path.basename(memmap_dir)}): {e}"
                 )
+        reproject_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
+        if os.path.isdir(reproject_dir):
+            try:
+                shutil.rmtree(reproject_dir)
+                self.update_progress(
+                    f"🧹 Dossier memmap supprimé: {os.path.basename(reproject_dir)}"
+                )
+            except Exception:
+                pass
 
     ################################################################################################################################################
 
@@ -10685,6 +10699,7 @@ class SeestarQueuedStacker:
         local_solver_preference="none",
         move_stacked=False,
         partial_save_interval=1,
+        temp_folder=None,
         *,
         save_as_float32=False,
         preserve_linear_output=False,
@@ -10778,6 +10793,11 @@ class SeestarQueuedStacker:
                 "ERROR",
             )
             return False
+        self.temp_folder = os.path.abspath(temp_folder) if temp_folder else self.output_folder
+        try:
+            os.makedirs(self.temp_folder, exist_ok=True)
+        except Exception:
+            pass
         self._resume_requested = self._can_resume(Path(self.output_folder))
         logger.debug(
             f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'"

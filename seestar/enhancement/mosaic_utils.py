@@ -6,6 +6,8 @@ from .reproject_utils import reproject_and_coadd, reproject_interp
 
 from zemosaic import zemosaic_utils
 import inspect
+import os
+import shutil
 
 
 
@@ -15,6 +17,9 @@ def assemble_final_mosaic_with_reproject_coadd(
     final_output_shape_hw: tuple,
     match_bg: bool = True,
     weight_arrays=None,
+    use_memmap: bool = False,
+    memmap_dir: str | None = None,
+    cleanup_memmap: bool = True,
 ):
     """Assemble master tiles using ``reproject_and_coadd``.
 
@@ -30,6 +35,16 @@ def assemble_final_mosaic_with_reproject_coadd(
         Forwarded to ``reproject_and_coadd``.
     weight_arrays : list of ndarray, optional
         Optional per-tile weight maps passed to ``reproject_and_coadd``.
+    use_memmap : bool, optional
+        If ``True`` and supported by the underlying ``reproject`` version,
+        intermediate arrays are memory-mapped to ``memmap_dir`` to reduce RAM
+        usage.
+    memmap_dir : str, optional
+        Directory where memmap files are stored. Created if needed. When
+        ``None``, no explicit directory is passed to ``reproject``.
+    cleanup_memmap : bool, optional
+        When ``True`` the memmap directory will be removed once stacking
+        completes.
 
     Returns
     -------
@@ -85,6 +100,11 @@ def assemble_final_mosaic_with_reproject_coadd(
 
     header = final_output_wcs.to_header(relax=True)
 
+    if use_memmap:
+        if memmap_dir is None:
+            memmap_dir = os.path.join(os.getcwd(), "reproject_memmap")
+        os.makedirs(memmap_dir, exist_ok=True)
+
     for ch in range(n_ch):
         try:
 
@@ -103,6 +123,20 @@ def assemble_final_mosaic_with_reproject_coadd(
             kwargs_local = dict(kwargs)
             if weight_arrays is not None:
                 kwargs_local["input_weights"] = weight_arrays
+            try:
+                sig = inspect.signature(reproject_and_coadd)
+                if use_memmap:
+                    if "use_memmap" in sig.parameters:
+                        kwargs_local["use_memmap"] = True
+                    elif "intermediate_memmap" in sig.parameters:
+                        kwargs_local["intermediate_memmap"] = True
+                    if "memmap_dir" in sig.parameters:
+                        kwargs_local["memmap_dir"] = memmap_dir
+                    if "cleanup_memmap" in sig.parameters:
+                        kwargs_local["cleanup_memmap"] = False
+            except Exception:
+                if use_memmap and "memmap_dir" not in kwargs_local:
+                    kwargs_local["memmap_dir"] = memmap_dir
 
             sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
                 data_list=data_list,
@@ -125,4 +159,9 @@ def assemble_final_mosaic_with_reproject_coadd(
             coverage = cov.astype(np.float32)
 
     mosaic = np.stack(mosaic_channels, axis=-1)
+    if use_memmap and cleanup_memmap and memmap_dir:
+        try:
+            shutil.rmtree(memmap_dir)
+        except Exception:
+            pass
     return mosaic, coverage
