@@ -62,10 +62,31 @@ def reproject_and_coadd(
         _reproject_interp()
 
     if _astropy_reproject_and_coadd is not None:
-        # Use the reference implementation when possible
+        # Use the reference implementation when possible, but ensure all WCS
+        # objects are 2D to avoid mismatched dimensions errors.
+
+        if isinstance(output_projection, WCS):
+            out_wcs = (
+                output_projection
+                if output_projection.world_n_dim == 2
+                else WCS(output_projection.to_header(), naxis=2)
+            )
+        else:
+            out_wcs = WCS(output_projection, naxis=2)
+
+        fixed_input = []
+        for img, wcs_in in input_data:
+            if not isinstance(wcs_in, WCS):
+                fixed_wcs = WCS(wcs_in, naxis=2)
+            elif wcs_in.world_n_dim != 2:
+                fixed_wcs = WCS(wcs_in.to_header(), naxis=2)
+            else:
+                fixed_wcs = wcs_in
+            fixed_input.append((img, fixed_wcs))
+
         return _astropy_reproject_and_coadd(
-            input_data,
-            output_projection=output_projection,
+            fixed_input,
+            output_projection=out_wcs,
             shape_out=shape_out,
             input_weights=input_weights,
             reproject_function=reproject_function,
