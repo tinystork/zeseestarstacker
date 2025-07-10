@@ -170,7 +170,7 @@ def _reproject_worker(
     with fits.open(fits_path, memmap=False) as hdul:
         data = hdul[0].data
         try:
-            input_wcs = WCS(hdul[0].header)
+            input_wcs = WCS(hdul[0].header, naxis=2)
         except Exception:
             input_wcs = None
 
@@ -196,7 +196,7 @@ def _reproject_worker(
         from seestar.enhancement.reproject_utils import reproject_interp
 
         reproj, footprint = reproject_interp(
-            (data, input_wcs), WCS(ref_wcs_header), shape_out, parallel=False
+            (data, input_wcs), WCS(ref_wcs_header, naxis=2), shape_out, parallel=False
         )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
@@ -8734,7 +8734,7 @@ class SeestarQueuedStacker:
         data = fits.getdata(fits_path, memmap=False).astype(np.float32)
         hdr = fits.getheader(fits_path)
         try:
-            input_wcs = WCS(hdr)
+            input_wcs = WCS(hdr, naxis=2)
         except Exception:
             input_wcs = None
         if data.ndim == 2:
@@ -11607,7 +11607,7 @@ class SeestarQueuedStacker:
 
                     a, b = tf[0, 0], tf[1, 0]
                     tx, ty = tf[0, 2], tf[1, 2]
-                    w = WCS(hdul[0].header)
+                    w = WCS(hdul[0].header, naxis=2)
                     R = np.array([[a, -b], [b, a]])
                     w.pixel_scale_matrix = w.pixel_scale_matrix @ R
                     w.wcs.crpix -= [tx, ty]
