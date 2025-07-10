@@ -62,17 +62,23 @@ def reproject_and_coadd(
         _reproject_interp()
 
     if _astropy_reproject_and_coadd is not None:
-        # Use the reference implementation when possible
-        return _astropy_reproject_and_coadd(
-            input_data,
-            output_projection=output_projection,
-            shape_out=shape_out,
-            input_weights=input_weights,
-            reproject_function=reproject_function,
-            combine_function=combine_function,
-            match_background=match_background,
-            **kwargs,
-        )
+        # Use the reference implementation when possible but gracefully
+        # fallback to the local implementation if it fails due to WCS
+        # incompatibilities (e.g. different number of world coordinates).
+        try:
+            return _astropy_reproject_and_coadd(
+                input_data,
+                output_projection=output_projection,
+                shape_out=shape_out,
+                input_weights=input_weights,
+                reproject_function=reproject_function,
+                combine_function=combine_function,
+                match_background=match_background,
+                **kwargs,
+            )
+        except ValueError as exc:
+            if "different number of world coordinates" not in str(exc):
+                raise
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(shape_out)
