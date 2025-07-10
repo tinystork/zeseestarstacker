@@ -91,3 +91,42 @@ def test_fallback_on_generic_error(monkeypatch):
     )
     assert np.allclose(result, 1)
     assert np.allclose(cov, 1)
+
+
+def test_skip_non_celestial_inputs(monkeypatch):
+    module = reproject_utils
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, **kwargs):
+        data, _ = data_wcs
+        return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
+
+    def fake_astropy_coadd(input_data, **kwargs):
+        # ensure only celestial WCS inputs are forwarded
+        assert len(input_data) == 1
+        _, wcs_obj = input_data[0]
+        assert getattr(wcs_obj, "has_celestial", False)
+        shape_out = kwargs.get("shape_out")
+        return np.ones(shape_out, dtype=float), np.ones(shape_out, dtype=float)
+
+    monkeypatch.setattr(module, "_astropy_reproject_and_coadd", fake_astropy_coadd)
+
+    from astropy.wcs import WCS
+    import numpy as np
+
+    wcs_cel = WCS(naxis=2)
+    wcs_cel.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs_cel.pixel_shape = (1, 1)
+
+    wcs_non = WCS(naxis=2)
+    wcs_non.wcs.ctype = ["LON", "LAT"]
+    wcs_non.pixel_shape = (1, 1)
+
+    result, cov = module.reproject_and_coadd(
+        [(np.ones((1, 1), dtype=np.float32), wcs_non), (np.ones((1, 1), dtype=np.float32), wcs_cel)],
+        output_projection=wcs_cel,
+        shape_out=(1, 1),
+        reproject_function=dummy_reproj,
+    )
+
+    assert np.allclose(result, 1)
+    assert np.allclose(cov, 1)

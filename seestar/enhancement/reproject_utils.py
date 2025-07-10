@@ -18,6 +18,9 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
     _astropy_reproject_and_coadd = None
 
 from astropy.wcs import WCS
+import logging
+
+logger = logging.getLogger(__name__)
 import numpy as np
 
 
@@ -61,6 +64,23 @@ def reproject_and_coadd(
         # reproject not available
         _reproject_interp()
 
+    ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
+    shape_out = tuple(int(round(x)) for x in shape_out)
+
+    weights_iter = input_weights if input_weights is not None else [None] * len(input_data)
+    filtered_pairs = []
+    filtered_weights = []
+    for (img, wcs_in), weight in zip(input_data, weights_iter):
+        wcs_obj = WCS(wcs_in) if not isinstance(wcs_in, WCS) else wcs_in
+        if ref_wcs.has_celestial and not getattr(wcs_obj, "has_celestial", False):
+            logger.warning("Skipping input without celestial WCS")
+            continue
+        filtered_pairs.append((img, wcs_obj))
+        filtered_weights.append(weight)
+
+    if not filtered_pairs:
+        raise ValueError("No compatible input WCS for reprojection")
+
     if _astropy_reproject_and_coadd is not None:
         # Use the reference implementation when possible but gracefully
         # fall back to the local implementation if it fails (e.g. due to
@@ -70,10 +90,10 @@ def reproject_and_coadd(
         # like a projection mismatch.
         try:
             return _astropy_reproject_and_coadd(
-                input_data,
-                output_projection=output_projection,
+                filtered_pairs,
+                output_projection=ref_wcs,
                 shape_out=shape_out,
-                input_weights=input_weights,
+                input_weights=filtered_weights if input_weights is not None else None,
                 reproject_function=reproject_function,
                 combine_function=combine_function,
                 match_background=match_background,
@@ -84,15 +104,10 @@ def reproject_and_coadd(
             if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
                 raise
 
-    ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
-    shape_out = tuple(shape_out)
-
     sum_image = np.zeros(shape_out, dtype=np.float64)
     cov_image = np.zeros(shape_out, dtype=np.float64)
 
-    weights_iter = input_weights if input_weights is not None else [None] * len(input_data)
-
-    for (img, wcs_in), weight in zip(input_data, weights_iter):
+    for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
         proj_img, footprint = reproject_function(
             (img, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
         )
