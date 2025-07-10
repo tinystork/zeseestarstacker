@@ -107,6 +107,7 @@ def reproject_and_coadd(
     sum_image = np.zeros(shape_out, dtype=np.float64)
     cov_image = np.zeros(shape_out, dtype=np.float64)
 
+
     for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
         proj_img, footprint = reproject_function(
             (img, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
