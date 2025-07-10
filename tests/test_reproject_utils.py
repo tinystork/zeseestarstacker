@@ -100,11 +100,17 @@ def test_skip_non_celestial_inputs(monkeypatch):
         data, _ = data_wcs
         return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
 
-    monkeypatch.setattr(
-        module,
-        "_astropy_reproject_and_coadd",
-        lambda *a, **k: (_ for _ in ()).throw(ValueError("Output WCS has celestial components but input WCS does not")),
-    )
+
+    def fake_astropy_coadd(input_data, **kwargs):
+        # ensure only celestial WCS inputs are forwarded
+        assert len(input_data) == 1
+        _, wcs_obj = input_data[0]
+        assert getattr(wcs_obj, "has_celestial", False)
+        shape_out = kwargs.get("shape_out")
+        return np.ones(shape_out, dtype=float), np.ones(shape_out, dtype=float)
+
+    monkeypatch.setattr(module, "_astropy_reproject_and_coadd", fake_astropy_coadd)
+
 
     from astropy.wcs import WCS
     import numpy as np

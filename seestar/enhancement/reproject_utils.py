@@ -64,37 +64,10 @@ def reproject_and_coadd(
         # reproject not available
         _reproject_interp()
 
-    if _astropy_reproject_and_coadd is not None:
-        # Use the reference implementation when possible but gracefully
-        # fall back to the local implementation if it fails (e.g. due to
-        # WCS incompatibilities). Older versions of ``reproject`` may
-        # raise different exception types depending on the failure so we
-        # simply catch ``Exception`` and only re-raise if it doesn't look
-        # like a projection mismatch.
-        try:
-            return _astropy_reproject_and_coadd(
-                input_data,
-                output_projection=output_projection,
-                shape_out=shape_out,
-                input_weights=input_weights,
-                reproject_function=reproject_function,
-                combine_function=combine_function,
-                match_background=match_background,
-                **kwargs,
-            )
-        except Exception as exc:  # pragma: no cover - depends on reproject version
-            msg = str(exc)
-            if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
-                raise
-
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
 
-    sum_image = np.zeros(shape_out, dtype=np.float64)
-    cov_image = np.zeros(shape_out, dtype=np.float64)
-
     weights_iter = input_weights if input_weights is not None else [None] * len(input_data)
-
     filtered_pairs = []
     filtered_weights = []
     for (img, wcs_in), weight in zip(input_data, weights_iter):
@@ -107,6 +80,33 @@ def reproject_and_coadd(
 
     if not filtered_pairs:
         raise ValueError("No compatible input WCS for reprojection")
+
+    if _astropy_reproject_and_coadd is not None:
+        # Use the reference implementation when possible but gracefully
+        # fall back to the local implementation if it fails (e.g. due to
+        # WCS incompatibilities). Older versions of ``reproject`` may
+        # raise different exception types depending on the failure so we
+        # simply catch ``Exception`` and only re-raise if it doesn't look
+        # like a projection mismatch.
+        try:
+            return _astropy_reproject_and_coadd(
+                filtered_pairs,
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                input_weights=filtered_weights if input_weights is not None else None,
+                reproject_function=reproject_function,
+                combine_function=combine_function,
+                match_background=match_background,
+                **kwargs,
+            )
+        except Exception as exc:  # pragma: no cover - depends on reproject version
+            msg = str(exc)
+            if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
+                raise
+
+    sum_image = np.zeros(shape_out, dtype=np.float64)
+    cov_image = np.zeros(shape_out, dtype=np.float64)
+
 
     for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
         proj_img, footprint = reproject_function(
