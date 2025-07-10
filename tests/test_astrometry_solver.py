@@ -255,3 +255,16 @@ def test_astap_adds_fov_when_scale_missing(tmp_path, monkeypatch):
     )
 
     assert "-fov" in captured["cmd"]
+
+
+def test_resolve_astap_app(monkeypatch, tmp_path):
+    app_dir = tmp_path / "ASTAP.app"
+    bin_dir = app_dir / "Contents" / "MacOS"
+    bin_dir.mkdir(parents=True)
+    exe = bin_dir / "astap"
+    exe.write_text("")
+
+    monkeypatch.setattr(astrometry_solver.platform, "system", lambda: "Darwin")
+
+    resolved = astrometry_solver.resolve_astap_executable(str(app_dir))
+    assert resolved == str(exe)

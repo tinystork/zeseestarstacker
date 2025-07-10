@@ -4,6 +4,7 @@ Module pour la fenêtre de configuration des solveurs astrométriques locaux.
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os  # Pour les opérations sur les chemins
+import platform
 from zemosaic import zemosaic_config
 from .ui_utils import ToolTip
 
@@ -483,10 +484,17 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         elif os.path.exists(current_path):
              initial_dir = os.path.dirname(current_path)
 
-        file_types = [(self.tr("executable_files", default="Executable Files"), "*.*")] 
-        if os.name == 'nt': 
-            file_types = [(self.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"), 
-                          (self.tr("all_files", default="All Files"), "*.*")]
+        file_types = [(self.tr("executable_files", default="Executable Files"), "*.*")]
+        if os.name == 'nt':
+            file_types = [
+                (self.tr("astap_executable_win", default="ASTAP Executable"), "*.exe"),
+                (self.tr("all_files", default="All Files"), "*.*"),
+            ]
+        elif platform.system() == "Darwin":
+            file_types = [
+                (self.tr("astap_app", default="ASTAP Application"), "*.app"),
+                (self.tr("all_files", default="All Files"), "*.*"),
+            ]
         
         filepath = filedialog.askopenfilename(
             title=self.tr("select_astap_executable_title", default="Select ASTAP Executable"),
