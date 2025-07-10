@@ -469,7 +469,12 @@ class SeestarAligner:
         dans le dossier temporaire DEDANS base_output_folder.
         """
         if reference_image is None: return
-        temp_folder_ref = os.path.join(base_output_folder, "temp_processing")
+        # On permet de passer directement un chemin qui est déjà le dossier
+        # temp_processing pour éviter de dupliquer ce segment dans certains cas
+        if os.path.basename(os.path.normpath(base_output_folder)) == "temp_processing":
+            temp_folder_ref = base_output_folder
+        else:
+            temp_folder_ref = os.path.join(base_output_folder, "temp_processing")
         try:
             os.makedirs(temp_folder_ref, exist_ok=True)
             ref_output_path = os.path.join(temp_folder_ref, "reference_image.fit")
