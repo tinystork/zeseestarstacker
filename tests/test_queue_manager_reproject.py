@@ -684,6 +684,52 @@ def test_save_classic_batch_crop_resolves(monkeypatch, tmp_path):
     assert calls["n"] == 1
 
 
+def test_save_classic_batch_unsolved_skipped(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+        settings_mod.SettingsManager = object
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.reproject_coadd_final = True
+    obj.output_folder = str(tmp_path)
+    obj.reference_header_for_wcs = qm.fits.Header()
+
+    def fake_run_astap(self, path):
+        return False
+
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+
+    hdr = qm.fits.Header()
+    data = np.ones((4, 4, 3), dtype=np.float32)
+    wht = np.ones((4, 4), dtype=np.float32)
+
+    sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
+
+    assert sci is not None
+    assert len(obj.intermediate_classic_batch_files) == 0
+    assert sci in obj.unsolved_classic_batch_files
+
+
 def test_calculate_fixed_orientation_grid():
     sys.path.insert(0, str(ROOT))
     import importlib
@@ -803,4 +849,76 @@ def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
 
     assert calls["fixed"] == 1
     assert calls["optimal"] == 0
+
+
+def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = True
+    obj.drizzle_active_session = False
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+
+    data = np.zeros((3, 3, 3), dtype=np.float32)
+    hdr = make_wcs(shape=(3, 3)).to_header()
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr, overwrite=True)
+    fits.writeto(sci2, data, hdr, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+
+    obj.unsolved_classic_batch_files.add(str(sci2))
+
+    import seestar.enhancement.reproject_utils as ru
+
+    counts = []
+
+    def fake_reproject_and_coadd(data_list, *a, **k):
+        counts.append(len(data_list))
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        return np.zeros(k.get("shape_out"), dtype=np.float32), np.ones(k.get("shape_out"), dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches([
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ])
+
+    assert counts == []
 

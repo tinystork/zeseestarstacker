@@ -952,6 +952,10 @@ class SeestarQueuedStacker:
         self.reproject_coadd_final = False
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
+        # Batches that failed astrometric solving
+        self.unsolved_classic_batch_files = set()
+        # Status flag for the most recently saved batch
+        self._last_classic_batch_solved = True
 
         self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
@@ -3736,13 +3740,22 @@ class SeestarQueuedStacker:
                                         except Exception:
                                             batch_wcs = None
 
-                                        # 3. Accumulate (reprojection now happens inside _combine_batch_result)
-                                        self._combine_batch_result(
-                                            stacked_np,
-                                            hdr,
-                                            wht_2d,
-                                            batch_wcs=batch_wcs,
-                                        )
+                                        # 3. Accumulate if astrometric solve succeeded or not reprojecting
+                                        if (
+                                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                                            or self._last_classic_batch_solved
+                                        ):
+                                            self._combine_batch_result(
+                                                stacked_np,
+                                                hdr,
+                                                wht_2d,
+                                                batch_wcs=batch_wcs,
+                                            )
+                                        else:
+                                            self.update_progress(
+                                                "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
+                                                "WARN",
+                                            )
                                         if hasattr(self.cumulative_sum_memmap, "flush"):
                                             self.cumulative_sum_memmap.flush()
                                         if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -4260,12 +4273,21 @@ class SeestarQueuedStacker:
                         except Exception:
                             batch_wcs = None
 
-                        self._combine_batch_result(
-                            stacked_np,
-                            hdr,
-                            wht_2d,
-                            batch_wcs=batch_wcs,
-                        )
+                        if (
+                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                            or self._last_classic_batch_solved
+                        ):
+                            self._combine_batch_result(
+                                stacked_np,
+                                hdr,
+                                wht_2d,
+                                batch_wcs=batch_wcs,
+                            )
+                        else:
+                            self.update_progress(
+                                "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
+                                "WARN",
+                            )
 
                         if self.reproject_between_batches:
                             stack_img, solved_hdr = self._solve_cumulative_stack()
@@ -6209,12 +6231,21 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
 
-            self._combine_batch_result(
-                stacked_batch_data_np,
-                stack_info_header,
-                batch_coverage_map_2d,
-                batch_wcs,
-            )
+            if (
+                not (self.reproject_between_batches or self.reproject_coadd_final)
+                or self._last_classic_batch_solved
+            ):
+                self._combine_batch_result(
+                    stacked_batch_data_np,
+                    stack_info_header,
+                    batch_coverage_map_2d,
+                    batch_wcs,
+                )
+            else:
+                self.update_progress(
+                    "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
+                    "WARN",
+                )
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -8985,6 +9016,7 @@ class SeestarQueuedStacker:
             wht_paths.append(wht_path)
 
         run_astap = self.solve_batches or self.reproject_coadd_final
+        solved_ok = True
 
         if run_astap:
             solved_ok = self._run_astap_and_update_header(sci_fits)
@@ -9046,6 +9078,7 @@ class SeestarQueuedStacker:
                     os.remove(sci_fits)
                     for p in wht_paths:
                         os.remove(p)
+                    self._last_classic_batch_solved = False
                     return None, None
         else:
             if self.reference_header_for_wcs is not None:
@@ -9100,9 +9133,13 @@ class SeestarQueuedStacker:
                         wht_path, overwrite=True, output_verify="ignore"
                     )
 
+        self._last_classic_batch_solved = solved_ok
 
         if self.reproject_coadd_final:
-            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+            if solved_ok:
+                self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+            else:
+                self.unsolved_classic_batch_files.add(sci_fits)
 
         return sci_fits, wht_paths
 
@@ -9130,6 +9167,12 @@ class SeestarQueuedStacker:
 
         # --- 2. Loop over saved batch FITS --------------------------------------
         for sci_path, wht_paths in batch_files:
+            if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                self.update_progress(
+                    f"   -> Batch ignor\xe9 (non r\xe9solu) {sci_path}",
+                    "WARN",
+                )
+                continue
             # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
@@ -9298,6 +9341,12 @@ class SeestarQueuedStacker:
         headers = []
         weight_maps = []
         for sci_path, _wht_paths in batch_files:
+            if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                self.update_progress(
+                    f"   -> Batch ignor\xe9 (non r\xe9solu) {sci_path}",
+                    "WARN",
+                )
+                continue
             try:
                 hdr = fits.getheader(sci_path, memmap=False)
                 wcs = WCS(hdr, naxis=2)
