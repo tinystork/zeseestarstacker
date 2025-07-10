@@ -63,8 +63,11 @@ def reproject_and_coadd(
 
     if _astropy_reproject_and_coadd is not None:
         # Use the reference implementation when possible but gracefully
-        # fallback to the local implementation if it fails due to WCS
-        # incompatibilities (e.g. different number of world coordinates).
+        # fall back to the local implementation if it fails (e.g. due to
+        # WCS incompatibilities). Older versions of ``reproject`` may
+        # raise different exception types depending on the failure so we
+        # simply catch ``Exception`` and only re-raise if it doesn't look
+        # like a projection mismatch.
         try:
             return _astropy_reproject_and_coadd(
                 input_data,
@@ -76,8 +79,9 @@ def reproject_and_coadd(
                 match_background=match_background,
                 **kwargs,
             )
-        except ValueError as exc:
-            if "different number of world coordinates" not in str(exc):
+        except Exception as exc:  # pragma: no cover - depends on reproject version
+            msg = str(exc)
+            if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
                 raise
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection

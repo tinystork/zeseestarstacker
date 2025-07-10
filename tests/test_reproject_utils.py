@@ -64,3 +64,30 @@ def test_fallback_on_wcs_mismatch(monkeypatch):
     )
     assert np.allclose(result, 1)
     assert np.allclose(cov, 1)
+
+
+def test_fallback_on_generic_error(monkeypatch):
+    module = reproject_utils
+
+    def raise_type_error(*args, **kwargs):
+        raise TypeError("Output shape mismatch")
+
+    monkeypatch.setattr(module, "_astropy_reproject_and_coadd", raise_type_error)
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, **kwargs):
+        data, _ = data_wcs
+        return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
+
+    from astropy.wcs import WCS
+    import numpy as np
+
+    wcs = WCS(naxis=2)
+    wcs.pixel_shape = (1, 1)
+    result, cov = module.reproject_and_coadd(
+        [(np.ones((1, 1), dtype=np.float32), wcs)],
+        output_projection=wcs,
+        shape_out=(1, 1),
+        reproject_function=dummy_reproj,
+    )
+    assert np.allclose(result, 1)
+    assert np.allclose(cov, 1)
