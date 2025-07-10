@@ -85,7 +85,7 @@ def reproject_and_coadd(
                 raise
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
-    shape_out = tuple(shape_out)
+    shape_out = tuple(int(round(x)) for x in shape_out)
 
     sum_image = np.zeros(shape_out, dtype=np.float64)
     cov_image = np.zeros(shape_out, dtype=np.float64)
