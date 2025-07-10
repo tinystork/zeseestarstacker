@@ -1197,16 +1197,20 @@ class SeestarStackerGUI:
         self.stack_final_combo.pack(side=tk.LEFT, padx=(5, 0))
         self.stack_final_combo.bind("<<ComboboxSelected>>", self._on_final_combo_change)
 
-        tk.Label(
+        self.hq_ram_limit_label_widget = tk.Label(
             final_frame,
             text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
-        ).pack(side=tk.LEFT, padx=(10, 2))
-        tk.Spinbox(
+        )
+        self.hq_ram_limit_label_widget.pack(side=tk.LEFT, padx=(10, 2))
+        self.hq_ram_limit_spinbox = tk.Spinbox(
             final_frame,
-            from_=1, to=64, increment=1,
+            from_=1,
+            to=64,
+            increment=1,
             width=5,
             textvariable=self.max_hq_mem_var,
-        ).pack(side=tk.LEFT)
+        )
+        self.hq_ram_limit_spinbox.pack(side=tk.LEFT)
 
         # Mapping between internal keys and displayed labels for normalization, weighting and final combine
         self.norm_keys = ["none", "linear_fit", "sky_mean"]
@@ -3292,6 +3296,7 @@ class SeestarStackerGUI:
             "stacking_winsor_limits_label": "winsor_limits_label",
             "stacking_winsor_note": "winsor_note_label",
             "stacking_final_combine_label": "final_combine_label",
+            "hq_ram_limit_label": "hq_ram_limit_label_widget",
             "wb_r": getattr(self, "wb_r_ctrls", {}).get("label"),
             "wb_g": getattr(self, "wb_g_ctrls", {}).get("label"),
             "wb_b": getattr(self, "wb_b_ctrls", {}).get("label"),
@@ -3416,6 +3421,8 @@ class SeestarStackerGUI:
             ("cb_max_b_factor_spinbox", "tooltip_cb_max_b_factor"),
             ("final_edge_crop_actual_label", "tooltip_final_edge_crop_percent"),
             ("final_edge_crop_spinbox", "tooltip_final_edge_crop_percent"),
+            ("hq_ram_limit_label_widget", "tooltip_hq_ram_limit"),
+            ("hq_ram_limit_spinbox", "tooltip_hq_ram_limit"),
             ("apply_final_scnr_check", "tooltip_apply_final_scnr"),
             (
                 getattr(self, "scnr_amount_ctrls", {}).get("label"),
