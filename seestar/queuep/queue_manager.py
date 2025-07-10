@@ -3102,9 +3102,7 @@ class SeestarQueuedStacker:
                         "unknown_reference_panel.fits"  # Fallback
                     )
 
-            ref_temp_processing_dir = os.path.join(
-                self.output_folder, "temp_processing"
-            )
+            ref_temp_processing_dir = self._temp_processing_dir()
             reference_image_path_for_solver = os.path.join(
                 ref_temp_processing_dir, "reference_image.fit"
             )
@@ -10503,6 +10501,16 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
 
+    ##########################################################################
+    ####################################################################
+
+    def _temp_processing_dir(self) -> str:
+        """Return the path to the temporary processing directory."""
+        base = os.path.abspath(self.output_folder) if self.output_folder else ""
+        if os.path.basename(os.path.normpath(base)) == "temp_processing":
+            return base
+        return os.path.join(base, "temp_processing")
+
     ################################################################################################################################################
 
     def cleanup_temp_reference(self):
@@ -10512,7 +10520,7 @@ class SeestarQueuedStacker:
             )
             return
         try:
-            aligner_temp_folder = os.path.join(self.output_folder, "temp_processing")
+            aligner_temp_folder = self._temp_processing_dir()
             if os.path.isdir(aligner_temp_folder):
                 ref_fit = os.path.join(aligner_temp_folder, "reference_image.fit")
                 ref_png = os.path.join(aligner_temp_folder, "reference_image.png")
@@ -11229,9 +11237,7 @@ class SeestarQueuedStacker:
                 f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}"
             )
 
-            ref_temp_processing_dir = os.path.join(
-                self.output_folder, "temp_processing"
-            )
+            ref_temp_processing_dir = self._temp_processing_dir()
             reference_image_path_for_solving = os.path.join(
                 ref_temp_processing_dir, "reference_image.fit"
             )
