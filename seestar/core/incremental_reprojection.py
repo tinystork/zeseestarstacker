@@ -8,6 +8,7 @@ import importlib.util
 _cupy_available = importlib.util.find_spec("cupy") is not None
 
 from .reprojection import reproject_to_reference_wcs
+from .reprojection_utils import standardize_wcs
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,7 @@ def reproject_and_coadd_batch(
             continue
         try:
             wcs = WCS(hdr, naxis=2)
+            wcs = standardize_wcs(wcs)
             if not wcs.is_celestial:
                 continue
             if wcs.pixel_shape is None:
