@@ -152,6 +152,9 @@ def assemble_final_mosaic_with_reproject_coadd(
 
                 **kwargs_local,
             )
+            # Avoid propagating NaNs which can lead to black images
+            sci = np.nan_to_num(sci, nan=0.0)
+            cov = np.nan_to_num(cov, nan=0.0)
         except Exception:
             return None, None
         mosaic_channels.append(sci.astype(np.float32))
