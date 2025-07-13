@@ -5414,6 +5414,7 @@ class SeestarQueuedStacker:
                 output_filename_suffix="_mosaic_reproject",
                 drizzle_final_sci_data=final_sci_image_HWC,
                 drizzle_final_wht_data=final_coverage_map_2D,
+                preserve_linear_output=True,
             )
         except Exception as e_stack_final:
             self.update_progress(
