@@ -9232,8 +9232,17 @@ class SeestarQueuedStacker:
                 ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
 
                 # Science image (3‑channels)
+                if (
+                    data_cxhxw.ndim == 3
+                    and data_cxhxw.shape[0] in (1, 3)
+                    and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+                ):
+                    img_hwc_in = np.moveaxis(data_cxhxw, 0, -1)
+                else:
+                    img_hwc_in = data_cxhxw
+
                 img_hwc = reproject_to_reference_wcs(
-                    np.moveaxis(data_cxhxw, 0, -1),  # CxHxW ➜ HxWxC
+                    img_hwc_in,
                     batch_wcs,
                     self.reference_wcs_object,
                     (tgt_h, tgt_w),
@@ -9249,8 +9258,14 @@ class SeestarQueuedStacker:
 
                 batch_wcs = self.reference_wcs_object  # Subsequent code must use it
             else:
-                # Fall back: keep original orientation
-                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+                if (
+                    data_cxhxw.ndim == 3
+                    and data_cxhxw.shape[0] in (1, 3)
+                    and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+                ):
+                    img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+                else:
+                    img_hwc = data_cxhxw
 
             # 2.4 Feed per‑channel lists -------------------------------------
             wcs_for_grid.append(batch_wcs)
