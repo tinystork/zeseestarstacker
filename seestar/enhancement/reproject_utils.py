@@ -75,6 +75,12 @@ def reproject_and_coadd(
         if ref_wcs.has_celestial and not getattr(wcs_obj, "has_celestial", False):
             logger.warning("Skipping input without celestial WCS")
             continue
+
+        if img.ndim == 3 and img.shape[0] in (1, 3) and img.shape[-1] != img.shape[0]:
+            img = np.moveaxis(img, 0, -1)
+        if weight is not None and weight.ndim == img.ndim and weight.shape[0] in (1, 3) and weight.shape[-1] != weight.shape[0]:
+            weight = np.moveaxis(weight, 0, -1)
+
         filtered_pairs.append((img, wcs_obj))
         filtered_weights.append(weight)
 
