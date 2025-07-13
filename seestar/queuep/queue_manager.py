@@ -4374,9 +4374,9 @@ class SeestarQueuedStacker:
                             self._finalize_single_classic_batch(
                                 self.intermediate_classic_batch_files[0]
                             )
-                        elif not self._reproject_classic_batches_zm(
-                            self.intermediate_classic_batch_files
-                        ):
+                        else:
+                            # Directly use the alignment-safe implementation
+                            # to avoid blur when combining pre-stacked batches.
                             self._reproject_classic_batches(
                                 self.intermediate_classic_batch_files
                             )
@@ -9157,6 +9157,28 @@ class SeestarQueuedStacker:
             reproject_interp,
         )
 
+        # ------------------------------------------------------------------
+        # If no reference WCS is defined (e.g. pre-scan failed), initialise it
+        # from the first valid solved batch so that subsequent images can be
+        # reprojected consistently on a common grid.
+        # ------------------------------------------------------------------
+        if self.reference_wcs_object is None and self.reference_shape is None:
+            for sci_path, _wht_paths in batch_files:
+                if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                    continue
+                try:
+                    hdr = fits.getheader(sci_path, memmap=False)
+                    ref_wcs = WCS(hdr, naxis=2)
+                    h = int(hdr.get("NAXIS2"))
+                    w = int(hdr.get("NAXIS1"))
+                    ref_wcs.pixel_shape = (w, h)
+                    self.reference_wcs_object = ref_wcs
+                    self.reference_shape = (h, w)
+                    self.reference_header_for_wcs = hdr.copy()
+                    break
+                except Exception:
+                    continue
+
         # --- 1. Containers -------------------------------------------------------
         channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
         channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
@@ -9280,7 +9302,15 @@ class SeestarQueuedStacker:
         self.current_stack = np.stack(final_channels, axis=-1)
         self.current_coverage = final_cov
 
-        # Caller will take care of saving the FITS file / updating GUI, etc.
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        self._save_final_stack(
+            "_classic_reproject",
+            drizzle_final_sci_data=self.current_stack,
+            drizzle_final_wht_data=self.current_coverage,
+            preserve_linear_output=True,
+        )
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
