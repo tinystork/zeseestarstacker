@@ -111,6 +111,7 @@ def reproject_and_coadd(
                 exc,
             )
 
+
     first_img = filtered_pairs[0][0]
     if first_img.ndim == 3:
         n_channels = first_img.shape[2]
@@ -188,6 +189,7 @@ def reproject_and_coadd(
     else:
         final[valid] = sum_image[valid] / cov_image[valid][..., None]
 
+
     if input_weights is not None and not np.any(cov_image > 0):
         logger.warning("All weights vanished during reprojection; retrying without weights")
         return reproject_and_coadd(
@@ -200,6 +202,7 @@ def reproject_and_coadd(
             match_background=match_background,
             **kwargs,
         )
+
 
     return final.astype(np.float32), cov_image.astype(np.float32)
 

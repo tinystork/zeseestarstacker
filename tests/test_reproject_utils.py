@@ -160,6 +160,7 @@ def test_channel_orientation_chw(monkeypatch):
     assert np.allclose(cov, 1)
 
 
+
 def test_channel_orientation_with_weights(monkeypatch):
     module = reproject_utils
 
@@ -212,3 +213,4 @@ def test_zero_coverage_fallback(monkeypatch):
 
     assert np.allclose(result, 1)
     assert np.allclose(cov, 1)
+
