@@ -321,16 +321,23 @@ class StackEnhancer:
              return img
 
 
-def apply_edge_crop(img_data, crop_percent_decimal):
-    """
-    Applique un rognage en pourcentage sur les bords d'une image.
+def apply_edge_crop(img_data, crop_percent_decimal, header=None):
+    """Rogne l'image et met à jour optionnellement le WCS ``header``.
 
-    Args:
-        img_data (np.ndarray): Image à rogner.
-        crop_percent_decimal (float): Pourcentage à rogner (ex: 0.05 pour 5%).
+    Parameters
+    ----------
+    img_data : np.ndarray
+        Image à rogner.
+    crop_percent_decimal : float
+        Pourcentage à rogner (``0.05`` pour 5 % par exemple).
+    header : astropy.io.fits.Header, optional
+        Si fourni, les mots clés ``CRPIX1``, ``CRPIX2`` et ``NAXIS`` seront
+        ajustés pour refléter le rognage.
 
-    Returns:
-        np.ndarray: Image rognée, ou l'originale si rognage non applicable/erreur.
+    Returns
+    -------
+    np.ndarray or tuple
+        Image rognée seule ou ``(image, header)`` si ``header`` est passé.
     """
     if img_data is None:
         print("WARN [apply_edge_crop]: Données image None, pas de rognage.")
@@ -363,15 +370,24 @@ def apply_edge_crop(img_data, crop_percent_decimal):
                 return img_data
             
             print(f"DEBUG [apply_edge_crop]: Rognage terminé. Nouvelle shape: {cropped_img.shape}.")
+            if header is not None:
+                header = header.copy()
+                if "CRPIX1" in header:
+                    header["CRPIX1"] = header.get("CRPIX1", 0) - crop_w_pixels
+                if "CRPIX2" in header:
+                    header["CRPIX2"] = header.get("CRPIX2", 0) - crop_h_pixels
+                header["NAXIS1"] = cropped_img.shape[1]
+                header["NAXIS2"] = cropped_img.shape[0]
+                return cropped_img, header
             return cropped_img
         else:
-            # print("DEBUG [apply_edge_crop]: Pixels de rognage calculés à 0, pas de rognage effectué.")
-            return img_data # Pas de rognage si pixels = 0
+            # Pas de rognage si pixels = 0
+            return (img_data, header) if header is not None else img_data
 
     except Exception as e:
          print(f"   ERREUR [apply_edge_crop]: Erreur pendant le rognage: {e}")
          traceback.print_exc(limit=1)
-         return img_data # Retourner l'original en cas d'erreur
+         return (img_data, header) if header is not None else img_data
 
 ######################################################################################################################################################
 
