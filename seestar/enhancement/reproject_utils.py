@@ -100,11 +100,48 @@ def reproject_and_coadd(
                 **kwargs,
             )
         except Exception as exc:  # pragma: no cover - depends on reproject version
-            msg = str(exc)
-            if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
-                raise
+            logger.warning(
+                "astropy reproject_and_coadd failed: %s; falling back to numpy implementation",
+                exc,
+            )
 
-    sum_image = np.zeros(shape_out, dtype=np.float64)
+    first_img = filtered_pairs[0][0]
+    if first_img.ndim == 3:
+        n_channels = first_img.shape[2]
+    else:
+        n_channels = 1
+
+    if n_channels > 1:
+        channel_results = []
+        cov_image = None
+        for ch in range(n_channels):
+            ch_pairs = []
+            for img, wcs_in in filtered_pairs:
+                if img.ndim == 3:
+                    ch_pairs.append((img[..., ch], wcs_in))
+                else:
+                    ch_pairs.append((img, wcs_in))
+            ch_res, cov = reproject_and_coadd(
+                ch_pairs,
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                input_weights=filtered_weights,
+                reproject_function=reproject_function,
+                combine_function=combine_function,
+                match_background=match_background,
+                **kwargs,
+            )
+            channel_results.append(ch_res)
+            if cov_image is None:
+                cov_image = cov
+            else:
+                cov_image = np.maximum(cov_image, cov)
+        mosaic = np.stack(channel_results, axis=-1)
+        return mosaic.astype(np.float32), cov_image.astype(np.float32)
+
+    sum_shape = shape_out
+
+    sum_image = np.zeros(sum_shape, dtype=np.float64)
     cov_image = np.zeros(shape_out, dtype=np.float64)
 
 
@@ -122,12 +159,20 @@ def reproject_and_coadd(
             w_reproj = np.nan_to_num(w_reproj, nan=0.0)
             weight_proj = w_reproj * w_fp
 
-        sum_image += proj_img * weight_proj
+        if n_channels == 1:
+            sum_image += proj_img * weight_proj
+        else:
+            if proj_img.ndim == 2:
+                proj_img = np.repeat(proj_img[:, :, None], n_channels, axis=2)
+            sum_image += proj_img * weight_proj[:, :, None]
         cov_image += weight_proj
 
-    final = np.full(shape_out, np.nan, dtype=np.float64)
+    final = np.full(sum_shape, np.nan, dtype=np.float64)
     valid = cov_image > 0
-    final[valid] = sum_image[valid] / cov_image[valid]
+    if n_channels == 1:
+        final[valid] = sum_image[valid] / cov_image[valid]
+    else:
+        final[valid] = sum_image[valid] / cov_image[valid][..., None]
 
     return final.astype(np.float32), cov_image.astype(np.float32)
 
