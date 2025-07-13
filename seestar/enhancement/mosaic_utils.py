@@ -173,6 +173,9 @@ def assemble_final_mosaic_with_reproject_coadd(
 
                 **kwargs_local,
             )
+            if not np.any(cov > 0):
+                sci = np.mean(np.stack(data_list, axis=0), axis=0).astype(np.float32)
+                cov = np.ones(final_output_shape_hw, dtype=np.float32)
         except Exception:
             return None, None
         mosaic_channels.append(sci.astype(np.float32))
