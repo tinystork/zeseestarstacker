@@ -158,3 +158,33 @@ def test_channel_orientation_chw(monkeypatch):
     assert result.shape == (1, 1, 3)
     assert np.allclose(result, 1)
     assert np.allclose(cov, 1)
+
+
+
+def test_channel_orientation_with_weights(monkeypatch):
+    module = reproject_utils
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, **kwargs):
+        data, _ = data_wcs
+        return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
+
+    from astropy.wcs import WCS
+    import numpy as np
+
+    wcs = WCS(naxis=2)
+    wcs.pixel_shape = (1, 1)
+
+    chw_data = np.full((3, 1, 1), 2.0, dtype=np.float32)
+    chw_weight = np.ones((3, 1, 1), dtype=np.float32)
+    result, cov = module.reproject_and_coadd(
+        [(chw_data, wcs)],
+        output_projection=wcs,
+        shape_out=(1, 1),
+        input_weights=[chw_weight],
+        reproject_function=dummy_reproj,
+    )
+
+    assert result.shape == (1, 1, 3)
+    assert np.allclose(result, 2)
+    assert np.allclose(cov, 1)
+
