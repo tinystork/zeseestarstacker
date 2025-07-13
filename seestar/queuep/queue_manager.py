@@ -5414,7 +5414,7 @@ class SeestarQueuedStacker:
                 output_filename_suffix="_mosaic_reproject",
                 drizzle_final_sci_data=final_sci_image_HWC,
                 drizzle_final_wht_data=final_coverage_map_2D,
-                preserve_linear_output=True,
+                preserve_linear_output=self.preserve_linear_output,
             )
         except Exception as e_stack_final:
             self.update_progress(
@@ -9319,7 +9319,7 @@ class SeestarQueuedStacker:
             "_classic_reproject",
             drizzle_final_sci_data=self.current_stack,
             drizzle_final_wht_data=self.current_coverage,
-            preserve_linear_output=True,
+            preserve_linear_output=self.preserve_linear_output,
         )
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
@@ -9497,7 +9497,7 @@ class SeestarQueuedStacker:
             "_classic_reproject_zm",
             drizzle_final_sci_data=data_hwc,
             drizzle_final_wht_data=cov_hw,
-            preserve_linear_output=True,
+            preserve_linear_output=self.preserve_linear_output,
         )
         return True
     def _finalize_single_classic_batch(self, batch_file_tuple):
@@ -9520,7 +9520,7 @@ class SeestarQueuedStacker:
             "_classic_reproject",
             drizzle_final_sci_data=data,
             drizzle_final_wht_data=cov,
-            preserve_linear_output=True,
+            preserve_linear_output=self.preserve_linear_output,
         )
 
     ############################################################################################################################################
