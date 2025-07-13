@@ -106,6 +106,7 @@ from ..core.normalization import (
     _normalize_images_sky_mean,
 )
 from ..core.reprojection import reproject_to_reference_wcs
+from ..core.reprojection_utils import standardize_wcs
 from ..core.weights import (
     _calculate_image_weights_noise_fwhm,
     _calculate_image_weights_noise_variance,
@@ -2361,9 +2362,11 @@ class SeestarQueuedStacker:
             return None, None
 
         all_sky_corners_list = []
+        std_wcs_list = []
         for i, wcs_in in enumerate(all_input_wcs_list):
             if wcs_in is None or not wcs_in.is_celestial:
                 continue
+            wcs_in = standardize_wcs(wcs_in)
             if (
                 wcs_in.pixel_shape is None
                 and all_input_headers_list
@@ -2384,14 +2387,15 @@ class SeestarQueuedStacker:
                 pixel_corners[:, 0], pixel_corners[:, 1]
             )
             all_sky_corners_list.append(sky_corners)
+            std_wcs_list.append(wcs_in)
 
         if not all_sky_corners_list:
             return None, None
 
         all_corners_flat_skycoord = skycoord_concatenate(all_sky_corners_list)
 
-        center_ra = np.median([w.wcs.crval[0] for w in all_input_wcs_list])
-        center_dec = np.median([w.wcs.crval[1] for w in all_input_wcs_list])
+        center_ra = np.median([w.wcs.crval[0] for w in std_wcs_list])
+        center_dec = np.median([w.wcs.crval[1] for w in std_wcs_list])
 
         local_tan = WCS(naxis=2)
         local_tan.wcs.ctype = ["RA---TAN", "DEC--TAN"]
@@ -2414,7 +2418,7 @@ class SeestarQueuedStacker:
         maxx, maxy = xy_rot.max(axis=0)
 
         scales_arcsec = []
-        for w in all_input_wcs_list:
+        for w in std_wcs_list:
             try:
                 scales_arcsec.append(
                     np.mean(np.abs(proj_plane_pixel_scales(w))) * 3600.0
@@ -2528,8 +2532,8 @@ class SeestarQueuedStacker:
 
             if shape_hw is None:
                 continue
-
-            valid_wcs.append(wcs_in)
+            std_wcs = standardize_wcs(wcs_in)
+            valid_wcs.append(std_wcs)
             valid_shapes_hw.append(shape_hw)
 
         if not valid_wcs:
@@ -2689,6 +2693,7 @@ class SeestarQueuedStacker:
                     )
 
                 elif wcs_obj and wcs_obj.is_celestial:
+                    wcs_obj = standardize_wcs(wcs_obj)
                     wcs_list.append(wcs_obj)
                     header_list.append(hdr)
                 else:
@@ -5327,6 +5332,7 @@ class SeestarQueuedStacker:
                 ) = panel_info_tuple
                 if panel_image_data is None or wcs_for_panel is None:
                     continue
+                wcs_for_panel = standardize_wcs(wcs_for_panel)
                 input_data_for_reproject.append((panel_image_data, wcs_for_panel))
                 h, w = panel_image_data.shape[:2]
                 if pixel_mask is not None:
@@ -9378,6 +9384,7 @@ class SeestarQueuedStacker:
             try:
                 hdr = fits.getheader(sci_path, memmap=False)
                 wcs = WCS(hdr, naxis=2)
+                wcs = standardize_wcs(wcs)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)

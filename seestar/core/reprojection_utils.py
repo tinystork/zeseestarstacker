@@ -60,6 +60,7 @@ def collect_headers(filepaths: Iterable[str]) -> List[HeaderInfo]:
             wcs = WCS(hdr)
             if not wcs.is_celestial:
                 continue
+            wcs = standardize_wcs(wcs)
             naxis1 = int(hdr.get("NAXIS1"))
             naxis2 = int(hdr.get("NAXIS2"))
             shape_hw = (naxis2, naxis1)
@@ -75,7 +76,7 @@ def compute_final_output_grid(header_infos: Iterable[HeaderInfo], scale: float =
     if not header_list:
         raise ValueError("No header infos provided")
 
-    ref_wcs = header_list[0][1]
+    ref_wcs = standardize_wcs(header_list[0][1])
 
     xmin = math.inf
     ymin = math.inf
@@ -84,6 +85,7 @@ def compute_final_output_grid(header_infos: Iterable[HeaderInfo], scale: float =
     pixel_scales = []
 
     for shape_hw, wcs in header_list:
+        wcs = standardize_wcs(wcs)
         h, w = shape_hw
         corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=float)
         sky = wcs.pixel_to_world(corners[:, 0], corners[:, 1])
@@ -113,6 +115,8 @@ def compute_final_output_grid(header_infos: Iterable[HeaderInfo], scale: float =
 
     out_wcs = WCS(naxis=2)
     out_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    out_wcs.wcs.radesys = "ICRS"
+    out_wcs.wcs.equinox = 2000.0
     out_wcs.wcs.crval = list(ref_wcs.wcs.crval)
     out_wcs.wcs.crpix = [-xmin_f + 0.5, -ymin_f + 0.5]
     out_wcs.wcs.cd = np.array([[-output_scale_deg, 0.0], [0.0, output_scale_deg]])
