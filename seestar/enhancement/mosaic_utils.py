@@ -99,6 +99,10 @@ def assemble_final_mosaic_with_reproject_coadd(
     n_ch = data_all[0].shape[2] if data_all else 0
 
     header = final_output_wcs.to_header(relax=True)
+    # Ensure the output shape is explicitly recorded for reprojection
+    # routines that rely on NAXIS1/2 when the header is provided.
+    header["NAXIS1"] = w
+    header["NAXIS2"] = h
 
     if use_memmap:
         if memmap_dir is None:
