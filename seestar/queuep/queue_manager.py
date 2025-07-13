@@ -9157,6 +9157,28 @@ class SeestarQueuedStacker:
             reproject_interp,
         )
 
+        # ------------------------------------------------------------------
+        # If no reference WCS is defined (e.g. pre-scan failed), initialise it
+        # from the first valid solved batch so that subsequent images can be
+        # reprojected consistently on a common grid.
+        # ------------------------------------------------------------------
+        if self.reference_wcs_object is None and self.reference_shape is None:
+            for sci_path, _wht_paths in batch_files:
+                if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                    continue
+                try:
+                    hdr = fits.getheader(sci_path, memmap=False)
+                    ref_wcs = WCS(hdr, naxis=2)
+                    h = int(hdr.get("NAXIS2"))
+                    w = int(hdr.get("NAXIS1"))
+                    ref_wcs.pixel_shape = (w, h)
+                    self.reference_wcs_object = ref_wcs
+                    self.reference_shape = (h, w)
+                    self.reference_header_for_wcs = hdr.copy()
+                    break
+                except Exception:
+                    continue
+
         # --- 1. Containers -------------------------------------------------------
         channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
         channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
