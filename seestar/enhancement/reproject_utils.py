@@ -134,6 +134,10 @@ def reproject_and_coadd(
             channel_results.append(ch_res)
             if cov_image is None:
                 cov_image = cov
+
+            else:
+                cov_image = np.maximum(cov_image, cov)
+
         mosaic = np.stack(channel_results, axis=-1)
         return mosaic.astype(np.float32), cov_image.astype(np.float32)
 
