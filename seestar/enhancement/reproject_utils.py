@@ -112,12 +112,14 @@ def reproject_and_coadd(
         proj_img, footprint = reproject_function(
             (img, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
         )
+        proj_img = np.nan_to_num(proj_img, nan=0.0)
 
         weight_proj = footprint
         if weight is not None:
             w_reproj, w_fp = reproject_function(
                 (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
             )
+            w_reproj = np.nan_to_num(w_reproj, nan=0.0)
             weight_proj = w_reproj * w_fp
 
         sum_image += proj_img * weight_proj
