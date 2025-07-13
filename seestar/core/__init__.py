@@ -43,7 +43,11 @@ from .stack_methods import (
 )
 from .incremental_reprojection import reproject_and_combine
 from .reprojection import resolve_all_wcs
-from .reprojection_utils import collect_headers, compute_final_output_grid
+from .reprojection_utils import (
+    collect_headers,
+    compute_final_output_grid,
+    standardize_wcs,
+)
 from .simple_stacker import create_master_tile as create_master_tile_simple
 
 # Liste initiale des éléments à exporter
@@ -71,6 +75,7 @@ __all__ = [
     'resolve_all_wcs',
     'collect_headers',
     'compute_final_output_grid',
+    'standardize_wcs',
     'downsample_image'
 ]
 

@@ -10,6 +10,42 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.coordinates import SkyCoord
+from astropy import units as u
+
+
+def standardize_wcs(wcs: WCS) -> WCS:
+    """Return a copy of ``wcs`` converted to ICRS RA/DEC coordinates.
+
+    This helps ensure that reprojection remains consistent regardless of
+    observation location or time.
+    """
+
+    try:
+        wcs_cel = wcs.celestial
+    except Exception:
+        return wcs
+
+    wcs_new = wcs_cel.deepcopy()
+
+    try:
+        wcs_new.wcs.radesys = "ICRS"
+        wcs_new.wcs.equinox = 2000.0
+    except Exception:
+        pass
+
+    try:
+        ctype1 = wcs_new.wcs.ctype[0].upper() if wcs_new.wcs.ctype else ""
+        ctype2 = wcs_new.wcs.ctype[1].upper() if wcs_new.wcs.ctype else ""
+        if not ctype1.startswith("RA"):
+            ctype1 = "RA---TAN"
+        if not ctype2.startswith("DEC"):
+            ctype2 = "DEC--TAN"
+        wcs_new.wcs.ctype = [ctype1, ctype2]
+    except Exception:
+        pass
+
+    return wcs_new
 
 
 HeaderInfo = Tuple[Tuple[int, int], WCS]
