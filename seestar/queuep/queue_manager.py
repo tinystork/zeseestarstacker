@@ -9280,7 +9280,15 @@ class SeestarQueuedStacker:
         self.current_stack = np.stack(final_channels, axis=-1)
         self.current_coverage = final_cov
 
-        # Caller will take care of saving the FITS file / updating GUI, etc.
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        self._save_final_stack(
+            "_classic_reproject",
+            drizzle_final_sci_data=self.current_stack,
+            drizzle_final_wht_data=self.current_coverage,
+            preserve_linear_output=True,
+        )
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
