@@ -160,6 +160,7 @@ def test_channel_orientation_chw(monkeypatch):
     assert np.allclose(cov, 1)
 
 
+
 def test_channel_orientation_with_weights(monkeypatch):
     module = reproject_utils
 
@@ -186,3 +187,4 @@ def test_channel_orientation_with_weights(monkeypatch):
     assert result.shape == (1, 1, 3)
     assert np.allclose(result, 2)
     assert np.allclose(cov, 1)
+
