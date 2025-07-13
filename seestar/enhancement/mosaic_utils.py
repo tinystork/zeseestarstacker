@@ -98,9 +98,15 @@ def assemble_final_mosaic_with_reproject_coadd(
     coverage = None
     n_ch = data_all[0].shape[2] if data_all else 0
 
-    header = final_output_wcs.to_header(relax=True)
-    # Ensure the output shape is explicitly recorded for reprojection
-    # routines that rely on NAXIS1/2 when the header is provided.
+    header = (
+        final_output_wcs.to_header()
+        if hasattr(final_output_wcs, "to_header")
+        else final_output_wcs
+    )
+    # ``reproject`` expects the output grid size to be present in the header
+    # when a ``WCS`` instance is provided.  Explicitly set ``NAXIS1``/``NAXIS2``
+    # so that the reference implementation and our NumPy fallback both
+    # operate on the same shape regardless of ``final_output_wcs`` internals.
     header["NAXIS1"] = w
     header["NAXIS2"] = h
 
