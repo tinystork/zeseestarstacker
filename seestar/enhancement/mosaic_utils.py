@@ -126,7 +126,18 @@ def assemble_final_mosaic_with_reproject_coadd(
 
             kwargs_local = dict(kwargs)
             if weight_arrays is not None:
-                kwargs_local["input_weights"] = weight_arrays
+                weights_ch = []
+                for w in weight_arrays:
+                    if w.ndim == 3:
+                        if w.shape[0] == n_ch:
+                            weights_ch.append(w[ch])
+                            continue
+                        if w.shape[-1] == n_ch:
+                            weights_ch.append(w[..., ch])
+                            continue
+                        w = np.squeeze(w)
+                    weights_ch.append(w)
+                kwargs_local["input_weights"] = weights_ch
             try:
                 sig = inspect.signature(reproject_and_coadd)
                 if use_memmap:
