@@ -34,6 +34,21 @@ def standardize_wcs(wcs: WCS) -> WCS:
     except Exception:
         pass
 
+    # Some sources (e.g. ASTAP) incorrectly store the CD matrix values in the
+    # PC keywords while leaving ``CDELT`` non-unity. This leads to pixel scales
+    # orders of magnitude too small when interpreted normally.  Detect this
+    # situation and convert the PC matrix to a proper CD matrix so that
+    # downstream reprojection works with a sensible pixel scale.
+    try:
+        pc = getattr(wcs_new.wcs, "pc", None)
+        if pc is not None and np.max(np.abs(pc)) < 0.01:
+            if np.all(np.isfinite(pc)):
+                wcs_new.wcs.cd = pc
+                wcs_new.wcs.pc = np.eye(2)
+                wcs_new.wcs.cdelt = [1.0, 1.0]
+    except Exception:
+        pass
+
     try:
         ctype1 = wcs_new.wcs.ctype[0].upper() if wcs_new.wcs.ctype else ""
         ctype2 = wcs_new.wcs.ctype[1].upper() if wcs_new.wcs.ctype else ""

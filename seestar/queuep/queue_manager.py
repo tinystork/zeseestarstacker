@@ -2816,6 +2816,9 @@ class SeestarQueuedStacker:
                 executor = self._get_quality_executor()
             else:
                 executor = self.quality_executor
+            if getattr(executor, "_max_workers", 1) == 1:
+                import time
+                time.sleep(0.5)
             future = executor.submit(_quality_metrics_worker, image_data)
             scores, star_msg, num_stars = future.result()
         except Exception as e:
