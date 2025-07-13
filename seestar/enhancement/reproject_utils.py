@@ -111,6 +111,7 @@ def reproject_and_coadd(
                 exc,
             )
 
+
     first_img = filtered_pairs[0][0]
     if first_img.ndim == 3:
         n_channels = first_img.shape[2]
@@ -122,15 +123,12 @@ def reproject_and_coadd(
         cov_image = None
         for ch in range(n_channels):
             ch_pairs = []
-
             ch_weights = []
             for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
-
                 if img.ndim == 3:
                     ch_pairs.append((img[..., ch], wcs_in))
                 else:
                     ch_pairs.append((img, wcs_in))
-
                 if weight is not None:
                     if weight.ndim == 3:
                         ch_weights.append(weight[..., ch])
@@ -138,14 +136,11 @@ def reproject_and_coadd(
                         ch_weights.append(weight)
                 else:
                     ch_weights.append(None)
-
             ch_res, cov = reproject_and_coadd(
                 ch_pairs,
                 output_projection=ref_wcs,
                 shape_out=shape_out,
-
                 input_weights=ch_weights,
-
                 reproject_function=reproject_function,
                 combine_function=combine_function,
                 match_background=match_background,
@@ -154,10 +149,8 @@ def reproject_and_coadd(
             channel_results.append(ch_res)
             if cov_image is None:
                 cov_image = cov
-
             else:
                 cov_image = np.maximum(cov_image, cov)
-
         mosaic = np.stack(channel_results, axis=-1)
         return mosaic.astype(np.float32), cov_image.astype(np.float32)
 
@@ -195,6 +188,21 @@ def reproject_and_coadd(
         final[valid] = sum_image[valid] / cov_image[valid]
     else:
         final[valid] = sum_image[valid] / cov_image[valid][..., None]
+
+
+    if input_weights is not None and not np.any(cov_image > 0):
+        logger.warning("All weights vanished during reprojection; retrying without weights")
+        return reproject_and_coadd(
+            filtered_pairs,
+            output_projection=ref_wcs,
+            shape_out=shape_out,
+            input_weights=None,
+            reproject_function=reproject_function,
+            combine_function=combine_function,
+            match_background=match_background,
+            **kwargs,
+        )
+
 
     return final.astype(np.float32), cov_image.astype(np.float32)
 

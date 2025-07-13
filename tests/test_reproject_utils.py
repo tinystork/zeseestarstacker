@@ -188,3 +188,29 @@ def test_channel_orientation_with_weights(monkeypatch):
     assert np.allclose(result, 2)
     assert np.allclose(cov, 1)
 
+
+def test_zero_coverage_fallback(monkeypatch):
+    module = reproject_utils
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, **kwargs):
+        data, _ = data_wcs
+        return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
+
+    from astropy.wcs import WCS
+    import numpy as np
+
+    wcs = WCS(naxis=2)
+    wcs.pixel_shape = (1, 1)
+
+    data = np.ones((1, 1), dtype=np.float32)
+    result, cov = module.reproject_and_coadd(
+        [(data, wcs)],
+        output_projection=wcs,
+        shape_out=(1, 1),
+        input_weights=[np.zeros((1, 1), dtype=np.float32)],
+        reproject_function=dummy_reproj,
+    )
+
+    assert np.allclose(result, 1)
+    assert np.allclose(cov, 1)
+
