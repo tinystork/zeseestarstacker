@@ -4374,9 +4374,9 @@ class SeestarQueuedStacker:
                             self._finalize_single_classic_batch(
                                 self.intermediate_classic_batch_files[0]
                             )
-                        elif not self._reproject_classic_batches_zm(
-                            self.intermediate_classic_batch_files
-                        ):
+                        else:
+                            # Directly use the alignment-safe implementation
+                            # to avoid blur when combining pre-stacked batches.
                             self._reproject_classic_batches(
                                 self.intermediate_classic_batch_files
                             )
