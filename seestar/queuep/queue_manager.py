@@ -9336,10 +9336,10 @@ class SeestarQueuedStacker:
             self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
             return False
 
-        master_tiles = []
+        channel_arrays_wcs = [[] for _ in range(3)]
+        channel_footprints = [[] for _ in range(3)]
         wcs_list = []
         headers = []
-        weight_maps = []
         for sci_path, _wht_paths in batch_files:
             if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
                 self.update_progress(
@@ -9353,20 +9353,46 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
-                master_tiles.append((str(sci_path), wcs))
-                wcs_list.append(wcs)
-                headers.append(hdr)
+                data = fits.getdata(sci_path).astype(np.float32)
+                if data.ndim == 3:
+                    data = np.moveaxis(data, 0, -1)
+                else:
+                    data = data[..., np.newaxis]
                 try:
                     cov = fits.getdata(_wht_paths[0]).astype(np.float32)
                     np.nan_to_num(cov, copy=False)
                     cov *= make_radial_weight_map(h, w)
                 except Exception:
                     cov = np.ones((h, w), dtype=np.float32)
-                weight_maps.append(cov)
+
+                if self.reference_wcs_object is not None:
+                    tgt_h, tgt_w = (
+                        self.reference_wcs_object.pixel_shape[1],
+                        self.reference_wcs_object.pixel_shape[0],
+                    ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
+                    data = reproject_to_reference_wcs(
+                        data,
+                        wcs,
+                        self.reference_wcs_object,
+                        (tgt_h, tgt_w),
+                    )
+                    cov = reproject_to_reference_wcs(
+                        cov,
+                        wcs,
+                        self.reference_wcs_object,
+                        (tgt_h, tgt_w),
+                    )
+                    wcs = self.reference_wcs_object
+
+                wcs_list.append(wcs)
+                headers.append(hdr)
+                for ch in range(data.shape[2]):
+                    channel_arrays_wcs[ch].append((data[..., ch], wcs))
+                    channel_footprints[ch].append(cov)
             except Exception as e:
                 self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
 
-        if len(master_tiles) < 2:
+        if len(wcs_list) < 2:
             return False
 
         if self.reference_wcs_object is not None and self.reference_shape is not None:
@@ -9403,25 +9429,24 @@ class SeestarQueuedStacker:
                     )
                     return False
 
-        memmap_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
-        os.makedirs(memmap_dir, exist_ok=True)
-        try:
-            data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
-                master_tile_fits_with_wcs_list=master_tiles,
-                final_output_wcs=out_wcs,
-                final_output_shape_hw=out_shape,
-                match_bg=True,
-                weight_arrays=weight_maps,
-                use_memmap=True,
-                memmap_dir=memmap_dir,
-                cleanup_memmap=self.perform_cleanup,
+        final_channels = []
+        final_cov = None
+        for ch in range(3):
+            sci, cov = reproject_and_coadd(
+                channel_arrays_wcs[ch],
+                output_projection=out_wcs,
+                shape_out=out_shape,
+                input_weights=channel_footprints[ch],
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=True,
             )
-        except Exception as e:
-            self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
-            return False
+            final_channels.append(sci.astype(np.float32))
+            if final_cov is None:
+                final_cov = cov.astype(np.float32)
 
-        if data_hwc is None:
-            return False
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
 
         data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
 
