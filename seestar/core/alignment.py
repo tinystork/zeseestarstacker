@@ -201,18 +201,18 @@ class SeestarAligner:
                 dsize_cv2 = (w_ref, h_ref)
                 cv2_M_final = cv2_M
             else:
+                # --- nouvelle logique anti-crop --------------------------
                 h_src, w_src = img_to_align_for_transform_application.shape[:2]
-                corners = np.array([[0, 0], [w_src, 0], [w_src, h_src], [0, h_src]], dtype=np.float32).reshape(-1, 1, 2)
-                transformed_corners = cv2.transform(corners, cv2_M)
-                x_min, y_min = np.min(transformed_corners, axis=0)[0]
-                x_max, y_max = np.max(transformed_corners, axis=0)[0]
-                w_out = int(np.ceil(x_max - x_min))
-                h_out = int(np.ceil(y_max - y_min))
+                cos = abs(cv2_M[0, 0])
+                sin = abs(cv2_M[0, 1])
+                new_w = int(h_src * sin + w_src * cos)
+                new_h = int(h_src * cos + w_src * sin)
 
-                shift_M = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]], dtype=np.float32)
-                cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
-                cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
-                dsize_cv2 = (w_out, h_out)
+                cv2_M[0, 2] += (new_w - w_src) / 2.0
+                cv2_M[1, 2] += (new_h - h_src) / 2.0
+
+                dsize_cv2 = (new_w, new_h)
+                cv2_M_final = cv2_M
 
             align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
             try:
