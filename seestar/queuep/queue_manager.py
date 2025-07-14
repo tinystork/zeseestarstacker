@@ -25,17 +25,17 @@ import asyncio
 import concurrent.futures
 import gc
 import glob
+import inspect
 import math
 import multiprocessing
 import os
+import platform
 import shutil
 import sys
-import platform
 import tempfile
 import threading  # Essentiel pour la classe (Lock)
 import time
 import traceback
-import inspect
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
@@ -53,14 +53,16 @@ from ..tools.file_ops import move_to_stacked
 logger.debug("Imports standard OK.")
 
 
-from typing import Literal, List, Tuple
+from typing import List, Literal, Tuple
 
 import astroalign as aa
 import cv2
 import numpy as np
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
+
     def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
         Y, X = np.ogrid[:h, :w]
         cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
@@ -73,6 +75,8 @@ except Exception:
             1.0,
         )
         return w_map
+
+
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from astropy.coordinates import concatenate as skycoord_concatenate
@@ -93,9 +97,7 @@ from seestar.gui.settings import SettingsManager
 
 # --- Third-Party Library Imports ---
 from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
-from ..core.background import (
-    subtract_background_2d,
-)
+from ..core.background import subtract_background_2d
 from ..core.drizzle_utils import drizzle_finalize
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
@@ -159,7 +161,6 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
-
     """Reproject a FITS image onto ``ref_wcs_header``.
 
     The input file's WCS is read from its header so that reprojection is
@@ -271,8 +272,8 @@ def drizzle_final_worker(args):
 
 def _quality_metrics_worker(image_data):
     """Compute SNR and star count in a separate process."""
-    import numpy as np
     import astroalign as aa
+    import numpy as np
 
     scores = {"snr": 0.0, "stars": 0.0}
     star_msg = None
@@ -2482,13 +2483,11 @@ class SeestarQueuedStacker:
             final canvas size similar to ZeMosaic's behaviour.
         """
 
-
         if self.freeze_reference_wcs and self.reference_wcs_object is not None:
             return self.reference_wcs_object, (
                 int(self.reference_header_for_wcs["NAXIS2"]),
                 int(self.reference_header_for_wcs["NAXIS1"]),
             )
-
 
         num_wcs = len(all_input_wcs_list)
         logger.debug(
@@ -2609,8 +2608,6 @@ class SeestarQueuedStacker:
                 target_res_deg_per_pix,
             )
 
-
-
         return out_wcs, out_shape_hw
 
     ###########################################################################################################################################################
@@ -2715,7 +2712,9 @@ class SeestarQueuedStacker:
                 ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
                     wcs_list,
                     header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
                 )
             elif len(wcs_list) == 1:
                 ref_wcs = wcs_list[0]
@@ -2724,7 +2723,9 @@ class SeestarQueuedStacker:
                 ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
                     wcs_list,
                     header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
                 )
                 if ref_wcs is None:
                     self.update_progress(
@@ -2790,9 +2791,8 @@ class SeestarQueuedStacker:
 
     def _get_quality_executor(self) -> ProcessPoolExecutor:
         """Return a valid executor for quality metrics."""
-        if (
-            getattr(self, "quality_executor", None) is None
-            or getattr(self.quality_executor, "_shutdown", False)
+        if getattr(self, "quality_executor", None) is None or getattr(
+            self.quality_executor, "_shutdown", False
         ):
             max_workers = _suggest_pool_size(0.75)
             self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
@@ -3742,7 +3742,10 @@ class SeestarQueuedStacker:
 
                                         # 3. Accumulate if astrometric solve succeeded or not reprojecting
                                         if (
-                                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                                            not (
+                                                self.reproject_between_batches
+                                                or self.reproject_coadd_final
+                                            )
                                             or self._last_classic_batch_solved
                                         ):
                                             self._combine_batch_result(
@@ -3818,18 +3821,28 @@ class SeestarQueuedStacker:
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'."
                                     )
                                     try:
-                                        sig = inspect.signature(self._save_drizzle_input_temp)
+                                        sig = inspect.signature(
+                                            self._save_drizzle_input_temp
+                                        )
                                         if len(sig.parameters) >= 3:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig, matrix_M_val
+                                            temp_driz_file_path = (
+                                                self._save_drizzle_input_temp(
+                                                    aligned_data,
+                                                    header_orig,
+                                                    matrix_M_val,
+                                                )
                                             )
                                         else:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig
+                                            temp_driz_file_path = (
+                                                self._save_drizzle_input_temp(
+                                                    aligned_data, header_orig
+                                                )
                                             )
                                     except Exception:
-                                        temp_driz_file_path = self._save_drizzle_input_temp(
-                                            aligned_data, header_orig, matrix_M_val
+                                        temp_driz_file_path = (
+                                            self._save_drizzle_input_temp(
+                                                aligned_data, header_orig, matrix_M_val
+                                            )
                                         )
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(
@@ -4274,7 +4287,10 @@ class SeestarQueuedStacker:
                             batch_wcs = None
 
                         if (
-                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                            not (
+                                self.reproject_between_batches
+                                or self.reproject_coadd_final
+                            )
                             or self._last_classic_batch_solved
                         ):
                             self._combine_batch_result(
@@ -5712,7 +5728,6 @@ class SeestarQueuedStacker:
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
-
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
                     prepared_img_after_initial_proc,
@@ -6266,7 +6281,6 @@ class SeestarQueuedStacker:
         )
 
     ##############################################################################################################################################
-
 
     def _process_incremental_drizzle_batch(
         self,
@@ -7533,8 +7547,12 @@ class SeestarQueuedStacker:
                 batch_wht = batch_wht.reshape(self.memmap_shape[:2])
 
             mask = batch_wht > 0
-            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[mask]
-            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[mask]
+            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[
+                mask
+            ]
+            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[
+                mask
+            ]
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -8085,10 +8103,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "winsorized sigma clip"
@@ -8111,10 +8128,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "kappa sigma"
@@ -8135,10 +8151,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "linear fit clip"
@@ -8156,10 +8171,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "median"
@@ -8206,10 +8220,9 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
 
@@ -8653,15 +8666,11 @@ class SeestarQueuedStacker:
             "use_radec_hints": getattr(self, "use_radec_hints", False),
         }
 
-
         # In Reproject & Coadd mode we now forward the user configured ASTAP
         # options without forcing a blind search or RA/DEC hints.  This mirrors
         # the simpler invocation used in ZeMosaic.
 
-
-        self.update_progress(
-            f"   [Solver] Solve {os.path.basename(fits_path)}…"
-        )
+        self.update_progress(f"   [Solver] Solve {os.path.basename(fits_path)}…")
         if self.astrometry_solver:
             wcs = self.astrometry_solver.solve(
                 fits_path,
@@ -8933,6 +8942,7 @@ class SeestarQueuedStacker:
             return
 
         self.reference_wcs_object = out_wcs
+        self.reference_shape = out_shape
         self._close_memmaps()
         self._create_sum_wht_memmaps(out_shape)
 
@@ -9233,9 +9243,13 @@ class SeestarQueuedStacker:
             # ------------------------------------------------------------------
             if self.reference_wcs_object is not None:
                 tgt_h, tgt_w = (
-                    self.reference_wcs_object.pixel_shape[1],
-                    self.reference_wcs_object.pixel_shape[0],
-                ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
+                    (
+                        self.reference_wcs_object.pixel_shape[1],
+                        self.reference_wcs_object.pixel_shape[0],
+                    )
+                    if self.reference_wcs_object.pixel_shape is not None
+                    else (h, w)
+                )
 
                 # Science image (3‑channels)
                 img_hwc = reproject_to_reference_wcs(
@@ -9371,7 +9385,10 @@ class SeestarQueuedStacker:
                 assemble_final_mosaic_with_reproject_coadd,
             )
         except Exception as e:
-            self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
+            self.update_progress(
+                f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}",
+                "WARN",
+            )
             return False
 
         master_tiles = []
@@ -9441,7 +9458,9 @@ class SeestarQueuedStacker:
                     )
                     return False
 
-        memmap_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
+        memmap_dir = os.path.join(
+            self.temp_folder or self.output_folder, "reproject_memmap"
+        )
         os.makedirs(memmap_dir, exist_ok=True)
         try:
             data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
@@ -9455,13 +9474,17 @@ class SeestarQueuedStacker:
                 cleanup_memmap=self.perform_cleanup,
             )
         except Exception as e:
-            self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
+            self.update_progress(
+                f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN"
+            )
             return False
 
         if data_hwc is None:
             return False
 
-        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
+            data_hwc, cov_hw, out_wcs
+        )
 
         if (
             self.reference_wcs_object is not None
@@ -9499,6 +9522,7 @@ class SeestarQueuedStacker:
             preserve_linear_output=True,
         )
         return True
+
     def _finalize_single_classic_batch(self, batch_file_tuple):
         """Save the single stacked batch as the final stack."""
         sci_path, wht_paths = batch_file_tuple
@@ -10289,13 +10313,11 @@ class SeestarQueuedStacker:
                 # collapsing to all zeros.
                 effective_max = max(max_val, 1.0 / 65535.0)
                 scale = 65535.0 / effective_max
-                data_scaled_uint16 = (
-                    np.clip(raw_data, 0.0, None) * scale
-                ).astype(np.uint16)
-            else:
-                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(
+                data_scaled_uint16 = (np.clip(raw_data, 0.0, None) * scale).astype(
                     np.uint16
                 )
+            else:
+                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
             # Convertir en int16 décalé pour conformité FITS
             data_for_primary_hdu_save = (
                 data_scaled_uint16.astype(np.int32) - 32768
@@ -10640,7 +10662,9 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     f"⚠️ Erreur suppression dossier memmap ({os.path.basename(memmap_dir)}): {e}"
                 )
-        reproject_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
+        reproject_dir = os.path.join(
+            self.temp_folder or self.output_folder, "reproject_memmap"
+        )
         if os.path.isdir(reproject_dir):
             try:
                 shutil.rmtree(reproject_dir)
@@ -10932,7 +10956,9 @@ class SeestarQueuedStacker:
                 "ERROR",
             )
             return False
-        self.temp_folder = os.path.abspath(temp_folder) if temp_folder else self.output_folder
+        self.temp_folder = (
+            os.path.abspath(temp_folder) if temp_folder else self.output_folder
+        )
         try:
             os.makedirs(self.temp_folder, exist_ok=True)
         except Exception:
@@ -11089,6 +11115,9 @@ class SeestarQueuedStacker:
 
         if reproject_coadd_final is not None:
             self.reproject_coadd_final = bool(reproject_coadd_final)
+        if self.reproject_coadd_final:
+            # → On fige la grille sur la première référence WCS
+            self.freeze_reference_wcs = True
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
@@ -11730,8 +11759,8 @@ class SeestarQueuedStacker:
             hdul = fits.HDUList([hdu])
             if tf is not None:
                 try:
-                    from astropy.wcs import WCS
                     import numpy as np
+                    from astropy.wcs import WCS
 
                     a, b = tf[0, 0], tf[1, 0]
                     tx, ty = tf[0, 2], tf[1, 2]
