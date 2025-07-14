@@ -9389,7 +9389,13 @@ class SeestarQueuedStacker:
             return img_hwc, cov_hw, mosaic_wcs
 
     def _reproject_classic_batches_zm(self, batch_files):
-        """Reproject and co-add all classic batches in one final pass."""
+        """Reproject and co-add all classic batches in one final pass.
+
+        This mirrors the approach used in ZeMosaic: each stacked batch is
+        optionally cropped and solved again before being combined with
+        ``reproject_and_coadd``.  The clustering phase present in ZeMosaic is
+        omitted here.
+        """
 
         try:
             from seestar.enhancement.reproject_utils import (
@@ -9407,6 +9413,9 @@ class SeestarQueuedStacker:
         weight_maps = []
         wcs_list = []
         headers = []
+
+        crop_tiles = getattr(self, "apply_master_tile_crop", False)
+        crop_frac = getattr(self, "master_tile_crop_percent_decimal", 0.0)
         for sci_path, _wht_paths in batch_files:
             if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
                 self.update_progress(
@@ -9418,10 +9427,32 @@ class SeestarQueuedStacker:
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
+
+                if crop_tiles and crop_frac > 0.0:
+                    dh = int(data_cxhxw.shape[1] * crop_frac)
+                    dw = int(data_cxhxw.shape[2] * crop_frac)
+                    if dh or dw:
+                        end_h = -dh if dh else None
+                        end_w = -dw if dw else None
+                        data_cxhxw = data_cxhxw[:, dh:end_h, dw:end_w]
+                        hdr["CRPIX1"] = hdr.get("CRPIX1", 0) - dw
+                        hdr["CRPIX2"] = hdr.get("CRPIX2", 0) - dh
+                        hdr["NAXIS1"] = data_cxhxw.shape[2]
+                        hdr["NAXIS2"] = data_cxhxw.shape[1]
+
+                tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
+                    tmp.name, overwrite=True
+                )
+                self._run_astap_and_update_header(tmp.name)
+                hdr = fits.getheader(tmp.name)
+                os.remove(tmp.name)
+
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
+
                 try:
                     cov = fits.getdata(_wht_paths[0]).astype(np.float32)
                     np.nan_to_num(cov, copy=False)
@@ -9430,24 +9461,6 @@ class SeestarQueuedStacker:
                     cov = np.ones((h, w), dtype=np.float32)
 
                 img_hwc = np.moveaxis(data_cxhxw, 0, -1)
-
-                if (
-                    self.reference_wcs_object is not None
-                    and self.reference_shape is not None
-                ):
-                    img_hwc = reproject_to_reference_wcs(
-                        img_hwc,
-                        wcs,
-                        self.reference_wcs_object,
-                        self.reference_shape,
-                    )
-                    cov = reproject_to_reference_wcs(
-                        cov,
-                        wcs,
-                        self.reference_wcs_object,
-                        self.reference_shape,
-                    )
-                    wcs = self.reference_wcs_object
 
                 data_pairs.append((img_hwc, wcs))
                 weight_maps.append(cov)
