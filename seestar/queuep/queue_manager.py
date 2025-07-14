@@ -9332,8 +9332,15 @@ class SeestarQueuedStacker:
             from seestar.enhancement.mosaic_utils import (
                 assemble_final_mosaic_with_reproject_coadd,
             )
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
+            )
         except Exception as e:
-            self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
+            self.update_progress(
+                f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}",
+                "WARN",
+            )
             return False
 
         channel_arrays_wcs = [[] for _ in range(3)]
