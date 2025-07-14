@@ -2541,7 +2541,12 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.error("find_optimal_celestial_wcs unavailable: %s", e)
             find_optimal_celestial_wcs = None
-        _fallback_grid = None
+
+        from ..core.reprojection_utils import compute_final_output_grid
+
+        def _fallback_grid(wcs_list, shapes_hw_list, scale_factor):
+            header_infos = list(zip(shapes_hw_list, wcs_list))
+            return compute_final_output_grid(header_infos, scale=scale_factor)
 
         valid_wcs = []
         valid_shapes_hw = []
