@@ -11132,7 +11132,8 @@ class SeestarQueuedStacker:
         # reprojection between batches is enabled (to avoid changing the
         # reference size and breaking alignment).
         self.keep_input_size_for_reproject = (
-            self.reproject_between_batches and not is_mosaic_run
+            (self.reproject_between_batches or self.reproject_coadd_final)
+            and not is_mosaic_run
         )
 
         # --- FIN NOUVEAU ---
@@ -11530,21 +11531,30 @@ class SeestarQueuedStacker:
             logger.debug(f"     WCS Ref non disponible ou non céleste.")
 
         if self.reference_wcs_object and self.fixed_output_wcs is None:
-            try:
-                ref_hw = ref_shape_hwc[:2]
-                (
-                    self.fixed_output_wcs,
-                    self.fixed_output_shape,
-                ) = self._create_drizzle_output_wcs(
-                    self.reference_wcs_object, ref_hw, self.drizzle_scale
-                )
+            ref_hw = ref_shape_hwc[:2]
+            if self.reproject_coadd_final and not is_mosaic_run:
+                self.fixed_output_wcs = self.reference_wcs_object
+                self.fixed_output_shape = ref_hw
                 self.drizzle_output_wcs = self.fixed_output_wcs
                 self.drizzle_output_shape_hw = self.fixed_output_shape
-                self.reference_shape = self.fixed_output_shape
-            except Exception as e_fix:
-                logger.debug(
-                    f"WARN start_processing: erreur creation grille fixe: {e_fix}"
-                )
+                self.reference_shape = ref_hw
+            else:
+                try:
+                    (
+                        self.fixed_output_wcs,
+                        self.fixed_output_shape,
+                    ) = self._create_drizzle_output_wcs(
+                        self.reference_wcs_object,
+                        ref_hw,
+                        self.drizzle_scale,
+                    )
+                    self.drizzle_output_wcs = self.fixed_output_wcs
+                    self.drizzle_output_shape_hw = self.fixed_output_shape
+                    self.reference_shape = self.fixed_output_shape
+                except Exception as e_fix:
+                    logger.debug(
+                        f"WARN start_processing: erreur creation grille fixe: {e_fix}"
+                    )
 
         init_shape_hwc = ref_shape_hwc
         if (
