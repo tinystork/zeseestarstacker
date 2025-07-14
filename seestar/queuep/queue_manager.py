@@ -9289,7 +9289,25 @@ class SeestarQueuedStacker:
             return
 
         # --- 4. Determine output grid -------------------------------------------
-        if self.reference_wcs_object is not None and self.reference_shape is not None:
+        if self.reproject_coadd_final and wcs_for_grid:
+            # Force the output grid to exactly match the first batch
+            out_wcs = wcs_for_grid[0]
+            if out_wcs.pixel_shape is not None:
+                out_shape = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            elif headers_for_grid:
+                h = int(headers_for_grid[0].get("NAXIS2", 0))
+                w = int(headers_for_grid[0].get("NAXIS1", 0))
+                out_shape = (h, w)
+                out_wcs.pixel_shape = (w, h)
+            else:
+                out_shape = None
+            if out_shape is not None:
+                try:
+                    out_wcs._naxis1 = out_shape[1]
+                    out_wcs._naxis2 = out_shape[0]
+                except Exception:
+                    pass
+        elif self.reference_wcs_object is not None and self.reference_shape is not None:
             out_wcs = self.reference_wcs_object
             out_shape = self.reference_shape
         elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
@@ -9424,7 +9442,24 @@ class SeestarQueuedStacker:
         if len(master_tiles) < 2:
             return False
 
-        if self.reference_wcs_object is not None and self.reference_shape is not None:
+        if self.reproject_coadd_final and wcs_list:
+            out_wcs = wcs_list[0]
+            if out_wcs.pixel_shape is not None:
+                out_shape = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            elif headers:
+                h = int(headers[0].get("NAXIS2", 0))
+                w = int(headers[0].get("NAXIS1", 0))
+                out_shape = (h, w)
+                out_wcs.pixel_shape = (w, h)
+            else:
+                out_shape = None
+            if out_shape is not None:
+                try:
+                    out_wcs._naxis1 = out_shape[1]
+                    out_wcs._naxis2 = out_shape[0]
+                except Exception:
+                    pass
+        elif self.reference_wcs_object is not None and self.reference_shape is not None:
             out_wcs = self.reference_wcs_object
             out_shape = self.reference_shape
         elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
