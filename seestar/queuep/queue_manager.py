@@ -100,6 +100,7 @@ from ..core.drizzle_utils import drizzle_finalize
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
     reproject_and_combine,
+    initialize_master,
 )
 from ..core.normalization import (
     _normalize_images_linear_fit,
@@ -967,6 +968,7 @@ class SeestarQueuedStacker:
         # Master arrays when combining batches with incremental reprojection
         self.master_sum = None
         self.master_coverage = None
+        self.reproject_output_wcs = None
 
         # Backward compatibility attributes removed in favour of
         # ``reproject_between_batches``. They may still appear in old settings
@@ -2205,6 +2207,41 @@ class SeestarQueuedStacker:
             self._update_preview()
         except Exception as e:
             logger.debug(f"Error in _update_preview_master: {e}")
+
+    def _incremental_reproject_coadd(self, batch_img, batch_cov, batch_wcs):
+        """Incrementally reproject and co-add a stacked batch."""
+        if (
+            batch_img is None
+            or batch_cov is None
+            or batch_wcs is None
+            or not self.reproject_coadd_final
+        ):
+            return
+
+        ref_wcs = self.reference_wcs_object or batch_wcs
+        if ref_wcs.pixel_shape is None:
+            ref_wcs.pixel_shape = (batch_img.shape[1], batch_img.shape[0])
+
+        if self.reproject_output_wcs is None:
+            self.reproject_output_wcs = ref_wcs
+            self.master_sum, self.master_coverage = initialize_master(
+                batch_img, batch_cov, batch_wcs, ref_wcs
+            )
+        else:
+            self.master_sum, self.master_coverage = reproject_and_combine(
+                self.master_sum,
+                self.master_coverage,
+                batch_img,
+                batch_cov,
+                batch_wcs,
+                self.reproject_output_wcs,
+            )
+
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(
+            self.reproject_output_wcs.to_header(relax=True)
+        )
+        self._update_preview_master()
 
     def _downsample_preview(self, data: np.ndarray, wht: np.ndarray) -> None:
         # Preview buffer logic
@@ -9138,6 +9175,11 @@ class SeestarQueuedStacker:
         if self.reproject_coadd_final:
             if solved_ok:
                 self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+                try:
+                    batch_wcs = WCS(header, naxis=2)
+                except Exception:
+                    batch_wcs = None
+                self._incremental_reproject_coadd(final_stacked, final_wht, batch_wcs)
             else:
                 self.unsolved_classic_batch_files.add(sci_fits)
 
@@ -10858,6 +10900,10 @@ class SeestarQueuedStacker:
             os.makedirs(self.temp_folder, exist_ok=True)
         except Exception:
             pass
+        # Reset incremental reproject accumulators for a new session
+        self.master_sum = None
+        self.master_coverage = None
+        self.reproject_output_wcs = None
         self._resume_requested = self._can_resume(Path(self.output_folder))
         logger.debug(
             f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'"
