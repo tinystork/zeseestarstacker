@@ -8950,6 +8950,7 @@ class SeestarQueuedStacker:
             wcs_list,
             headers,
             scale_factor=scale_factor,
+            auto_rotate=True,
         )
         if out_wcs is None or out_shape is None:
             self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
