@@ -9369,19 +9369,24 @@ class SeestarQueuedStacker:
             return img_hwc, cov_hw, mosaic_wcs
 
     def _reproject_classic_batches_zm(self, batch_files):
-        """Reproject and coadd classic batches without ZeMosaic."""
+        """Reproject and co-add all classic batches in one final pass."""
+
         try:
-            from seestar.enhancement.mosaic_utils import (
-                assemble_final_mosaic_with_reproject_coadd,
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
             )
+            from seestar.core.reprojection import reproject_to_reference_wcs
         except Exception as e:
-            self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
+            self.update_progress(
+                f"⚠️ Outils de reprojection indisponibles: {e}", "WARN"
+            )
             return False
 
-        master_tiles = []
+        data_pairs = []
+        weight_maps = []
         wcs_list = []
         headers = []
-        weight_maps = []
         for sci_path, _wht_paths in batch_files:
             if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
                 self.update_progress(
@@ -9390,25 +9395,48 @@ class SeestarQueuedStacker:
                 )
                 continue
             try:
-                hdr = fits.getheader(sci_path, memmap=False)
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
-                master_tiles.append((str(sci_path), wcs))
-                wcs_list.append(wcs)
-                headers.append(hdr)
                 try:
                     cov = fits.getdata(_wht_paths[0]).astype(np.float32)
                     np.nan_to_num(cov, copy=False)
                     cov *= make_radial_weight_map(h, w)
                 except Exception:
                     cov = np.ones((h, w), dtype=np.float32)
+
+                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+
+                if (
+                    self.reference_wcs_object is not None
+                    and self.reference_shape is not None
+                ):
+                    img_hwc = reproject_to_reference_wcs(
+                        img_hwc,
+                        wcs,
+                        self.reference_wcs_object,
+                        self.reference_shape,
+                    )
+                    cov = reproject_to_reference_wcs(
+                        cov,
+                        wcs,
+                        self.reference_wcs_object,
+                        self.reference_shape,
+                    )
+                    wcs = self.reference_wcs_object
+
+                data_pairs.append((img_hwc, wcs))
                 weight_maps.append(cov)
+                wcs_list.append(wcs)
+                headers.append(hdr)
             except Exception as e:
                 self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
 
-        if len(master_tiles) < 2:
+        if len(data_pairs) < 2:
             return False
 
         if self.reference_wcs_object is not None and self.reference_shape is not None:
@@ -9445,25 +9473,25 @@ class SeestarQueuedStacker:
                     )
                     return False
 
-        memmap_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
-        os.makedirs(memmap_dir, exist_ok=True)
-        try:
-            data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
-                master_tile_fits_with_wcs_list=master_tiles,
-                final_output_wcs=out_wcs,
-                final_output_shape_hw=out_shape,
-                match_bg=True,
-                weight_arrays=weight_maps,
-                use_memmap=True,
-                memmap_dir=memmap_dir,
-                cleanup_memmap=self.perform_cleanup,
+        final_channels = []
+        final_cov = None
+        for ch in range(data_pairs[0][0].shape[2]):
+            inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
+            sci, cov = reproject_and_coadd(
+                inputs_ch,
+                output_projection=out_wcs,
+                shape_out=out_shape,
+                input_weights=weight_maps,
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=True,
             )
-        except Exception as e:
-            self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
-            return False
+            final_channels.append(sci.astype(np.float32))
+            if final_cov is None:
+                final_cov = cov.astype(np.float32)
 
-        if data_hwc is None:
-            return False
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
 
         data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
 
