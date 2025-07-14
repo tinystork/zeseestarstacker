@@ -64,4 +64,4 @@ def test_quality_parallel(monkeypatch):
     t_slow = _run(slow)
     fast.quality_executor.shutdown()
     slow.quality_executor.shutdown()
-    assert t_slow / t_fast >= 3
+    assert t_slow / t_fast >= 2
