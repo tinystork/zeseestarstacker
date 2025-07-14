@@ -9297,10 +9297,12 @@ class SeestarQueuedStacker:
             )
             sky = ref_wcs.pixel_to_world(corners[:, 0], corners[:, 1])
             x, y = mosaic_wcs.world_to_pixel(sky)
-            left = int(np.floor(np.nanmin(x)))
-            right = int(np.ceil(np.nanmax(x)))
-            top = int(np.floor(np.nanmin(y)))
-            bottom = int(np.ceil(np.nanmax(y)))
+
+            left = int(round(np.nanmin(x)))
+            top = int(round(np.nanmin(y)))
+            right = left + w_ref - 1
+            bottom = top + h_ref - 1
+
             left = max(left, 0)
             top = max(top, 0)
             right = min(right, img_hwc.shape[1] - 1)
