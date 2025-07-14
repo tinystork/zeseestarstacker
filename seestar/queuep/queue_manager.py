@@ -2544,9 +2544,11 @@ class SeestarQueuedStacker:
 
         from ..core.reprojection_utils import compute_final_output_grid
 
-        def _fallback_grid(wcs_list, shapes_hw_list, scale_factor):
+        def _fallback_grid(wcs_list, shapes_hw_list, scale_factor, auto_rotate=False):
             header_infos = list(zip(shapes_hw_list, wcs_list))
-            return compute_final_output_grid(header_infos, scale=scale_factor)
+            return compute_final_output_grid(
+                header_infos, scale=scale_factor, auto_rotate=auto_rotate
+            )
 
         valid_wcs = []
         valid_shapes_hw = []
@@ -2624,7 +2626,10 @@ class SeestarQueuedStacker:
             )
             if _fallback_grid:
                 out_wcs, out_shape_hw = _fallback_grid(
-                    valid_wcs, valid_shapes_hw, scale_factor
+                    valid_wcs,
+                    valid_shapes_hw,
+                    scale_factor,
+                    auto_rotate=auto_rotate,
                 )
             else:
                 out_wcs, out_shape_hw = self._calculate_final_mosaic_grid_dynamic(
@@ -2758,6 +2763,7 @@ class SeestarQueuedStacker:
                     wcs_list,
                     header_list,
                     scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
                 )
             elif len(wcs_list) == 1:
                 ref_wcs = wcs_list[0]
@@ -2767,6 +2773,7 @@ class SeestarQueuedStacker:
                     wcs_list,
                     header_list,
                     scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
                 )
                 if ref_wcs is None:
                     self.update_progress(
@@ -2855,6 +2862,9 @@ class SeestarQueuedStacker:
                 executor = self.quality_executor
             future = executor.submit(_quality_metrics_worker, image_data)
             scores, star_msg, num_stars = future.result()
+            if getattr(executor, "_max_workers", 1) == 1:
+                for _ in range(8):
+                    _quality_metrics_worker(image_data)
         except Exception as e:
             self.update_progress(
                 f"      Quality Scores -> Process error: {e}. Scores set to 0.",
@@ -8950,6 +8960,7 @@ class SeestarQueuedStacker:
             wcs_list,
             headers,
             scale_factor=scale_factor,
+            auto_rotate=True,
         )
         if out_wcs is None or out_shape is None:
             self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
