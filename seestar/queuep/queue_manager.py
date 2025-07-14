@@ -4392,12 +4392,19 @@ class SeestarQueuedStacker:
                             self._finalize_single_classic_batch(
                                 self.intermediate_classic_batch_files[0]
                             )
-                        elif not self._reproject_classic_batches_zm(
-                            self.intermediate_classic_batch_files
-                        ):
-                            self._reproject_classic_batches(
-                                self.intermediate_classic_batch_files
-                            )
+                        else:
+                            try:
+                                self._reproject_classic_batches(
+                                    self.intermediate_classic_batch_files
+                                )
+                            except Exception as e:
+                                self.update_progress(
+                                    f"⚠️ _reproject_classic_batches échoué: {e}; utilisation du fallback ZeMosaic.",
+                                    "WARN",
+                                )
+                                self._reproject_classic_batches_zm(
+                                    self.intermediate_classic_batch_files
+                                )
                     else:
                         self.update_progress(
                             "   Aucune batch sauvegardé pour reproject&coadd."
