@@ -8699,6 +8699,13 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
         data_to_save = np.moveaxis(data, -1, 0) if data.ndim == 3 else data
+        h, w = data.shape[:2]
+        hdr["NAXIS"] = 3 if data.ndim == 3 else 2
+        hdr["NAXIS1"] = w
+        hdr["NAXIS2"] = h
+        if data.ndim == 3:
+            hdr["NAXIS3"] = data.shape[2]
+        hdr["BITPIX"] = -32
         fits.PrimaryHDU(data=data_to_save.astype(np.float32), header=hdr).writeto(
             cache_path, overwrite=True
         )
@@ -8735,6 +8742,12 @@ class SeestarQueuedStacker:
 
         tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
         tmp.close()
+        h, w = stack.shape[:2]
+        hdr["NAXIS"] = 3
+        hdr["NAXIS1"] = w
+        hdr["NAXIS2"] = h
+        hdr["NAXIS3"] = stack.shape[2]
+        hdr["BITPIX"] = -32
         fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
             tmp.name, overwrite=True
         )
@@ -8883,9 +8896,14 @@ class SeestarQueuedStacker:
         avg = self.cumulative_sum_memmap / wht_safe[..., None]
         avg = np.nan_to_num(avg, nan=0.0)
 
-        hdu = fits.PrimaryHDU(
-            data=avg.astype(np.float32), header=self.reference_header_for_wcs
-        )
+        hdr = self.reference_header_for_wcs.copy()
+        h, w = avg.shape[:2]
+        hdr["NAXIS"] = 3
+        hdr["NAXIS1"] = w
+        hdr["NAXIS2"] = h
+        hdr["NAXIS3"] = avg.shape[2]
+        hdr["BITPIX"] = -32
+        hdu = fits.PrimaryHDU(data=avg.astype(np.float32), header=hdr)
         fits.writeto(
             "master_stack_classic_nodriz.fits", hdu.data, hdu.header, overwrite=True
         )
@@ -9011,7 +9029,12 @@ class SeestarQueuedStacker:
             wht_path = os.path.join(
                 out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
             )
-            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+            hdr_wht = fits.Header()
+            hdr_wht["NAXIS"] = 2
+            hdr_wht["NAXIS1"] = final_wht.shape[1]
+            hdr_wht["NAXIS2"] = final_wht.shape[0]
+            hdr_wht["BITPIX"] = -32
+            fits.PrimaryHDU(data=final_wht.astype(np.float32), header=hdr_wht).writeto(
                 wht_path, overwrite=True, output_verify="ignore"
             )
             wht_paths.append(wht_path)
@@ -9072,9 +9095,15 @@ class SeestarQueuedStacker:
                         sci_fits, overwrite=True, output_verify="ignore"
                     )
                     for i, wht_path in enumerate(wht_paths):
-                        fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                            wht_path, overwrite=True, output_verify="ignore"
-                        )
+                        hdr_wht = fits.Header()
+                        hdr_wht["NAXIS"] = 2
+                        hdr_wht["NAXIS1"] = final_wht.shape[1]
+                        hdr_wht["NAXIS2"] = final_wht.shape[0]
+                        hdr_wht["BITPIX"] = -32
+                        fits.PrimaryHDU(
+                            data=final_wht.astype(np.float32),
+                            header=hdr_wht,
+                        ).writeto(wht_path, overwrite=True, output_verify="ignore")
                 else:
                     os.remove(sci_fits)
                     for p in wht_paths:
@@ -9130,9 +9159,15 @@ class SeestarQueuedStacker:
                     sci_fits, overwrite=True, output_verify="ignore"
                 )
                 for i, wht_path in enumerate(wht_paths):
-                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                        wht_path, overwrite=True, output_verify="ignore"
-                    )
+                    hdr_wht = fits.Header()
+                    hdr_wht["NAXIS"] = 2
+                    hdr_wht["NAXIS1"] = final_wht.shape[1]
+                    hdr_wht["NAXIS2"] = final_wht.shape[0]
+                    hdr_wht["BITPIX"] = -32
+                    fits.PrimaryHDU(
+                        data=final_wht.astype(np.float32),
+                        header=hdr_wht,
+                    ).writeto(wht_path, overwrite=True, output_verify="ignore")
 
         self._last_classic_batch_solved = solved_ok
 
@@ -10291,6 +10326,14 @@ class SeestarQueuedStacker:
             f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})"
         )
 
+        # Ensure mandatory FITS header keywords are present
+        h, w = data_for_primary_hdu_save.shape[:2]
+        final_header["NAXIS"] = 3 if data_for_primary_hdu_save.ndim == 3 else 2
+        final_header["NAXIS1"] = w
+        final_header["NAXIS2"] = h
+        if data_for_primary_hdu_save.ndim == 3:
+            final_header["NAXIS3"] = data_for_primary_hdu_save.shape[2]
+
         # --- ÉTAPE 6: Sauvegarde FITS effective ---
         try:
             primary_hdu = fits.PrimaryHDU(
@@ -10503,7 +10546,16 @@ class SeestarQueuedStacker:
         with np.errstate(divide="ignore", invalid="ignore"):
             avg = sum_data / np.maximum(wht_data[..., None], eps)
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
-        fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
+        h, w = avg.shape[:2]
+        hdr = fits.Header()
+        hdr["NAXIS"] = 3
+        hdr["NAXIS1"] = w
+        hdr["NAXIS2"] = h
+        hdr["NAXIS3"] = avg.shape[2]
+        hdr["BITPIX"] = -32
+        fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0), header=hdr).writeto(
+            tmp, overwrite=True
+        )
         os.replace(tmp, out_path)
 
         if os.path.exists(out_path):
