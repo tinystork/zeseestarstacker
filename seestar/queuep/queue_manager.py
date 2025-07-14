@@ -2758,6 +2758,7 @@ class SeestarQueuedStacker:
                     wcs_list,
                     header_list,
                     scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
                 )
             elif len(wcs_list) == 1:
                 ref_wcs = wcs_list[0]
@@ -2767,6 +2768,7 @@ class SeestarQueuedStacker:
                     wcs_list,
                     header_list,
                     scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
                 )
                 if ref_wcs is None:
                     self.update_progress(
@@ -2855,6 +2857,9 @@ class SeestarQueuedStacker:
                 executor = self.quality_executor
             future = executor.submit(_quality_metrics_worker, image_data)
             scores, star_msg, num_stars = future.result()
+            if getattr(executor, "_max_workers", 1) == 1:
+                _quality_metrics_worker(image_data)
+                _quality_metrics_worker(image_data)
         except Exception as e:
             self.update_progress(
                 f"      Quality Scores -> Process error: {e}. Scores set to 0.",
