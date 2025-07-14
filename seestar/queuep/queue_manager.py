@@ -10083,6 +10083,7 @@ class SeestarQueuedStacker:
         )
 
         # Les données post-traitées 0-1 seront utilisées pour l'aperçu UI
+        # cropping will be applied later, but keep a copy for now in case
         self.last_saved_data_for_preview = data_after_postproc.copy()
         logger.debug(
             "DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI)."
@@ -10163,6 +10164,29 @@ class SeestarQueuedStacker:
                         else "[deg] Pointing DEC from reference header"
                     ),
                 )
+
+        # --- Optional final edge crop on the post-processed data ---
+        crop_pct = getattr(self, "final_edge_crop_percent_decimal", 0.0)
+        if crop_pct > 0:
+            try:
+                crop_res = apply_edge_crop(
+                    data_after_postproc,
+                    crop_pct,
+                    header=final_header,
+                )
+                if isinstance(crop_res, tuple):
+                    data_after_postproc, final_header = crop_res
+                else:
+                    data_after_postproc = crop_res
+                # Apply same crop to raw ADU data used for FITS output
+                if getattr(self, "raw_adu_data_for_ui_histogram", None) is not None:
+                    self.raw_adu_data_for_ui_histogram = apply_edge_crop(
+                        self.raw_adu_data_for_ui_histogram,
+                        crop_pct,
+                    )
+                self.last_saved_data_for_preview = data_after_postproc.copy()
+            except Exception as crop_err:
+                self.update_progress(f"   WARN QM: Edge crop failed: {crop_err}")
 
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):

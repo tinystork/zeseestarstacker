@@ -31,6 +31,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Configuration:** Saves and loads user settings (`seestar_settings.json`).
 *   **Output Format:** Save FITS stacks as float32 or uint16. Enable *Preserve Linear Output* to skip percentile scaling.
 *   **Workflow Tools:** Add folders during processing, Copy Log button, Open Output Folder button, optional temporary file cleanup.
+*   **Final Edge Crop:** Optionally crop a small percentage from the stacked image edges before saving (WCS adjusted).
 *   **Smart Quality Control:**
     *   SNR-based weighting
     *   Star count/sharpness analysis
@@ -62,6 +63,7 @@ written linearly.
 *   **Configuration :** Sauvegarde et charge les paramètres utilisateur (`seestar_settings.json`).
 *   **Format de Sortie :** Sauvegarde des FITS en float32 ou uint16. Activez *Préserver l'image linéaire* pour éviter la normalisation par percentiles.
 *   **Outils de Workflow :** Ajout de dossiers pendant le traitement, bouton Copier Log, bouton Ouvrir Dossier Sortie, nettoyage optionnel des fichiers temporaires.
+*   **Rognage Final des Bords :** Rogne automatiquement un petit pourcentage des bords de l'image finale avec mise à jour du WCS.
 *   **Contrôle Qualité Intelligent :**
     *   Pondération par rapport signal/bruit (SNR)
     *   Analyse du nombre/netteté des étoiles
