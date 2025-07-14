@@ -407,3 +407,26 @@ def test_save_final_stack_radec_from_reference_header(tmp_path):
     assert np.isclose(hdr["RA"], 12.34)
     assert np.isclose(hdr["DEC"], 56.78)
 
+
+def test_final_edge_crop(tmp_path):
+    obj = _make_obj(tmp_path, True)
+    obj.final_edge_crop_percent_decimal = 0.1
+    data = np.ones((10, 10), dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+    obj.current_stack_header["CRPIX1"] = 5.0
+    obj.current_stack_header["CRPIX2"] = 5.0
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_mosaic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=True,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    hdr = fits.getheader(obj.final_stacked_path)
+    assert saved.shape == (8, 8)
+    assert hdr["NAXIS1"] == 8 and hdr["NAXIS2"] == 8
+    assert hdr["CRPIX1"] == 4.0 and hdr["CRPIX2"] == 4.0
+
