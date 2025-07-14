@@ -5429,19 +5429,21 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"   Reprojection et combinaison du canal {i_ch+1}/3..."
             )
-            channel_arrays_wcs_list = [
-                (panel_data[..., i_ch], wcs)
-                for panel_data, wcs in input_data_for_reproject
-            ]
+
+            # --- Préparation des tuples (data, wcs, weight) pour chaque panneau
+            channel_arrays = []
+            for (panel_data, wcs), weight in zip(
+                input_data_for_reproject, input_footprints_for_reproject
+            ):
+                channel_arrays.append((panel_data[..., i_ch], wcs, weight))
+
             try:
                 sci, cov = reproject_and_coadd(
-                    channel_arrays_wcs_list,
+                    channel_arrays,
                     output_projection=output_wcs,
                     shape_out=output_shape_hw,
-                    input_weights=input_footprints_for_reproject,
                     reproject_function=reproject_interp,
-                    combine_function="mean",
-                    match_background=True,
+                    combine_function=_stack_mean,
                 )
                 final_mosaic_sci_channels.append(sci.astype(np.float32))
                 final_mosaic_coverage_channels.append(cov.astype(np.float32))
