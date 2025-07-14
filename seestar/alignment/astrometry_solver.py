@@ -299,6 +299,20 @@ class AstrometrySolver:
                 return float("nan")
         return float("nan")
 
+    def _is_wcs_plausible(self, wcs_obj, scale_est=None):
+        """Simple sanity check for solved WCS."""
+        scale = self._extract_scale_arcsec(wcs_obj)
+        if np.isnan(scale) or scale <= 0:
+            return False
+        if scale_est is not None and scale_est > 0:
+            try:
+                scale_est_val = float(scale_est)
+                if abs(scale - scale_est_val) > scale_est_val * 0.5:
+                    return False
+            except Exception:
+                pass
+        return True
+
 
 
 
@@ -440,13 +454,20 @@ class AstrometrySolver:
                 if wcs_solution:
                     dt = time.time() - t0
                     scale = self._extract_scale_arcsec(wcs_solution)
-                    self._log(
-                        f"🔭 [Solver] ASTAP OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
-                        "INFO",
-                    )
-                    return wcs_solution
+                    if self._is_wcs_plausible(wcs_solution, scale_est):
+                        self._log(
+                            f"🔭 [Solver] ASTAP OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                            "INFO",
+                        )
+                        return wcs_solution
+                    else:
+                        self._log(
+                            f"ASTAP solution rejected (scale {scale:.2f} asec/pix not plausible)",
+                            "WARN",
+                        )
+                        wcs_solution = None
                 else:
-                    local_solver_attempted_and_failed = True 
+                    local_solver_attempted_and_failed = True
                     self._log("ASTAP a échoué ou n'a pas trouvé de solution.", "WARN")
             else:
                 self._log(
@@ -479,11 +500,18 @@ class AstrometrySolver:
                 if wcs_solution:
                     dt = time.time() - t0
                     scale = self._extract_scale_arcsec(wcs_solution)
-                    self._log(
-                        f"🔭 [Solver] ansvr OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
-                        "INFO",
-                    )
-                    return wcs_solution
+                    if self._is_wcs_plausible(wcs_solution, scale_est):
+                        self._log(
+                            f"🔭 [Solver] ansvr OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                            "INFO",
+                        )
+                        return wcs_solution
+                    else:
+                        self._log(
+                            f"ansvr solution rejected (scale {scale:.2f} asec/pix not plausible)",
+                            "WARN",
+                        )
+                        wcs_solution = None
                 else:
                     local_solver_attempted_and_failed = True
                     self._log("Astrometry.net Local (solve-field) a échoué ou n'a pas trouvé de solution.", "WARN")
@@ -511,11 +539,18 @@ class AstrometrySolver:
                 if wcs_solution:
                     dt = time.time() - t0
                     scale = self._extract_scale_arcsec(wcs_solution)
-                    self._log(
-                        f"🔭 [Solver] Astrometry.net-API OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
-                        "INFO",
-                    )
-                    return wcs_solution
+                    if self._is_wcs_plausible(wcs_solution, scale_est):
+                        self._log(
+                            f"🔭 [Solver] Astrometry.net-API OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
+                            "INFO",
+                        )
+                        return wcs_solution
+                    else:
+                        self._log(
+                            f"Astrometry.net-API solution rejected (scale {scale:.2f} asec/pix not plausible)",
+                            "WARN",
+                        )
+                        wcs_solution = None
                 else:
                     self._log("Astrometry.net (web service) a échoué ou n'a pas trouvé de solution.", "WARN")
             else:

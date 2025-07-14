@@ -33,7 +33,10 @@ class SeestarAligner:
     Classe pour l'alignement des images astronomiques de Seestar.
     Trouve une image de référence et aligne les autres images sur celle-ci.
     """
-    NUM_IMAGES_FOR_AUTO_REF = 50 # Number of initial images to check for reference
+    NUM_IMAGES_FOR_AUTO_REF = 50  # Number of initial images to check for reference
+    # Thresholds to detect clearly wrong transformations returned by astroalign
+    MAX_ROTATION_DEG = 5.0  # degrees
+    MAX_TRANSLATION_PX = 10.0  # pixels
 
     def __init__(self, move_to_unaligned_callback=None):
         """Initialise l'aligneur avec des valeurs par défaut."""
@@ -184,6 +187,25 @@ class SeestarAligner:
             theta = np.arctan2(b, a)
             tx = transform_skimage_obj.params[0, 2]
             ty = transform_skimage_obj.params[1, 2]
+
+            rotation_deg = abs(np.degrees(theta))
+            translation_norm = np.hypot(tx, ty)
+            if (
+                rotation_deg > getattr(self, "MAX_ROTATION_DEG", 5.0)
+                or translation_norm > getattr(self, "MAX_TRANSLATION_PX", 10.0)
+            ):
+                self.update_progress(
+                    f"⚠️ Alignement suspect {file_name}: rotation {rotation_deg:.2f}°"
+                    f" translation {translation_norm:.1f}px"
+                )
+                logger.warning(
+                    "Rejecting alignment for %s due to large transform: "
+                    "rot=%.2f°, trans=%.1fpx",
+                    file_name,
+                    rotation_deg,
+                    translation_norm,
+                )
+                return img_to_align, False
 
             transform_no_scale = SimilarityTransform(rotation=theta,
                                                      translation=(tx, ty))
