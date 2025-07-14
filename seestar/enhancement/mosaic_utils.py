@@ -158,6 +158,12 @@ def assemble_final_mosaic_with_reproject_coadd(
         if coverage is None:
             coverage = cov.astype(np.float32)
 
+    # Ensure the WCS reports a pixel shape consistent with the output mosaic
+    final_output_wcs.pixel_shape = (
+        final_output_shape_hw[1],
+        final_output_shape_hw[0],
+    )
+
     mosaic = np.stack(mosaic_channels, axis=-1)
     if use_memmap and cleanup_memmap and memmap_dir:
         try:
