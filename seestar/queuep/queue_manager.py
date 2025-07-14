@@ -86,32 +86,23 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from ccdproc import combine as ccdproc_combine
 from scipy.spatial import ConvexHull
 
-from seestar.core.stack_methods import (
-    _stack_kappa_sigma,
-    _stack_linear_fit_clip,
-    _stack_mean,
-    _stack_median,
-    _stack_winsorized_sigma,
-)
+from seestar.core.stack_methods import (_stack_kappa_sigma,
+                                        _stack_linear_fit_clip, _stack_mean,
+                                        _stack_median, _stack_winsorized_sigma)
 from seestar.gui.settings import SettingsManager
 
 # --- Third-Party Library Imports ---
-from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
+from ..core.background import \
+    _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
 from ..core.background import subtract_background_2d
 from ..core.drizzle_utils import drizzle_finalize
-from ..core.incremental_reprojection import (
-    reproject_and_coadd_batch,
-    reproject_and_combine,
-)
-from ..core.normalization import (
-    _normalize_images_linear_fit,
-    _normalize_images_sky_mean,
-)
+from ..core.incremental_reprojection import (reproject_and_coadd_batch,
+                                             reproject_and_combine)
+from ..core.normalization import (_normalize_images_linear_fit,
+                                  _normalize_images_sky_mean)
 from ..core.reprojection import reproject_to_reference_wcs
-from ..core.weights import (
-    _calculate_image_weights_noise_fwhm,
-    _calculate_image_weights_noise_variance,
-)
+from ..core.weights import (_calculate_image_weights_noise_fwhm,
+                            _calculate_image_weights_noise_variance)
 from ..enhancement.stack_enhancement import apply_edge_crop
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
@@ -215,13 +206,10 @@ def _stack_worker(args):
         apply_rewinsor,
     ) = args
 
-    from seestar.core.stack_methods import (
-        _stack_kappa_sigma,
-        _stack_linear_fit_clip,
-        _stack_mean,
-        _stack_median,
-        _stack_winsorized_sigma,
-    )
+    from seestar.core.stack_methods import (_stack_kappa_sigma,
+                                            _stack_linear_fit_clip,
+                                            _stack_mean, _stack_median,
+                                            _stack_winsorized_sigma)
 
     if mode == "winsorized-sigma":
         return _stack_winsorized_sigma(
@@ -348,12 +336,8 @@ except ImportError as e:
     logger.error("Échec import detect_and_correct_hot_pixels: %s", e)
     raise
 try:
-    from ..core.image_processing import (
-        debayer_image,
-        load_and_validate_fits,
-        save_fits_image,
-        save_preview_image,
-    )
+    from ..core.image_processing import (debayer_image, load_and_validate_fits,
+                                         save_fits_image, save_preview_image)
 except ImportError as e:
     logger.error("Échec import image_processing: %s", e)
     raise
@@ -405,12 +389,8 @@ except ImportError as e:
     raise
 # Core Image Processing (Utilisé PARTOUT)
 try:
-    from ..core.image_processing import (
-        debayer_image,
-        load_and_validate_fits,
-        save_fits_image,
-        save_preview_image,
-    )
+    from ..core.image_processing import (debayer_image, load_and_validate_fits,
+                                         save_fits_image, save_preview_image)
 
     logger.debug("Imports image_processing OK.")
 except ImportError as e:
@@ -418,7 +398,8 @@ except ImportError as e:
     raise
 # --- IMPORT POUR L'ALIGNEUR LOCAL ---
 try:
-    from ..core import SeestarLocalAligner  # Devrait être FastSeestarAligner aliasé
+    from ..core import \
+        SeestarLocalAligner  # Devrait être FastSeestarAligner aliasé
 
     _LOCAL_ALIGNER_AVAILABLE = True
     logger.debug("Import SeestarLocalAligner (local CV) OK.")
@@ -451,7 +432,8 @@ except ImportError as e:
     raise
 
 try:
-    from ..enhancement.stack_enhancement import feather_by_weight_map  # NOUVEL IMPORT
+    from ..enhancement.stack_enhancement import \
+        feather_by_weight_map  # NOUVEL IMPORT
 
     _FEATHERING_AVAILABLE = True
     logger.debug("Import feather_by_weight_map depuis stack_enhancement OK.")
@@ -531,7 +513,8 @@ def renormalize_fits(
 
 
 try:
-    from ..enhancement.stack_enhancement import apply_low_wht_mask  # NOUVEL IMPORT
+    from ..enhancement.stack_enhancement import \
+        apply_low_wht_mask  # NOUVEL IMPORT
 
     _LOW_WHT_MASK_AVAILABLE = True
     logger.debug("Import apply_low_wht_mask depuis stack_enhancement OK.")
@@ -603,9 +586,7 @@ except ImportError as e:
 
 
 from ..alignment.astrometry_solver import (  # Déplacé vers _worker/_process_file
-    AstrometrySolver,
-    solve_image_wcs,
-)
+    AstrometrySolver, solve_image_wcs)
 
 # --- Configuration des Avertissements ---
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
@@ -2740,6 +2721,9 @@ class SeestarQueuedStacker:
             self.reference_shape = ref_shape
             self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
             self.ref_wcs_header = self.reference_header_for_wcs
+            if not self.freeze_reference_wcs:
+                # On verrouille la référence dès qu'elle existe
+                self.freeze_reference_wcs = True
         else:
             ref_wcs = self.reference_wcs_object
             ref_shape = (
@@ -3231,9 +3215,8 @@ class SeestarQueuedStacker:
                         "   ⚠️ Échec de tous les solveurs pour panneau de référence. Tentative WCS approximatif (fallback)..."
                     )
                     _cwfh_func = None
-                    from ..enhancement.drizzle_integration import (
-                        _create_wcs_from_header as _cwfh,
-                    )
+                    from ..enhancement.drizzle_integration import \
+                        _create_wcs_from_header as _cwfh
 
                     _cwfh_func = _cwfh
                     if _cwfh_func:
@@ -3345,9 +3328,8 @@ class SeestarQueuedStacker:
                     )
                     # Fallback WCS approximatif pour Drizzle Standard / Mosaïque Astrometry.net per Panel
                     _cwfh_func_std_driz = None
-                    from ..enhancement.drizzle_integration import (
-                        _create_wcs_from_header as _cwfh_std,
-                    )
+                    from ..enhancement.drizzle_integration import \
+                        _create_wcs_from_header as _cwfh_std
 
                     _cwfh_func_std_driz = _cwfh_std
                     if _cwfh_func_std_driz:
@@ -5330,9 +5312,7 @@ class SeestarQueuedStacker:
 
         try:
             from seestar.enhancement.reproject_utils import (
-                reproject_and_coadd,
-                reproject_interp,
-            )
+                reproject_and_coadd, reproject_interp)
         except ImportError:
             self.update_progress(
                 "❌ Bibliothèque reproject non disponible pour l'assemblage mosaïque.",
@@ -6460,9 +6440,8 @@ class SeestarQueuedStacker:
                     and self.reference_wcs_object
                 ):
                     # Added a check if reproject_to_reference_wcs is actually callable
-                    from seestar.core.reprojection import (
-                        reproject_to_reference_wcs as _reproject_func,
-                    )
+                    from seestar.core.reprojection import \
+                        reproject_to_reference_wcs as _reproject_func
 
                     if _reproject_func:
                         logger.debug(
@@ -8790,6 +8769,8 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object is None or not self.freeze_reference_wcs:
             if new_wcs is not None:
                 self.reference_wcs_object = new_wcs
+                if not self.freeze_reference_wcs:
+                    self.freeze_reference_wcs = True
                 self.reference_shape = (stack.shape[0], stack.shape[1])
 
         self.reference_header_for_wcs = hdr.copy()
@@ -9213,10 +9194,8 @@ class SeestarQueuedStacker:
         « Reproject + Co‑add ».
         """
 
-        from seestar.enhancement.reproject_utils import (
-            reproject_and_coadd,
-            reproject_interp,
-        )
+        from seestar.enhancement.reproject_utils import (reproject_and_coadd,
+                                                         reproject_interp)
 
         # --- 1. Containers -------------------------------------------------------
         channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
@@ -9412,9 +9391,8 @@ class SeestarQueuedStacker:
     def _reproject_classic_batches_zm(self, batch_files):
         """Reproject and coadd classic batches without ZeMosaic."""
         try:
-            from seestar.enhancement.mosaic_utils import (
-                assemble_final_mosaic_with_reproject_coadd,
-            )
+            from seestar.enhancement.mosaic_utils import \
+                assemble_final_mosaic_with_reproject_coadd
         except Exception as e:
             self.update_progress(
                 f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}",
@@ -11180,9 +11158,8 @@ class SeestarQueuedStacker:
         # reprojection between batches is enabled (to avoid changing the
         # reference size and breaking alignment).
         self.keep_input_size_for_reproject = (
-            (self.reproject_between_batches or self.reproject_coadd_final)
-            and not is_mosaic_run
-        )
+            self.reproject_between_batches or self.reproject_coadd_final
+        ) and not is_mosaic_run
 
         # --- FIN NOUVEAU ---
 
@@ -11498,9 +11475,8 @@ class SeestarQueuedStacker:
                     )
                     _cwfh_func_startup = None
                     try:
-                        from ..enhancement.drizzle_integration import (
-                            _create_wcs_from_header as _cwfh_s,
-                        )
+                        from ..enhancement.drizzle_integration import \
+                            _create_wcs_from_header as _cwfh_s
 
                         _cwfh_func_startup = _cwfh_s
                     except ImportError:
