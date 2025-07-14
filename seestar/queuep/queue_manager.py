@@ -8755,6 +8755,7 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object is None or not self.freeze_reference_wcs:
             if new_wcs is not None:
                 self.reference_wcs_object = new_wcs
+                self.reference_shape = (stack.shape[0], stack.shape[1])
 
         self.reference_header_for_wcs = hdr.copy()
         self.ref_wcs_header = hdr.copy()
