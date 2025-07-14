@@ -9243,20 +9243,11 @@ class SeestarQueuedStacker:
                     else (h, w)
                 )
 
-                # Science image (3‑channels)
-                img_hwc = reproject_to_reference_wcs(
-                    np.moveaxis(data_cxhxw, 0, -1),  # CxHxW ➜ HxWxC
-                    batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
-                )
-
-                # Weight map – single channel, same helper works
-                coverage = reproject_to_reference_wcs(
+                # ↳ Version sûre : boucle sur les canaux + carte de poids
+                img_hwc, coverage = self._reproject_batch_to_reference(
+                    np.moveaxis(data_cxhxw, 0, -1),   # CxHxW → HxWxC
                     coverage,
                     batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
                 )
 
                 batch_wcs = self.reference_wcs_object  # Subsequent code must use it
