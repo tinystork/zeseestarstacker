@@ -17,15 +17,34 @@ NANSTD = bn.nanstd if bn else np.nanstd
 logger = logging.getLogger(__name__)
 
 
-def _stack_mean(images, weights=None):
-    arr = np.stack([im for im in images], axis=0).astype(np.float32)
-    if weights is not None:
-        w = np.asarray(weights, dtype=np.float32)[:, None, None]
-        if arr.ndim == 4:
-            w = w[..., None]
+def _weighted_average(
+    arr: np.ndarray, weights: np.ndarray, mask: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """Return weighted mean along the first axis with optional mask."""
+
+    w = np.asarray(weights, dtype=np.float32)
+    # Expand weight dimensions to broadcast with data
+    if arr.ndim == 4:
+        w = w[:, None, None, None]
+    else:
+        w = w[:, None, None]
+
+    if mask is not None:
+        w = w * mask
+        sum_w = np.nansum(w, axis=0)
+        sum_d = np.nansum(arr * w, axis=0)
+    else:
         sum_w = np.sum(w, axis=0)
         sum_d = np.sum(arr * w, axis=0)
-        result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-9)
+
+    return np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
+
+
+def _stack_mean(images, weights=None):
+    """Simple mean stacking with optional weights."""
+    arr = np.stack([im for im in images], axis=0).astype(np.float32)
+    if weights is not None:
+        result = _weighted_average(arr, weights)
     else:
         result = np.mean(arr, axis=0)
     return result.astype(np.float32), 0.0
@@ -46,12 +65,7 @@ def _stack_kappa_sigma(images, weights=None, sigma_low=3.0, sigma_high=3.0):
     mask = (arr >= low) & (arr <= high)
     arr_clip = np.where(mask, arr, np.nan)
     if weights is not None:
-        w = np.asarray(weights, dtype=np.float32)[:, None, None]
-        if arr.ndim == 4:
-            w = w[..., None]
-        sum_w = np.nansum(w * mask, axis=0)
-        sum_d = np.nansum(arr_clip * w, axis=0)
-        result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
+        result = _weighted_average(arr_clip, weights, mask=mask)
     else:
         result = NANMEAN(arr_clip, axis=0)
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)
@@ -67,12 +81,7 @@ def _stack_linear_fit_clip(images, weights=None, sigma=3.0):
     mask = np.abs(residuals - med_res) <= sigma * std_res
     arr_clip = np.where(mask, arr, np.nan)
     if weights is not None:
-        w = np.asarray(weights, dtype=np.float32)[:, None, None]
-        if arr.ndim == 4:
-            w = w[..., None]
-        sum_w = np.nansum(w * mask, axis=0)
-        sum_d = np.nansum(arr_clip * w, axis=0)
-        result = np.divide(sum_d, sum_w, out=np.zeros_like(sum_d), where=sum_w > 1e-6)
+        result = _weighted_average(arr_clip, weights, mask=mask)
     else:
         result = NANMEAN(arr_clip, axis=0)
     rejected_pct = 100.0 * (mask.size - np.count_nonzero(mask)) / float(mask.size)

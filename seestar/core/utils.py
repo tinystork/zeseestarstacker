@@ -1,6 +1,4 @@
-"""
-Fonctions utilitaires pour le traitement d'images astronomiques.
-"""
+"""Utility functions used across the stacking pipeline."""
 import numpy as np
 import cv2
 import os # Added for exists check
@@ -200,16 +198,19 @@ def apply_denoise(image, strength=1):
 
 
 def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
-    """
-    Estime la taille de lot optimale en fonction de la mémoire disponible.
-    CORRIGÉ: Gère correctement le tuple retourné par load_and_validate_fits.
+    """Estimate a reasonable batch size based on available system memory.
 
-    Parameters:
-        sample_image_path: Chemin vers une image exemple pour estimer la taille mémoire
-        available_memory_percentage: Pourcentage de la mémoire disponible à utiliser (0-100)
+    Parameters
+    ----------
+    sample_image_path : str | None
+        Path to an example FITS file used to estimate per-image memory usage.
+    available_memory_percentage : int
+        Percentage of available memory that can be used (0-100).
 
-    Returns:
-        int: Taille de lot estimée, au moins 3 et au plus 50
+    Returns
+    -------
+    int
+        Estimated batch size constrained between 3 and 50.
     """
     # Default batch size if estimation fails
     default_batch_size = 10
@@ -219,56 +220,54 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
         return default_batch_size
 
     try:
-        # Obtenir la mémoire disponible (en octets)
+        # Query total available memory in bytes
         mem = psutil.virtual_memory()
         available_memory = mem.available
 
-        # N'utiliser qu'un pourcentage de la mémoire disponible
+        # Only use a fraction of the available memory
         usable_memory = available_memory * (available_memory_percentage / 100.0)
 
-        # Estimer la taille d'une image en mémoire pendant le traitement
+        # Estimate memory usage of a single image during processing
         single_image_size_bytes = 0
         if sample_image_path and os.path.exists(sample_image_path):
-            img_data_for_estimation = None # Initialiser
+            img_data_for_estimation = None  # Placeholder until loaded
             try:
-                # Load image to get dimensions and type (returns float32 0-1)
-                loaded_tuple = load_and_validate_fits(sample_image_path) # APPEL MODIFIÉ
+                # Load the FITS file to determine image shape and dtype
+                loaded_tuple = load_and_validate_fits(sample_image_path)
 
-                # --- DÉBUT DE LA CORRECTION ---
                 if loaded_tuple and loaded_tuple[0] is not None:
-                    img_data_for_estimation = loaded_tuple[0] # Déballer l'array image
+                    img_data_for_estimation = loaded_tuple[0]
                 else:
-                    # Si load_and_validate_fits retourne None ou si les données sont None,
-                    # img_data_for_estimation restera None.
-                    # Le ValueError sera levé plus bas si img_data_for_estimation est None.
-                    pass # img_data_for_estimation est déjà None
-                # --- FIN DE LA CORRECTION ---
+                    # Will raise below if still None
+                    pass
 
-                if img_data_for_estimation is None: # Vérifier après la tentative de déballage
+                if img_data_for_estimation is None:
                     raise ValueError(f"Failed to load sample image: {sample_image_path}")
 
-                # Estimate memory usage during processing (alignment + stacking buffer)
+                # Estimated size includes buffers used during alignment and stacking
                 memory_factor = 6
-                h, w = img_data_for_estimation.shape[:2] # Utiliser img_data_for_estimation
-                channels_out = 3 # Assume color output for worst-case size
+                h, w = img_data_for_estimation.shape[:2]
+                channels_out = 3  # Assume color output
                 bytes_per_float = 4
                 single_image_size_bytes = h * w * channels_out * bytes_per_float * memory_factor
 
             except Exception as img_e:
-                 print(f"Warning: Could not load/analyze sample image {sample_image_path} for size estimation: {img_e}")
-                 single_image_size_bytes = 0 # Fallback
+                print(
+                    f"Warning: Could not load/analyze sample image {sample_image_path} for size estimation: {img_e}"
+                )
+                single_image_size_bytes = 0  # Fallback
         else:
             print("Warning: No valid sample image path provided for size estimation.")
-            single_image_size_bytes = 0 # Fallback
+            single_image_size_bytes = 0  # Fallback
 
 
-        # Fallback estimation if image loading failed or no path provided
+        # Use a rough estimate if the sample image could not be analysed
         if single_image_size_bytes <= 0:
             print("Using fallback image size estimation (approx. 4MP color image).")
             single_image_size_bytes = 2000 * 2000 * 3 * 4 * 6
 
 
-        # Safety factor for other system usage and Python overhead
+        # Safety factor to account for other memory usage
         safety_factor = 1.5
 
         if single_image_size_bytes <= 0:
@@ -276,19 +275,23 @@ def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
              return default_batch_size
 
         estimated_batch = int(usable_memory / (single_image_size_bytes * safety_factor))
-        estimated_batch = max(3, min(50, estimated_batch)) # Limites raisonnables
+        estimated_batch = max(3, min(50, estimated_batch))
 
-        print(f"Mémoire disponible: {available_memory / (1024**3):.2f} Go "
-              f"(Utilisable: {usable_memory / (1024**3):.2f} Go)")
-        print(f"Taille estimée par image (avec overhead): {single_image_size_bytes / (1024**2):.2f} Mo")
-        print(f"Taille de lot estimée: {estimated_batch}")
+        print(
+            f"Available memory: {available_memory / (1024**3):.2f} GiB "
+            f"(Usable: {usable_memory / (1024**3):.2f} GiB)"
+        )
+        print(
+            f"Estimated per-image size (with overhead): {single_image_size_bytes / (1024**2):.2f} MiB"
+        )
+        print(f"Estimated batch size: {estimated_batch}")
 
         return estimated_batch
 
     except Exception as e:
-        print(f"Erreur lors de l'estimation de la taille de lot: {e}")
+        print(f"Error estimating batch size: {e}")
         traceback.print_exc()
-        print(f"Utilisation de la taille de lot par défaut : {default_batch_size}")
+        print(f"Using default batch size: {default_batch_size}")
         return default_batch_size
 
 
