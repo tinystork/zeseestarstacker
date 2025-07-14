@@ -9411,14 +9411,35 @@ class SeestarQueuedStacker:
                 scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
             )
         else:
-            out_wcs, out_shape = self._calculate_final_mosaic_grid(
-                wcs_list,
-                headers,
-                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-                auto_rotate=True,
-            )
-            if out_wcs is None:
-                return False
+            try:
+                from seestar.core.reprojection_utils import compute_final_output_grid
+
+                header_infos = []
+                for wcs_obj, hdr in zip(wcs_list, headers):
+                    shape_hw = None
+                    if wcs_obj.pixel_shape is not None:
+                        shape_hw = (wcs_obj.pixel_shape[1], wcs_obj.pixel_shape[0])
+                    elif hdr is not None:
+                        n1 = hdr.get("NAXIS1")
+                        n2 = hdr.get("NAXIS2")
+                        if n1 and n2:
+                            shape_hw = (int(n2), int(n1))
+                    if shape_hw is not None:
+                        header_infos.append((shape_hw, wcs_obj))
+
+                out_wcs, out_shape = compute_final_output_grid(
+                    header_infos,
+                    scale=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                )
+            except Exception:
+                out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    headers,
+                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
+                )
+                if out_wcs is None:
+                    return False
 
         if out_wcs.pixel_shape is not None:
             expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
