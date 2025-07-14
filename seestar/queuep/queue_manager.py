@@ -4397,6 +4397,12 @@ class SeestarQueuedStacker:
                                 self._reproject_classic_batches(
                                     self.intermediate_classic_batch_files
                                 )
+                                self._save_final_stack(
+                                    "_classic_reproject",
+                                    drizzle_final_sci_data=self.current_stack,
+                                    drizzle_final_wht_data=self.current_coverage,
+                                    preserve_linear_output=True,
+                                )
                             except Exception as e:
                                 self.update_progress(
                                     f"⚠️ _reproject_classic_batches échoué: {e}; utilisation du fallback ZeMosaic.",
