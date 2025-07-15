@@ -2872,6 +2872,8 @@ class SeestarQueuedStacker:
 
     def _recalculate_total_batches(self):
         """Estimates the total number of batches based on files_in_queue."""
+        if getattr(self, "use_batch_plan", False):
+            return
         if self.batch_size > 0:
             self.total_batches_estimated = math.ceil(
                 self.files_in_queue / self.batch_size
@@ -11480,6 +11482,35 @@ class SeestarQueuedStacker:
                         f"Avertissement: Erreur lecture dossier '{folder_path_iter}' pour réf: {e_listdir}",
                         "WARN",
                     )
+
+            plan_path = os.path.join(self.current_folder, "stack_plan.csv")
+            use_plan_for_ref = (
+                requested_batch_size <= 0 and os.path.isfile(plan_path)
+            )
+            if (
+                use_plan_for_ref
+                and (not current_folder_to_scan_for_shape or not files_in_folder_for_shape)
+            ):
+                try:
+                    batches_for_ref = get_batches_from_stack_plan(
+                        plan_path, self.current_folder
+                    )
+                    first_fp = None
+                    for batch in batches_for_ref:
+                        for fp in batch:
+                            if os.path.isfile(fp):
+                                first_fp = fp
+                                break
+                        if first_fp:
+                            break
+                    if first_fp:
+                        current_folder_to_scan_for_shape = os.path.dirname(first_fp)
+                        files_in_folder_for_shape = [os.path.basename(first_fp)]
+                except Exception as plan_err:
+                    logger.debug(
+                        f"ERREUR lecture stack_plan.csv pour référence: {plan_err}"
+                    )
+
             if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
                 raise RuntimeError(
                     "Aucun fichier FITS trouvé dans les dossiers pour servir de référence."
