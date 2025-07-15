@@ -9041,6 +9041,40 @@ class SeestarQueuedStacker:
         except Exception:
             input_wcs = None
 
+        # Propagate basic pointing information so intermediate batches remain
+        # self-contained even when solving is deferred. RA/DEC are taken from
+        # the WCS if available or fall back to the reference header.
+        if "RA" not in header:
+            if "CRVAL1" in header:
+                header["RA"] = (
+                    float(header["CRVAL1"]),
+                    "[deg] Approx pointing RA from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "RA" in self.reference_header_for_wcs:
+                header["RA"] = (
+                    float(self.reference_header_for_wcs["RA"]),
+                    (
+                        self.reference_header_for_wcs.comments["RA"]
+                        if "RA" in self.reference_header_for_wcs.comments
+                        else "[deg] Pointing RA from reference header"
+                    ),
+                )
+        if "DEC" not in header:
+            if "CRVAL2" in header:
+                header["DEC"] = (
+                    float(header["CRVAL2"]),
+                    "[deg] Approx pointing DEC from WCS",
+                )
+            elif getattr(self, "reference_header_for_wcs", None) is not None and "DEC" in self.reference_header_for_wcs:
+                header["DEC"] = (
+                    float(self.reference_header_for_wcs["DEC"]),
+                    (
+                        self.reference_header_for_wcs.comments["DEC"]
+                        if "DEC" in self.reference_header_for_wcs.comments
+                        else "[deg] Pointing DEC from reference header"
+                    ),
+                )
+
         # Save the batch to disk before solving so the WCS can be written
         # directly to the final FITS file.
         data_cxhxw = np.moveaxis(final_stacked, -1, 0)
