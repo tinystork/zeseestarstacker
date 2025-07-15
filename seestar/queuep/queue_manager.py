@@ -41,6 +41,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue  # Essentiel pour la classe
+import csv
 
 # --- Standard Library Imports ---
 from astropy.io import fits
@@ -123,6 +124,7 @@ _last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0  # horodatage du dernier push
 _QM_DEBOUNCE = 0.20  # secondes mini entre deux messages GUI
+_BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 
 # ----------------------------------------------------------------------
 # Type aliases
@@ -326,6 +328,49 @@ def _quality_metrics_worker(image_data):
         scores["stars"] = 0.0
 
     return scores, star_msg, num_stars
+
+
+def get_batches_from_stack_plan(plan_path, input_folder=None):
+    """Read ``stack_plan.csv`` and group file paths by ``batch_id``.
+
+    Parameters
+    ----------
+    plan_path : str
+        Path to the CSV plan file.
+    input_folder : str, optional
+        Folder used to rebase relative or invalid paths.
+
+    Returns
+    -------
+    list[list[str]]
+        Ordered list of batches. Each batch is a list of file paths.
+    """
+
+    batches = []
+    by_batch: dict[str, list[str]] = {}
+    with open(plan_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            batch_id = row.get("batch_id")
+            file_path = row.get("file_path")
+            if not file_path or batch_id is None:
+                continue
+            if input_folder and not os.path.isfile(file_path):
+                file_path = os.path.join(input_folder, os.path.basename(file_path))
+            by_batch.setdefault(batch_id, []).append(file_path)
+
+    batch_order = []
+    with open(plan_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            batch_id = row.get("batch_id")
+            if batch_id not in batch_order:
+                batch_order.append(batch_id)
+
+    for bid in batch_order:
+        batches.append(by_batch.get(bid, []))
+
+    return batches
 
 
 # --- Optional Third-Party Imports (with availability flags) ---
@@ -957,6 +1002,8 @@ class SeestarQueuedStacker:
         self.unsolved_classic_batch_files = set()
         # Status flag for the most recently saved batch
         self._last_classic_batch_solved = True
+        # Use custom stacking plan when provided
+        self.use_batch_plan = False
 
         self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
@@ -2825,6 +2872,8 @@ class SeestarQueuedStacker:
 
     def _recalculate_total_batches(self):
         """Estimates the total number of batches based on files_in_queue."""
+        if getattr(self, "use_batch_plan", False):
+            return
         if self.batch_size > 0:
             self.total_batches_estimated = math.ceil(
                 self.files_in_queue / self.batch_size
@@ -3551,6 +3600,21 @@ class SeestarQueuedStacker:
 
                 try:
                     file_path = self.queue.get(timeout=1.0)
+                    if (
+                        getattr(self, "use_batch_plan", False)
+                        and file_path == _BATCH_BREAK_TOKEN
+                    ):
+                        (
+                            reference_image_data_for_global_alignment,
+                            reference_header_for_global_alignment,
+                        ) = self._flush_current_batch(
+                            current_batch_items_with_masks_for_stack_batch,
+                            reference_image_data_for_global_alignment,
+                            reference_header_for_global_alignment,
+                        )
+                        self.queue.task_done()
+                        continue
+
                     file_name_for_log = os.path.basename(file_path)
                     logger.debug(
                         f"DEBUG QM [_worker V_LoopFocus / Boucle Principale]: Traitement fichier '{file_name_for_log}' depuis la queue."
@@ -6320,6 +6384,117 @@ class SeestarQueuedStacker:
         logger.debug(
             f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}."
         )
+
+    def _flush_current_batch(
+        self,
+        batch_items,
+        ref_img,
+        ref_hdr,
+    ):
+        """Finalize and combine the currently accumulated batch."""
+        if not batch_items:
+            return ref_img, ref_hdr
+
+        if self.reproject_between_batches:
+            self.stacked_batches_count += 1
+            num_in_batch = len(batch_items)
+            stacked_np, hdr, wht_2d = self._stack_batch(
+                batch_items,
+                self.stacked_batches_count,
+                self.total_batches_estimated,
+            )
+            if stacked_np is None:
+                batch_items.clear()
+                gc.collect()
+                return ref_img, ref_hdr
+
+            self._save_and_solve_classic_batch(
+                stacked_np,
+                wht_2d,
+                hdr,
+                self.stacked_batches_count,
+            )
+            batch_wcs = None
+            try:
+                batch_wcs = WCS(hdr, naxis=2)
+            except Exception:
+                batch_wcs = None
+
+            if (
+                not (self.reproject_between_batches or self.reproject_coadd_final)
+                or self._last_classic_batch_solved
+            ):
+                self._combine_batch_result(
+                    stacked_np,
+                    hdr,
+                    wht_2d,
+                    batch_wcs=batch_wcs,
+                )
+            else:
+                self.update_progress(
+                    "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
+                    "WARN",
+                )
+            if hasattr(self.cumulative_sum_memmap, "flush"):
+                self.cumulative_sum_memmap.flush()
+            if hasattr(self.cumulative_wht_memmap, "flush"):
+                self.cumulative_wht_memmap.flush()
+            if not self.drizzle_active_session:
+                self._update_preview_sum_w()
+
+            if self.reproject_between_batches:
+                stack_img, solved_hdr = self._solve_cumulative_stack()
+                if stack_img is not None and solved_hdr is not None:
+                    ref_img = stack_img
+                    ref_hdr = solved_hdr.copy()
+                else:
+                    ref_img = stacked_np.astype(np.float32, copy=True)
+                    ref_hdr = hdr.copy()
+            else:
+                ref_img = stacked_np.astype(np.float32, copy=True)
+                ref_hdr = hdr.copy()
+
+            batch_items.clear()
+            self._current_batch_paths = []
+            self._save_partial_stack()
+            gc.collect()
+            return ref_img, ref_hdr
+
+        # --- Classic or drizzle standard ---
+        self.stacked_batches_count += 1
+        self._send_eta_update()
+        if self.drizzle_active_session:
+            if self.drizzle_mode == "Incremental":
+                self._start_drizzle_process(
+                    batch_items,
+                    self.stacked_batches_count,
+                    self.total_batches_estimated,
+                )
+            elif self.drizzle_mode == "Final":
+                fut = self.drizzle_executor.submit(
+                    self._process_and_save_drizzle_batch,
+                    batch_items,
+                    self.drizzle_output_wcs,
+                    self.drizzle_output_shape_hw,
+                    self.stacked_batches_count,
+                )
+                self.drizzle_processes.append(fut)
+        else:
+            self._process_completed_batch(
+                batch_items,
+                self.stacked_batches_count,
+                self.total_batches_estimated,
+                self.reference_wcs_object,
+            )
+
+        self._move_to_stacked(self._current_batch_paths)
+        self._save_partial_stack()
+        self._update_batch_count_file()
+        self._current_batch_paths = []
+        self._update_batches_meta()
+        batch_items.clear()
+        gc.collect()
+        return ref_img, ref_hdr
 
     ##############################################################################################################################################
 
@@ -11307,6 +11482,35 @@ class SeestarQueuedStacker:
                         f"Avertissement: Erreur lecture dossier '{folder_path_iter}' pour réf: {e_listdir}",
                         "WARN",
                     )
+
+            plan_path = os.path.join(self.current_folder, "stack_plan.csv")
+            use_plan_for_ref = (
+                requested_batch_size <= 0 and os.path.isfile(plan_path)
+            )
+            if (
+                use_plan_for_ref
+                and (not current_folder_to_scan_for_shape or not files_in_folder_for_shape)
+            ):
+                try:
+                    batches_for_ref = get_batches_from_stack_plan(
+                        plan_path, self.current_folder
+                    )
+                    first_fp = None
+                    for batch in batches_for_ref:
+                        for fp in batch:
+                            if os.path.isfile(fp):
+                                first_fp = fp
+                                break
+                        if first_fp:
+                            break
+                    if first_fp:
+                        current_folder_to_scan_for_shape = os.path.dirname(first_fp)
+                        files_in_folder_for_shape = [os.path.basename(first_fp)]
+                except Exception as plan_err:
+                    logger.debug(
+                        f"ERREUR lecture stack_plan.csv pour référence: {plan_err}"
+                    )
+
             if not current_folder_to_scan_for_shape or not files_in_folder_for_shape:
                 raise RuntimeError(
                     "Aucun fichier FITS trouvé dans les dossiers pour servir de référence."
@@ -11633,16 +11837,41 @@ class SeestarQueuedStacker:
                             "WARN",
                         )
 
-        initial_files_added = self._add_files_to_queue(self.current_folder)
-        if initial_files_added > 0:
-            self._recalculate_total_batches()
+        plan_path = os.path.join(self.current_folder, "stack_plan.csv")
+        use_plan = requested_batch_size <= 0 and os.path.isfile(plan_path)
+        if use_plan:
+            self.use_batch_plan = True
+            batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
+            logger.debug("Batching: using stacking plan from stack_plan.csv")
+            self.batch_size = 999999999
+            self.queue = Queue()
+            self.files_in_queue = 0
+            self.all_input_filepaths = []
+            for b_idx, batch in enumerate(batches_from_plan):
+                for fp in batch:
+                    abs_fp = os.path.abspath(fp)
+                    self.queue.put(abs_fp)
+                    self.processed_files.add(abs_fp)
+                    self.files_in_queue += 1
+                    self.all_input_filepaths.append(abs_fp)
+                if b_idx < len(batches_from_plan) - 1:
+                    self.queue.put(_BATCH_BREAK_TOKEN)
+            self.total_batches_estimated = len(batches_from_plan)
             self.update_progress(
-                f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
+                f"📋 {self.files_in_queue} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated}"
             )
-        elif not self.additional_folders:
-            self.update_progress(
-                "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
-            )
+        else:
+            self.use_batch_plan = False
+            initial_files_added = self._add_files_to_queue(self.current_folder)
+            if initial_files_added > 0:
+                self._recalculate_total_batches()
+                self.update_progress(
+                    f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
+                )
+            elif not self.additional_folders:
+                self.update_progress(
+                    "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
+                )
 
         if (
             self._resume_requested
