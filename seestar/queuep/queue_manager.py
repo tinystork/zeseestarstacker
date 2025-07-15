@@ -9072,7 +9072,10 @@ class SeestarQueuedStacker:
             )
             wht_paths.append(wht_path)
 
-        run_astap = self.solve_batches or self.reproject_coadd_final
+        # In reproject+coadd mode we postpone solving until all batches are
+        # stacked. Only run the solver here when explicitly requested via
+        # ``solve_batches``.
+        run_astap = self.solve_batches and not self.reproject_coadd_final
         solved_ok = True
 
         if run_astap:
@@ -9193,15 +9196,10 @@ class SeestarQueuedStacker:
         self._last_classic_batch_solved = solved_ok
 
         if self.reproject_coadd_final:
-            if solved_ok:
-                self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
-                try:
-                    batch_wcs = WCS(header, naxis=2)
-                except Exception:
-                    batch_wcs = None
-                self._incremental_reproject_coadd(final_stacked, final_wht, batch_wcs)
-            else:
-                self.unsolved_classic_batch_files.add(sci_fits)
+            # Simply store the batch for the final reproject+coadd pass
+            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+        elif not solved_ok:
+            self.unsolved_classic_batch_files.add(sci_fits)
 
         return sci_fits, wht_paths
 
