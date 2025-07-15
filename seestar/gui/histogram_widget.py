@@ -37,6 +37,9 @@ class HistogramWidget(ttk.Frame):
         self.auto_zoom_enabled = False
         # When True, the X axis range is preserved across batches
         self.freeze_x_range = False
+        # When True, the Y axis range is preserved across batches
+        self.freeze_y_range = True
+        self._stored_ylim = None
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -251,7 +254,10 @@ class HistogramWidget(ttk.Frame):
 
         if hist_data_details_to_plot is None or not hist_data_details_to_plot.get('hists') or hist_data_details_to_plot.get('bins') is None:
             self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
-            self.ax.set_ylim(1, 10); self.ax.set_yscale('log')
+            self.ax.set_ylim(1, 10)
+            self.ax.set_yscale('log')
+            if self.freeze_y_range and self._stored_ylim is None:
+                self._stored_ylim = self.ax.get_ylim()
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})"); self.ax.set_ylabel("Nbre Pixels (log)")
             self.ax.text(0.5, 0.5, "Aucune donnée", color="gray", ha='center', va='center', transform=self.ax.transAxes)
             print(f"  -> Affichage 'Aucune donnée'. Xlim réglé sur [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}].")
@@ -302,8 +308,13 @@ class HistogramWidget(ttk.Frame):
                     print(f"    -> Aucun compte > 0 pour Ylim, utilisation défaut.")
             
             current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8 # Fallback si ylim non défini
-            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10) 
-            self.ax.set_ylim(bottom=0.8, top=target_top_y_limit); self.ax.set_yscale('log')
+            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10)
+            if not self.freeze_y_range or self._stored_ylim is None:
+                self.ax.set_ylim(bottom=0.8, top=target_top_y_limit)
+                self._stored_ylim = self.ax.get_ylim()
+            else:
+                self.ax.set_ylim(self._stored_ylim)
+            self.ax.set_yscale('log')
             print(f"  -> Ylim recalculé et appliqué: (0.8, {target_top_y_limit:.2f})")
 
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})"); self.ax.set_ylabel("Nbre Pixels (log)")
@@ -592,6 +603,8 @@ class HistogramWidget(ttk.Frame):
         if abs(ylim_current_state[0] - target_ylim_reset[0]) > 1e-1 or \
            abs(ylim_current_state[1] - target_ylim_reset[1]) > 1e-1:
             self.ax.set_ylim(target_ylim_reset)
+            if self.freeze_y_range:
+                self._stored_ylim = self.ax.get_ylim()
             needs_redraw_flag = True
             print(f"  -> Ylim réinitialisé à {target_ylim_reset}")
             
