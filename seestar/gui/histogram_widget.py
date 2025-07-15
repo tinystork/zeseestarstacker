@@ -40,8 +40,10 @@ class HistogramWidget(ttk.Frame):
         # When True, the Y axis range is preserved across batches
         self.freeze_y_range = True
         self._stored_ylim = None
+
         # When True, the X axis scale is preserved across batches
         self._stored_xlim = None
+
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -257,10 +259,12 @@ class HistogramWidget(ttk.Frame):
         self._configure_plot_style() 
 
         if hist_data_details_to_plot is None or not hist_data_details_to_plot.get('hists') or hist_data_details_to_plot.get('bins') is None:
+
             if self.freeze_x_range and self._stored_xlim is not None:
                 self.ax.set_xlim(self._stored_xlim)
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
+
             self.ax.set_ylim(1, 10)
             self.ax.set_yscale('log')
             if self.freeze_y_range and self._stored_ylim is None:
@@ -268,10 +272,12 @@ class HistogramWidget(ttk.Frame):
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})"); self.ax.set_ylabel("Nbre Pixels (log)")
             self.ax.text(0.5, 0.5, "Aucune donnée", color="gray", ha='center', va='center', transform=self.ax.transAxes)
             print(f"  -> Affichage 'Aucune donnée'. Xlim réglé sur [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}].")
+
             if self.freeze_x_range:
                 self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw_idle();
             return
+
 
         try:
             bins = hist_data_details_to_plot['bins']; bin_centers = (bins[:-1] + bins[1:]) / 2
