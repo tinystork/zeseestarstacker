@@ -9406,6 +9406,14 @@ class SeestarQueuedStacker:
                 )
                 continue
             try:
+                solved_ok = self._run_astap_and_update_header(sci_path)
+                if not solved_ok:
+                    self.update_progress(
+                        f"   -> Batch ignor\xe9 (astrom\xe9trie \xe9chou\xe9e) {sci_path}",
+                        "WARN",
+                    )
+                    self.unsolved_classic_batch_files.add(sci_path)
+                    continue
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
@@ -9424,9 +9432,6 @@ class SeestarQueuedStacker:
                         fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
                             sci_path, overwrite=True
                         )
-                # Always resolve using the final batch path so ASTAP creates
-                # the .wcs file next to ``classic_batch_00x.fits``
-                self._run_astap_and_update_header(sci_path)
                 hdr = fits.getheader(sci_path)
 
                 wcs = WCS(hdr, naxis=2)
