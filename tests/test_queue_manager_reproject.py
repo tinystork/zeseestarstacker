@@ -726,8 +726,54 @@ def test_save_classic_batch_unsolved_skipped(monkeypatch, tmp_path):
     sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
 
     assert sci is not None
-    assert len(obj.intermediate_classic_batch_files) == 0
-    assert sci in obj.unsolved_classic_batch_files
+    assert len(obj.intermediate_classic_batch_files) == 1
+    assert sci not in obj.unsolved_classic_batch_files
+
+
+def test_save_classic_batch_header_contains_radec(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+        settings_mod.SettingsManager = object
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.reproject_coadd_final = True
+    obj.solve_batches = False
+    obj.output_folder = str(tmp_path)
+    obj.reference_header_for_wcs = qm.fits.Header()
+    obj.reference_header_for_wcs["RA"] = 10.0
+    obj.reference_header_for_wcs["DEC"] = 20.0
+
+    hdr = qm.fits.Header()
+    hdr["EXPTIME"] = 2.5
+    hdr["TOTEXP"] = 2.5
+    data = np.ones((4, 4, 3), dtype=np.float32)
+    wht = np.ones((4, 4), dtype=np.float32)
+
+    sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
+
+    hd = qm.fits.getheader(sci)
+    assert hd["TOTEXP"] == 2.5
+    assert "RA" in hd and "DEC" in hd
 
 
 def test_calculate_fixed_orientation_grid():

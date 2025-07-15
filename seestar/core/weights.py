@@ -1,9 +1,28 @@
 import numpy as np
 from astropy.stats import sigma_clipped_stats, SigmaClip
-from photutils.background import Background2D, MedianBackground
-from photutils.detection import DAOStarFinder
-from photutils.segmentation import detect_sources
-from photutils.segmentation import SourceCatalog
+try:
+    from photutils.background import Background2D, MedianBackground
+    from photutils.detection import DAOStarFinder
+    from photutils.segmentation import detect_sources
+    from photutils.segmentation import SourceCatalog
+    _PHOTUTILS_AVAILABLE = True
+except Exception:
+    _PHOTUTILS_AVAILABLE = False
+
+    class Background2D:  # type: ignore
+        pass
+
+    class MedianBackground:  # type: ignore
+        pass
+
+    class DAOStarFinder:  # type: ignore
+        pass
+
+    def detect_sources(*a, **k):  # type: ignore
+        return None
+
+    class SourceCatalog:  # type: ignore
+        pass
 
 
 def _calculate_image_weights_noise_variance(image_list, progress_callback=None):
