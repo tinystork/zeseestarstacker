@@ -37,6 +37,11 @@ class HistogramWidget(ttk.Frame):
         self.auto_zoom_enabled = False
         # When True, the X axis range is preserved across batches
         self.freeze_x_range = False
+        # When True, the Y axis range is preserved across batches
+        self.freeze_y_range = True
+        self._stored_ylim = None
+        # When True, the X axis scale is preserved across batches
+        self._stored_xlim = None
         self._min_line_val_data_scale = 0.0
         self._max_line_val_data_scale = 1.0
         self.data_min_for_current_plot = 0.0
@@ -238,6 +243,8 @@ class HistogramWidget(ttk.Frame):
         print(f"  -> Utilisant plage X stockée: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
 
         xlim_before_plot = self.ax.get_xlim()
+        if self.freeze_x_range and self._stored_xlim is not None:
+            xlim_before_plot = self._stored_xlim
         
         was_x_zoomed_and_relevant = (
             abs(xlim_before_plot[0] - current_plot_min_x) > 1e-6 * abs(current_plot_max_x - current_plot_min_x) or \
@@ -250,12 +257,21 @@ class HistogramWidget(ttk.Frame):
         self._configure_plot_style() 
 
         if hist_data_details_to_plot is None or not hist_data_details_to_plot.get('hists') or hist_data_details_to_plot.get('bins') is None:
-            self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
-            self.ax.set_ylim(1, 10); self.ax.set_yscale('log')
+            if self.freeze_x_range and self._stored_xlim is not None:
+                self.ax.set_xlim(self._stored_xlim)
+            else:
+                self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
+            self.ax.set_ylim(1, 10)
+            self.ax.set_yscale('log')
+            if self.freeze_y_range and self._stored_ylim is None:
+                self._stored_ylim = self.ax.get_ylim()
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})"); self.ax.set_ylabel("Nbre Pixels (log)")
             self.ax.text(0.5, 0.5, "Aucune donnée", color="gray", ha='center', va='center', transform=self.ax.transAxes)
             print(f"  -> Affichage 'Aucune donnée'. Xlim réglé sur [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}].")
-            self.canvas.draw_idle(); return
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
+            self.canvas.draw_idle();
+            return
 
         try:
             bins = hist_data_details_to_plot['bins']; bin_centers = (bins[:-1] + bins[1:]) / 2
@@ -302,8 +318,13 @@ class HistogramWidget(ttk.Frame):
                     print(f"    -> Aucun compte > 0 pour Ylim, utilisation défaut.")
             
             current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8 # Fallback si ylim non défini
-            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10) 
-            self.ax.set_ylim(bottom=0.8, top=target_top_y_limit); self.ax.set_yscale('log')
+            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10)
+            if not self.freeze_y_range or self._stored_ylim is None:
+                self.ax.set_ylim(bottom=0.8, top=target_top_y_limit)
+                self._stored_ylim = self.ax.get_ylim()
+            else:
+                self.ax.set_ylim(self._stored_ylim)
+            self.ax.set_yscale('log')
             print(f"  -> Ylim recalculé et appliqué: (0.8, {target_top_y_limit:.2f})")
 
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})"); self.ax.set_ylabel("Nbre Pixels (log)")
@@ -311,9 +332,14 @@ class HistogramWidget(ttk.Frame):
             if was_x_zoomed_and_relevant:
                 self.ax.set_xlim(xlim_before_plot)
                 print(f"  -> Zoom X utilisateur restauré. Xlim: {xlim_before_plot}")
+            elif self.freeze_x_range and self._stored_xlim is not None:
+                self.ax.set_xlim(self._stored_xlim)
+                print(f"  -> Xlim gelé restauré: {self._stored_xlim}")
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
 
             self.canvas.draw_idle()
             # --- NEW: restore BP/WP lines if they existed ---
@@ -359,6 +385,8 @@ class HistogramWidget(ttk.Frame):
             try: 
                 self._configure_plot_style()
                 self.ax.set_xlim(0,1); self.ax.set_ylim(1,10); self.ax.set_yscale('log')
+                if self.freeze_x_range:
+                    self._stored_xlim = self.ax.get_xlim()
                 self.ax.text(0.5, 0.5, "Erreur Histogramme", color="red", ha='center', va='center', transform=self.ax.transAxes)
                 self.canvas.draw_idle()
             except Exception: pass
@@ -480,7 +508,10 @@ class HistogramWidget(ttk.Frame):
             new_max_panned = new_min_panned + current_width_pan
             current_ax_lim = self.ax.get_xlim()
             if abs(new_min_panned - current_ax_lim[0]) > 1e-9 or abs(new_max_panned - current_ax_lim[1]) > 1e-9:
-                self.ax.set_xlim(new_min_panned, new_max_panned); self.canvas.draw_idle()
+                self.ax.set_xlim(new_min_panned, new_max_panned)
+                if self.freeze_x_range:
+                    self._stored_xlim = self.ax.get_xlim()
+                self.canvas.draw_idle()
 
     def _on_scroll(self, event):
         if event.inaxes != self.ax or event.xdata is None: return
@@ -505,10 +536,16 @@ class HistogramWidget(ttk.Frame):
         if new_zoomed_width < 1e-7: 
             if (self.data_max_for_current_plot - self.data_min_for_current_plot) > 1e-6:
                  self.ax.set_xlim(self.data_min_for_current_plot, self.data_max_for_current_plot)
-            else: self.ax.set_xlim(0,1) 
+            else:
+                 self.ax.set_xlim(0,1)
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw_idle(); return
         if abs(new_min_zoomed - current_xlim_scroll[0]) > 1e-9 or abs(new_max_zoomed - current_xlim_scroll[1]) > 1e-9:
-            self.ax.set_xlim(new_min_zoomed, new_max_zoomed); self.canvas.draw_idle()
+            self.ax.set_xlim(new_min_zoomed, new_max_zoomed)
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
+            self.canvas.draw_idle()
 
     def zoom_histogram(self, percentile_max=99.5):
         try:
@@ -521,6 +558,8 @@ class HistogramWidget(ttk.Frame):
             if not np.isfinite(x_max):
                 return
             self.ax.set_xlim(0.0, max(0.02, float(x_max)))
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw()
         except Exception as e:
             print(f"ERREUR HistoWidget.zoom_histogram: {e}")
@@ -528,6 +567,8 @@ class HistogramWidget(ttk.Frame):
     def reset_histogram_view(self):
         try:
             self.ax.set_xlim(0.0, 1.0)
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw()
         except Exception as e:
             print(f"ERREUR HistoWidget.reset_histogram_view: {e}")
@@ -553,6 +594,8 @@ class HistogramWidget(ttk.Frame):
         if abs(xlim_current_state[0] - self.data_min_for_current_plot) > 1e-6 or \
            abs(xlim_current_state[1] - self.data_max_for_current_plot) > 1e-6:
             self.ax.set_xlim(self.data_min_for_current_plot, self.data_max_for_current_plot)
+            if self.freeze_x_range:
+                self._stored_xlim = self.ax.get_xlim()
             needs_redraw_flag = True
             print(f"  -> Xlim réinitialisé à [{self.data_min_for_current_plot:.4g}, {self.data_max_for_current_plot:.4g}]")
         
@@ -592,6 +635,8 @@ class HistogramWidget(ttk.Frame):
         if abs(ylim_current_state[0] - target_ylim_reset[0]) > 1e-1 or \
            abs(ylim_current_state[1] - target_ylim_reset[1]) > 1e-1:
             self.ax.set_ylim(target_ylim_reset)
+            if self.freeze_y_range:
+                self._stored_ylim = self.ax.get_ylim()
             needs_redraw_flag = True
             print(f"  -> Ylim réinitialisé à {target_ylim_reset}")
             
