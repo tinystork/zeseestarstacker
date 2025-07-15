@@ -8270,7 +8270,7 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d *= self._radial_w_base
 
                 stack_note = f"mean ({max_workers} threads)"
-            if self.reference_header_for_wcs is not None:
+            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
                 stack_info_header = self.reference_header_for_wcs.copy()
             else:
                 stack_info_header = fits.Header()
@@ -9083,7 +9083,10 @@ class SeestarQueuedStacker:
             if solved_ok:
                 header = fits.getheader(sci_fits)
             else:
-                if self.reference_header_for_wcs is not None:
+                if (
+                    self.reference_header_for_wcs is not None
+                    and not self.reproject_coadd_final
+                ):
                     if (
                         input_wcs is not None
                         and self.reference_wcs_object is not None
@@ -9141,7 +9144,7 @@ class SeestarQueuedStacker:
                     self._last_classic_batch_solved = False
                     return None, None
         else:
-            if self.reference_header_for_wcs is not None:
+            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
                 if (
                     input_wcs is not None
                     and self.reference_wcs_object is not None
