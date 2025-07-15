@@ -730,6 +730,7 @@ def test_save_classic_batch_unsolved_skipped(monkeypatch, tmp_path):
     assert sci not in obj.unsolved_classic_batch_files
 
 
+
 def test_save_classic_batch_header_contains_radec(monkeypatch, tmp_path):
     sys.path.insert(0, str(ROOT))
     import importlib
@@ -774,6 +775,7 @@ def test_save_classic_batch_header_contains_radec(monkeypatch, tmp_path):
     hd = qm.fits.getheader(sci)
     assert hd["TOTEXP"] == 2.5
     assert "RA" in hd and "DEC" in hd
+
 
 
 def test_calculate_fixed_orientation_grid():
