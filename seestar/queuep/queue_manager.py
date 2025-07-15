@@ -3768,7 +3768,9 @@ class SeestarQueuedStacker:
                                             (
                                                 stack_img,
                                                 solved_hdr,
-                                            ) = self._solve_cumulative_stack()
+                                            ) = self._solve_cumulative_stack(
+                                                solved_path
+                                            )
                                             if (
                                                 stack_img is not None
                                                 and solved_hdr is not None
@@ -4290,7 +4292,9 @@ class SeestarQueuedStacker:
                             )
 
                         if self.reproject_between_batches:
-                            stack_img, solved_hdr = self._solve_cumulative_stack()
+                            stack_img, solved_hdr = self._solve_cumulative_stack(
+                                solved_path
+                            )
                             if stack_img is not None and solved_hdr is not None:
                                 reference_image_data_for_global_alignment = stack_img
                                 reference_header_for_global_alignment = (
@@ -8704,8 +8708,13 @@ class SeestarQueuedStacker:
         )
         return cache_path
 
-    def _solve_cumulative_stack(self):
-        """Solve the current cumulative stack with ASTAP and update reference WCS."""
+    def _solve_cumulative_stack(self, batch_path: str | None = None):
+        """Solve the current cumulative stack with ASTAP and update reference WCS.
+
+        When ``batch_path`` is provided and exists, it is used directly for the
+        astrometric solve instead of writing a temporary FITS.  This mirrors the
+        behaviour in ``zemosaic`` where solved batch files are reused.
+        """
 
         if (
             self.cumulative_sum_memmap is None
@@ -8733,15 +8742,25 @@ class SeestarQueuedStacker:
             )
             return stack.astype(np.float32), hdr
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-        tmp.close()
-        fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
-            tmp.name, overwrite=True
-        )
-        solved_ok = self._run_astap_and_update_header(tmp.name)
+        solve_path = None
+        temp_file_used = False
+        if batch_path and os.path.exists(batch_path):
+            solve_path = batch_path
+        else:
+            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+            tmp.close()
+            fits.PrimaryHDU(
+                data=np.moveaxis(stack, -1, 0),
+                header=hdr,
+            ).writeto(tmp.name, overwrite=True)
+            solve_path = tmp.name
+            temp_file_used = True
+
+        solved_ok = self._run_astap_and_update_header(solve_path)
         if solved_ok:
-            hdr = fits.getheader(tmp.name)
-        os.remove(tmp.name)
+            hdr = fits.getheader(solve_path)
+        if temp_file_used:
+            os.remove(solve_path)
 
         try:
             new_wcs = WCS(hdr, naxis=2)
