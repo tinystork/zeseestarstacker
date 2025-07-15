@@ -9235,6 +9235,12 @@ class SeestarQueuedStacker:
                     "WARN",
                 )
                 continue
+            # Ensure a valid WCS is present when using reproject+coadd
+            if getattr(self, "reproject_coadd_final", False):
+                try:
+                    self._run_astap_and_update_header(sci_path)
+                except Exception:
+                    pass
             # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
