@@ -8270,7 +8270,7 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d *= self._radial_w_base
 
                 stack_note = f"mean ({max_workers} threads)"
-            if self.reference_header_for_wcs is not None:
+            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
                 stack_info_header = self.reference_header_for_wcs.copy()
             else:
                 stack_info_header = fits.Header()
@@ -9072,7 +9072,10 @@ class SeestarQueuedStacker:
             )
             wht_paths.append(wht_path)
 
-        run_astap = self.solve_batches or self.reproject_coadd_final
+        # In reproject+coadd mode we postpone solving until all batches are
+        # stacked. Only run the solver here when explicitly requested via
+        # ``solve_batches``.
+        run_astap = self.solve_batches and not self.reproject_coadd_final
         solved_ok = True
 
         if run_astap:
@@ -9080,7 +9083,10 @@ class SeestarQueuedStacker:
             if solved_ok:
                 header = fits.getheader(sci_fits)
             else:
-                if self.reference_header_for_wcs is not None:
+                if (
+                    self.reference_header_for_wcs is not None
+                    and not self.reproject_coadd_final
+                ):
                     if (
                         input_wcs is not None
                         and self.reference_wcs_object is not None
@@ -9138,7 +9144,7 @@ class SeestarQueuedStacker:
                     self._last_classic_batch_solved = False
                     return None, None
         else:
-            if self.reference_header_for_wcs is not None:
+            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
                 if (
                     input_wcs is not None
                     and self.reference_wcs_object is not None
@@ -9193,15 +9199,10 @@ class SeestarQueuedStacker:
         self._last_classic_batch_solved = solved_ok
 
         if self.reproject_coadd_final:
-            if solved_ok:
-                self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
-                try:
-                    batch_wcs = WCS(header, naxis=2)
-                except Exception:
-                    batch_wcs = None
-                self._incremental_reproject_coadd(final_stacked, final_wht, batch_wcs)
-            else:
-                self.unsolved_classic_batch_files.add(sci_fits)
+            # Simply store the batch for the final reproject+coadd pass
+            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+        elif not solved_ok:
+            self.unsolved_classic_batch_files.add(sci_fits)
 
         return sci_fits, wht_paths
 
@@ -9235,6 +9236,12 @@ class SeestarQueuedStacker:
                     "WARN",
                 )
                 continue
+            # Ensure a valid WCS is present when using reproject+coadd
+            if getattr(self, "reproject_coadd_final", False):
+                try:
+                    self._run_astap_and_update_header(sci_path)
+                except Exception:
+                    pass
             # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
@@ -9255,34 +9262,9 @@ class SeestarQueuedStacker:
                 coverage = np.ones((h, w), dtype=np.float32)
 
             # ------------------------------------------------------------------
-            # 2.3 **NEW** – project the *whole batch* onto the reference WCS
+            # 2.3 Prepare batch data
             # ------------------------------------------------------------------
-            if self.reference_wcs_object is not None:
-                tgt_h, tgt_w = (
-                    self.reference_wcs_object.pixel_shape[1],
-                    self.reference_wcs_object.pixel_shape[0],
-                ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
-
-                # Science image (3‑channels)
-                img_hwc = reproject_to_reference_wcs(
-                    np.moveaxis(data_cxhxw, 0, -1),  # CxHxW ➜ HxWxC
-                    batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
-                )
-
-                # Weight map – single channel, same helper works
-                coverage = reproject_to_reference_wcs(
-                    coverage,
-                    batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
-                )
-
-                batch_wcs = self.reference_wcs_object  # Subsequent code must use it
-            else:
-                # Fall back: keep original orientation
-                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
 
             # 2.4 Feed per‑channel lists -------------------------------------
             wcs_for_grid.append(batch_wcs)
@@ -9424,6 +9406,14 @@ class SeestarQueuedStacker:
                 )
                 continue
             try:
+                solved_ok = self._run_astap_and_update_header(sci_path)
+                if not solved_ok:
+                    self.update_progress(
+                        f"   -> Batch ignor\xe9 (astrom\xe9trie \xe9chou\xe9e) {sci_path}",
+                        "WARN",
+                    )
+                    self.unsolved_classic_batch_files.add(sci_path)
+                    continue
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
@@ -9442,9 +9432,6 @@ class SeestarQueuedStacker:
                         fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
                             sci_path, overwrite=True
                         )
-                # Always resolve using the final batch path so ASTAP creates
-                # the .wcs file next to ``classic_batch_00x.fits``
-                self._run_astap_and_update_header(sci_path)
                 hdr = fits.getheader(sci_path)
 
                 wcs = WCS(hdr, naxis=2)
