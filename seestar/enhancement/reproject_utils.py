@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
 
 from astropy.wcs import WCS
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 import numpy as np
@@ -81,7 +82,20 @@ def reproject_and_coadd(
     if not filtered_pairs:
         raise ValueError("No compatible input WCS for reprojection")
 
-    if _astropy_reproject_and_coadd is not None:
+    use_astropy = _astropy_reproject_and_coadd is not None
+
+    if use_astropy:
+        mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+        mem_required = np.prod(shape_out) * 2 * 8 / 1024**3
+        if mem_required > mem_threshold:
+            logger.info(
+                "Disabling astropy reproject_and_coadd (%.1f GiB required > %.1f GiB)",
+                mem_required,
+                mem_threshold,
+            )
+            use_astropy = False
+
+    if use_astropy:
         # Use the reference implementation when possible but gracefully
         # fall back to the local implementation if it fails (e.g. due to
         # WCS incompatibilities). Older versions of ``reproject`` may
