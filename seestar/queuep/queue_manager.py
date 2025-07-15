@@ -9439,14 +9439,13 @@ class SeestarQueuedStacker:
                         hdr["CRPIX2"] = hdr.get("CRPIX2", 0) - dh
                         hdr["NAXIS1"] = data_cxhxw.shape[2]
                         hdr["NAXIS2"] = data_cxhxw.shape[1]
-
-                tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
-                fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
-                    tmp.name, overwrite=True
-                )
-                self._run_astap_and_update_header(tmp.name)
-                hdr = fits.getheader(tmp.name)
-                os.remove(tmp.name)
+                        fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
+                            sci_path, overwrite=True
+                        )
+                # Always resolve using the final batch path so ASTAP creates
+                # the .wcs file next to ``classic_batch_00x.fits``
+                self._run_astap_and_update_header(sci_path)
+                hdr = fits.getheader(sci_path)
 
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
