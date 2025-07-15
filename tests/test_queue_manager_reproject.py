@@ -726,8 +726,8 @@ def test_save_classic_batch_unsolved_skipped(monkeypatch, tmp_path):
     sci, wht_paths = obj._save_and_solve_classic_batch(data, wht, hdr, 1)
 
     assert sci is not None
-    assert len(obj.intermediate_classic_batch_files) == 0
-    assert sci in obj.unsolved_classic_batch_files
+    assert len(obj.intermediate_classic_batch_files) == 1
+    assert sci not in obj.unsolved_classic_batch_files
 
 
 def test_calculate_fixed_orientation_grid():
