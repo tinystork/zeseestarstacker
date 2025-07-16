@@ -654,7 +654,8 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
-        self.reproject_coadd_var = tk.BooleanVar(value=False)
+        # Default final combine selection is "Reproject & Coadd"
+        self.reproject_coadd_var = tk.BooleanVar(value=True)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
