@@ -30,6 +30,10 @@ from PIL import Image, ImageTk
 
 from zemosaic import zemosaic_config
 
+from ..queuep.queue_manager import (
+    GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG as APP_VERSION,
+)
+
 from .ui_utils import ToolTip
 
 logger = logging.getLogger(__name__)
@@ -140,6 +144,7 @@ class SeestarStackerGUI:
 
     def __init__(self, initial_input_dir=None, stack_immediately_from=None):
         self.root = tk.Tk()
+        self.app_version = APP_VERSION
 
         # --- DÉBUT CONFIGURATION LOGGER DE BASE (Option B) ---
         # Créer un nom de logger unique basé sur l'ID de l'objet pour éviter les conflits
@@ -416,7 +421,7 @@ class SeestarStackerGUI:
         self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)
         self.logger.info("DEBUG (GUI __init__): Callbacks backend connectés.")
 
-        self.root.title(self.tr("title"))
+        self.root.title(f"{self.tr('title')}  –  {self.app_version}")
         try:
             self.root.geometry(self.settings.window_geometry)
         except tk.TclError:
@@ -3514,7 +3519,7 @@ class SeestarStackerGUI:
 
     def update_ui_language(self):
         """Met à jour tous les textes traduisibles de l'interface."""
-        self.root.title(self.tr("title"))
+        self.root.title(f"{self.tr('title')}  –  {self.app_version}")
         if not hasattr(self, "widgets_to_translate"):
             print("Warning: Widget reference dictionary not found for translation.")
             return
