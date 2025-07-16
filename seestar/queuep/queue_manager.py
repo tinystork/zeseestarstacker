@@ -3131,6 +3131,32 @@ class SeestarQueuedStacker:
                             f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence."
                         )
 
+            if (
+                (not files_for_ref_scan or not folder_for_ref_scan)
+                and getattr(self, "use_batch_plan", False)
+            ):
+                plan_path = os.path.join(self.current_folder, "stack_plan.csv")
+                if os.path.isfile(plan_path):
+                    try:
+                        batches_for_ref = get_batches_from_stack_plan(
+                            plan_path, self.current_folder
+                        )
+                        first_fp = None
+                        for batch in batches_for_ref:
+                            for fp in batch:
+                                if os.path.isfile(fp):
+                                    first_fp = fp
+                                    break
+                            if first_fp:
+                                break
+                        if first_fp:
+                            folder_for_ref_scan = os.path.dirname(first_fp)
+                            files_for_ref_scan = [os.path.basename(first_fp)]
+                    except Exception as plan_err:
+                        logger.debug(
+                            f"ERREUR lecture stack_plan.csv pour référence (worker): {plan_err}"
+                        )
+
             if not files_for_ref_scan or not folder_for_ref_scan:
                 raise RuntimeError(
                     "Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence."
