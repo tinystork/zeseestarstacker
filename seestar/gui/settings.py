@@ -1328,7 +1328,8 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
-        defaults_dict["reproject_coadd_final"] = False
+        # Default to "Reproject & Coadd" for the final combine option
+        defaults_dict["reproject_coadd_final"] = True
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {
