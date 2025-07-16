@@ -654,7 +654,8 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
-        self.reproject_coadd_var = tk.BooleanVar(value=False)
+        # Default final combine selection is "Reproject & Coadd"
+        self.reproject_coadd_var = tk.BooleanVar(value=True)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
@@ -2622,10 +2623,12 @@ class SeestarStackerGUI:
             self.stack_reject_algo_var.set("linear_fit_clip")
         if hasattr(self, "final_key_to_label"):
             if self.reproject_between_batches_var.get():
+                self.stack_final_combine_var.set("reproject")
                 self.stack_final_display_var.set(
                     self.final_key_to_label.get("reproject", "reproject")
                 )
             elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
+                self.stack_final_combine_var.set("reproject_coadd")
                 self.stack_final_display_var.set(
                     self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
                 )
@@ -2655,15 +2658,13 @@ class SeestarStackerGUI:
         if key == "reproject":
             self.reproject_between_batches_var.set(True)
             self.reproject_coadd_var.set(False)
-            self.stack_final_combine_var.set("mean")
         elif key == "reproject_coadd":
             self.reproject_between_batches_var.set(False)
             self.reproject_coadd_var.set(True)
-            self.stack_final_combine_var.set("mean")
         else:
             self.reproject_between_batches_var.set(False)
             self.reproject_coadd_var.set(False)
-            self.stack_final_combine_var.set(key)
+        self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
 
     #################################################################################################################################
