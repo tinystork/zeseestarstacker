@@ -1486,14 +1486,17 @@ class SettingsManager:
                 self.stack_final_combine = "median"
                 self.stack_reject_algo = "none"
             elif self.stack_method == "kappa_sigma":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "kappa_sigma"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
             elif self.stack_method == "winsorized_sigma_clip":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "winsorized_sigma_clip"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
             elif self.stack_method == "linear_fit_clip":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "linear_fit_clip"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
 
             valid_norm_methods = ["none", "linear_fit", "sky_mean"]
             self.stack_norm_method = str(

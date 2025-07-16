@@ -533,7 +533,8 @@ class SeestarStackerGUI:
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
         self.stack_reject_algo_var = tk.StringVar(value="kappa_sigma")
-        self.stack_final_combine_var = tk.StringVar(value="mean")
+        # Default final combine to "Reproject & Coadd"
+        self.stack_final_combine_var = tk.StringVar(value="reproject_coadd")
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
