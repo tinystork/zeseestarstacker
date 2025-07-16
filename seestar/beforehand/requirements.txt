@@ -18,7 +18,5 @@ photutils
 # Détection de traînées via Hough  
 scipy
 scikit-image
-bottleneck
-fsspec
-threadpoolctl
+rasterio
 

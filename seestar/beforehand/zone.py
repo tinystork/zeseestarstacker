@@ -1,3 +1,24 @@
+# -----------------------------------------------------------------------------
+# Auteur       : TRISTAN NAULEAU 
+# Date         : 2025-07-12
+# Licence      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# Ce travail est distribué librement en accord avec les termes de la
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# Vous êtes libre de redistribuer et de modifier ce code, à condition
+# de conserver cette notice et de mentionner que je suis l’auteur
+# de tout ou partie du code si vous le réutilisez.
+# -----------------------------------------------------------------------------
+# Author       : TRISTAN NAULEAU
+# Date         : 2025-07-12
+# License      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# This work is freely distributed under the terms of the
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# You are free to redistribute and modify this code, provided that
+# you keep this notice and mention that I am the author
+# of all or part of the code if you reuse it.
+# -----------------------------------------------------------------------------
 
 # Fichier pour l'internationalisation (i18n) et les infobulles
 
@@ -37,6 +58,10 @@ translations = {
         'input_dir_label': "Dossier d'entrée:",
         'output_log_label': "Fichier log:",
         'include_subfolders_label': "Inclure les sous-dossiers",
+        'bortle_file_label': "Base Bortle (GeoTIFF/KMZ):",
+        'browse_bortle_button': "Parcourir",
+        'use_bortle_check_label': "Utiliser le classement Bortle",
+        'bortle_class_unknown': "Inconnu",
         'lang_label': "Langue:",
         'status_label': "Statut :",
         'elapsed_time_label': "Temps écoulé :",
@@ -70,8 +95,24 @@ translations = {
         'apply_snr_rejection_button': "Appliquer Rejet SNR",
         'visual_apply_snr_button': "Appliquer Rejet SNR",
         'apply_starcount_rejection': "Appliquer Rejet Starcount",
+        'organize_files_button': "Organiser fichiers",
         'apply_reco_button': "Appliquer Recommandations",
         'visual_apply_reco_button': "Appliquer Recommandations",
+        'create_stack_plan_button': "Créer plan de stack",
+        'stack_plan_window_title': "Plan de stack",
+        'include_exposure_in_batch': "Inclure le temps de pose dans le batch",
+        'generate_plan_button': "Générer le plan",
+        'stack_plan_alert_no_analysis': "Analyse non effectuée.",
+        'stack_plan_preview_total': "Images sélectionnées: {count}",
+        'stack_plan_preview_batches': "Nombre de batchs: {count}",
+        'mount': "Monture",
+        'bortle': "Bortle",
+        'telescope': "Télescope",
+        'session_date': "Date de session",
+        'filter': "Filtre",
+        'exposure': "Temps de pose",
+        'ascending': "Croissant",
+        'descending': "Décroissant",
 
         # --- Textes acstools status ---
         'acstools_ok': "(acstools disponible)", 'acstools_missing': "(acstools non trouvé ou incompatible)", 'acstools_sig_error': "(fonction detsat incompatible)",
@@ -86,6 +127,8 @@ translations = {
         'msg_log_not_exist': "Le fichier log n'existe pas ou n'est pas spécifié.", 'msg_log_open_error': "Impossible d'ouvrir '{path}':\n{e}", 'msg_export_no_images': "Aucune image à exporter.", 'msg_export_success': "Liste de {count} fichiers exportée vers:\n{path}", 'msg_export_error': "Erreur écriture fichier:\n{e}",
         'msg_dep_missing_title': "Dépendances Manquantes", 'msg_dep_missing_text': "Bibliothèques manquantes:\n- {deps}\n\nInstaller via pip ?", 'msg_dep_installing': "Installation dépendances...", 'msg_dep_install_pkg': "Installation de {package}...", 'msg_dep_install_success': " -> Succès.", 'msg_dep_install_fail': " -> ÉCHEC: {e}", 'msg_dep_install_error': "Impossible d'installer {package}.\n{e}", 'msg_dep_install_done': "Dépendances installées. Redémarrez l'application.", 'msg_dep_install_partial': "Certaines dépendances n'ont pu être installées.", 'msg_dep_error_continue': "Dépendances manquantes. L'application pourrait mal fonctionner.",
         'msg_tkinter_error': "Erreur Tkinter:\n{e}", 'msg_unexpected_error': "Erreur inattendue:\n{e}",
+        'msg_organize_done': "{count} fichiers organisés.",
+        'msg_organize_failed': "Organisation échouée: {e}",
 
         # --- Fenêtre Visualisation ---
         'visu_window_title': "Visualisation des résultats", 'visu_tab_snr_dist': "Distribution SNR", 'visu_tab_snr_comp': "Comparaison SNR", 'visu_tab_sat_trails': "Traînées Détectées", 'visu_tab_raw_data': "Données Détaillées", 'visu_tab_recom': "Recommandations Stacking",
@@ -124,7 +167,14 @@ translations = {
         'tooltip_apply_starcount_rejection': "Appliquer les actions Starcount différées",
 
         # --- Textes Logique ---
-        'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Avertissement: ", 'logic_error_prefix': "Erreur: ",
+        # Prefixes utilisés par la logique d'analyse pour formater les messages
+        # affichés dans la fenêtre de résultats. Ajout de "{text}" pour permettre
+        # l'insertion du contenu fourni par le code appelant.
+        'logic_info_prefix': "INFO: {text}",
+        'logic_log_prefix': "LOG: {text}",
+        'logic_status_prefix': "STATUS: {text}",
+        'logic_warn_prefix': "Avertissement: {text}",
+        'logic_error_prefix': "Erreur: {text}",
         'logic_sat_incomp': "Détection satellites non disponible ou incompatible.", 'logic_sigma_invalid': "Sigma invalide ({e}), utilisation de {default}", 'logic_lowthr_invalid': "Low Thresh invalide ({e}), utilisation de {default}", 'logic_highthr_invalid': "High Thresh invalide ({e}), utilisation de {default}",
         'logic_satdet_params': "Détection avec: sigma={sigma}, low={low_thresh}, high={h_thresh}, chips={chips}, line_len={line_len}, small_edge={small_edge}, line_gap={line_gap}",
         'logic_satdet_errors_title': "Erreurs spécifiques reportées par satdet:", 'logic_satdet_errors_item': "  - {fname} (ext {ext}): {msg}", 'logic_satdet_errors_none': "  (Aucune erreur pertinente à afficher)",
@@ -163,6 +213,7 @@ translations = {
         "Le fichier log a été mis à jour avec les actions SNR.": "Le fichier log a été mis à jour avec les actions SNR.",
         "Échec de l'application des actions SNR.": "Échec de l'application des actions SNR.",
         "Échec application rejets SNR.": "Échec application rejets SNR.",
+        'Des actions SNR sont en attente.': "Des actions SNR sont en attente.",
 
 
     },
@@ -187,6 +238,10 @@ translations = {
         # --- Labels & Fields ---
         'input_dir_label': "Input Folder:", 'output_log_label': "Log File:",
         'include_subfolders_label': "Include Subfolders", # <-- NEW
+        'bortle_file_label': "Bortle base (GeoTIFF/KMZ):",
+        'browse_bortle_button': "Browse",
+        'use_bortle_check_label': "Use Bortle classification",
+        'bortle_class_unknown': "Unknown",
         'lang_label': "Language:",
         'status_label': "Status:",
         'elapsed_time_label': "Elapsed:",
@@ -222,6 +277,8 @@ translations = {
         'msg_dep_missing_title': "Missing Dependencies", 'msg_dep_missing_text': "Missing libraries:\n- {deps}\n\nInstall via pip?", 'msg_dep_installing': "Installing dependencies...", 'msg_dep_install_pkg': "Installing {package}...", 'msg_dep_install_success': " -> Success.", 'msg_dep_install_fail': " -> FAILED: {e}", 'msg_dep_install_error': "Could not install {package}.\n{e}",
         'msg_dep_install_done': "Dependencies installed. Please restart the application.", 'msg_dep_install_partial': "Some dependencies failed to install.", 'msg_dep_error_continue': "Missing dependencies. The application might not work correctly.",
         'msg_tkinter_error': "Tkinter Error:\n{e}", 'msg_unexpected_error': "Unexpected error:\n{e}",
+        'msg_organize_done': "{count} files organized.",
+        'msg_organize_failed': "Organization failed: {e}",
 
         # --- Visualization Window ---
         'visu_window_title': "Results Visualization", 'visu_tab_snr_dist': "SNR Distribution", 'visu_tab_snr_comp': "SNR Comparison", 'visu_tab_sat_trails': "Detected Trails", 'visu_tab_raw_data': "Detailed Data", 'visu_tab_recom': "Stacking Recommendations",
@@ -260,7 +317,14 @@ translations = {
         'tooltip_apply_starcount_rejection': "Apply pending starcount actions",
 
         # --- Logic Texts ---
-        'logic_info_prefix': "INFO: ", 'logic_log_prefix': "LOG: ", 'logic_status_prefix': "STATUS: ", 'logic_warn_prefix': "Warning: ", 'logic_error_prefix': "Error: ",
+        # Prefixes used by the analysis logic to format log lines. Include
+        # "{text}" so the caller supplied message is displayed instead of just
+        # the prefix.
+        'logic_info_prefix': "INFO: {text}",
+        'logic_log_prefix': "LOG: {text}",
+        'logic_status_prefix': "STATUS: {text}",
+        'logic_warn_prefix': "Warning: {text}",
+        'logic_error_prefix': "Error: {text}",
         'logic_sat_incomp': "Satellite detection unavailable or incompatible.", 'logic_sigma_invalid': "Invalid Sigma ({e}), using {default}", 'logic_lowthr_invalid': "Invalid Low Thresh ({e}), using {default}", 'logic_highthr_invalid': "Invalid High Thresh ({e}), using {default}",
         'logic_satdet_params': "Detection with: sigma={sigma}, low={low_thresh}, high={h_thresh}, chips={chips}, line_len={line_len}, small_edge={small_edge}, line_gap={line_gap}",
         'logic_satdet_errors_title': "Specific errors reported by satdet:", 'logic_satdet_errors_item': "  - {fname} (ext {ext}): {msg}", 'logic_satdet_errors_none': "  (No relevant errors to display)",
@@ -286,8 +350,24 @@ translations = {
         'marker_delete_selected_success': "{count} marker(s) deleted.",
         'marker_delete_all_success': "All {count} found marker(s) deleted.",
         'apply_starcount_rejection': "Apply Starcount Rejection",
+        'organize_files_button': "Organize Files",
         'apply_reco_button': "Apply Recommendations",
         'visual_apply_reco_button': "Apply Recommendations",
+        'create_stack_plan_button': "Create stacking plan",
+        'stack_plan_window_title': "Stacking plan",
+        'include_exposure_in_batch': "Include exposure in batch",
+        'generate_plan_button': "Generate plan",
+        'stack_plan_alert_no_analysis': "Analysis not run.",
+        'stack_plan_preview_total': "Selected images: {count}",
+        'stack_plan_preview_batches': "Batch count: {count}",
+        'mount': "Mount",
+        'bortle': "Bortle",
+        'telescope': "Telescope",
+        'session_date': "Session date",
+        'filter': "Filter",
+        'exposure': "Exposure",
+        'ascending': "Ascending",
+        'descending': "Descending",
 
         #--- Apply SNR
         'apply_snr_rejection_button': "Apply SNR Rejection",

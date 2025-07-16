@@ -1,3 +1,24 @@
+# -----------------------------------------------------------------------------
+# Auteur       : TRISTAN NAULEAU 
+# Date         : 2025-07-12
+# Licence      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# Ce travail est distribué librement en accord avec les termes de la
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# Vous êtes libre de redistribuer et de modifier ce code, à condition
+# de conserver cette notice et de mentionner que je suis l’auteur
+# de tout ou partie du code si vous le réutilisez.
+# -----------------------------------------------------------------------------
+# Author       : TRISTAN NAULEAU
+# Date         : 2025-07-12
+# License      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# This work is freely distributed under the terms of the
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# You are free to redistribute and modify this code, provided that
+# you keep this notice and mention that I am the author
+# of all or part of the code if you reuse it.
+# -----------------------------------------------------------------------------
 
 # === Imports Standard ===
 import os
@@ -24,6 +45,7 @@ from PIL import Image, ImageTk
 import json
 import importlib.util
 import numbers
+from stack_plan import generate_stacking_plan, write_stacking_plan_csv
 
 # Détection de l'environnement : intégré ou autonome
 try:
@@ -608,6 +630,9 @@ class AstroImageAnalyzerGUI:
             print("AVERTISSEMENT (analyse_gui __init__): Aucun chemin de fichier de commande fourni. La fonction 'Analyser et Empiler' ne communiquera pas avec le stacker.")
         # --- FIN AJOUT ---
 
+        self.config_path = os.path.join(os.path.expanduser('~'), 'zeanalyser_gui_config.json')
+        self._config_data = self._load_gui_config()
+
         # Variables Tkinter pour lier les widgets aux données
         self.current_lang = tk.StringVar(value=initial_lang)
         if lock_language is None:
@@ -630,6 +655,8 @@ class AstroImageAnalyzerGUI:
         self.detect_trails = tk.BooleanVar(value=False)
         self.sort_by_snr = tk.BooleanVar(value=True)
         self.include_subfolders = tk.BooleanVar(value=False)
+        self.bortle_path = tk.StringVar(value=self._config_data.get('bortle_path', ''))
+        self.use_bortle = tk.BooleanVar(value=self._config_data.get('use_bortle', False))
 
         # Paramètres Sélection SNR
         self.snr_selection_mode = tk.StringVar(value='percent') 
@@ -700,6 +727,9 @@ class AstroImageAnalyzerGUI:
         self.apply_ecc_button = None
         self.apply_reco_button = None
         self.visual_apply_reco_button = None
+        self.organize_button = None
+        self.stack_plan_button = None
+        self.latest_stack_plan_path = None
         
         # Vérifier si les traductions ont été chargées
         if 'translations' not in globals() or not translations:
@@ -829,6 +859,11 @@ class AstroImageAnalyzerGUI:
         options['analyze_snr'] = self.analyze_snr.get()
         options['detect_trails'] = self.detect_trails.get()
         options['include_subfolders'] = self.include_subfolders.get()
+        options['bortle_path'] = self.bortle_path.get()
+        options['use_bortle'] = self.use_bortle.get()
+
+        options['apply_snr_action_immediately'] = False
+        options['apply_trail_action_immediately'] = False
 
         # Vérifier chemins entrée/log (identique)
         if not input_dir or not os.path.isdir(input_dir):
@@ -941,6 +976,28 @@ class AstroImageAnalyzerGUI:
         if hasattr(self, 'visualize_button') and self.visualize_button:
             self._set_widget_state(self.visualize_button, tk.NORMAL if can_visualize else tk.DISABLED)
 
+        if hasattr(self, 'stack_plan_button') and self.stack_plan_button:
+            state = tk.NORMAL if can_visualize else tk.DISABLED
+            self._set_widget_state(self.stack_plan_button, state)
+
+
+    def _load_gui_config(self):
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_gui_config(self):
+        data = {
+            'bortle_path': self.bortle_path.get(),
+            'use_bortle': self.use_bortle.get()
+        }
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
 
     def _launch_analysis(self, stack_after: bool):
@@ -958,14 +1015,27 @@ class AstroImageAnalyzerGUI:
         options['analyze_snr'] = self.analyze_snr.get()
         options['detect_trails'] = self.detect_trails.get()
         options['include_subfolders'] = self.include_subfolders.get()
+        options['bortle_path'] = self.bortle_path.get()
+        options['use_bortle'] = self.use_bortle.get()
 
-        # --- NOUVEAU : Définir l'option pour l'action SNR différée ---
-        options['apply_snr_action_immediately'] = False # On veut toujours différer l'action SNR depuis le GUI
+        # --- NOUVEAU : Définir les options pour les actions différées ---
+        options['apply_snr_action_immediately'] = False  # Toujours différé depuis le GUI
+        options['apply_trail_action_immediately'] = False
         # --- FIN NOUVEAU ---
+
+        if options.get('use_bortle'):
+            bp = options.get('bortle_path', '')
+            if not bp or not bp.lower().endswith(('.tif', '.tiff', '.kmz')):
+                messagebox.showwarning(
+                    self._("msg_warning"),
+                    "Sélectionnez un fichier Bortle valide (GeoTIFF ou KMZ) avant de lancer l\u2019analyse.",
+                    parent=self.root
+                )
+                return False
 
         if not input_dir or not os.path.isdir(input_dir):
             messagebox.showerror(self._("msg_error"), self._("msg_input_dir_invalid"), parent=self.root)
-            self.stack_after_analysis = False 
+            self.stack_after_analysis = False
             return False
         if not output_log:
             messagebox.showerror(self._("msg_error"), self._("msg_log_file_missing"), parent=self.root)
@@ -1415,8 +1485,21 @@ class AstroImageAnalyzerGUI:
                     fwhm_p75 = np.percentile(fwhm_vals, 75)
                     ecc_p75 = np.percentile(ecc_vals, 75)
                     good_img = [
-                        r for r in valid_kept_results
-                        if r['snr'] >= snr_p25 and r.get('fwhm', np.inf) <= fwhm_p75 and r.get('ecc', np.inf) <= ecc_p75
+                        r
+                        for r in valid_kept_results
+                        if r['snr'] >= snr_p25
+                        and (
+                            r.get('fwhm')
+                            if is_finite_number(r.get('fwhm'))
+                            else np.inf
+                        )
+                        <= fwhm_p75
+                        and (
+                            r.get('ecc')
+                            if is_finite_number(r.get('ecc'))
+                            else np.inf
+                        )
+                        <= ecc_p75
                     ]
                     ttk.Label(
                         recom_frame,
@@ -1692,6 +1775,7 @@ class AstroImageAnalyzerGUI:
             self.visual_apply_reco_button = ttk.Button(
                 bottom_frame,
                 text=self._('visual_apply_reco_button'),
+                width=30,
                 state=tk.DISABLED,
                 command=self._apply_recommendations_gui
             )
@@ -1809,7 +1893,11 @@ class AstroImageAnalyzerGUI:
                 return
 
             # Confirmer suppression
-            confirm_msg = self._("marker_confirm_delete_selected", default="Supprimer les marqueurs pour les {count} dossiers sélectionnés ?\nCela forcera leur ré-analyse au prochain lancement.").format(count=len(selected_indices))
+            confirm_msg = self._(
+                "marker_confirm_delete_selected",
+                default="Supprimer les marqueurs pour les {count} dossiers sélectionnés ?\nCela forcera leur ré-analyse au prochain lancement.",
+                count=len(selected_indices),
+            )
             if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
                 deleted_count = 0; errors = []
                 paths_to_delete_rel = [listbox.get(i) for i in selected_indices]
@@ -1851,7 +1939,16 @@ class AstroImageAnalyzerGUI:
 
                 # Message final
                 if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
-                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_selected_success", default="{count} marqueur(s) supprimé(s).").format(count=deleted_count), parent=marker_window)
+                elif deleted_count > 0:
+                    messagebox.showinfo(
+                        self._("msg_info"),
+                        self._(
+                            "marker_delete_selected_success",
+                            default="{count} marqueur(s) supprimé(s).",
+                            count=deleted_count,
+                        ),
+                        parent=marker_window,
+                    )
 ####################################################################################################################
 
 
@@ -1863,7 +1960,12 @@ class AstroImageAnalyzerGUI:
                 return
 
             # Confirmer suppression totale
-            confirm_msg = self._("marker_confirm_delete_all", default="Supprimer TOUS les marqueurs ({count}) dans le dossier '{folder}' et ses sous-dossiers analysables ?\nCela forcera une ré-analyse complète.").format(count=len(abs_paths_to_clear), folder=os.path.basename(abs_input_dir))
+            confirm_msg = self._(
+                "marker_confirm_delete_all",
+                default="Supprimer TOUS les marqueurs ({count}) dans le dossier '{folder}' et ses sous-dossiers analysables ?\nCela forcera une ré-analyse complète.",
+                count=len(abs_paths_to_clear),
+                folder=os.path.basename(abs_input_dir),
+            )
             if messagebox.askyesno(self._("msg_warning"), confirm_msg, parent=marker_window):
                 deleted_count = 0; errors = []
                 # Supprimer tous les marqueurs
@@ -1885,7 +1987,16 @@ class AstroImageAnalyzerGUI:
 
                 # Message final
                 if errors: messagebox.showerror(self._("msg_error"), self._("marker_delete_errors", default="Erreurs lors de la suppression de certains marqueurs:\n") + "\n".join(errors), parent=marker_window)
-                elif deleted_count > 0: messagebox.showinfo(self._("msg_info"), self._("marker_delete_all_success", default="Tous les {count} marqueur(s) trouvés ont été supprimés.").format(count=deleted_count), parent=marker_window)
+                elif deleted_count > 0:
+                    messagebox.showinfo(
+                        self._("msg_info"),
+                        self._(
+                            "marker_delete_all_success",
+                            default="Tous les {count} marqueur(s) trouvés ont été supprimés.",
+                            count=deleted_count,
+                        ),
+                        parent=marker_window,
+                    )
 
 
 
@@ -1969,6 +2080,8 @@ class AstroImageAnalyzerGUI:
         # --- Ajout Debug ---
         print("DEBUG AG: Fermeture du GUI de l'analyseur...")
         # --------------------
+        # Sauvegarder la configuration GUI avant de supprimer les variables Tkinter
+        self._save_gui_config()
         print("  Nettoyage explicite des ressources Tkinter...")
         # Cacher et annuler les infobulles actives (inchangé)
         for tt_key in list(self.tooltips.keys()):
@@ -2174,10 +2287,34 @@ class AstroImageAnalyzerGUI:
         subfolder_check.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(5,2))
         self.widgets_refs['include_subfolders_label'] = subfolder_check
 
-        # Ligne 3: Sélection Langue (Aligné à droite)
+        # Ligne 3: Bortle raster
+        bortle_label = ttk.Label(config_frame, text="")
+        bortle_label.grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.widgets_refs['bortle_file_label'] = bortle_label
+        self.bortle_entry = ttk.Entry(config_frame, textvariable=self.bortle_path, width=40)
+        self.bortle_entry.grid(row=3, column=1, padx=5, pady=2, sticky=tk.W+tk.E)
+        self.bortle_browse_button = ttk.Button(config_frame, text="", command=self.browse_bortle_file)
+        self.bortle_browse_button.grid(row=3, column=2, padx=5, pady=2)
+        # Stocker avec un préfixe "browse_" pour appliquer la traduction
+        self.widgets_refs['browse_bortle_button'] = self.bortle_browse_button
+        self.use_bortle_check = ttk.Checkbutton(config_frame, text="", variable=self.use_bortle, command=self.toggle_sections_state)
+        self.use_bortle_check.grid(row=3, column=3, sticky=tk.W)
+        self.widgets_refs['use_bortle_check_label'] = self.use_bortle_check
+
+        # Ligne 4: Bouton organiser fichiers
+        self.organize_button = ttk.Button(
+            config_frame,
+            text=self._('organize_files_button'),
+            command=self.organize_files,
+            state=tk.DISABLED,
+        )
+        self.organize_button.grid(row=4, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
+        self.widgets_refs['organize_files_button'] = self.organize_button
+
+        # Ligne 5: Sélection Langue (Aligné à droite)
         if not self.lock_language:
             lang_frame = ttk.Frame(config_frame)
-            lang_frame.grid(row=3, column=0, columnspan=3, sticky=tk.E, pady=5, padx=5)
+            lang_frame.grid(row=5, column=0, columnspan=3, sticky=tk.E, pady=5, padx=5)
             lang_label = ttk.Label(lang_frame, text="")
             lang_label.pack(side=tk.LEFT, padx=(0, 5))
             self.widgets_refs['lang_label'] = lang_label
@@ -2374,11 +2511,21 @@ class AstroImageAnalyzerGUI:
         self.manage_markers_button.pack(side=tk.LEFT, padx=5)
         self.widgets_refs['manage_markers_button'] = self.manage_markers_button
 
+        self.stack_plan_button = ttk.Button(
+            button_frame,
+            text=self._('create_stack_plan_button'),
+            command=self.open_stack_plan_window,
+            width=18,
+            state=tk.DISABLED
+        )
+        self.stack_plan_button.pack(side=tk.LEFT, padx=5)
+        self.widgets_refs['create_stack_plan_button'] = self.stack_plan_button
+
         self.apply_reco_button = ttk.Button(
             button_frame,
             text=self._('apply_reco_button'),
             command=self._apply_recommendations_gui,
-            width=18,
+            width=30,
             state=tk.DISABLED
         )
         self.apply_reco_button.pack(side=tk.RIGHT, padx=5)
@@ -2448,6 +2595,8 @@ class AstroImageAnalyzerGUI:
                 # Gérer le bouton "Gérer Marqueurs"
                 elif isinstance(widget, ttk.Button) and key == 'manage_markers_button':
                     widget.config(text=self._('manage_markers_button'))
+                elif isinstance(widget, ttk.Button) and key == 'create_stack_plan_button':
+                    widget.config(text=self._('create_stack_plan_button'))
             except tk.TclError as e:
                 # Ignorer erreurs si widget détruit pendant mise à jour
                 print(f"WARN: Erreur Tcl mise à jour texte widget '{key}' lang {lang}: {e}")
@@ -2485,12 +2634,15 @@ class AstroImageAnalyzerGUI:
             if self.send_reference_button: self.send_reference_button.config(text=self._("use_best_reference_button"))
             if self.visualize_button: self.visualize_button.config(text=self._("visualize_button"))
             if self.open_log_button: self.open_log_button.config(text=self._("open_log_button"))
+            if self.organize_button: self.organize_button.config(text=self._("organize_files_button"))
             if self.apply_snr_button:
                 self.apply_snr_button.config(text=self._("apply_snr_rejection_button"))
             # Texte du bouton Quitter/Retour dépend si un callback est fourni
             if self.return_button:
                 btn_text = self._("return_button_text") if self.main_app_callback else self._("quit_button")
                 self.return_button.config(text=btn_text)
+            if self.apply_reco_button:
+                self.apply_reco_button.config(text=self._("apply_reco_button"))
         except tk.TclError as e:
             print(f"WARN: Erreur Tcl mise à jour texte bouton principal: {e}")
         except KeyError as e:
@@ -2558,6 +2710,32 @@ class AstroImageAnalyzerGUI:
         self.root.after(50, self.root.focus_force)
         self.root.after(100, self.root.lift)
 
+    def browse_bortle_file(self):
+        """Ouvre un fichier GeoTIFF ou KMZ contenant la carte Bortle."""
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title=self._('bortle_file_label'),
+            filetypes=[('GeoTIFF/KMZ', '*.tif *.tiff *.tpk *.kmz'), (self._('Tous les fichiers'), '*.*')]
+        )
+        if path:
+            if os.path.isdir(path):
+                files = [f for f in os.listdir(path) if f.lower().endswith(('.tif', '.tiff', '.tpk', '.kmz'))]
+                if len(files) == 1:
+                    path = os.path.join(path, files[0])
+                elif len(files) > 1:
+                    # Simplified selection: take first file
+                    path = os.path.join(path, files[0])
+            if not path.lower().endswith(('.tif', '.tiff', '.kmz')):
+                messagebox.showerror(
+                    self._("msg_error"),
+                    "Fichier Bortle non pris en charge : choisissez un GeoTIFF (.tif) ou KMZ",
+                    parent=self.root
+                )
+                return
+            self.bortle_path.set(path)
+        self.root.after(50, self.root.focus_force)
+        self.root.after(100, self.root.lift)
+
     # --- Gestion État Widgets ---
 
     def _set_widget_state(self, widget, state):
@@ -2609,6 +2787,10 @@ class AstroImageAnalyzerGUI:
             # État du dossier rejet traînées
             trail_reject_dir_state = tk.NORMAL if trails_enabled_by_user and trails_possible and action == 'move' else tk.DISABLED
             self._set_widget_state(self.trail_reject_dir_frame, trail_reject_dir_state)
+
+            bortle_state = tk.NORMAL if self.use_bortle.get() else tk.DISABLED
+            self._set_widget_state(self.bortle_entry, bortle_state)
+            self._set_widget_state(self.bortle_browse_button, bortle_state)
 
         except AttributeError:
             # Peut arriver si appelé avant que tous les widgets soient créés
@@ -2941,6 +3123,9 @@ class AstroImageAnalyzerGUI:
 
         self._stop_timer()
         self.analysis_running = False
+        self.analysis_completed_successfully = success
+        if self.stack_after_analysis and self.analysis_completed_successfully:
+            self.root.after(0, self._auto_stack_workflow)
         self.has_pending_snr_actions = False # Réinitialiser par défaut
 
         folder_to_stack = None
@@ -2972,7 +3157,6 @@ class AstroImageAnalyzerGUI:
 
         self.update_progress(100.0 if success else 0.0)
         self.analysis_results = results if results else []
-        self.analysis_completed_successfully = success
         self.best_reference_path = self._get_best_reference()
         if success and self.analysis_results:
             (self.recommended_images,
@@ -2997,22 +3181,28 @@ class AstroImageAnalyzerGUI:
         if success:
             processed_count = len(self.analysis_results)
             if processed_count > 0:
-                 errors_count = sum(1 for r in self.analysis_results if r.get('status') == 'error')
-                 # L'action_count ici reflète les actions immédiates (ex: pour les traînées)
-                 action_count = sum(1 for r in self.analysis_results if r.get('action','').startswith(('moved_trail', 'deleted_trail')))
-                 final_status_key = "status_analysis_done_some" # Ajuster ce message si besoin pour refléter les actions en attente
-                 self.update_results_text("--- Analyse terminée ---")
-                 if not should_write_command: self._set_widget_state(self.visualize_button, tk.NORMAL)
-                 else: self._set_widget_state(self.visualize_button, tk.DISABLED)
+                errors_count = sum(1 for r in self.analysis_results if r.get('status') == 'error')
+                # L'action_count ici reflète les actions immédiates (ex: pour les traînées)
+                action_count = sum(1 for r in self.analysis_results if r.get('action','').startswith(('moved_trail', 'deleted_trail')))
+                final_status_key = "status_analysis_done_some" # Ajuster ce message si besoin pour refléter les actions en attente
+                self.update_results_text("--- Analyse terminée ---")
+                if not should_write_command:
+                    self._set_widget_state(self.visualize_button, tk.NORMAL)
+                    if self.stack_plan_button:
+                        self._set_widget_state(self.stack_plan_button, tk.NORMAL)
+                else:
+                    self._set_widget_state(self.visualize_button, tk.DISABLED)
+                    if self.stack_plan_button:
+                        self._set_widget_state(self.stack_plan_button, tk.DISABLED)
             else:
-                 final_status_key = "status_analysis_done_no_valid"
-                 self.update_results_text("--- Analyse terminée (aucun fichier traitable trouvé ou tous ignorés) ---")
-                 self._set_widget_state(self.visualize_button, tk.DISABLED)
+                final_status_key = "status_analysis_done_no_valid"
+                self.update_results_text("--- Analyse terminée (aucun fichier traitable trouvé ou tous ignorés) ---")
+                self._set_widget_state(self.visualize_button, tk.DISABLED)
         else: # Echec de l'analyse
-             final_status_key = "status_analysis_done_errors"
-             self.update_results_text("--- Analyse terminée avec erreurs ---")
-             self._set_widget_state(self.visualize_button, tk.DISABLED)
-             self.has_pending_snr_actions = False # Pas d'actions en attente si l'analyse a échoué globalement
+            final_status_key = "status_analysis_done_errors"
+            self.update_results_text("--- Analyse terminée avec erreurs ---")
+            self._set_widget_state(self.visualize_button, tk.DISABLED)
+            self.has_pending_snr_actions = False # Pas d'actions en attente si l'analyse a échoué globalement
 
         if final_status_key:
             print(f"DEBUG (analyse_gui): Affichage statut final (clé: {final_status_key})") 
@@ -3078,6 +3268,8 @@ class AstroImageAnalyzerGUI:
                      self._set_widget_state(self.apply_snr_button, tk.DISABLED)
 
         self.update_status("status_analysis_done")
+        if success and self.organize_button:
+            self.root.after(0, lambda: self.organize_button.config(state=tk.NORMAL))
         print("DEBUG (analyse_gui): Appel final à gc.collect()")
         gc.collect()
         print("DEBUG (analyse_gui): Sortie de finalize_analysis.")
@@ -3113,7 +3305,19 @@ class AstroImageAnalyzerGUI:
             snr_p25 = np.percentile(snrs, 25)
             fwhm_p75 = np.percentile(fwhm_vals, 75)
             ecc_p75 = np.percentile(ecc_vals, 75)
-            return [r for r in valid_kept if r['snr'] >= snr_p25 and r.get('fwhm', np.inf) <= fwhm_p75 and r.get('ecc', np.inf) <= ecc_p75]
+            return [
+                r
+                for r in valid_kept
+                if r['snr'] >= snr_p25
+                and (
+                    r.get('fwhm') if is_finite_number(r.get('fwhm')) else np.inf
+                )
+                <= fwhm_p75
+                and (
+                    r.get('ecc') if is_finite_number(r.get('ecc')) else np.inf
+                )
+                <= ecc_p75
+            ]
         if len(snrs) >= 5 and len(sc_vals) >= 5:
             snr_p25 = np.percentile(snrs, 25)
             sc_p25 = np.percentile(sc_vals, 25)
@@ -3267,10 +3471,11 @@ class AstroImageAnalyzerGUI:
         if hasattr(self, '_refresh_treeview') and callable(getattr(self, '_refresh_treeview')):
             self._refresh_treeview()
 
-    def _apply_recommendations_gui(self):
+    def _apply_recommendations_gui(self, *, auto: bool = False):
         """Keep only recommended images and apply reject actions."""
         if not getattr(self, 'recommended_images', None):
-            messagebox.showinfo("Info", "Aucune recommandation calculée.")
+            if not auto:
+                messagebox.showinfo("Info", "Aucune recommandation calculée.")
             return
 
         reco_files = {os.path.abspath(img['file']) for img in self.recommended_images}
@@ -3349,6 +3554,7 @@ class AstroImageAnalyzerGUI:
             self.apply_reco_button.config(state=tk.DISABLED)
         if hasattr(self, 'visual_apply_reco_button') and self.visual_apply_reco_button:
             self.visual_apply_reco_button.config(state=tk.DISABLED)
+        self._regenerate_stack_plan()
 
     def _on_visual_apply_snr(self):
         """Handler pour le bouton d'application SNR de la fenêtre de visualisation."""
@@ -3367,6 +3573,7 @@ class AstroImageAnalyzerGUI:
                 self.snr_range_slider.set_active(False)
         except Exception:
             pass
+        self._regenerate_stack_plan()
 
     def _on_visual_apply_starcount(self):
         """Handler pour le bouton d'application Starcount de la fenêtre de visualisation."""
@@ -3378,6 +3585,7 @@ class AstroImageAnalyzerGUI:
                 self.starcount_range_slider.set_active(False)
         except Exception:
             pass
+        self._regenerate_stack_plan()
 
     def _on_visual_apply_fwhm(self):
         """Handler for FWHM apply button."""
@@ -3389,6 +3597,7 @@ class AstroImageAnalyzerGUI:
                 self.fwhm_range_slider.set_active(False)
         except Exception:
             pass
+        self._regenerate_stack_plan()
 
     def _on_visual_apply_ecc(self):
         """Handler for eccentricity apply button."""
@@ -3400,6 +3609,7 @@ class AstroImageAnalyzerGUI:
                 self.ecc_range_slider.set_active(False)
         except Exception:
             pass
+        self._regenerate_stack_plan()
 
     def _on_starcount_slider_change(self, val, patches):
         """Mise à jour visuelle lors du déplacement du RangeSlider Starcount."""
@@ -3433,6 +3643,108 @@ class AstroImageAnalyzerGUI:
         self.current_ecc_max = hi
         if self.apply_ecc_button:
             self.apply_ecc_button.config(state=tk.NORMAL)
+
+    def _regenerate_stack_plan(self):
+        from stack_plan import generate_stacking_plan, write_stacking_plan_csv
+        import os
+        import tkinter.messagebox as messagebox
+
+        kept = [r for r in self.analysis_results if r.get('status') == 'ok' and r.get('action') == 'kept']
+        if not kept:
+            messagebox.showwarning("Plan de stacking", "Aucune image à empiler après tri.")
+            return
+
+        pending = any(
+            r.get('action', '').startswith('pending') or
+            (r.get('rejected_reason', '') and r.get('action', '').endswith('_pending_action'))
+            for r in self.analysis_results
+        )
+        if pending:
+            if not messagebox.askyesno(
+                "Plan de stacking non à jour",
+                "Attention : certains fichiers sont encore marqués à supprimer/déplacer.\n"
+                "Le plan ne sera pas fidèle à la future organisation.\n"
+                "Voulez-vous appliquer les actions différées maintenant ?"
+            ):
+                return
+
+        plan = generate_stacking_plan(kept)
+        plan_path = os.path.join(os.path.dirname(self.output_log.get()), "stack_plan.csv")
+        try:
+            write_stacking_plan_csv(plan_path, plan)
+        except PermissionError as exc:
+            messagebox.showerror(
+                "Erreur de permission",
+                f"Impossible d'écrire le fichier :\n{plan_path}\n{exc}"
+            )
+            return
+        messagebox.showinfo(
+            "Plan de stacking mis à jour",
+            f"Le plan a été régénéré :\n{plan_path}\n({len(plan)} fichiers)"
+        )
+
+    def _create_stacking_plan_auto(self) -> str | None:
+        """Create a stacking plan CSV without user interaction."""
+        source = self.recommended_images if getattr(self, 'recommended_images', []) else [
+            r for r in self.analysis_results if r.get('status') == 'ok' and r.get('action') == 'kept'
+        ]
+        if not source:
+            return None
+
+        if self.use_bortle.get():
+            sort_spec = [('bortle', False), ('session_date', False), ('exposure', True)]
+        else:
+            sort_spec = [('session_date', False), ('exposure', True)]
+
+        include_expo = False
+        if hasattr(self, 'include_exposure_in_batch'):
+            try:
+                include_expo = bool(self.include_exposure_in_batch.get())
+            except Exception:
+                include_expo = False
+
+        rows = generate_stacking_plan(
+            source,
+            include_exposure_in_batch=include_expo,
+            sort_spec=sort_spec,
+        )
+        if not rows:
+            return None
+
+        plan_path = os.path.join(self.input_dir.get(), "stack_plan.csv")
+        try:
+            write_stacking_plan_csv(plan_path, rows)
+        except Exception:
+            return None
+
+        self.latest_stack_plan_path = plan_path
+        return plan_path
+
+    def _auto_stack_workflow(self):
+        """Execute analysis post-processing and stacking automatically."""
+        try:
+            self._apply_recommendations_gui(auto=True)
+            self._organize_files_backend(auto=True)
+            try:
+                self.send_reference_to_main()
+            except Exception:
+                pass
+            plan_path = self._create_stacking_plan_auto()
+            if plan_path:
+                self.latest_stack_plan_path = plan_path
+            self._trigger_stack_via_stacker()
+            self.update_status('status_custom', text='Workflow auto-stack terminé.')
+        except Exception as exc:
+            traceback.print_exc()
+            self.update_status('status_custom', text=f'Auto-stack error: {exc}')
+
+    def _trigger_stack_via_stacker(self):
+        """Trigger the stacking process via SeeStar Stacker if available."""
+        try:
+            if hasattr(zeseestarstacker, 'trigger_stack'):
+                zeseestarstacker.trigger_stack(self.latest_stack_plan_path)
+        except Exception as e:
+            print(f"Error triggering stacker: {e}")
 
     def run_apply_actions_thread(self, results_list, snr_reject_abs, delete_flag, move_flag, callbacks, input_dir_abs):
         """
@@ -3474,8 +3786,17 @@ class AstroImageAnalyzerGUI:
 
         self.update_progress(100.0)
         if apply_success:
-            self.update_status("status_custom", text=self._("{count} actions SNR appliquées.", default="{count} SNR actions applied.").format(count=actions_done_count))
-            self.update_results_text(f"--- {self._('Fin application rejets SNR. {count} actions effectuées.', default='End applying SNR rejections. {count} actions performed.').format(count=actions_done_count)} ---")
+            self.update_status(
+                "status_custom",
+                text=self._(
+                    "{count} actions SNR appliquées.",
+                    default="{count} SNR actions applied.",
+                    count=actions_done_count,
+                ),
+            )
+            self.update_results_text(
+                f"--- {self._('Fin application rejets SNR. {count} actions effectuées.', default='End applying SNR rejections. {count} actions performed.', count=actions_done_count)} ---"
+            )
             
             # Réécrire le résumé du log pour refléter les actions maintenant effectuées
             # et mettre à jour les données de visualisation dans le log.
@@ -3531,7 +3852,14 @@ class AstroImageAnalyzerGUI:
 
                 except Exception as e_log_update:
                     print(f"Erreur mise à jour log après actions SNR: {e_log_update}")
-                    self.update_results_text("logic_error_prefix", text=self._("Erreur mise à jour fichier log: {e}", default="Error updating log file: {e}").format(e=e_log_update))
+                    self.update_results_text(
+                        "logic_error_prefix",
+                        text=self._(
+                            "Erreur mise à jour fichier log: {e}",
+                            default="Error updating log file: {e}",
+                            e=e_log_update,
+                        ),
+                    )
         else: # apply_success is False
             self.update_status("status_custom", text=self._("Échec de l'application des actions SNR.", default="Failed to apply SNR actions."))
             self.update_results_text(f"--- {self._('Échec application rejets SNR.', default='Failed applying SNR rejections.')} ---")
@@ -3553,6 +3881,258 @@ class AstroImageAnalyzerGUI:
             self._set_widget_state(self.apply_snr_button, tk.DISABLED)
 
         gc.collect()
+
+    def open_stack_plan_window(self):
+        """Open a window to create a stacking plan CSV."""
+        if not self.analysis_results:
+            messagebox.showwarning(self._('msg_warning'),
+                                   self._('stack_plan_alert_no_analysis'),
+                                   parent=self.root)
+            return
+
+        kept_results = [
+            r
+            for r in self.analysis_results
+            if r.get('status') == 'ok' and r.get('action') == 'kept'
+        ]
+
+        unique = {
+            'mount': sorted({r.get('mount', '') for r in kept_results}),
+            'bortle': sorted({str(r.get('bortle', '')) for r in kept_results}),
+            'telescope': sorted({r.get('telescope') or 'Unknown' for r in kept_results}),
+            'session_date': sorted({(r.get('date_obs') or '').split('T')[0] for r in kept_results}),
+            'filter': sorted({r.get('filter', '') for r in kept_results}),
+            'exposure': sorted({str(r.get('exposure', '')) for r in kept_results}),
+        }
+
+        window = tk.Toplevel(self.root)
+        window.title(self._('stack_plan_window_title'))
+        window.transient(self.root)
+        window.grab_set()
+
+        include_expo_var = tk.BooleanVar(value=False)
+        value_vars = {}
+        sort_order_vars = {}
+
+        total_var = tk.StringVar()
+        batch_var = tk.StringVar()
+
+        def update_preview(*args):
+            criteria = {}
+            for cat, var_map in value_vars.items():
+                selected = [v for v, var in var_map.items() if var.get()]
+                if len(selected) != len(var_map):
+                    criteria[cat] = selected
+            sort_spec = []
+            for cat in ['mount', 'bortle', 'telescope', 'session_date', 'filter', 'exposure']:
+                order = sort_order_vars[cat].get()
+                reverse = order == self._('descending')
+                sort_spec.append((cat, reverse))
+            rows = generate_stacking_plan(
+                kept_results,
+                include_exposure_in_batch=include_expo_var.get(),
+                criteria=criteria,
+                sort_spec=sort_spec,
+            )
+            total_var.set(self._('stack_plan_preview_total', count=len(rows)))
+            batch_var.set(self._('stack_plan_preview_batches', count=len({r['batch_id'] for r in rows})))
+
+        main = ttk.Frame(window, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        row = 0
+        for cat, values in unique.items():
+            frame = ttk.LabelFrame(main, text=self._(cat))
+            frame.grid(row=row, column=0, sticky='w', padx=5, pady=5)
+            val_map = {}
+            for val in values:
+                var = tk.BooleanVar(value=True)
+                ttk.Checkbutton(frame, text=str(val), variable=var, command=update_preview).pack(side=tk.LEFT)
+                val_map[val] = var
+            value_vars[cat] = val_map
+            sort_var = tk.StringVar(value=self._('ascending'))
+            sort_order_vars[cat] = sort_var
+            cb = ttk.Combobox(frame, state='readonly', width=10,
+                              values=[self._('ascending'), self._('descending')],
+                              textvariable=sort_var)
+            cb.pack(side=tk.RIGHT)
+            cb.bind('<<ComboboxSelected>>', update_preview)
+            row += 1
+
+        ttk.Checkbutton(main, text=self._('include_exposure_in_batch'),
+                        variable=include_expo_var, command=update_preview).grid(row=row, column=0, sticky='w', pady=5)
+        row += 1
+
+        ttk.Label(main, textvariable=total_var).grid(row=row, column=0, sticky='w'); row += 1
+        ttk.Label(main, textvariable=batch_var).grid(row=row, column=0, sticky='w'); row += 1
+
+        def generate_and_close():
+            criteria = {}
+            for cat, var_map in value_vars.items():
+                selected = [v for v, var in var_map.items() if var.get()]
+                if len(selected) != len(var_map):
+                    criteria[cat] = selected
+            sort_spec = []
+            for cat in ['mount', 'bortle', 'telescope', 'session_date', 'filter', 'exposure']:
+                order = sort_order_vars[cat].get()
+                reverse = order == self._('descending')
+                sort_spec.append((cat, reverse))
+            rows = generate_stacking_plan(
+                kept_results,
+                include_exposure_in_batch=include_expo_var.get(),
+                criteria=criteria,
+                sort_spec=sort_spec,
+            )
+            if not rows:
+                messagebox.showwarning(self._('msg_warning'), self._('msg_export_no_images'), parent=window)
+                return
+            csv_path = os.path.join(os.path.dirname(self.output_log.get()), 'stack_plan.csv')
+            write_stacking_plan_csv(csv_path, rows)
+            messagebox.showinfo(self._('msg_info'), csv_path, parent=window)
+            window.destroy()
+
+        ttk.Button(main, text=self._('generate_plan_button'), command=generate_and_close).grid(row=row, column=0, pady=5)
+        update_preview()
+
+    def _organize_files_backend(self, *, auto: bool = False):
+        """Backend pour appliquer les actions différées sur les fichiers."""
+
+        delete_flag = self.reject_action.get() == 'delete'
+        move_flag = self.reject_action.get() == 'move'
+
+        callbacks = {
+            'log': self.update_results_text,
+            'status': self.update_status,
+            'progress': self.update_progress,
+        }
+
+        input_dir = self.input_dir.get()
+
+        total = 0
+        try:
+            total += analyse_logic.apply_pending_snr_actions(
+                self.analysis_results,
+                self.snr_reject_dir.get(),
+                delete_rejected_flag=delete_flag,
+                move_rejected_flag=move_flag,
+                log_callback=callbacks['log'],
+                status_callback=callbacks['status'],
+                progress_callback=callbacks['progress'],
+                input_dir_abs=input_dir,
+            )
+
+            total += analyse_logic.apply_pending_reco_actions(
+                self.analysis_results,
+                self.snr_reject_dir.get(),
+                delete_rejected_flag=delete_flag,
+                move_rejected_flag=move_flag,
+                log_callback=callbacks['log'],
+                status_callback=callbacks['status'],
+                progress_callback=callbacks['progress'],
+                input_dir_abs=input_dir,
+            )
+
+            if hasattr(analyse_logic, 'apply_pending_trail_actions'):
+                total += analyse_logic.apply_pending_trail_actions(
+                    self.analysis_results,
+                    self.trail_reject_dir.get(),
+                    delete_rejected_flag=delete_flag,
+                    move_rejected_flag=move_flag,
+                    log_callback=callbacks['log'],
+                    status_callback=callbacks['status'],
+                    progress_callback=callbacks['progress'],
+                    input_dir_abs=input_dir,
+                )
+
+            if hasattr(analyse_logic, 'apply_pending_starcount_actions'):
+                total += analyse_logic.apply_pending_starcount_actions(
+                    self.analysis_results,
+                    self.starcount_reject_dir.get(),
+                    delete_rejected_flag=delete_flag,
+                    move_rejected_flag=move_flag,
+                    log_callback=callbacks['log'],
+                    status_callback=callbacks['status'],
+                    progress_callback=callbacks['progress'],
+                    input_dir_abs=input_dir,
+                )
+
+            if hasattr(analyse_logic, 'apply_pending_fwhm_actions'):
+                total += analyse_logic.apply_pending_fwhm_actions(
+                    self.analysis_results,
+                    self.starcount_reject_dir.get(),
+                    delete_rejected_flag=delete_flag,
+                    move_rejected_flag=move_flag,
+                    log_callback=callbacks['log'],
+                    status_callback=callbacks['status'],
+                    progress_callback=callbacks['progress'],
+                    input_dir_abs=input_dir,
+                )
+
+            if hasattr(analyse_logic, 'apply_pending_ecc_actions'):
+                total += analyse_logic.apply_pending_ecc_actions(
+                    self.analysis_results,
+                    self.starcount_reject_dir.get(),
+                    delete_rejected_flag=delete_flag,
+                    move_rejected_flag=move_flag,
+                    log_callback=callbacks['log'],
+                    status_callback=callbacks['status'],
+                    progress_callback=callbacks['progress'],
+                    input_dir_abs=input_dir,
+                )
+
+            total += analyse_logic.apply_pending_organization(
+                self.analysis_results,
+                log_callback=callbacks['log'],
+                status_callback=callbacks['status'],
+                progress_callback=callbacks['progress'],
+                input_dir_abs=input_dir,
+            )
+
+            if not auto:
+                messagebox.showinfo(
+                    self._("msg_info"),
+                    self._("msg_organize_done", count=total),
+                )
+        except Exception as e:
+            if not auto:
+                messagebox.showerror(
+                    self._("msg_error"),
+                    self._("msg_organize_failed", e=e),
+                )
+        finally:
+            try:
+                self._regenerate_stack_plan()
+            except Exception:
+                pass
+            try:
+                if self.output_log.get():
+                    current_options = {
+                        'analyze_snr': self.analyze_snr.get(),
+                        'detect_trails': self.detect_trails.get(),
+                        'include_subfolders': self.include_subfolders.get(),
+                        'move_rejected': (self.reject_action.get() == 'move'),
+                        'delete_rejected': (self.reject_action.get() == 'delete'),
+                        'snr_reject_dir': self.snr_reject_dir.get(),
+                        'trail_reject_dir': self.trail_reject_dir.get(),
+                        'snr_selection_mode': self.snr_selection_mode.get(),
+                        'snr_selection_value': self.snr_selection_value.get(),
+                        'trail_params': {k: self.trail_params[k].get() for k in self.trail_params},
+                    }
+                    analyse_logic.write_log_summary(
+                        self.output_log.get(),
+                        self.input_dir.get(),
+                        current_options,
+                        results_list=self.analysis_results,
+                    )
+            except Exception:
+                pass
+            self._update_log_and_vis_buttons_state()
+
+    def organize_files(self):
+        """Applique toutes les actions différées sur les fichiers via le GUI."""
+        if self.organize_button:
+            self.organize_button.config(state=tk.DISABLED)
+        self._organize_files_backend(auto=False)
 
     def _refresh_treeview(self):
         """Placeholder for treeview refresh if implemented."""

@@ -1,3 +1,24 @@
+# -----------------------------------------------------------------------------
+# Auteur       : TRISTAN NAULEAU 
+# Date         : 2025-07-12
+# Licence      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# Ce travail est distribué librement en accord avec les termes de la
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# Vous êtes libre de redistribuer et de modifier ce code, à condition
+# de conserver cette notice et de mentionner que je suis l’auteur
+# de tout ou partie du code si vous le réutilisez.
+# -----------------------------------------------------------------------------
+# Author       : TRISTAN NAULEAU
+# Date         : 2025-07-12
+# License      : GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+#
+# This work is freely distributed under the terms of the
+# GNU GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html).
+# You are free to redistribute and modify this code, provided that
+# you keep this notice and mention that I am the author
+# of all or part of the code if you reuse it.
+# -----------------------------------------------------------------------------
 # (Imports and write_log_summary remain the same)
 import os
 import shutil
@@ -10,6 +31,86 @@ from astropy.utils.exceptions import AstropyWarning
 import warnings
 import json
 import concurrent.futures
+import threading
+import zipfile
+import xml.etree.ElementTree as ET
+import csv
+
+from rasterio.io import MemoryFile
+from rasterio.transform import from_bounds
+
+import bortle_utils
+
+
+def artif_ratio_to_sqm(ratio_artif, mag_naturel=21.6):
+    """Convert a ratio artificial/natural sky brightness to SQM."""
+    return mag_naturel - 2.5 * np.log10(1 + ratio_artif)
+
+NATURAL_SKY = 174.0  # µcd/m² ≈ 22 mag/arcsec²
+
+
+def _load_bortle_raster(path):
+    """Load a Bortle raster dataset, supporting KMZ ground overlays."""
+    if path.lower().endswith('.kmz'):
+        with zipfile.ZipFile(path, 'r') as zf:
+            kml_name = next((n for n in zf.namelist() if n.lower().endswith('.kml')), None)
+            if not kml_name:
+                raise ValueError('KMZ missing KML file')
+            kml_bytes = zf.read(kml_name)
+            root = ET.fromstring(kml_bytes)
+            ns = ''
+            if root.tag.startswith('{'):
+                ns = root.tag[: root.tag.index('}') + 1]
+            go = root.find('.//' + ns + 'GroundOverlay')
+            if go is None:
+                raise ValueError('KMZ missing GroundOverlay')
+            href_el = go.find('.//' + ns + 'href')
+            if href_el is None or not href_el.text:
+                raise ValueError('KMZ GroundOverlay missing href')
+            image_name = href_el.text.strip()
+            if image_name not in zf.namelist():
+                raise ValueError('Referenced image not found in KMZ')
+            llbox = go.find('.//' + ns + 'LatLonBox')
+            if llbox is None:
+                raise ValueError('KMZ GroundOverlay missing LatLonBox')
+
+            def _read_val(tag):
+                el = llbox.find(ns + tag)
+                if el is None or el.text is None:
+                    raise ValueError(f'LatLonBox missing {tag}')
+                return float(el.text)
+
+            north = _read_val('north')
+            south = _read_val('south')
+            east = _read_val('east')
+            west = _read_val('west')
+
+            img_bytes = zf.read(image_name)
+
+        with MemoryFile(img_bytes) as mem_src:
+            with mem_src.open() as src:
+                data = src.read()
+                height = src.height
+                width = src.width
+                count = src.count
+                dtype = src.dtypes[0]
+
+        transform = from_bounds(west, south, east, north, width, height)
+        profile = {
+            'driver': 'GTiff',
+            'height': height,
+            'width': width,
+            'count': count,
+            'dtype': dtype,
+            'crs': 'EPSG:4326',
+            'transform': transform,
+        }
+        mem_out = MemoryFile()
+        ds = mem_out.open(**profile)
+        ds.write(data)
+        return ds
+    else:
+        return bortle_utils.load_bortle_raster(path)
 
 try:
     import starcount_module
@@ -293,6 +394,110 @@ def apply_pending_snr_actions(results_list, snr_reject_abs_path,
     return actions_count
 
 
+def apply_pending_trail_actions(results_list, trail_reject_abs_path,
+                                delete_rejected_flag, move_rejected_flag,
+                                log_callback, status_callback, progress_callback,
+                                input_dir_abs):
+    """Apply deferred actions for trail-rejected files."""
+    actions_count = 0
+    if not results_list:
+        return actions_count
+
+    _log = log_callback if callable(log_callback) else lambda k, **kw: None
+    _status = status_callback if callable(status_callback) else lambda k, **kw: None
+    _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+    to_process = [r for r in results_list if r.get('rejected_reason') == 'trail_pending_action' and r.get('status') == 'ok']
+    total = len(to_process)
+    if total == 0:
+        _log('logic_info_prefix', text='Aucune action Traînées en attente.')
+        return 0
+
+    _status('status_custom', text=f'Application des actions Traînées différées sur {total} fichiers...')
+    _progress(0)
+
+    for i, r in enumerate(to_process):
+        _progress(((i + 1) / total) * 100)
+        try:
+            rel_path = os.path.relpath(r.get('path'), input_dir_abs) if r.get('path') and input_dir_abs else r.get('file', 'N/A')
+        except ValueError:
+            rel_path = r.get('file', 'N/A')
+
+        _status('status_custom', text=f'Action Traînées sur {rel_path} ({i+1}/{total})')
+
+        current_path = r.get('path')
+        if not current_path or not os.path.exists(current_path):
+            _log('logic_move_skipped', file=rel_path, e='Fichier source introuvable pour action Traînées différée.')
+            r['action_comment'] = r.get('action_comment', '') + ' Source non trouvée pour action différée.'
+            r['action'] = 'error_action_deferred'
+            r['status'] = 'error'
+            continue
+
+        action_done = False
+        original_reason = r['rejected_reason']
+
+        if delete_rejected_flag:
+            try:
+                os.remove(current_path)
+                _log('logic_info_prefix', text=f'Fichier supprimé (Traînées différé): {rel_path}')
+                r['path'] = None
+                r['action'] = 'deleted_trail'
+                r['rejected_reason'] = 'trail'
+                r['status'] = 'processed_action'
+                actions_count += 1
+                action_done = True
+            except Exception as del_e:
+                _log('logic_error_prefix', text=f'Erreur suppression Traînées différé {rel_path}: {del_e}')
+                r['action_comment'] = r.get('action_comment', '') + f' Erreur suppression différée: {del_e}'
+                r['action'] = 'error_delete'
+                r['rejected_reason'] = original_reason
+        elif move_rejected_flag and trail_reject_abs_path:
+            if not os.path.isdir(trail_reject_abs_path):
+                try:
+                    os.makedirs(trail_reject_abs_path)
+                    _log('logic_dir_created', path=trail_reject_abs_path)
+                except OSError as e_mkdir:
+                    _log('logic_dir_create_error', path=trail_reject_abs_path, e=e_mkdir)
+                    r['action_comment'] = r.get('action_comment', '') + f' Dossier rejet Traînées inaccessible: {e_mkdir}'
+                    r['action'] = 'error_move'
+                    r['rejected_reason'] = original_reason
+                    continue
+
+            dest_path = os.path.join(trail_reject_abs_path, os.path.basename(current_path))
+            try:
+                if os.path.normpath(current_path) != os.path.normpath(dest_path):
+                    shutil.move(current_path, dest_path)
+                    _log('logic_moved_info', folder=os.path.basename(trail_reject_abs_path), text_key_suffix='_deferred_trail', file_rel_path=rel_path)
+                    r['path'] = dest_path
+                    r['action'] = 'moved_trail'
+                    r['rejected_reason'] = 'trail'
+                    r['status'] = 'processed_action'
+                    actions_count += 1
+                    action_done = True
+                else:
+                    r['action_comment'] = r.get('action_comment', '') + ' Déjà dans dossier cible (différé)?'
+                    r['action'] = 'kept'
+                    r['rejected_reason'] = 'trail'
+                    r['status'] = 'processed_action'
+                    action_done = True
+            except Exception as move_e:
+                _log('logic_move_error', file=rel_path, e=move_e)
+                r['action_comment'] = r.get('action_comment', '') + f' Erreur déplacement différé: {move_e}'
+                r['action'] = 'error_move'
+                r['rejected_reason'] = original_reason
+
+        if not action_done and not delete_rejected_flag and not move_rejected_flag:
+            r['action'] = 'kept_pending_trail_no_action'
+            r['rejected_reason'] = 'trail'
+            r['status'] = 'processed_action'
+            r['action_comment'] = r.get('action_comment', '') + ' Action Traînées différée mais aucune opération configurée.'
+
+    _progress(100)
+    _status('status_custom', text=f'{actions_count} actions Traînées différées appliquées.')
+    _log('logic_info_prefix', text=f'{actions_count} actions Traînées différées appliquées.')
+    return actions_count
+
+
 def apply_pending_reco_actions(results_list, reject_abs_path,
                                delete_rejected_flag, move_rejected_flag,
                                log_callback, status_callback, progress_callback,
@@ -400,9 +605,19 @@ def build_recommended_images(results):
     """Return list of files meeting SNR/FWHM/Ecc criteria."""
     kept = [r for r in results if r.get('action') == 'kept']
 
-    snrs = np.array([r.get('snr', np.nan) for r in kept], dtype=float)
-    fwhms = np.array([r.get('fwhm', np.nan) for r in kept], dtype=float)
-    eccs = np.array([r.get('ecc', r.get('e', np.nan)) for r in kept], dtype=float)
+    snrs = np.array([
+        r.get('snr') if r.get('snr') is not None else np.nan
+        for r in kept
+    ], dtype=float)
+    fwhms = np.array([
+        r.get('fwhm') if r.get('fwhm') is not None else np.nan
+        for r in kept
+    ], dtype=float)
+    eccs = np.array([
+        r.get('ecc') if r.get('ecc') is not None
+        else (r.get('e') if r.get('e') is not None else np.nan)
+        for r in kept
+    ], dtype=float)
 
     if kept:
         snr_min = float(np.nanpercentile(snrs, 25))
@@ -413,9 +628,21 @@ def build_recommended_images(results):
 
     reco = [
         r for r in kept
-        if (r.get('snr') is not None and float(r.get('snr', np.nan)) >= snr_min)
-        and (float(r.get('fwhm', np.nan)) <= fwhm_max)
-        and (float(r.get('ecc', r.get('e', np.nan))) <= ecc_max)
+        if (
+            r.get('snr') is not None
+            and float(r.get('snr') if r.get('snr') is not None else np.nan) >= snr_min
+        )
+        and (
+            float(r.get('fwhm') if r.get('fwhm') is not None else np.nan)
+            <= fwhm_max
+        )
+        and (
+            float(
+                r.get('ecc') if r.get('ecc') is not None
+                else (r.get('e') if r.get('e') is not None else np.nan)
+            )
+            <= ecc_max
+        )
     ]
     return reco, snr_min, fwhm_max, ecc_max
 
@@ -428,6 +655,102 @@ def debug_counts(results):
     ecc = sum(r.get('rejected_reason') == 'high_eccentricity' for r in results)
     pending = sum(str(r.get('action', '')).startswith('pending') for r in results)
     print(f"total={total} | snr={low_snr} | fwhm={high_fwhm} | stars={starcount} | e={ecc} | pending={pending}")
+
+
+def write_telescope_pollution_csv(csv_path, results_list, bortle_dataset=None):
+    """Write per-telescope light pollution info to a CSV file."""
+    telescopes = {}
+    for r in results_list:
+        if r.get('status') != 'ok':
+            continue
+        tele = r.get('telescope') or 'Unknown'
+        if tele in telescopes:
+            continue
+        lon = r.get('sitelong')
+        lat = r.get('sitelat')
+        try:
+            lon = float(lon) if lon is not None else None
+            lat = float(lat) if lat is not None else None
+        except Exception:
+            lon = lat = None
+        l_ucd = None
+        sqm = None
+        if bortle_dataset and lon is not None and lat is not None:
+            try:
+                l_ucd = bortle_utils.sample_bortle_dataset(bortle_dataset, lon, lat)
+                sqm = artif_ratio_to_sqm(l_ucd)
+            except Exception:
+                l_ucd = None
+                sqm = None
+        telescopes[tele] = {
+            'lon': lon,
+            'lat': lat,
+            'l_ucd_artif': l_ucd,
+            'sqm': sqm,
+        }
+
+    try:
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['telescope', 'longitude', 'latitude', 'l_ucd_artif', 'sqm'])
+            for tele, data in telescopes.items():
+                writer.writerow([
+                    tele,
+                    '' if data['lon'] is None else data['lon'],
+                    '' if data['lat'] is None else data['lat'],
+                    '' if data['l_ucd_artif'] is None else f"{data['l_ucd_artif']:.2f}",
+                    '' if data['sqm'] is None else f"{data['sqm']:.2f}",
+                ])
+    except Exception:
+        raise
+
+
+def apply_pending_organization(results_list, log_callback=None,
+                               status_callback=None, progress_callback=None,
+                               input_dir_abs=None):
+    """Move kept images to their destination folders."""
+    actions_count = 0
+    if not results_list:
+        return actions_count
+
+    _log = log_callback if callable(log_callback) else lambda k, **kw: None
+    _status = status_callback if callable(status_callback) else lambda k, **kw: None
+    _progress = progress_callback if callable(progress_callback) else lambda v: None
+
+    to_process = [
+        r for r in results_list
+        if r.get('status') == 'ok' and r.get('action') == 'kept'
+        and r.get('path') and r.get('filepath_dst')
+    ]
+    total = len(to_process)
+    if total == 0:
+        _log('logic_info_prefix', text='Aucun fichier à organiser.')
+        return 0
+
+    _status('status_custom', text=f'Organisation de {total} fichiers...')
+    for i, r in enumerate(to_process):
+        _progress(((i + 1) / total) * 100)
+        current_path = r.get('path')
+        dest_path = r.get('filepath_dst')
+        try:
+            rel_path = os.path.relpath(current_path, input_dir_abs) if current_path and input_dir_abs else os.path.basename(current_path)
+        except ValueError:
+            rel_path = os.path.basename(current_path)
+
+        if not dest_path or os.path.normpath(current_path) == os.path.normpath(dest_path):
+            continue
+        try:
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            shutil.move(current_path, dest_path)
+            r['path'] = dest_path
+            actions_count += 1
+            _log('logic_moved_info', folder=os.path.basename(os.path.dirname(dest_path)), text_key_suffix='_organize', file_rel_path=rel_path)
+        except Exception as e:
+            _log('logic_move_error', file=rel_path, e=e)
+    _progress(100)
+    _status('status_custom', text=f'{actions_count} fichiers organisés.')
+    _log('logic_info_prefix', text=f'{actions_count} fichiers organisés.')
+    return actions_count
 
 
 
@@ -446,6 +769,11 @@ def _snr_worker(path):
         'exposure': 'N/A',
         'filter': 'N/A',
         'temperature': 'N/A',
+        'eqmode': 2,
+        'sitelong': None,
+        'sitelat': None,
+        'telescope': None,
+        'date_obs': None,
         'error': None,
         'fwhm': np.nan,
         'ecc': np.nan,
@@ -459,6 +787,11 @@ def _snr_worker(path):
             if hdul and len(hdul) > 0 and hasattr(hdul[0], 'data') and hdul[0].data is not None:
                 data = hdul[0].data
                 header = hdul[0].header
+                result['eqmode'] = header.get('EQMODE', 2)
+                result['sitelong'] = header.get('SITELONG')
+                result['sitelat'] = header.get('SITELAT')
+                result['telescope'] = header.get('TELESCOP', header.get('TELESCOPE'))
+                result['date_obs'] = header.get('DATE-OBS')
                 result['exposure'] = header.get('EXPTIME', header.get('EXPOSURE', 'N/A'))
                 result['filter'] = header.get('FILTER', 'N/A')
                 result['temperature'] = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
@@ -520,8 +853,17 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     n_cpus = multiprocessing.cpu_count()
     n_workers = max(1, int(n_cpus * 0.75))
 
-    # --- NOUVEAU : Extraire l'option pour l'application immédiate des actions SNR ---
+    bortle_dataset = None
+    bortle_lock = threading.Lock()
+    if options.get('use_bortle') and options.get('bortle_path'):
+        try:
+            bortle_dataset = _load_bortle_raster(options['bortle_path'])
+        except Exception as e:
+            _log('logic_warn_prefix', text=f'Bortle raster load error: {e}')
+
+    # --- NOUVEAU : Extraire les options pour l'application immédiate des actions ---
     apply_snr_action_immediately = options.get('apply_snr_action_immediately', True)
+    apply_trail_action_immediately = options.get('apply_trail_action_immediately', True)
     # --- FIN NOUVEAU ---
 
     # --- Validation chemins & Création dossiers ---
@@ -535,6 +877,7 @@ def perform_analysis(input_dir, output_log, options, callbacks):
         return []
     
     abs_input_dir = os.path.abspath(input_dir)
+    output_root = options.get('output_root', abs_input_dir)
     reject_dirs_to_exclude_abs = []
     snr_reject_abs = None
     trail_reject_abs = None
@@ -699,6 +1042,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                     'fwhm': np.nan,
                     'ecc': np.nan,
                     'n_star_ecc': 0,
+                    'eqmode': 2,
+                    'sitelong': None,
+                    'sitelat': None,
+                    'telescope': None,
+                    'date_obs': None,
                 }
                 try:
                     worker_res = future.result()
@@ -715,6 +1063,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                             'temperature': worker_res['temperature'],
                         }
                         result_base.update(snr_data)
+                        result_base['eqmode'] = worker_res.get('eqmode', 2)
+                        result_base['sitelong'] = worker_res.get('sitelong')
+                        result_base['sitelat'] = worker_res.get('sitelat')
+                        result_base['telescope'] = worker_res.get('telescope')
+                        result_base['date_obs'] = worker_res.get('date_obs')
                         if 'starcount' in worker_res:
                             result_base['starcount'] = worker_res['starcount']
                         if 'fwhm' in worker_res:
@@ -760,6 +1113,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                 'has_trails': False,
                 'num_trails': 0,
                 'starcount': None,
+                'eqmode': 2,
+                'sitelong': None,
+                'sitelat': None,
+                'telescope': None,
+                'date_obs': None,
             }
             try:
                 if options.get('analyze_snr'):
@@ -771,6 +1129,11 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                             if hdul and len(hdul) > 0 and hasattr(hdul[0], 'data') and hdul[0].data is not None:
                                 data = hdul[0].data
                                 header = hdul[0].header
+                                result['eqmode'] = header.get('EQMODE', 2)
+                                result['sitelong'] = header.get('SITELONG')
+                                result['sitelat'] = header.get('SITELAT')
+                                result['telescope'] = header.get('TELESCOP', header.get('TELESCOPE'))
+                                result['date_obs'] = header.get('DATE-OBS')
                                 exposure = header.get('EXPTIME', header.get('EXPOSURE', 'N/A'))
                                 filter_name = header.get('FILTER', 'N/A')
                                 temperature = header.get('CCD-TEMP', header.get('TEMPERAT', 'N/A'))
@@ -1064,42 +1427,58 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                     if isinstance(trail_segments, (list, np.ndarray)) and len(trail_segments) > 0:
                         r['has_trails'] = True
                         r['num_trails'] = len(trail_segments)
-                        # Si le fichier était en attente pour SNR, le rejet trail prend priorité
-                        r['rejected_reason'] = 'trail' 
                         _log("logic_info_prefix", text=f"Trail Rejet: {r['rel_path']} ({len(trail_segments)} segments)")
-                        
-                        action_to_take_trail = 'kept'
-                        reject_dir_trail_option = options.get('trail_reject_dir')
-                        if options.get('delete_rejected'): action_to_take_trail = 'deleted_trail'
-                        elif options.get('move_rejected') and reject_dir_trail_option and trail_reject_abs: action_to_take_trail = 'moved_trail'
-                        
-                        if action_to_take_trail != 'kept':
-                            if os.path.exists(current_path): # Vérifier à nouveau si le fichier existe
-                                if action_to_take_trail == 'moved_trail':
-                                    dest_path_trail = os.path.join(trail_reject_abs, os.path.basename(current_path))
-                                    try:
-                                        if os.path.normpath(current_path) != os.path.normpath(dest_path_trail):
-                                            shutil.move(current_path, dest_path_trail)
-                                            _log("logic_moved_info", folder=os.path.basename(trail_reject_abs), text_key_suffix="_trail", file_rel_path=r['rel_path'])
-                                            r['path'] = dest_path_trail; r['action'] = 'moved_trail'
-                                        else: r['action_comment'] += " Déjà dans dossier cible Trail?"; r['action'] = 'kept'
-                                    except Exception as move_e_tr:
-                                        _log("logic_move_error", file=r['rel_path'], e=move_e_tr)
-                                        r['action_comment'] += f" Erreur déplacement Trail: {move_e_tr}"; r['action'] = 'error_move'; r['rejected_reason'] = None 
-                                elif action_to_take_trail == 'deleted_trail':
-                                    try:
-                                        os.remove(current_path)
-                                        _log("logic_info_prefix", text=f"Fichier supprimé (Trail): {r['rel_path']}")
-                                        r['path'] = None; r['action'] = 'deleted_trail'
-                                    except Exception as del_e_tr:
-                                        _log("logic_error_prefix", text=f"Erreur suppression Trail {r['rel_path']}: {del_e_tr}")
-                                        r['action_comment'] += f" Erreur suppression Trail: {del_e_tr}"; r['action'] = 'error_delete'; r['rejected_reason'] = None
+
+                        if apply_trail_action_immediately:
+                            r['rejected_reason'] = 'trail'
+                            action_to_take_trail = 'kept'
+                            reject_dir_trail_option = options.get('trail_reject_dir')
+                            if options.get('delete_rejected'):
+                                action_to_take_trail = 'deleted_trail'
+                            elif options.get('move_rejected') and reject_dir_trail_option and trail_reject_abs:
+                                action_to_take_trail = 'moved_trail'
+
+                            if action_to_take_trail != 'kept':
+                                if os.path.exists(current_path):
+                                    if action_to_take_trail == 'moved_trail':
+                                        dest_path_trail = os.path.join(trail_reject_abs, os.path.basename(current_path))
+                                        try:
+                                            if os.path.normpath(current_path) != os.path.normpath(dest_path_trail):
+                                                shutil.move(current_path, dest_path_trail)
+                                                _log("logic_moved_info", folder=os.path.basename(trail_reject_abs), text_key_suffix="_trail", file_rel_path=r['rel_path'])
+                                                r['path'] = dest_path_trail
+                                                r['action'] = 'moved_trail'
+                                            else:
+                                                r['action_comment'] += " Déjà dans dossier cible Trail?"
+                                                r['action'] = 'kept'
+                                        except Exception as move_e_tr:
+                                            _log("logic_move_error", file=r['rel_path'], e=move_e_tr)
+                                            r['action_comment'] += f" Erreur déplacement Trail: {move_e_tr}"
+                                            r['action'] = 'error_move'
+                                            r['rejected_reason'] = None
+                                    elif action_to_take_trail == 'deleted_trail':
+                                        try:
+                                            os.remove(current_path)
+                                            _log("logic_info_prefix", text=f"Fichier supprimé (Trail): {r['rel_path']}")
+                                            r['path'] = None
+                                            r['action'] = 'deleted_trail'
+                                        except Exception as del_e_tr:
+                                            _log("logic_error_prefix", text=f"Erreur suppression Trail {r['rel_path']}: {del_e_tr}")
+                                            r['action_comment'] += f" Erreur suppression Trail: {del_e_tr}"
+                                            r['action'] = 'error_delete'
+                                            r['rejected_reason'] = None
+                                else:
+                                    _log("logic_move_skipped", file=r['rel_path'], e="Fichier source non trouvé pour action Trail.")
+                                    r['action_comment'] += " Ignoré action Trail (source non trouvée)."
+                                    r['action'] = 'error_action'
+                                    r['rejected_reason'] = None
                             else:
-                                _log("logic_move_skipped", file=r['rel_path'], e="Fichier source non trouvé pour action Trail.")
-                                r['action_comment'] += " Ignoré action Trail (source non trouvée)."; r['action'] = 'error_action'; r['rejected_reason'] = None
-                        else: # action_to_take_trail == 'kept'
-                            r['action'] = 'kept' # Même si raison rejet = trail
-                            r['action_comment'] += " Rejeté (traînée) mais action=none."
+                                r['action'] = 'kept'
+                                r['action_comment'] += " Rejeté (traînée) mais action=none."
+                        else:
+                            r['rejected_reason'] = 'trail_pending_action'
+                            r['action'] = 'pending_trail_action'
+                            r['action_comment'] += ' Action Trail différée.'
                     else: # Pas de traînées trouvées pour ce fichier
                         r['has_trails'] = False; r['num_trails'] = 0
                 else:  # Pas de résultat de trail_module pour ce fichier, vérifier les erreurs
@@ -1129,6 +1508,55 @@ def perform_analysis(input_dir, output_log, options, callbacks):
                             file_had_trail_error = True
                     if not file_had_trail_error:
                          r['has_trails'] = False; r['num_trails'] = 0 # Marquer comme non-traînée si pas d'erreur spécifique
+
+    # --- Tri Bortle et organisation ---
+    for r in all_results_list:
+        r['mount'] = 'ALTZ'
+        r['bortle'] = 'Unknown'
+        r['filepath_dst'] = r.get('path')
+        if r.get('status') == 'ok' and r.get('action') == 'kept' and r.get('path'):
+            group = 'EQ' if str(r.get('eqmode', 2)) == '1' else 'ALTZ'
+            r['mount'] = group
+            lon = r.get('sitelong'); lat = r.get('sitelat')
+            bortle_class = 'Unknown'
+            if options.get('use_bortle') and bortle_dataset and lon is not None and lat is not None:
+                try:
+                    with bortle_lock:
+                        l_ucd = bortle_utils.sample_bortle_dataset(bortle_dataset, float(lon), float(lat))
+                    sqm = artif_ratio_to_sqm(float(l_ucd))
+                    bortle_class = str(bortle_utils.sqm_to_bortle(float(sqm)))
+                except Exception:
+                    bortle_class = 'Unknown'
+                    l_ucd = None
+                    sqm = None
+            else:
+                l_ucd = None
+                sqm = None
+            r['bortle'] = bortle_class
+            r['l_ucd_artif'] = l_ucd
+            r['sqm'] = sqm
+            tele = r.get('telescope') or 'Unknown'
+            date_obs = r.get('date_obs')
+            date_obj = None
+            if date_obs:
+                try:
+                    date_obj = datetime.datetime.fromisoformat(str(date_obs).split('T')[0])
+                except Exception:
+                    pass
+            filename_lower = os.path.basename(r['path']).lower()
+            if 'mosaic' in filename_lower:
+                parts = [output_root, 'mosaic', group]
+            else:
+                parts = [output_root, group]
+            if options.get('use_bortle'):
+                parts.append(f"Bortle_{bortle_class}")
+            parts.append(tele)
+            if date_obj:
+                parts.append(date_obj.strftime('%Y-%m-%d'))
+            parts.append(f"Filter_{r.get('filter') or 'Unknown'}")
+            dest_dir = os.path.join(*filter(None, parts))
+            dest_path = os.path.join(dest_dir, os.path.basename(r['path']))
+            r['filepath_dst'] = dest_path
     
 
     # --- Étape 7: Création des fichiers marqueurs ---
@@ -1153,41 +1581,47 @@ def perform_analysis(input_dir, output_log, options, callbacks):
 
     # --- Étape 8: Écrire les résultats détaillés FINALS dans le log ---
     try:
-         with open(output_log, 'a', encoding='utf-8') as log_file: # Mode 'a' pour ajouter au log existant
+        with open(output_log, 'a', encoding='utf-8') as log_file:  # Mode 'a' pour ajouter au log existant
             log_file.write("\n--- Analyse individuelle des fichiers (État final après actions) ---\n")
+
             header_parts = ["Fichier (Relatif)", "Statut", "SNR", "Fond", "Bruit", "PixSig", "Starcount"]
-            if options.get('detect_trails') and SATDET_AVAILABLE: header_parts.extend(["Traînée", "NbSeg"])
-            header_parts.extend(["Expo", "Filtre", "Temp", "Action Finale", "Rejet", "Commentaire"])
-            header = "\t".join(header_parts) + "\n"; log_file.write(header)
-            
+            if options.get('detect_trails') and SATDET_AVAILABLE:
+                header_parts.extend(["Traînée", "NbSeg"])
+            header_parts.extend(["Expo", "Filtre", "Temp", "Monture", "Bortle", "Dest", "Action Finale", "Rejet", "Commentaire"])
+
+            header = "\t".join(header_parts) + "\n"
+            log_file.write(header)
+
             for r in all_results_list:
-                 log_line_parts = [
-                     str(r.get('rel_path','?')),
-                     str(r.get('status','?')),
+                log_line_parts = [
+                    str(r.get('rel_path', '?')),
+                    str(r.get('status', '?')),
                     f"{r.get('snr', np.nan):.2f}",
                     f"{r.get('sky_bg', np.nan):.2f}",
                     f"{r.get('sky_noise', np.nan):.2f}",
-                    str(r.get('signal_pixels',0)),
+                    str(r.get('signal_pixels', 0)),
                     str(r.get('starcount', 'N/A'))
-                 ]
-                 if options.get('detect_trails') and SATDET_AVAILABLE:
-                     trail_status = 'N/A'
-                     if 'has_trails' in r: 
-                         # --- CORRECTION ICI ---
-                         trail_status = 'Oui' if r['has_trails'] else 'Non' 
-                         # --- FIN CORRECTION ---
-                     log_line_parts.extend([trail_status, str(r.get('num_trails',0))])
-                 
-                 log_line_parts.extend([
-                     str(r.get('exposure','N/A')),
-                     str(r.get('filter','N/A')),
-                     str(r.get('temperature','N/A')),
-                     str(r.get('action','?')),
-                     str(r.get('rejected_reason') or ''),
-                     (str(r.get('error_message') or '') + " " + str(r.get('action_comment') or '')).strip()
-                 ])
-                 log_line = "\t".join(log_line_parts) + "\n"
-                 log_file.write(log_line.replace('\tnan','\tN/A').replace('\tN/A','\t-'))
+                ]
+                if options.get('detect_trails') and SATDET_AVAILABLE:
+                    trail_status = 'N/A'
+                    if 'has_trails' in r:
+                        trail_status = 'Oui' if r['has_trails'] else 'Non'
+                    log_line_parts.extend([trail_status, str(r.get('num_trails', 0))])
+
+                log_line_parts.extend([
+                    str(r.get('exposure', 'N/A')),
+                    str(r.get('filter', 'N/A')),
+                    str(r.get('temperature', 'N/A')),
+                    str(r.get('mount', '')),
+                    str(r.get('bortle', '')),
+                    str(r.get('filepath_dst', '')),
+                    str(r.get('action', '?')),
+                    str(r.get('rejected_reason') or ''),
+                    (str(r.get('error_message') or '') + " " + str(r.get('action_comment') or '')).strip()
+                ])
+                log_line = "\t".join(log_line_parts) + "\n"
+                log_file.write(log_line.replace('\tnan', '\tN/A').replace('\tN/A', '\t-'))
+
     except IOError as e: 
         # Utiliser le callback _log s'il est disponible, sinon print
         _log_func = _log if callable(_log) else print
@@ -1199,10 +1633,23 @@ def perform_analysis(input_dir, output_log, options, callbacks):
     _progress(100); end_time = time.time(); duration = end_time - start_time
     write_log_summary(output_log, abs_input_dir, options, trail_analysis_config, trail_errors, all_results_list, selection_stats, skipped_marker_dirs_count)
     try:
-        with open(output_log, 'a', encoding='utf-8') as log_file: 
+        with open(output_log, 'a', encoding='utf-8') as log_file:
             log_file.write(f"\nDurée totale de l'analyse: {duration:.2f} secondes\n")
             log_file.write("="*80 + "\nFin du log.\n")
     except IOError: pass # Ignorer si erreur ici, le principal est déjà écrit
-    
+
+    csv_path = os.path.join(os.path.dirname(output_log), 'telescopes_pollution.csv')
+    try:
+        write_telescope_pollution_csv(csv_path, all_results_list, bortle_dataset if options.get('use_bortle') else None)
+        _log('logic_info_prefix', text=f"CSV pollution écrit: {os.path.basename(csv_path)}")
+    except Exception as csv_e:
+        _log('logic_error_prefix', text=f"Erreur écriture CSV pollution: {csv_e}")
+
+    if bortle_dataset:
+        try:
+            bortle_dataset.close()
+        except Exception:
+            pass
+
     _status("status_analysis_done") # Statut final générique
     return all_results_list
