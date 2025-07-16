@@ -158,13 +158,18 @@ class SettingsManager:
                     )
                 ),
             ).get()
-            self.stack_final_combine = getattr(
-                gui_instance,
-                "stack_final_combine_var",
-                tk.StringVar(
-                    value=default_values_from_code.get("stack_final_combine", "mean")
-                ),
-            ).get()
+            if getattr(gui_instance, "reproject_between_batches_var", tk.BooleanVar()).get():
+                self.stack_final_combine = "reproject"
+            elif getattr(gui_instance, "reproject_coadd_var", tk.BooleanVar()).get():
+                self.stack_final_combine = "reproject_coadd"
+            else:
+                self.stack_final_combine = getattr(
+                    gui_instance,
+                    "stack_final_combine_var",
+                    tk.StringVar(
+                        value=default_values_from_code.get("stack_final_combine", "reproject_coadd")
+                    ),
+                ).get()
             self.stack_method = getattr(
                 gui_instance,
                 "stack_method_var",
@@ -1223,7 +1228,8 @@ class SettingsManager:
         defaults_dict["stack_kappa_low"] = 3.0
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
-        defaults_dict["stack_final_combine"] = "mean"
+        # Default to Reproject & Coadd for final combine
+        defaults_dict["stack_final_combine"] = "reproject_coadd"
         defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
@@ -1328,7 +1334,8 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
-        defaults_dict["reproject_coadd_final"] = False
+        # Default to "Reproject & Coadd" for the final combine option
+        defaults_dict["reproject_coadd_final"] = True
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {
@@ -1479,14 +1486,17 @@ class SettingsManager:
                 self.stack_final_combine = "median"
                 self.stack_reject_algo = "none"
             elif self.stack_method == "kappa_sigma":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "kappa_sigma"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
             elif self.stack_method == "winsorized_sigma_clip":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "winsorized_sigma_clip"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
             elif self.stack_method == "linear_fit_clip":
-                self.stack_final_combine = "mean"
                 self.stack_reject_algo = "linear_fit_clip"
+                if self.stack_final_combine not in ["reproject", "reproject_coadd"]:
+                    self.stack_final_combine = "mean"
 
             valid_norm_methods = ["none", "linear_fit", "sky_mean"]
             self.stack_norm_method = str(
@@ -1604,7 +1614,13 @@ class SettingsManager:
                 parsed = defaults_fallback["stack_winsor_limits"]
             self.stack_winsor_limits = parsed
 
-            valid_combine = ["mean", "median", "winsorized_sigma_clip"]
+            valid_combine = [
+                "mean",
+                "median",
+                "winsorized_sigma_clip",
+                "reproject",
+                "reproject_coadd",
+            ]
             self.stack_final_combine = str(
                 getattr(
                     self,
@@ -1617,6 +1633,14 @@ class SettingsManager:
                     f"Méthode de combinaison finale invalide ('{self.stack_final_combine}'), réinitialisée à '{defaults_fallback['stack_final_combine']}'"
                 )
                 self.stack_final_combine = defaults_fallback["stack_final_combine"]
+            if self.stack_final_combine == "reproject":
+                self.reproject_between_batches = True
+                self.reproject_coadd_final = False
+                self.stack_final_combine = "reproject"
+            elif self.stack_final_combine == "reproject_coadd":
+                self.reproject_between_batches = False
+                self.reproject_coadd_final = True
+                self.stack_final_combine = "reproject_coadd"
 
             # --- Quality Weighting Validation ---
             # ... (inchangé) ...
