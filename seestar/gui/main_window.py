@@ -717,8 +717,6 @@ class SeestarStackerGUI:
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
 
-
-
         except tk.TclError:
             # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
             pass
@@ -1081,7 +1079,6 @@ class SeestarStackerGUI:
         temp_entry = ttk.Entry(temp_frame, textvariable=self.temp_folder_path, width=42)
         temp_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
 
-
         crop_frame = ttk.Frame(tab_stacking)
         crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         self.crop_master_check = ttk.Checkbutton(
@@ -1094,9 +1091,7 @@ class SeestarStackerGUI:
         ttk.Label(
             crop_frame,
             text=self.tr("crop_percent_side_label", default="Crop % per side"),
-        ).grid(
-            row=0, column=1, sticky=tk.W, padx=(10, 2)
-        )
+        ).grid(row=0, column=1, sticky=tk.W, padx=(10, 2))
         self.master_tile_crop_spinbox = ttk.Spinbox(
             crop_frame,
             from_=0.0,
@@ -1206,8 +1201,7 @@ class SeestarStackerGUI:
         self.stack_final_combo.bind("<<ComboboxSelected>>", self._on_final_combo_change)
 
         self.hq_ram_limit_label_widget = tk.Label(
-            final_frame,
-            text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
+            final_frame, text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
         )
         self.hq_ram_limit_label_widget.pack(side=tk.LEFT, padx=(10, 2))
         self.hq_ram_limit_spinbox = tk.Spinbox(
@@ -1274,7 +1268,8 @@ class SeestarStackerGUI:
         else:
             self.stack_final_display_var.set(
                 self.final_key_to_label.get(
-                    self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+                    self.stack_final_combine_var.get(),
+                    self.stack_final_combine_var.get(),
                 )
             )
 
@@ -1592,7 +1587,10 @@ class SeestarStackerGUI:
 
         self.apply_batch_feathering_check = ttk.Checkbutton(
             expert_content_frame,
-            text=self.tr("feather_inter_batch_label", default="Feather inter-batch (radial blend)"),
+            text=self.tr(
+                "feather_inter_batch_label",
+                default="Feather inter-batch (radial blend)",
+            ),
             variable=self.apply_batch_feathering_var,
             command=self._on_apply_batch_feathering_changed,
         )
@@ -1686,7 +1684,9 @@ class SeestarStackerGUI:
             variable=self.apply_bn_var,
             command=self._update_bn_options_state,
         )
-        self.apply_bn_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
+        self.apply_bn_check.grid(
+            row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3)
+        )
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text="Grid Size:")
         self.bn_grid_size_actual_label.grid(
             row=1, column=0, sticky=tk.W, padx=2, pady=2
@@ -1780,7 +1780,9 @@ class SeestarStackerGUI:
             variable=self.apply_cb_var,
             command=self._update_cb_options_state,
         )
-        self.apply_cb_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
+        self.apply_cb_check.grid(
+            row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3)
+        )
         self.cb_border_size_actual_label = ttk.Label(
             self.cb_frame, text="Border Size (px):"
         )
@@ -3855,9 +3857,13 @@ class SeestarStackerGUI:
                 self.apply_cb_var.set(default_settings.apply_cb)
 
             if hasattr(self, "apply_master_tile_crop_var"):
-                self.apply_master_tile_crop_var.set(default_settings.apply_master_tile_crop)
+                self.apply_master_tile_crop_var.set(
+                    default_settings.apply_master_tile_crop
+                )
             if hasattr(self, "master_tile_crop_percent_var"):
-                self.master_tile_crop_percent_var.set(default_settings.master_tile_crop_percent)
+                self.master_tile_crop_percent_var.set(
+                    default_settings.master_tile_crop_percent
+                )
 
             # Rognage Final
             if hasattr(self, "final_edge_crop_percent_var"):
@@ -4268,23 +4274,23 @@ class SeestarStackerGUI:
 
         try:
             print("  [RefreshPreview] Calling preview_manager.update_preview...")
-            processed_pil_image, _ = (
-                self.preview_manager.update_preview(
-                    self.current_preview_data,
-                    preview_params,
-                    stack_count=self.preview_img_count,
-                    total_images=self.preview_total_imgs,
-                    current_batch=self.preview_current_batch,
-                    total_batches=self.preview_total_batches,
-                )
+            processed_pil_image, _ = self.preview_manager.update_preview(
+                self.current_preview_data,
+                preview_params,
+                stack_count=self.preview_img_count,
+                total_images=self.preview_total_imgs,
+                current_batch=self.preview_current_batch,
+                total_batches=self.preview_total_batches,
             )
 
             if self.current_preview_hist_data is not None:
-                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
-                    self.current_preview_hist_data.copy(),
-                    r=preview_params["r_gain"],
-                    g=preview_params["g_gain"],
-                    b=preview_params["b_gain"],
+                data_for_histogram_analysis = (
+                    self.preview_manager.color_correction.white_balance(
+                        self.current_preview_hist_data.copy(),
+                        r=preview_params["r_gain"],
+                        g=preview_params["g_gain"],
+                        b=preview_params["b_gain"],
+                    )
                 )
             else:
                 data_for_histogram_analysis = None
@@ -5891,7 +5897,9 @@ class SeestarStackerGUI:
                 )
                 data_final = cosmetic_01_data_for_preview_from_backend
                 header_final = (
-                    final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
+                    final_header_for_ui_preview
+                    if final_header_for_ui_preview
+                    else fits.Header()
                 )
             elif final_stack_path and os.path.exists(final_stack_path):
                 try:
@@ -6534,7 +6542,6 @@ class SeestarStackerGUI:
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def _prepare_single_batch_if_needed(self) -> bool:
-
         """Check for ``stack_plan.csv`` when ``batch_size`` equals 1.
 
         Files from the CSV are queued in order and winsorized–sigma clipping is
@@ -6578,7 +6585,9 @@ class SeestarStackerGUI:
             file_idx = header.index("file_path")
             data_rows = rows[1:]
         else:
-            has_header = any(h in {"order", "file", "filename", "path", "index"} for h in header)
+            has_header = any(
+                h in {"order", "file", "filename", "path", "index"} for h in header
+            )
             if has_header:
                 data_rows = rows[1:]
 
@@ -6594,7 +6603,14 @@ class SeestarStackerGUI:
                 if cell.isdigit() and len(row) > 1:
                     cell = row[1].strip()
 
-            if not cell or cell.lower() in {"order", "file", "filename", "path", "index", "file_path"}:
+            if not cell or cell.lower() in {
+                "order",
+                "file",
+                "filename",
+                "path",
+                "index",
+                "file_path",
+            }:
                 continue
 
             if not os.path.isabs(cell):
@@ -6646,6 +6662,10 @@ class SeestarStackerGUI:
                 )
             else:
                 self.queued_stacker.total_batches_estimated = 0
+
+        # Mark queue as pre-populated to avoid re-scanning
+        if hasattr(self.queued_stacker, "queue_prepared"):
+            self.queued_stacker.queue_prepared = True
 
         return True
 
@@ -6777,7 +6797,9 @@ class SeestarStackerGUI:
             solver_pref = getattr(self.settings, "local_solver_preference", "none")
             astap_path = getattr(self.settings, "astap_path", "").strip()
             ansvr_path = getattr(self.settings, "local_ansvr_path", "").strip()
-            astrometry_dir = getattr(self.settings, "astrometry_solve_field_dir", "").strip()
+            astrometry_dir = getattr(
+                self.settings, "astrometry_solve_field_dir", ""
+            ).strip()
             api_key = getattr(self.settings, "astrometry_api_key", "").strip()
 
             solver_configured = False
@@ -6788,12 +6810,13 @@ class SeestarStackerGUI:
             elif solver_pref == "astrometry":
                 solver_configured = bool(astrometry_dir or api_key)
             else:
-                solver_configured = any([astap_path, ansvr_path, astrometry_dir, api_key])
+                solver_configured = any(
+                    [astap_path, ansvr_path, astrometry_dir, api_key]
+                )
 
             if not (use_solver and solver_configured):
                 messagebox.showerror(
-                    self.tr("error"),
-                    self.tr("reproject_solver_required_error")
+                    self.tr("error"), self.tr("reproject_solver_required_error")
                 )
                 if hasattr(self, "start_button") and self.start_button.winfo_exists():
                     self.start_button.config(state=tk.NORMAL)
@@ -6872,7 +6895,9 @@ class SeestarStackerGUI:
         if special_single:
             self.batch_size.set(self.settings.batch_size)
             self.stacking_mode.set(self.settings.stacking_mode)
-            self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+            self.reproject_between_batches_var.set(
+                self.settings.reproject_between_batches
+            )
             self.use_drizzle_var.set(self.settings.use_drizzle)
 
         # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
