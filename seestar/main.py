@@ -410,10 +410,19 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing as _mp
+    # Ensure a safe start method on Windows and frozen executables
+    try:
+        _mp.freeze_support()
+        _mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        # Start method was already set elsewhere
+        pass
     try:
         main()
-    except SystemExit: pass
-    except Exception as e_fatal: 
+    except SystemExit:
+        pass
+    except Exception as e_fatal:
         print(f"\n--- ERREUR FATALE NON INTERCEPTÉE ---"); print(f"Erreur critique dans main():"); print(f"Type: {type(e_fatal).__name__}"); print(f"Erreur: {e_fatal}")
         print("\n--- Traceback ---"); traceback.print_exc(); print("-" * 30)
         try: input("Appuyez sur Entrée pour quitter...")

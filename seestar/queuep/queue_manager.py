@@ -904,10 +904,12 @@ class SeestarQueuedStacker:
         # picklable via ``__getstate__``/``__setstate__`` so we can always rely
         # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
         # platform.
+        ctx = multiprocessing.get_context("spawn")
         Executor = ProcessPoolExecutor
 
         self.drizzle_executor = Executor(
             max_workers=max(1, self.num_threads // 2),
+            mp_context=ctx,
         )
         # Persistent pool for quality metric computation
         q_fraction = 0.75
@@ -917,7 +919,8 @@ class SeestarQueuedStacker:
             except Exception:
                 q_fraction = 0.75
         self.quality_executor = ProcessPoolExecutor(
-            max_workers=_suggest_pool_size(q_fraction)
+            max_workers=_suggest_pool_size(q_fraction),
+            mp_context=ctx,
         )
         logger.debug(
             "Quality pool started with %d workers", self.quality_executor._max_workers
@@ -2891,7 +2894,11 @@ class SeestarQueuedStacker:
             or getattr(self.quality_executor, "_shutdown", False)
         ):
             max_workers = _suggest_pool_size(0.75)
-            self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
+            ctx = multiprocessing.get_context("spawn")
+            self.quality_executor = ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=ctx,
+            )
             logger.debug("Quality pool (re)started with %d workers", max_workers)
         return self.quality_executor
 
