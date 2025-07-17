@@ -6534,12 +6534,14 @@ class SeestarStackerGUI:
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def _prepare_single_batch_if_needed(self) -> bool:
+
         """Check for ``stack_plan.csv`` when ``batch_size`` equals 1.
 
         Files from the CSV are queued in order and winsorized–sigma clipping is
         forced while drizzle and reprojection are disabled. The entire sequence
         is then stacked as one batch. Missing CSV falls back to multi-batch
         behaviour. Returns ``True`` when this special mode activates.
+
         """
 
         if getattr(self.settings, "batch_size", 0) != 1:
