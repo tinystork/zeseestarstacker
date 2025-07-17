@@ -1350,7 +1350,7 @@ class SeestarStackerGUI:
         self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
         self.batch_spinbox = ttk.Spinbox(
             batch_frame,
-            from_=3,
+            from_=1,
             to=500,
             increment=1,
             textvariable=self.batch_size,
