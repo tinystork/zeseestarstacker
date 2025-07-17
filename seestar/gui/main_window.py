@@ -1350,8 +1350,8 @@ class SeestarStackerGUI:
         self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
         self.batch_spinbox = ttk.Spinbox(
             batch_frame,
-            from_=1,
-            to=500,
+            from_=0,
+            to=9999,
             increment=1,
             textvariable=self.batch_size,
             width=5,
@@ -6534,19 +6534,19 @@ class SeestarStackerGUI:
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
     def _prepare_single_batch_if_needed(self) -> bool:
-        """Check for zenalakyser CSV when ``batch_size`` equals 1.
+        """Check for ``stack_plan.csv`` when ``batch_size`` equals 1.
 
-        If a ``zenalakyser_order.csv`` file is found, the listed images are
-        queued in that order and parameters are forced so the entire sequence is
-        stacked as one batch using winsorized–sigma clipping. Missing CSV
-        simply falls back to the standard multi-batch behaviour.
+        Files from the CSV are queued in order and winsorized–sigma clipping is
+        forced while drizzle and reprojection are disabled. The entire sequence
+        is then stacked as one batch. Missing CSV falls back to multi-batch
+        behaviour. Returns ``True`` when this special mode activates.
         """
 
         if getattr(self.settings, "batch_size", 0) != 1:
             return False
 
         csv_path = getattr(self.settings, "order_csv_path", "") or os.path.join(
-            self.settings.input_folder, "zenalakyser_order.csv"
+            self.settings.input_folder, "stack_plan.csv"
         )
 
         if not os.path.isfile(csv_path):
@@ -6556,7 +6556,7 @@ class SeestarStackerGUI:
             return False
 
         self.logger.info(
-            f"Zenalakyser CSV detected at '{csv_path}'. Preparing single batch"
+            f"Stack plan CSV detected at '{csv_path}'. Preparing single batch"
         )
 
         ordered_files: list[str] = []
@@ -6565,12 +6565,12 @@ class SeestarStackerGUI:
             for row in reader:
                 if not row:
                     continue
-                fp = row[0].strip()
-                if not fp:
+                cell = row[0].strip()
+                if not cell or cell.lower() in {"order", "file", "filename", "path", "index"}:
                     continue
-                if not os.path.isabs(fp):
-                    fp = os.path.join(self.settings.input_folder, fp)
-                ordered_files.append(os.path.abspath(fp))
+                if not os.path.isabs(cell):
+                    cell = os.path.join(self.settings.input_folder, cell)
+                ordered_files.append(os.path.abspath(cell))
 
         missing = [p for p in ordered_files if not os.path.isfile(p)]
         if missing:
@@ -6738,13 +6738,6 @@ class SeestarStackerGUI:
             "DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable)."
         )
 
-        special_single = self._prepare_single_batch_if_needed()
-        if special_single:
-            self.batch_size.set(self.settings.batch_size)
-            self.stacking_mode.set(self.settings.stacking_mode)
-            self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
-            self.use_drizzle_var.set(self.settings.use_drizzle)
-
         # --- Additional check: reproject modes require a configured local solver ---
         if (
             self.reproject_between_batches_var.get()
@@ -6844,6 +6837,13 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés."
         )
+
+        special_single = self._prepare_single_batch_if_needed()
+        if special_single:
+            self.batch_size.set(self.settings.batch_size)
+            self.stacking_mode.set(self.settings.stacking_mode)
+            self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+            self.use_drizzle_var.set(self.settings.use_drizzle)
 
         # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
         print(
