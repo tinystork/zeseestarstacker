@@ -6565,25 +6565,42 @@ class SeestarStackerGUI:
 
         ordered_files: list[str] = []
         with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if not row:
+            rows = list(csv.reader(f))
+        if not rows:
+            self.logger.warning("Stack plan CSV is empty")
+            return False
+
+        header = [c.strip().lower() for c in rows[0]]
+        file_idx = None
+        data_rows = rows
+
+        if "file_path" in header:
+            file_idx = header.index("file_path")
+            data_rows = rows[1:]
+        else:
+            has_header = any(h in {"order", "file", "filename", "path", "index"} for h in header)
+            if has_header:
+                data_rows = rows[1:]
+
+        for row in data_rows:
+            if not row:
+                continue
+            if file_idx is not None:
+                if len(row) <= file_idx:
                     continue
+                cell = row[file_idx].strip()
+            else:
                 cell = row[0].strip()
-                # When the CSV includes an index column (e.g. "1,filename"),
-                # treat the second column as the filepath. This prevents
-                # misinterpreting the numeric index as a filename which would
-                # trigger a FileNotFoundError.
                 if cell.isdigit() and len(row) > 1:
                     cell = row[1].strip()
 
-                if not cell or cell.lower() in {"order", "file", "filename", "path", "index"}:
-                    continue
+            if not cell or cell.lower() in {"order", "file", "filename", "path", "index", "file_path"}:
+                continue
 
-                if not os.path.isabs(cell):
-                    cell = os.path.join(self.settings.input_folder, cell)
+            if not os.path.isabs(cell):
+                cell = os.path.join(self.settings.input_folder, cell)
 
-                ordered_files.append(os.path.abspath(cell))
+            ordered_files.append(os.path.abspath(cell))
 
         missing = [p for p in ordered_files if not os.path.isfile(p)]
         if missing:
