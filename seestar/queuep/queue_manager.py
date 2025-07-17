@@ -2898,21 +2898,37 @@ class SeestarQueuedStacker:
     ################################################################################################################################################
 
     def _calculate_quality_metrics(self, image_data):
-        """Calculate SNR and star count using a separate process."""
+        """Calculate SNR and star count using a separate process.
+
+        Large arrays can cause issues when serialized for a ``ProcessPoolExecutor``
+        under Windows.  To avoid this, very large images (``>32 MB``) or runs with
+        ``batch_size == 1`` are processed in the current process instead of being
+        sent to the worker pool.
+        """
+
         if image_data is None:
             return {"snr": 0.0, "stars": 0.0}
 
         try:
-            if hasattr(self, "_get_quality_executor"):
-                executor = self._get_quality_executor()
-            else:
-                executor = self.quality_executor
-            future = executor.submit(_quality_metrics_worker, image_data)
-            scores, star_msg, num_stars = future.result()
-            if getattr(executor, "_max_workers", 1) == 1:
+            use_executor = (
+                getattr(self, "batch_size", 0) != 1
+                and image_data.nbytes <= 32 * 1024 * 1024
+            )
 
-                for _ in range(8):
-                    _quality_metrics_worker(image_data)
+            if use_executor:
+                executor = (
+                    self._get_quality_executor()
+                    if hasattr(self, "_get_quality_executor")
+                    else self.quality_executor
+                )
+                future = executor.submit(_quality_metrics_worker, image_data)
+                scores, star_msg, num_stars = future.result()
+                if getattr(executor, "_max_workers", 1) == 1:
+                    for _ in range(8):
+                        _quality_metrics_worker(image_data)
+            else:
+                # Fallback to in-process computation for large arrays
+                scores, star_msg, num_stars = _quality_metrics_worker(image_data)
 
         except Exception as e:
             self.update_progress(
