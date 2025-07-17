@@ -8,6 +8,7 @@ import gc
 import logging
 import math
 import os
+import csv
 import platform  # NOUVEL import
 import subprocess  # NOUVEL import
 
@@ -1349,7 +1350,7 @@ class SeestarStackerGUI:
         self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
         self.batch_spinbox = ttk.Spinbox(
             batch_frame,
-            from_=3,
+            from_=1,
             to=500,
             increment=1,
             textvariable=self.batch_size,
@@ -6532,6 +6533,92 @@ class SeestarStackerGUI:
 
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
+    def _prepare_single_batch_if_needed(self) -> bool:
+        """Check for zenalakyser CSV when ``batch_size`` equals 1.
+
+        If a ``zenalakyser_order.csv`` file is found, the listed images are
+        queued in that order and parameters are forced so the entire sequence is
+        stacked as one batch using winsorized–sigma clipping. Missing CSV
+        simply falls back to the standard multi-batch behaviour.
+        """
+
+        if getattr(self.settings, "batch_size", 0) != 1:
+            return False
+
+        csv_path = getattr(self.settings, "order_csv_path", "") or os.path.join(
+            self.settings.input_folder, "zenalakyser_order.csv"
+        )
+
+        if not os.path.isfile(csv_path):
+            self.logger.warning(
+                "Batch size 1 without CSV – reverting to normal behaviour"
+            )
+            return False
+
+        self.logger.info(
+            f"Zenalakyser CSV detected at '{csv_path}'. Preparing single batch"
+        )
+
+        ordered_files: list[str] = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                fp = row[0].strip()
+                if not fp:
+                    continue
+                if not os.path.isabs(fp):
+                    fp = os.path.join(self.settings.input_folder, fp)
+                ordered_files.append(os.path.abspath(fp))
+
+        missing = [p for p in ordered_files if not os.path.isfile(p)]
+        if missing:
+            raise FileNotFoundError(missing[0])
+
+        if self.settings.stacking_mode != "winsorized-sigma":
+            self.logger.info("stacking_mode -> winsorized-sigma")
+        self.settings.stacking_mode = "winsorized-sigma"
+
+        if getattr(self.settings, "reproject_between_batches", False):
+            self.logger.info("reproject_between_batches -> False")
+        self.settings.reproject_between_batches = False
+
+        if getattr(self.settings, "use_drizzle", False):
+            self.logger.info("use_drizzle -> False")
+        self.settings.use_drizzle = False
+
+        self.settings.batch_size = len(ordered_files)
+        self.logger.info(f"batch_size -> {self.settings.batch_size}")
+
+        from queue import Queue
+
+        self.queued_stacker.queue = Queue()
+        self.queued_stacker.processed_files = set()
+        self.queued_stacker.files_in_queue = 0
+        self.queued_stacker.all_input_filepaths = []
+
+        for fp in ordered_files:
+            self.queued_stacker.queue.put(fp)
+            self.queued_stacker.processed_files.add(fp)
+            self.queued_stacker.files_in_queue += 1
+            self.queued_stacker.all_input_filepaths.append(fp)
+
+        self.queued_stacker.batch_size = self.settings.batch_size
+        if hasattr(self.queued_stacker, "_recalculate_total_batches"):
+            self.queued_stacker._recalculate_total_batches()
+        else:
+            import math
+
+            if self.settings.batch_size > 0:
+                self.queued_stacker.total_batches_estimated = math.ceil(
+                    self.queued_stacker.files_in_queue / self.settings.batch_size
+                )
+            else:
+                self.queued_stacker.total_batches_estimated = 0
+
+        return True
+
     def start_processing(self):
         """
         Démarre le traitement. Ordre crucial pour la gestion des paramètres :
@@ -6650,6 +6737,13 @@ class SeestarStackerGUI:
         print(
             "DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable)."
         )
+
+        special_single = self._prepare_single_batch_if_needed()
+        if special_single:
+            self.batch_size.set(self.settings.batch_size)
+            self.stacking_mode.set(self.settings.stacking_mode)
+            self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+            self.use_drizzle_var.set(self.settings.use_drizzle)
 
         # --- Additional check: reproject modes require a configured local solver ---
         if (
