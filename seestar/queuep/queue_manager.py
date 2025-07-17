@@ -59,9 +59,11 @@ from typing import Literal, List, Tuple
 import astroalign as aa
 import cv2
 import numpy as np
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
+
     def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
         Y, X = np.ogrid[:h, :w]
         cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
@@ -74,6 +76,8 @@ except Exception:
             1.0,
         )
         return w_map
+
+
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from astropy.coordinates import concatenate as skycoord_concatenate
@@ -162,7 +166,6 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
-
     """Reproject a FITS image onto ``ref_wcs_header``.
 
     The input file's WCS is read from its header so that reprojection is
@@ -1009,6 +1012,9 @@ class SeestarQueuedStacker:
         self._current_batch_paths = []
         self.batch_count_path = None
         self._resume_requested = False
+
+        # Flag indicating the queue was pre-populated externally
+        self.queue_prepared = False
 
         # Master arrays when combining batches with incremental reprojection
         self.master_sum = None
@@ -2564,13 +2570,11 @@ class SeestarQueuedStacker:
             final canvas size similar to ZeMosaic's behaviour.
         """
 
-
         if self.freeze_reference_wcs and self.reference_wcs_object is not None:
             return self.reference_wcs_object, (
                 int(self.reference_header_for_wcs["NAXIS2"]),
                 int(self.reference_header_for_wcs["NAXIS1"]),
             )
-
 
         num_wcs = len(all_input_wcs_list)
         logger.debug(
@@ -2701,8 +2705,6 @@ class SeestarQueuedStacker:
                 target_res_deg_per_pix,
             )
 
-
-
         return out_wcs, out_shape_hw
 
     ###########################################################################################################################################################
@@ -2807,7 +2809,9 @@ class SeestarQueuedStacker:
                 ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
                     wcs_list,
                     header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
                     auto_rotate=True,
                 )
             elif len(wcs_list) == 1:
@@ -2817,7 +2821,9 @@ class SeestarQueuedStacker:
                 ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
                     wcs_list,
                     header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
                     auto_rotate=True,
                 )
                 if ref_wcs is None:
@@ -2886,9 +2892,8 @@ class SeestarQueuedStacker:
 
     def _get_quality_executor(self) -> ProcessPoolExecutor:
         """Return a valid executor for quality metrics."""
-        if (
-            getattr(self, "quality_executor", None) is None
-            or getattr(self.quality_executor, "_shutdown", False)
+        if getattr(self, "quality_executor", None) is None or getattr(
+            self.quality_executor, "_shutdown", False
         ):
             max_workers = _suggest_pool_size(0.75)
             self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
@@ -3145,9 +3150,8 @@ class SeestarQueuedStacker:
                             f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence."
                         )
 
-            if (
-                (not files_for_ref_scan or not folder_for_ref_scan)
-                and getattr(self, "use_batch_plan", False)
+            if (not files_for_ref_scan or not folder_for_ref_scan) and getattr(
+                self, "use_batch_plan", False
             ):
                 plan_path = os.path.join(self.current_folder, "stack_plan.csv")
                 if os.path.isfile(plan_path):
@@ -3900,7 +3904,10 @@ class SeestarQueuedStacker:
 
                                         # 3. Accumulate if astrometric solve succeeded or not reprojecting
                                         if (
-                                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                                            not (
+                                                self.reproject_between_batches
+                                                or self.reproject_coadd_final
+                                            )
                                             or self._last_classic_batch_solved
                                         ):
                                             self._combine_batch_result(
@@ -3976,18 +3983,28 @@ class SeestarQueuedStacker:
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'."
                                     )
                                     try:
-                                        sig = inspect.signature(self._save_drizzle_input_temp)
+                                        sig = inspect.signature(
+                                            self._save_drizzle_input_temp
+                                        )
                                         if len(sig.parameters) >= 3:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig, matrix_M_val
+                                            temp_driz_file_path = (
+                                                self._save_drizzle_input_temp(
+                                                    aligned_data,
+                                                    header_orig,
+                                                    matrix_M_val,
+                                                )
                                             )
                                         else:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig
+                                            temp_driz_file_path = (
+                                                self._save_drizzle_input_temp(
+                                                    aligned_data, header_orig
+                                                )
                                             )
                                     except Exception:
-                                        temp_driz_file_path = self._save_drizzle_input_temp(
-                                            aligned_data, header_orig, matrix_M_val
+                                        temp_driz_file_path = (
+                                            self._save_drizzle_input_temp(
+                                                aligned_data, header_orig, matrix_M_val
+                                            )
                                         )
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(
@@ -4432,7 +4449,10 @@ class SeestarQueuedStacker:
                             batch_wcs = None
 
                         if (
-                            not (self.reproject_between_batches or self.reproject_coadd_final)
+                            not (
+                                self.reproject_between_batches
+                                or self.reproject_coadd_final
+                            )
                             or self._last_classic_batch_solved
                         ):
                             self._combine_batch_result(
@@ -5872,7 +5892,6 @@ class SeestarQueuedStacker:
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
-
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
                     prepared_img_after_initial_proc,
@@ -6537,7 +6556,6 @@ class SeestarQueuedStacker:
         return ref_img, ref_hdr
 
     ##############################################################################################################################################
-
 
     def _process_incremental_drizzle_batch(
         self,
@@ -7804,8 +7822,12 @@ class SeestarQueuedStacker:
                 batch_wht = batch_wht.reshape(self.memmap_shape[:2])
 
             mask = batch_wht > 0
-            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[mask]
-            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[mask]
+            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[
+                mask
+            ]
+            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[
+                mask
+            ]
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
@@ -8356,10 +8378,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "winsorized sigma clip"
@@ -8382,10 +8403,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "kappa sigma"
@@ -8406,10 +8426,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "linear fit clip"
@@ -8427,10 +8446,9 @@ class SeestarQueuedStacker:
                 )
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "median"
@@ -8477,15 +8495,17 @@ class SeestarQueuedStacker:
                 batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
-                    if (
-                        not hasattr(self, "_radial_w_base")
-                        or self._radial_w_base.shape != (h, w)
-                    ):
+                    if not hasattr(
+                        self, "_radial_w_base"
+                    ) or self._radial_w_base.shape != (h, w):
                         self._radial_w_base = make_radial_weight_map(h, w)
                     batch_coverage_map_2d *= self._radial_w_base
 
                 stack_note = f"mean ({max_workers} threads)"
-            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
+            if (
+                self.reference_header_for_wcs is not None
+                and not self.reproject_coadd_final
+            ):
                 stack_info_header = self.reference_header_for_wcs.copy()
             else:
                 stack_info_header = fits.Header()
@@ -8924,15 +8944,11 @@ class SeestarQueuedStacker:
             "use_radec_hints": getattr(self, "use_radec_hints", False),
         }
 
-
         # In Reproject & Coadd mode we now forward the user configured ASTAP
         # options without forcing a blind search or RA/DEC hints.  This mirrors
         # the simpler invocation used in ZeMosaic.
 
-
-        self.update_progress(
-            f"   [Solver] Solve {os.path.basename(fits_path)}…"
-        )
+        self.update_progress(f"   [Solver] Solve {os.path.basename(fits_path)}…")
         if self.astrometry_solver:
             wcs = self.astrometry_solver.solve(
                 fits_path,
@@ -9265,7 +9281,10 @@ class SeestarQueuedStacker:
                     float(header["CRVAL1"]),
                     "[deg] Approx pointing RA from WCS",
                 )
-            elif getattr(self, "reference_header_for_wcs", None) is not None and "RA" in self.reference_header_for_wcs:
+            elif (
+                getattr(self, "reference_header_for_wcs", None) is not None
+                and "RA" in self.reference_header_for_wcs
+            ):
                 header["RA"] = (
                     float(self.reference_header_for_wcs["RA"]),
                     (
@@ -9280,7 +9299,10 @@ class SeestarQueuedStacker:
                     float(header["CRVAL2"]),
                     "[deg] Approx pointing DEC from WCS",
                 )
-            elif getattr(self, "reference_header_for_wcs", None) is not None and "DEC" in self.reference_header_for_wcs:
+            elif (
+                getattr(self, "reference_header_for_wcs", None) is not None
+                and "DEC" in self.reference_header_for_wcs
+            ):
                 header["DEC"] = (
                     float(self.reference_header_for_wcs["DEC"]),
                     (
@@ -9393,7 +9415,10 @@ class SeestarQueuedStacker:
                     self._last_classic_batch_solved = False
                     return None, None
         else:
-            if self.reference_header_for_wcs is not None and not self.reproject_coadd_final:
+            if (
+                self.reference_header_for_wcs is not None
+                and not self.reproject_coadd_final
+            ):
                 if (
                     input_wcs is not None
                     and self.reference_wcs_object is not None
@@ -9635,9 +9660,7 @@ class SeestarQueuedStacker:
             )
             from seestar.core.reprojection import reproject_to_reference_wcs
         except Exception as e:
-            self.update_progress(
-                f"⚠️ Outils de reprojection indisponibles: {e}", "WARN"
-            )
+            self.update_progress(f"⚠️ Outils de reprojection indisponibles: {e}", "WARN")
             return False
 
         data_pairs = []
@@ -9761,7 +9784,9 @@ class SeestarQueuedStacker:
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
 
-        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(data_hwc, cov_hw, out_wcs)
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
+            data_hwc, cov_hw, out_wcs
+        )
 
         if (
             self.reference_wcs_object is not None
@@ -9799,6 +9824,7 @@ class SeestarQueuedStacker:
             preserve_linear_output=True,
         )
         return True
+
     def _finalize_single_classic_batch(self, batch_file_tuple):
         """Save the single stacked batch as the final stack."""
         sci_path, wht_paths = batch_file_tuple
@@ -10565,13 +10591,11 @@ class SeestarQueuedStacker:
                 # collapsing to all zeros.
                 effective_max = max(max_val, 1.0 / 65535.0)
                 scale = 65535.0 / effective_max
-                data_scaled_uint16 = (
-                    np.clip(raw_data, 0.0, None) * scale
-                ).astype(np.uint16)
-            else:
-                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(
+                data_scaled_uint16 = (np.clip(raw_data, 0.0, None) * scale).astype(
                     np.uint16
                 )
+            else:
+                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
             # Convertir en int16 décalé pour conformité FITS
             data_for_primary_hdu_save = (
                 data_scaled_uint16.astype(np.int32) - 32768
@@ -10899,7 +10923,9 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     f"⚠️ Erreur suppression dossier memmap ({os.path.basename(memmap_dir)}): {e}"
                 )
-        reproject_dir = os.path.join(self.temp_folder or self.output_folder, "reproject_memmap")
+        reproject_dir = os.path.join(
+            self.temp_folder or self.output_folder, "reproject_memmap"
+        )
         if os.path.isdir(reproject_dir):
             try:
                 shutil.rmtree(reproject_dir)
@@ -11191,7 +11217,9 @@ class SeestarQueuedStacker:
                 "ERROR",
             )
             return False
-        self.temp_folder = os.path.abspath(temp_folder) if temp_folder else self.output_folder
+        self.temp_folder = (
+            os.path.abspath(temp_folder) if temp_folder else self.output_folder
+        )
         try:
             os.makedirs(self.temp_folder, exist_ok=True)
         except Exception:
@@ -11524,12 +11552,9 @@ class SeestarQueuedStacker:
                     )
 
             plan_path = os.path.join(self.current_folder, "stack_plan.csv")
-            use_plan_for_ref = (
-                requested_batch_size <= 0 and os.path.isfile(plan_path)
-            )
-            if (
-                use_plan_for_ref
-                and (not current_folder_to_scan_for_shape or not files_in_folder_for_shape)
+            use_plan_for_ref = requested_batch_size <= 0 and os.path.isfile(plan_path)
+            if use_plan_for_ref and (
+                not current_folder_to_scan_for_shape or not files_in_folder_for_shape
             ):
                 try:
                     batches_for_ref = get_batches_from_stack_plan(
@@ -11879,9 +11904,20 @@ class SeestarQueuedStacker:
 
         plan_path = os.path.join(self.current_folder, "stack_plan.csv")
         use_plan = requested_batch_size <= 0 and os.path.isfile(plan_path)
-        if use_plan:
+
+        if getattr(self, "queue_prepared", False):
+            self.use_batch_plan = False
+            if self.total_batches_estimated <= 0:
+                self._recalculate_total_batches()
+            self.update_progress(
+                f"📋 {self.files_in_queue} fichiers initiaux prêts. Total lots estimé: {self.total_batches_estimated}"
+            )
+            self.queue_prepared = False
+        elif use_plan:
             self.use_batch_plan = True
-            batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
+            batches_from_plan = get_batches_from_stack_plan(
+                plan_path, self.current_folder
+            )
             logger.debug("Batching: using stacking plan from stack_plan.csv")
             self.batch_size = 999999999
             self.queue = Queue()
