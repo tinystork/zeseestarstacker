@@ -11440,7 +11440,7 @@ class SeestarQueuedStacker:
                 estimated_size = estimate_batch_size(
                     sample_image_path=sample_img_path_for_bsize
                 )
-                self.batch_size = max(3, estimated_size)
+                self.batch_size = max(1, estimated_size)
                 self.update_progress(
                     f"✅ Taille lot auto estimée et appliquée: {self.batch_size}", None
                 )
@@ -11451,7 +11451,7 @@ class SeestarQueuedStacker:
                 )
                 self.batch_size = 10
         else:
-            self.batch_size = max(3, int(requested_batch_size))
+            self.batch_size = max(1, int(requested_batch_size))
         self.update_progress(
             f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}"
         )
