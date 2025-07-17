@@ -1220,6 +1220,7 @@ class SettingsManager:
         defaults_dict["temp_folder"] = ""
         defaults_dict["bayer_pattern"] = "GRBG"
         defaults_dict["batch_size"] = 0
+        defaults_dict["order_csv_path"] = ""
         defaults_dict["stacking_mode"] = "kappa-sigma"
         defaults_dict["kappa"] = 2.5
         defaults_dict["stack_norm_method"] = "none"
@@ -2455,6 +2456,7 @@ class SettingsManager:
             "max_hq_mem_gb": float(self.max_hq_mem_gb),
             "stack_method": str(self.stack_method),
             "batch_size": int(self.batch_size),
+            "order_csv_path": str(getattr(self, "order_csv_path", "")),
             "correct_hot_pixels": bool(self.correct_hot_pixels),
             "hot_pixel_threshold": float(self.hot_pixel_threshold),
             "neighborhood_size": int(self.neighborhood_size),
