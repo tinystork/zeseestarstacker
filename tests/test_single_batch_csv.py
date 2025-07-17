@@ -58,3 +58,34 @@ def test_single_batch_csv(tmp_path):
     assert gui.settings.stacking_mode == "winsorized-sigma"
     assert gui.settings.batch_size == 3
     assert gui.queued_stacker.total_batches_estimated == 1
+
+
+def test_single_batch_csv_with_index(tmp_path):
+    files = []
+    for i in range(3):
+        fp = tmp_path / f"img{i}.fits"
+        fp.write_text("dummy")
+        files.append(fp)
+
+    csv_path = tmp_path / "stack_plan.csv"
+    lines = ["index,file"]
+    for i, f in enumerate(files, start=1):
+        lines.append(f"{i},{f.name}")
+    csv_path.write_text("\n".join(lines))
+
+    gui = SeestarStackerGUI.__new__(SeestarStackerGUI)
+    gui.logger = logging.getLogger("test")
+    gui.settings = types.SimpleNamespace(
+        input_folder=str(tmp_path),
+        batch_size=1,
+        stacking_mode="kappa-sigma",
+        reproject_between_batches=True,
+        use_drizzle=True,
+        order_csv_path="",
+    )
+    gui.queued_stacker = SeestarQueuedStacker()
+
+    activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
+    assert activated
+    assert gui.settings.batch_size == 3
+    assert gui.queued_stacker.total_batches_estimated == 1

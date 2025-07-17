@@ -6540,7 +6540,9 @@ class SeestarStackerGUI:
         Files from the CSV are queued in order and winsorized–sigma clipping is
         forced while drizzle and reprojection are disabled. The entire sequence
         is then stacked as one batch. Missing CSV falls back to multi-batch
-        behaviour. Returns ``True`` when this special mode activates.
+        behaviour. CSV files can optionally include an index column (``1,file``)
+        which will be ignored. Returns ``True`` when this special mode
+        activates.
 
         """
 
@@ -6568,10 +6570,19 @@ class SeestarStackerGUI:
                 if not row:
                     continue
                 cell = row[0].strip()
+                # When the CSV includes an index column (e.g. "1,filename"),
+                # treat the second column as the filepath. This prevents
+                # misinterpreting the numeric index as a filename which would
+                # trigger a FileNotFoundError.
+                if cell.isdigit() and len(row) > 1:
+                    cell = row[1].strip()
+
                 if not cell or cell.lower() in {"order", "file", "filename", "path", "index"}:
                     continue
+
                 if not os.path.isabs(cell):
                     cell = os.path.join(self.settings.input_folder, cell)
+
                 ordered_files.append(os.path.abspath(cell))
 
         missing = [p for p in ordered_files if not os.path.isfile(p)]
