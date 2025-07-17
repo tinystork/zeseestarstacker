@@ -37,7 +37,9 @@ def test_single_batch_csv(tmp_path):
         files.append(fp)
 
     csv_path = tmp_path / "stack_plan.csv"
-    csv_path.write_text("\n".join(f.name for f in files))
+
+    csv_path.write_text("order,file\n" + "\n".join(f.name for f in files))
+
 
     gui = SeestarStackerGUI.__new__(SeestarStackerGUI)
     gui.logger = logging.getLogger("test")
