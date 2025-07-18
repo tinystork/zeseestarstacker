@@ -11932,6 +11932,9 @@ class SeestarQueuedStacker:
                 self.queue = new_q
                 self.batch_size = 1
                 self.total_batches_estimated = self.files_in_queue
+
+                self.use_batch_plan = True
+
                 self.update_progress(
                     f"  -> Mode batch unique adapté: {self.total_batches_estimated} sous-lots"
                 )
