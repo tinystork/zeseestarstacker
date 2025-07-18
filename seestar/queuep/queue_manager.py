@@ -6351,13 +6351,57 @@ class SeestarQueuedStacker:
         self.update_progress(
             f"⚙️ Traitement classique du batch {progress_info_log} ({num_items_in_this_batch} images)..."
         )
-        (
-            stacked_batch_data_np,
-            stack_info_header,
-            batch_coverage_map_2d,
-        ) = self._stack_batch(
-            batch_items_to_stack, current_batch_num, total_batches_est
-        )
+
+        approx_item_bytes = None
+        if num_items_in_this_batch > 0:
+            img0, _hdr0, _s0, _wcs0, mask0 = batch_items_to_stack[0]
+            approx_item_bytes = img0.nbytes
+            if mask0 is not None:
+                approx_item_bytes += mask0.nbytes
+
+        chunk_size = num_items_in_this_batch
+        if (
+            approx_item_bytes
+            and getattr(self, "max_hq_mem", 0) > 0
+            and approx_item_bytes > 0
+        ):
+            safe_factor = 2
+            chunk_size = max(
+                1, int(getattr(self, "max_hq_mem", 0) // (approx_item_bytes * safe_factor))
+            )
+        if chunk_size < num_items_in_this_batch:
+            self.update_progress(
+                f"HQ combine : découpe en sous-lots de {chunk_size} pour limiter la RAM",
+                "INFO_DETAIL",
+            )
+        processed_chunks = 0
+        stacked_batch_data_np = None
+        stack_info_header = None
+        batch_coverage_map_2d = None
+        for start in range(0, num_items_in_this_batch, chunk_size):
+            sub_items = batch_items_to_stack[start : start + chunk_size]
+            (
+                chunk_stack,
+                chunk_hdr,
+                chunk_cov,
+            ) = self._stack_batch(
+                sub_items, current_batch_num, total_batches_est
+            )
+            if chunk_stack is None or chunk_cov is None:
+                continue
+            batch_wcs = None
+            try:
+                batch_wcs = WCS(chunk_hdr, naxis=2)
+            except Exception:
+                batch_wcs = None
+            self._combine_batch_result(chunk_stack, chunk_hdr, chunk_cov, batch_wcs)
+            stacked_batch_data_np = chunk_stack
+            stack_info_header = chunk_hdr
+            batch_coverage_map_2d = chunk_cov
+            processed_chunks += 1
+        if processed_chunks == 0:
+            stacked_batch_data_np = None
+            batch_coverage_map_2d = None
 
         if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
             if self.reproject_coadd_final:
