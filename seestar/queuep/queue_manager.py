@@ -11906,6 +11906,10 @@ class SeestarQueuedStacker:
         plan_path = os.path.join(self.current_folder, "stack_plan.csv")
         use_plan = requested_batch_size <= 0 and os.path.isfile(plan_path)
 
+        special_single_csv = (
+            requested_batch_size == 1 and os.path.isfile(plan_path)
+        )
+
         if getattr(self, "queue_prepared", False):
             self.use_batch_plan = False
             if self.total_batches_estimated <= 0:
@@ -11914,6 +11918,24 @@ class SeestarQueuedStacker:
                 f"📋 {self.files_in_queue} fichiers initiaux prêts. Total lots estimé: {self.total_batches_estimated}"
             )
             self.queue_prepared = False
+        elif special_single_csv:
+            self.use_batch_plan = True
+            batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
+            ordered_files = [os.path.abspath(fp) for batch in batches_from_plan for fp in batch]
+            self.queue = Queue()
+            self.files_in_queue = 0
+            self.all_input_filepaths = []
+            self.processed_files = set()
+            for fp in ordered_files:
+                self.queue.put(fp)
+                self.processed_files.add(fp)
+                self.files_in_queue += 1
+                self.all_input_filepaths.append(fp)
+            self.batch_size = len(ordered_files)
+            self.total_batches_estimated = 1
+            self.update_progress(
+                f"📋 {self.files_in_queue} fichiers initiaux ajoutés depuis stack_plan.csv"
+            )
         elif use_plan:
             self.use_batch_plan = True
             batches_from_plan = get_batches_from_stack_plan(
