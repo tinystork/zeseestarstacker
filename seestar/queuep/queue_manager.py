@@ -11922,7 +11922,6 @@ class SeestarQueuedStacker:
                 and self.batch_size == self.files_in_queue
                 and self.total_batches_estimated == 1
             ):
-                from queue import Queue
 
                 new_q = Queue()
                 for idx, fp in enumerate(list(self.all_input_filepaths)):
