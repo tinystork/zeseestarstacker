@@ -11917,6 +11917,25 @@ class SeestarQueuedStacker:
             self.update_progress(
                 f"📋 {self.files_in_queue} fichiers initiaux prêts. Total lots estimé: {self.total_batches_estimated}"
             )
+            if (
+                self.files_in_queue > 1
+                and self.batch_size == self.files_in_queue
+                and self.total_batches_estimated == 1
+            ):
+                from queue import Queue
+
+                new_q = Queue()
+                for idx, fp in enumerate(list(self.all_input_filepaths)):
+                    new_q.put(fp)
+                    if idx < len(self.all_input_filepaths) - 1:
+                        new_q.put(_BATCH_BREAK_TOKEN)
+                self.queue = new_q
+                self.batch_size = 1
+                self.total_batches_estimated = self.files_in_queue
+                self.use_batch_plan = True
+                self.update_progress(
+                    f"  -> Mode batch unique adapté: {self.total_batches_estimated} sous-lots"
+                )
             self.queue_prepared = False
         elif special_single_csv:
             self.use_batch_plan = True
