@@ -1669,40 +1669,46 @@ class SeestarQueuedStacker:
         # self.reference_wcs_object est conservé s'il a été défini par start_processing (plate-solving de réf)
         self.intermediate_drizzle_batch_files = []
 
-        self.processed_files.clear()
-        with self.folders_lock:
-            self.additional_folders = []
-        self.current_batch_data = []
-        self.current_stack_header = None
-        self.images_in_cumulative_stack = 0
-        self.cumulative_drizzle_data = None
-        self.total_exposure_seconds = 0.0
-        self.final_stacked_path = None
-        self.processing_error = None
-        self.files_in_queue = 0
-        self.processed_files_count = 0
-        self.aligned_files_count = 0
-        self.stacked_batches_count = 0
-        self.total_batches_estimated = 0
-        self.failed_align_count = 0
-        self.failed_stack_count = 0
-        self.skipped_files_count = 0
+        skip_queue_reset = getattr(self, "queue_prepared", False)
+        if not skip_queue_reset:
+            self.processed_files.clear()
+            with self.folders_lock:
+                self.additional_folders = []
+            self.current_batch_data = []
+            self.current_stack_header = None
+            self.images_in_cumulative_stack = 0
+            self.cumulative_drizzle_data = None
+            self.total_exposure_seconds = 0.0
+            self.final_stacked_path = None
+            self.processing_error = None
+            self.files_in_queue = 0
+            self.processed_files_count = 0
+            self.aligned_files_count = 0
+            self.stacked_batches_count = 0
+            self.total_batches_estimated = 0
+            self.failed_align_count = 0
+            self.failed_stack_count = 0
+            self.skipped_files_count = 0
 
-        self.photutils_bn_applied_in_session = False
-        self.bn_globale_applied_in_session = False
-        self.cb_applied_in_session = False
-        self.feathering_applied_in_session = False
-        self.low_wht_mask_applied_in_session = False
-        self.scnr_applied_in_session = False
-        self.crop_applied_in_session = False
-        self.photutils_params_used_in_session = {}
+            self.photutils_bn_applied_in_session = False
+            self.bn_globale_applied_in_session = False
+            self.cb_applied_in_session = False
+            self.feathering_applied_in_session = False
+            self.low_wht_mask_applied_in_session = False
+            self.scnr_applied_in_session = False
+            self.crop_applied_in_session = False
+            self.photutils_params_used_in_session = {}
 
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-            except Exception:
-                break
+            while not self.queue.empty():
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                except Exception:
+                    break
+        else:
+            logger.debug(
+                "DEBUG QM [initialize]: queue_prepared=True -> file queue conservée"
+            )
 
         if hasattr(self, "aligner") and self.aligner:
             self.aligner.stop_processing = False
