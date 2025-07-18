@@ -6634,8 +6634,8 @@ class SeestarStackerGUI:
             self.logger.info("use_drizzle -> False")
         self.settings.use_drizzle = False
 
-        self.settings.batch_size = len(ordered_files)
-        self.logger.info(f"batch_size -> {self.settings.batch_size}")
+        self.settings.batch_size = 1
+        self.logger.info("batch_size -> 1 (sequential mode)")
 
         from queue import Queue
 
@@ -6644,28 +6644,25 @@ class SeestarStackerGUI:
         self.queued_stacker.files_in_queue = 0
         self.queued_stacker.all_input_filepaths = []
 
-        for fp in ordered_files:
+        from seestar.queuep.queue_manager import _BATCH_BREAK_TOKEN
+
+        for idx, fp in enumerate(ordered_files):
             self.queued_stacker.queue.put(fp)
+            if idx < len(ordered_files) - 1:
+                self.queued_stacker.queue.put(_BATCH_BREAK_TOKEN)
             self.queued_stacker.processed_files.add(fp)
             self.queued_stacker.files_in_queue += 1
             self.queued_stacker.all_input_filepaths.append(fp)
 
-        self.queued_stacker.batch_size = self.settings.batch_size
-        if hasattr(self.queued_stacker, "_recalculate_total_batches"):
-            self.queued_stacker._recalculate_total_batches()
-        else:
-            import math
+        self.queued_stacker.batch_size = 1
+        self.queued_stacker.total_batches_estimated = len(ordered_files)
+        self.queued_stacker.use_batch_plan = True
 
-            if self.settings.batch_size > 0:
-                self.queued_stacker.total_batches_estimated = math.ceil(
-                    self.queued_stacker.files_in_queue / self.settings.batch_size
-                )
-            else:
-                self.queued_stacker.total_batches_estimated = 0
-
-        # Mark queue as pre-populated to avoid re-scanning
         if hasattr(self.queued_stacker, "queue_prepared"):
             self.queued_stacker.queue_prepared = True
+
+        if hasattr(self.queued_stacker, "_recalculate_total_batches"):
+            self.queued_stacker._recalculate_total_batches()
 
         return True
 
