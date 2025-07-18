@@ -1221,6 +1221,7 @@ class SettingsManager:
         defaults_dict["bayer_pattern"] = "GRBG"
         defaults_dict["batch_size"] = 0
         defaults_dict["order_csv_path"] = ""
+        defaults_dict["order_file_list"] = []
         defaults_dict["stacking_mode"] = "kappa-sigma"
         defaults_dict["kappa"] = 2.5
         defaults_dict["stack_norm_method"] = "none"
@@ -2457,6 +2458,7 @@ class SettingsManager:
             "stack_method": str(self.stack_method),
             "batch_size": int(self.batch_size),
             "order_csv_path": str(getattr(self, "order_csv_path", "")),
+            "order_file_list": list(getattr(self, "order_file_list", [])),
             "correct_hot_pixels": bool(self.correct_hot_pixels),
             "hot_pixel_threshold": float(self.hot_pixel_threshold),
             "neighborhood_size": int(self.neighborhood_size),
