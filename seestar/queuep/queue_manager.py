@@ -157,7 +157,7 @@ def _suggest_pool_size(fraction: float = 0.75) -> int:
     import math
 
     n_cpu = max(os.cpu_count() or 1, 1)
-    return max(1, math.floor(n_cpu * fraction))
+    return max(1, math.ceil(n_cpu * fraction))
 
 
 def _reproject_worker(
@@ -8334,7 +8334,10 @@ class SeestarQueuedStacker:
 
             image_data_list = valid_images_for_ccdproc
             coverage_maps_list = valid_pixel_masks_for_coverage
-            coverage_stack_for_numpy = np.stack(coverage_maps_list, axis=0)
+
+            coverage_sum = np.zeros(shape_2d_for_coverage_map, dtype=np.float32)
+            for cov in coverage_maps_list:
+                coverage_sum += cov.astype(np.float32)
 
             quality_weights = weight_scalars_for_ccdproc
             if quality_weights is None:
@@ -8379,9 +8382,7 @@ class SeestarQueuedStacker:
                     kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                     winsor_limits=self.winsor_limits,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
-                )
+                batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
                     if not hasattr(
@@ -8404,9 +8405,7 @@ class SeestarQueuedStacker:
                     sigma_low=self.stack_kappa_low,
                     sigma_high=self.stack_kappa_high,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
-                )
+                batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
                     if not hasattr(
@@ -8427,9 +8426,7 @@ class SeestarQueuedStacker:
                     images_for_stack,
                     quality_weights,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
-                )
+                batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
                     if not hasattr(
@@ -8447,9 +8444,7 @@ class SeestarQueuedStacker:
                     images_for_stack,
                     quality_weights,
                 )
-                batch_coverage_map_2d = np.sum(coverage_stack_for_numpy, axis=0).astype(
-                    np.float32
-                )
+                batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
                     if not hasattr(
