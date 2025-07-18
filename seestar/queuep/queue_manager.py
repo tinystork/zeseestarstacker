@@ -8118,17 +8118,47 @@ class SeestarQueuedStacker:
         return stacked, rejected_pct
 
     def _combine_hq_by_tiles(
-        self, images_list, weights, kappa, winsor_limits, tile_h=512
+        self,
+        images_list,
+        weights,
+        kappa,
+        winsor_limits,
+        tile_h=512,
+        masks_list=None,
     ):
-        """Combine les mini-stacks en bandes pour limiter la RAM."""
+        """Combine les mini-stacks en bandes pour limiter la RAM.
+
+        Parameters
+        ----------
+        images_list : list of np.ndarray or np.memmap
+            Images à combiner.
+        weights : list of np.ndarray
+            Poids pour chaque image.
+        masks_list : list of np.ndarray | None
+            Masques binaires (0/1) pour chaque image. Lorsque fourni, ils sont
+            appliqués sur les morceaux lus depuis ``images_list`` afin de ne
+            pas créer de tableaux temporaires de la taille complète du lot.
+        """
         H, W, _ = images_list[0].shape
         final = np.zeros_like(images_list[0], dtype=np.float32)
         wht = np.zeros((H, W), dtype=np.float32)
 
         for y0 in range(0, H, tile_h):
             y1 = min(y0 + tile_h, H)
-            cube = np.stack([img[y0:y1] for img in images_list], axis=0)
-            w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
+            if masks_list is None:
+                cube = np.stack([img[y0:y1] for img in images_list], axis=0)
+                w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
+            else:
+                cube = np.stack(
+                    [
+                        img[y0:y1] * (
+                            mask[y0:y1][..., None] if img.ndim == 3 else mask[y0:y1]
+                        )
+                        for img, mask in zip(images_list, masks_list)
+                    ],
+                    axis=0,
+                )
+                w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
             if self.stack_final_combine == "winsorized_sigma_clip":
                 stacked, _ = self._stack_winsorized_sigma(
                     cube,
@@ -8368,20 +8398,36 @@ class SeestarQueuedStacker:
                 quality_weights = quality_weights * extra_w
 
             mode = getattr(self, "stacking_mode", "")
+            per_img_bytes = image_data_list[0].nbytes
+            total_bytes = per_img_bytes * len(image_data_list)
+            use_tile_mode = total_bytes > self.max_hq_mem
+
             if (
                 mode == "winsorized-sigma"
                 or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
             ):
-                images_for_stack = [
-                    img * (mask[..., None] if img.ndim == 3 else mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
-                stacked_batch_data_np, _ = self._stack_winsorized_sigma(
-                    images_for_stack,
-                    quality_weights,
-                    kappa=max(self.stack_kappa_low, self.stack_kappa_high),
-                    winsor_limits=self.winsor_limits,
-                )
+                if use_tile_mode:
+                    self.update_progress(
+                        "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
+                    )
+                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                        image_data_list,
+                        coverage_maps_list,
+                        max(self.stack_kappa_low, self.stack_kappa_high),
+                        self.winsor_limits,
+                        masks_list=coverage_maps_list,
+                    )
+                else:
+                    images_for_stack = [
+                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        for img, mask in zip(image_data_list, coverage_maps_list)
+                    ]
+                    stacked_batch_data_np, _ = self._stack_winsorized_sigma(
+                        images_for_stack,
+                        quality_weights,
+                        kappa=max(self.stack_kappa_low, self.stack_kappa_high),
+                        winsor_limits=self.winsor_limits,
+                    )
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
@@ -8395,16 +8441,28 @@ class SeestarQueuedStacker:
                 mode == "kappa-sigma"
                 or getattr(self, "stack_reject_algo", "") == "kappa_sigma"
             ):
-                images_for_stack = [
-                    img * (mask[..., None] if img.ndim == 3 else mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
-                stacked_batch_data_np, _ = _stack_kappa_sigma(
-                    images_for_stack,
-                    quality_weights,
-                    sigma_low=self.stack_kappa_low,
-                    sigma_high=self.stack_kappa_high,
-                )
+                if use_tile_mode:
+                    self.update_progress(
+                        "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
+                    )
+                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                        image_data_list,
+                        coverage_maps_list,
+                        self.stack_kappa_high,
+                        self.winsor_limits,
+                        masks_list=coverage_maps_list,
+                    )
+                else:
+                    images_for_stack = [
+                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        for img, mask in zip(image_data_list, coverage_maps_list)
+                    ]
+                    stacked_batch_data_np, _ = _stack_kappa_sigma(
+                        images_for_stack,
+                        quality_weights,
+                        sigma_low=self.stack_kappa_low,
+                        sigma_high=self.stack_kappa_high,
+                    )
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
@@ -8418,14 +8476,26 @@ class SeestarQueuedStacker:
                 mode == "linear_fit_clip"
                 or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
             ):
-                images_for_stack = [
-                    img * (mask[..., None] if img.ndim == 3 else mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
-                stacked_batch_data_np, _ = _stack_linear_fit_clip(
-                    images_for_stack,
-                    quality_weights,
-                )
+                if use_tile_mode:
+                    self.update_progress(
+                        "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
+                    )
+                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                        image_data_list,
+                        coverage_maps_list,
+                        self.stack_kappa_high,
+                        self.winsor_limits,
+                        masks_list=coverage_maps_list,
+                    )
+                else:
+                    images_for_stack = [
+                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        for img, mask in zip(image_data_list, coverage_maps_list)
+                    ]
+                    stacked_batch_data_np, _ = _stack_linear_fit_clip(
+                        images_for_stack,
+                        quality_weights,
+                    )
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
@@ -8436,14 +8506,26 @@ class SeestarQueuedStacker:
                     batch_coverage_map_2d *= self._radial_w_base
                 stack_note = "linear fit clip"
             elif mode == "median":
-                images_for_stack = [
-                    img * (mask[..., None] if img.ndim == 3 else mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
-                stacked_batch_data_np, _ = _stack_median(
-                    images_for_stack,
-                    quality_weights,
-                )
+                if use_tile_mode:
+                    self.update_progress(
+                        "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
+                    )
+                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                        image_data_list,
+                        coverage_maps_list,
+                        self.stack_kappa_high,
+                        self.winsor_limits,
+                        masks_list=coverage_maps_list,
+                    )
+                else:
+                    images_for_stack = [
+                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        for img, mask in zip(image_data_list, coverage_maps_list)
+                    ]
+                    stacked_batch_data_np, _ = _stack_median(
+                        images_for_stack,
+                        quality_weights,
+                    )
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
@@ -9050,7 +9132,7 @@ class SeestarQueuedStacker:
         return stack.astype(np.float32), hdr
 
     def _load_and_prepare_simple(self, fits_path: str):
-        data = fits.getdata(fits_path, memmap=False).astype(np.float32)
+        data = fits.getdata(fits_path, memmap=True).astype(np.float32, copy=False)
         hdr = fits.getheader(fits_path)
         try:
             input_wcs = WCS(hdr, naxis=2)
@@ -9530,7 +9612,7 @@ class SeestarQueuedStacker:
 
             # 2.2 Load coverage / weight map (or fallback)
             try:
-                coverage = fits.getdata(wht_paths[0]).astype(np.float32)
+                coverage = fits.getdata(wht_paths[0], memmap=True).astype(np.float32, copy=False)
                 np.nan_to_num(coverage, copy=False)
                 coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
@@ -9713,7 +9795,7 @@ class SeestarQueuedStacker:
                 wcs.pixel_shape = (w, h)
 
                 try:
-                    cov = fits.getdata(_wht_paths[0]).astype(np.float32)
+                    cov = fits.getdata(_wht_paths[0], memmap=True).astype(np.float32, copy=False)
                     np.nan_to_num(cov, copy=False)
                     cov *= make_radial_weight_map(h, w)
                 except Exception:
@@ -9837,7 +9919,7 @@ class SeestarQueuedStacker:
             self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
             return
         try:
-            cov = fits.getdata(wht_paths[0]).astype(np.float32)
+            cov = fits.getdata(wht_paths[0], memmap=True).astype(np.float32, copy=False)
             np.nan_to_num(cov, copy=False)
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
