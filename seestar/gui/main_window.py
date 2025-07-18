@@ -6634,8 +6634,12 @@ class SeestarStackerGUI:
             self.logger.info("use_drizzle -> False")
         self.settings.use_drizzle = False
 
-        self.settings.batch_size = 1
-        self.logger.info("batch_size -> 1 (sequential mode)")
+        batch_len = len(ordered_files)
+        if batch_len <= 0:
+            return False
+
+        self.settings.batch_size = batch_len
+        self.logger.info("batch_size -> %d (single batch)", batch_len)
 
         from queue import Queue
 
@@ -6644,18 +6648,14 @@ class SeestarStackerGUI:
         self.queued_stacker.files_in_queue = 0
         self.queued_stacker.all_input_filepaths = []
 
-        from seestar.queuep.queue_manager import _BATCH_BREAK_TOKEN
-
-        for idx, fp in enumerate(ordered_files):
+        for fp in ordered_files:
             self.queued_stacker.queue.put(fp)
-            if idx < len(ordered_files) - 1:
-                self.queued_stacker.queue.put(_BATCH_BREAK_TOKEN)
             self.queued_stacker.processed_files.add(fp)
             self.queued_stacker.files_in_queue += 1
             self.queued_stacker.all_input_filepaths.append(fp)
 
-        self.queued_stacker.batch_size = 1
-        self.queued_stacker.total_batches_estimated = len(ordered_files)
+        self.queued_stacker.batch_size = batch_len
+        self.queued_stacker.total_batches_estimated = 1
         self.queued_stacker.use_batch_plan = True
 
         if hasattr(self.queued_stacker, "queue_prepared"):
