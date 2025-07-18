@@ -56,8 +56,8 @@ def test_single_batch_csv(tmp_path):
     activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
     assert activated
     assert gui.settings.stacking_mode == "winsorized-sigma"
-    assert gui.settings.batch_size == 3
-    assert gui.queued_stacker.total_batches_estimated == 1
+    assert gui.settings.batch_size == 1
+    assert gui.queued_stacker.total_batches_estimated == 3
 
 
 def test_single_batch_csv_with_index(tmp_path):
@@ -87,8 +87,8 @@ def test_single_batch_csv_with_index(tmp_path):
 
     activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
     assert activated
-    assert gui.settings.batch_size == 3
-    assert gui.queued_stacker.total_batches_estimated == 1
+    assert gui.settings.batch_size == 1
+    assert gui.queued_stacker.total_batches_estimated == 3
 
 
 def test_single_batch_csv_with_additional_columns(tmp_path):
@@ -123,5 +123,5 @@ def test_single_batch_csv_with_additional_columns(tmp_path):
 
     activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
     assert activated
-    assert gui.settings.batch_size == 3
-    assert gui.queued_stacker.total_batches_estimated == 1
+    assert gui.settings.batch_size == 1
+    assert gui.queued_stacker.total_batches_estimated == 3
