@@ -6638,31 +6638,11 @@ class SeestarStackerGUI:
         if batch_len <= 0:
             return False
 
-        self.settings.batch_size = batch_len
-        self.logger.info("batch_size -> %d (single batch)", batch_len)
-
-        from queue import Queue
-
-        self.queued_stacker.queue = Queue()
-        self.queued_stacker.processed_files = set()
-        self.queued_stacker.files_in_queue = 0
-        self.queued_stacker.all_input_filepaths = []
-
-        for fp in ordered_files:
-            self.queued_stacker.queue.put(fp)
-            self.queued_stacker.processed_files.add(fp)
-            self.queued_stacker.files_in_queue += 1
-            self.queued_stacker.all_input_filepaths.append(fp)
-
-        self.queued_stacker.batch_size = batch_len
-        self.queued_stacker.total_batches_estimated = 1
-        self.queued_stacker.use_batch_plan = True
-
-        if hasattr(self.queued_stacker, "queue_prepared"):
-            self.queued_stacker.queue_prepared = True
-
-        if hasattr(self.queued_stacker, "_recalculate_total_batches"):
-            self.queued_stacker._recalculate_total_batches()
+        # keep ``batch_size`` at 1 so ``start_processing`` triggers its
+        # special CSV mode which will enqueue ``ordered_files`` itself.
+        self.settings.batch_size = 1
+        self.settings.order_csv_path = csv_path
+        self.logger.info("batch_size -> 1 (single batch via plan)")
 
         return True
 
