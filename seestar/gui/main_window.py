@@ -6642,6 +6642,7 @@ class SeestarStackerGUI:
         # special CSV mode which will enqueue ``ordered_files`` itself.
         self.settings.batch_size = 1
         self.settings.order_csv_path = csv_path
+        self.settings.order_file_list = ordered_files
         self.logger.info("batch_size -> 1 (single batch via plan)")
 
         return True
@@ -7045,6 +7046,7 @@ class SeestarStackerGUI:
             "normalize_method": self.settings.stack_norm_method,
             "weighting_method": self.settings.stack_weight_method,
             "batch_size": self.settings.batch_size,
+            "ordered_files": getattr(self.settings, "order_file_list", None),
             "correct_hot_pixels": self.settings.correct_hot_pixels,
             "hot_pixel_threshold": self.settings.hot_pixel_threshold,
             "neighborhood_size": self.settings.neighborhood_size,

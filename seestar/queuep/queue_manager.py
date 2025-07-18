@@ -11065,6 +11065,7 @@ class SeestarQueuedStacker:
         normalize_method="none",
         weighting_method="none",
         batch_size=10,
+        ordered_files=None,
         correct_hot_pixels=True,
         hot_pixel_threshold=3.0,
         neighborhood_size=5,
@@ -11940,8 +11941,9 @@ class SeestarQueuedStacker:
             self.queue_prepared = False
         elif special_single_csv:
             self.use_batch_plan = True
-            batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
-            ordered_files = [os.path.abspath(fp) for batch in batches_from_plan for fp in batch]
+            if ordered_files is None:
+                batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
+                ordered_files = [os.path.abspath(fp) for batch in batches_from_plan for fp in batch]
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
