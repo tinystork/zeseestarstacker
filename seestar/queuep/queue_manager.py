@@ -8188,7 +8188,14 @@ class SeestarQueuedStacker:
 
         wht = np.zeros((H, W), dtype=np.float32)
 
-        max_bytes = int(getattr(self, "max_hq_mem", 1) * (1024 ** 3))
+
+        # ``max_hq_mem`` is already stored in bytes. Do not multiply again
+        # otherwise the computed group size becomes enormous, causing
+        # ``_stack_winsorized_sigma`` to raise MemoryError.  Keep the value
+        # directly as bytes so the estimated per-tile group fits within the
+        # configured limit.
+        max_bytes = int(getattr(self, "max_hq_mem", 1))
+
 
         y0 = 0
         while y0 < H:
