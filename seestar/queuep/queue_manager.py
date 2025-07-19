@@ -8279,9 +8279,9 @@ class SeestarQueuedStacker:
                 )
             wht[y0:y1] = tile_wht
             if use_memmap:
-                tile_sum_mm[: y1 - y0] = 0
-                tile_wht_mm[: y1 - y0] = 0
 
+                tile_sum_mm[:] = 0
+                tile_wht_mm[:] = 0
                 tile_sum_mm.flush()
                 tile_wht_mm.flush()
                 final.flush()
