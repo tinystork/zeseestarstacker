@@ -13,6 +13,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Default tile height used when stacking with disk-backed memmaps.
+TILE_HEIGHT = 512
+
 
 class SettingsManager:
     """

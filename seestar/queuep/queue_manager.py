@@ -94,7 +94,7 @@ from seestar.core.stack_methods import (
     _stack_median,
     _stack_winsorized_sigma,
 )
-from seestar.gui.settings import SettingsManager
+from seestar.gui.settings import SettingsManager, TILE_HEIGHT
 
 # --- Third-Party Library Imports ---
 from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE
@@ -6437,6 +6437,15 @@ class SeestarQueuedStacker:
                 self.cumulative_wht_memmap.flush()
             if not self.drizzle_active_session:
                 self._update_preview_sum_w()
+
+            if hasattr(stacked_batch_data_np, "_mmap"):
+                try:
+                    stacked_batch_data_np.flush()
+                    stacked_batch_data_np._mmap.close()
+                    if hasattr(stacked_batch_data_np, "filename") and os.path.exists(stacked_batch_data_np.filename):
+                        os.remove(stacked_batch_data_np.filename)
+                except Exception:
+                    pass
         else:
             num_failed_in_stack_batch = len(batch_items_to_stack)
             self.failed_stack_count += num_failed_in_stack_batch
@@ -8125,18 +8134,35 @@ class SeestarQueuedStacker:
         winsor_limits,
         tile_h=512,
         masks_list=None,
+        batch_id=0,
+        use_memmap=False,
     ):
 
-        """Combine les mini-stacks en bandes tout en limitant la RAM.
+        """Combine les mini-stacks en bandes tout en limitant la RAM."""
 
-        Les images sont lues morceau par morceau et empilées par sous-groupes
-        d\'images afin que le tableau temporaire utilisé par les routines
-        d\'empilement n\'excède jamais ``max_hq_mem``.
-        """
+        tile_h = int(os.getenv("SEESTAR_TILE_H", tile_h))
 
         H, W = images_list[0].shape[:2]
         C = images_list[0].shape[2] if images_list[0].ndim == 3 else 1
-        final = np.zeros((H, W, C), dtype=np.float32)
+
+        if use_memmap:
+            tmp_path = os.path.join(
+                tempfile.gettempdir(), f"hq_batch{batch_id:04d}.dat"
+            )
+            logger.info(
+                f"Batch-1 mode: using disk-backed memmap ({tmp_path}) tile_h={tile_h}"
+            )
+            try:
+                from numpy.lib.format import open_memmap
+
+                final = open_memmap(
+                    tmp_path, mode="w+", dtype=np.float32, shape=(H, W, C)
+                )
+                final[:] = 0.0
+            except Exception as e:
+                raise RuntimeError("Memmap creation failed") from e
+        else:
+            final = np.zeros((H, W, C), dtype=np.float32)
 
         wht = np.zeros((H, W), dtype=np.float32)
 
@@ -8150,6 +8176,8 @@ class SeestarQueuedStacker:
 
             per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
             group_size = max(1, max_bytes // max(per_img_bytes, 1))
+            if use_memmap:
+                group_size = 1
 
             mode = getattr(self, "stacking_mode", "mean")
 
@@ -8200,7 +8228,11 @@ class SeestarQueuedStacker:
             )
             wht[y0:y1] = tile_wht
 
-        return final.astype(np.float32), wht.astype(np.float32)
+        if use_memmap:
+            final.flush()
+            return final
+
+        return final.astype(np.float32)
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
@@ -8429,6 +8461,13 @@ class SeestarQueuedStacker:
             total_bytes = per_img_bytes * len(image_data_list)
             use_tile_mode = total_bytes > self.max_hq_mem
 
+            use_memmap = False
+            try:
+                if self.settings.batch_size == 1:
+                    use_memmap = True
+            except Exception:
+                pass
+
             if (
                 mode == "winsorized-sigma"
                 or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
@@ -8442,7 +8481,10 @@ class SeestarQueuedStacker:
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
                         self.winsor_limits,
+                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
                         masks_list=coverage_maps_list,
+                        batch_id=current_batch_num,
+                        use_memmap=use_memmap,
                     )
                 else:
                     images_for_stack = [
@@ -8477,7 +8519,10 @@ class SeestarQueuedStacker:
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
+                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
                         masks_list=coverage_maps_list,
+                        batch_id=current_batch_num,
+                        use_memmap=use_memmap,
                     )
                 else:
                     images_for_stack = [
@@ -8512,7 +8557,10 @@ class SeestarQueuedStacker:
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
+                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
                         masks_list=coverage_maps_list,
+                        batch_id=current_batch_num,
+                        use_memmap=use_memmap,
                     )
                 else:
                     images_for_stack = [
@@ -8542,7 +8590,10 @@ class SeestarQueuedStacker:
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
+                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
                         masks_list=coverage_maps_list,
+                        batch_id=current_batch_num,
+                        use_memmap=use_memmap,
                     )
                 else:
                     images_for_stack = [
@@ -8967,6 +9018,9 @@ class SeestarQueuedStacker:
                     final_output_weights_list,
                     kappa=self.stack_kappa_high,
                     winsor_limits=self.winsor_limits,
+                    tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                    batch_id=current_batch_num,
+                    use_memmap=use_memmap,
                 )
             else:
                 if self.stack_final_combine == "winsorized_sigma_clip":
