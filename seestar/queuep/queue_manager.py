@@ -8123,8 +8123,17 @@ class SeestarQueuedStacker:
             winsor_limits,
             apply_rewinsor,
         )
-        with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
-            stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
+        use_executor = (
+            self.max_stack_workers > 1
+            and getattr(self, "batch_size", 0) != 1
+            and total_bytes <= 32 * 1024 * 1024
+        )
+        if use_executor:
+            with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
+                stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        else:
+            stacked, rejected_pct = _stack_worker(stack_args)
         self.update_progress(
             f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
             None,
