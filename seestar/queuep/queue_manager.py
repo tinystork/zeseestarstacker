@@ -8262,11 +8262,11 @@ class SeestarQueuedStacker:
                         stacked, cov_sum[..., None], out=stacked, casting="unsafe"
                     )
                     np.add(tile_sum, stacked, out=tile_sum)
-
                     np.add(tile_wht, cov_sum, out=tile_wht)
                 else:
                     tile_sum += stacked * cov_sum[..., None]
                     tile_wht += cov_sum
+
 
             if use_memmap:
                 np.divide(
@@ -8543,6 +8543,11 @@ class SeestarQueuedStacker:
                     use_memmap = True
             except Exception:
                 pass
+
+            if use_memmap:
+                # Force tile combine when memmap is requested to avoid
+                # allocating the full stack in RAM.
+                use_tile_mode = True
 
             if (
                 mode == "winsorized-sigma"
