@@ -8126,54 +8126,81 @@ class SeestarQueuedStacker:
         tile_h=512,
         masks_list=None,
     ):
-        """Combine les mini-stacks en bandes pour limiter la RAM.
 
-        Parameters
-        ----------
-        images_list : list of np.ndarray or np.memmap
-            Images à combiner.
-        weights : list of np.ndarray
-            Poids pour chaque image.
-        masks_list : list of np.ndarray | None
-            Masques binaires (0/1) pour chaque image. Lorsque fourni, ils sont
-            appliqués sur les morceaux lus depuis ``images_list`` afin de ne
-            pas créer de tableaux temporaires de la taille complète du lot.
+        """Combine les mini-stacks en bandes tout en limitant la RAM.
+
+        Les images sont lues morceau par morceau et empilées par sous-groupes
+        d\'images afin que le tableau temporaire utilisé par les routines
+        d\'empilement n\'excède jamais ``max_hq_mem``.
         """
-        H, W, _ = images_list[0].shape
-        final = np.zeros_like(images_list[0], dtype=np.float32)
+
+        H, W = images_list[0].shape[:2]
+        C = images_list[0].shape[2] if images_list[0].ndim == 3 else 1
+        final = np.zeros((H, W, C), dtype=np.float32)
+
         wht = np.zeros((H, W), dtype=np.float32)
+
+        max_bytes = int(getattr(self, "max_hq_mem", 1) * (1024 ** 3))
 
         for y0 in range(0, H, tile_h):
             y1 = min(y0 + tile_h, H)
-            if masks_list is None:
-                cube = np.stack([img[y0:y1] for img in images_list], axis=0)
-                w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
-            else:
-                cube = np.stack(
-                    [
-                        img[y0:y1] * (
-                            mask[y0:y1][..., None] if img.ndim == 3 else mask[y0:y1]
-                        )
-                        for img, mask in zip(images_list, masks_list)
-                    ],
-                    axis=0,
-                )
-                w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
-            if self.stack_final_combine == "winsorized_sigma_clip":
-                stacked, _ = self._stack_winsorized_sigma(
-                    cube,
-                    w_cube,
-                    kappa=kappa,
-                    winsor_limits=winsor_limits,
-                )
-            elif self.stack_final_combine == "median":
-                stacked, _ = _stack_median(cube, w_cube)
-            else:
-                stacked, _ = _stack_mean(cube, w_cube)
-            final[y0:y1] += stacked * np.sum(w_cube, axis=0)[..., None]
-            wht[y0:y1] += np.sum(w_cube, axis=0)
 
-        return np.nan_to_num(final / np.maximum(wht[..., None], 1e-6))
+            tile_sum = np.zeros((y1 - y0, W, C), dtype=np.float32)
+            tile_wht = np.zeros((y1 - y0, W), dtype=np.float32)
+
+            per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
+            group_size = max(1, max_bytes // max(per_img_bytes, 1))
+
+            mode = getattr(self, "stacking_mode", "mean")
+
+            for s in range(0, len(images_list), group_size):
+                imgs = []
+                covs = []
+                for idx, (img, cov) in enumerate(
+                    zip(images_list[s : s + group_size], weights[s : s + group_size])
+                ):
+                    sl = img[y0:y1]
+                    if masks_list is not None:
+                        m = masks_list[s + idx]
+                        sl = sl * (m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1])
+                    imgs.append(sl)
+                    covs.append(cov[y0:y1])
+
+                if mode == "winsorized-sigma" or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip":
+                    stacked, _ = self._stack_winsorized_sigma(
+                        imgs,
+                        covs,
+                        kappa=kappa,
+                        winsor_limits=winsor_limits,
+                    )
+                elif mode == "kappa-sigma" or getattr(self, "stack_reject_algo", "") == "kappa_sigma":
+                    stacked, _ = _stack_kappa_sigma(
+                        imgs,
+                        covs,
+                        sigma_low=self.stack_kappa_low,
+                        sigma_high=self.stack_kappa_high,
+                    )
+                elif mode == "linear_fit_clip" or getattr(self, "stack_reject_algo", "") == "linear_fit_clip":
+                    stacked, _ = _stack_linear_fit_clip(imgs, covs)
+                elif mode == "median":
+                    stacked, _ = _stack_median(imgs, covs)
+                else:
+                    stacked, _ = _stack_mean(imgs, covs)
+
+
+                cov_sum = np.sum(covs, axis=0)
+                tile_sum += stacked * cov_sum[..., None]
+                tile_wht += cov_sum
+
+            final[y0:y1] = np.divide(
+                tile_sum,
+                tile_wht[..., None],
+                out=np.zeros_like(tile_sum),
+                where=tile_wht[..., None] > 0,
+            )
+            wht[y0:y1] = tile_wht
+
+        return final.astype(np.float32), wht.astype(np.float32)
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
