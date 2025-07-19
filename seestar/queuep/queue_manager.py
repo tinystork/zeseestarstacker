@@ -8514,7 +8514,8 @@ class SeestarQueuedStacker:
 
             use_memmap = False
             try:
-                if self.settings.batch_size == 1:
+                batch_sz = getattr(self.settings, "batch_size", self.batch_size)
+                if int(batch_sz) == 1:
                     use_memmap = True
             except Exception:
                 pass
