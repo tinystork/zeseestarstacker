@@ -8188,12 +8188,14 @@ class SeestarQueuedStacker:
 
         wht = np.zeros((H, W), dtype=np.float32)
 
+
         # ``max_hq_mem`` is already stored in bytes. Do not multiply again
         # otherwise the computed group size becomes enormous, causing
         # ``_stack_winsorized_sigma`` to raise MemoryError.  Keep the value
         # directly as bytes so the estimated per-tile group fits within the
         # configured limit.
         max_bytes = int(getattr(self, "max_hq_mem", 1))
+
 
         y0 = 0
         while y0 < H:
@@ -8279,9 +8281,11 @@ class SeestarQueuedStacker:
             if use_memmap:
                 tile_sum_mm[: y1 - y0] = 0
                 tile_wht_mm[: y1 - y0] = 0
+
                 tile_sum_mm.flush()
                 tile_wht_mm.flush()
                 final.flush()
+
             gc.collect()
             y0 = y1
 
@@ -8289,11 +8293,13 @@ class SeestarQueuedStacker:
             final.flush()
             tile_sum_mm.flush()
             tile_wht_mm.flush()
+
             try:
                 os.remove(tmp_path + "_sum")
                 os.remove(tmp_path + "_wht")
             except Exception:
                 pass
+
             return final
 
         return final.astype(np.float32)
