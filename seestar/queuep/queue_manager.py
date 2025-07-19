@@ -8126,6 +8126,7 @@ class SeestarQueuedStacker:
         tile_h=512,
         masks_list=None,
     ):
+
         """Combine les mini-stacks en bandes tout en limitant la RAM.
 
         Les images sont lues morceau par morceau et empilées par sous-groupes
@@ -8136,12 +8137,14 @@ class SeestarQueuedStacker:
         H, W = images_list[0].shape[:2]
         C = images_list[0].shape[2] if images_list[0].ndim == 3 else 1
         final = np.zeros((H, W, C), dtype=np.float32)
+
         wht = np.zeros((H, W), dtype=np.float32)
 
         max_bytes = int(getattr(self, "max_hq_mem", 1) * (1024 ** 3))
 
         for y0 in range(0, H, tile_h):
             y1 = min(y0 + tile_h, H)
+
             tile_sum = np.zeros((y1 - y0, W, C), dtype=np.float32)
             tile_wht = np.zeros((y1 - y0, W), dtype=np.float32)
 
@@ -8183,6 +8186,7 @@ class SeestarQueuedStacker:
                     stacked, _ = _stack_median(imgs, covs)
                 else:
                     stacked, _ = _stack_mean(imgs, covs)
+
 
                 cov_sum = np.sum(covs, axis=0)
                 tile_sum += stacked * cov_sum[..., None]
