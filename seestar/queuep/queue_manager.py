@@ -59,6 +59,11 @@ from typing import Literal, List, Tuple
 import astroalign as aa
 import cv2
 import numpy as np
+import psutil
+try:
+    from numpy.lib.format import open_memmap
+except Exception:  # pragma: no cover - very unlikely
+    open_memmap = None
 
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
@@ -8118,8 +8123,17 @@ class SeestarQueuedStacker:
             winsor_limits,
             apply_rewinsor,
         )
-        with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
-            stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
+        use_executor = (
+            self.max_stack_workers > 1
+            and getattr(self, "batch_size", 0) != 1
+            and total_bytes <= 32 * 1024 * 1024
+        )
+        if use_executor:
+            with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
+                stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+        else:
+            stacked, rejected_pct = _stack_worker(stack_args)
         self.update_progress(
             f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
             None,
@@ -8153,26 +8167,48 @@ class SeestarQueuedStacker:
                 f"Batch-1 mode: using disk-backed memmap ({tmp_path}) tile_h={tile_h}"
             )
             try:
-                from numpy.lib.format import open_memmap
-
                 final = open_memmap(
                     tmp_path, mode="w+", dtype=np.float32, shape=(H, W, C)
                 )
                 final[:] = 0.0
+                tile_sum_mm = open_memmap(
+                    tmp_path + "_sum", mode="w+", dtype=np.float32, shape=(tile_h, W, C)
+                )
+                tile_sum_mm[:] = 0.0
+                tile_wht_mm = open_memmap(
+                    tmp_path + "_wht", mode="w+", dtype=np.float32, shape=(tile_h, W)
+                )
+                tile_wht_mm[:] = 0.0
             except Exception as e:
                 raise RuntimeError("Memmap creation failed") from e
         else:
             final = np.zeros((H, W, C), dtype=np.float32)
+            tile_sum_mm = None
+            tile_wht_mm = None
 
         wht = np.zeros((H, W), dtype=np.float32)
 
-        max_bytes = int(getattr(self, "max_hq_mem", 1) * (1024 ** 3))
+        # ``max_hq_mem`` is already stored in bytes. Do not multiply again
+        # otherwise the computed group size becomes enormous, causing
+        # ``_stack_winsorized_sigma`` to raise MemoryError.  Keep the value
+        # directly as bytes so the estimated per-tile group fits within the
+        # configured limit.
+        max_bytes = int(getattr(self, "max_hq_mem", 1))
 
-        for y0 in range(0, H, tile_h):
+        y0 = 0
+        while y0 < H:
+            if use_memmap and psutil.virtual_memory().available < 100 * 1024 * 1024 and tile_h > 64:
+                tile_h = max(64, tile_h // 2)
             y1 = min(y0 + tile_h, H)
 
-            tile_sum = np.zeros((y1 - y0, W, C), dtype=np.float32)
-            tile_wht = np.zeros((y1 - y0, W), dtype=np.float32)
+            if use_memmap:
+                tile_sum = tile_sum_mm[: y1 - y0]
+                tile_wht = tile_wht_mm[: y1 - y0]
+                tile_sum[:] = 0.0
+                tile_wht[:] = 0.0
+            else:
+                tile_sum = np.zeros((y1 - y0, W, C), dtype=np.float32)
+                tile_wht = np.zeros((y1 - y0, W), dtype=np.float32)
 
             per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
             group_size = max(1, max_bytes // max(per_img_bytes, 1))
@@ -8190,7 +8226,8 @@ class SeestarQueuedStacker:
                     sl = img[y0:y1]
                     if masks_list is not None:
                         m = masks_list[s + idx]
-                        sl = sl * (m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1])
+                        mask_slice = m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1]
+                        np.multiply(sl, mask_slice, out=sl, casting="unsafe")
                     imgs.append(sl)
                     covs.append(cov[y0:y1])
 
@@ -8217,19 +8254,46 @@ class SeestarQueuedStacker:
 
 
                 cov_sum = np.sum(covs, axis=0)
-                tile_sum += stacked * cov_sum[..., None]
-                tile_wht += cov_sum
+                if use_memmap:
+                    np.add(tile_sum, stacked * cov_sum[..., None], out=tile_sum)
+                    np.add(tile_wht, cov_sum, out=tile_wht)
+                else:
+                    tile_sum += stacked * cov_sum[..., None]
+                    tile_wht += cov_sum
 
-            final[y0:y1] = np.divide(
-                tile_sum,
-                tile_wht[..., None],
-                out=np.zeros_like(tile_sum),
-                where=tile_wht[..., None] > 0,
-            )
+            if use_memmap:
+                np.divide(
+                    tile_sum,
+                    tile_wht[..., None],
+                    out=final[y0:y1],
+                    where=tile_wht[..., None] > 0,
+                )
+            else:
+                final[y0:y1] = np.divide(
+                    tile_sum,
+                    tile_wht[..., None],
+                    out=np.zeros_like(tile_sum),
+                    where=tile_wht[..., None] > 0,
+                )
             wht[y0:y1] = tile_wht
+            if use_memmap:
+                tile_sum_mm[: y1 - y0] = 0
+                tile_wht_mm[: y1 - y0] = 0
+                tile_sum_mm.flush()
+                tile_wht_mm.flush()
+                final.flush()
+            gc.collect()
+            y0 = y1
 
         if use_memmap:
             final.flush()
+            tile_sum_mm.flush()
+            tile_wht_mm.flush()
+            try:
+                os.remove(tmp_path + "_sum")
+                os.remove(tmp_path + "_wht")
+            except Exception:
+                pass
             return final
 
         return final.astype(np.float32)
@@ -8463,7 +8527,8 @@ class SeestarQueuedStacker:
 
             use_memmap = False
             try:
-                if self.settings.batch_size == 1:
+                batch_sz = getattr(self.settings, "batch_size", self.batch_size)
+                if int(batch_sz) == 1:
                     use_memmap = True
             except Exception:
                 pass
