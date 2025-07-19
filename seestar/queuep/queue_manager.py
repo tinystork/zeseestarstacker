@@ -8257,7 +8257,12 @@ class SeestarQueuedStacker:
 
                 cov_sum = np.sum(covs, axis=0)
                 if use_memmap:
-                    np.add(tile_sum, stacked * cov_sum[..., None], out=tile_sum)
+
+                    np.multiply(
+                        stacked, cov_sum[..., None], out=stacked, casting="unsafe"
+                    )
+                    np.add(tile_sum, stacked, out=tile_sum)
+
                     np.add(tile_wht, cov_sum, out=tile_wht)
                 else:
                     tile_sum += stacked * cov_sum[..., None]
