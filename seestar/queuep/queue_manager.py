@@ -8274,9 +8274,11 @@ class SeestarQueuedStacker:
             if use_memmap:
                 tile_sum_mm[: y1 - y0] = 0
                 tile_wht_mm[: y1 - y0] = 0
+
                 tile_sum_mm.flush()
                 tile_wht_mm.flush()
                 final.flush()
+
             gc.collect()
             y0 = y1
 
@@ -8284,11 +8286,13 @@ class SeestarQueuedStacker:
             final.flush()
             tile_sum_mm.flush()
             tile_wht_mm.flush()
+
             try:
                 os.remove(tmp_path + "_sum")
                 os.remove(tmp_path + "_wht")
             except Exception:
                 pass
+
             return final
 
         return final.astype(np.float32)
