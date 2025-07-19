@@ -11,6 +11,8 @@ import traceback
 
 import numpy as np
 
+TILE_HEIGHT = 512
+
 logger = logging.getLogger(__name__)
 
 

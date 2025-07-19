@@ -893,6 +893,7 @@ class SeestarQueuedStacker:
         **kwargs,
     ):
         self.progress_callback = None
+        self.settings = settings if settings is not None else SettingsManager()
         self._configure_global_threads(thread_fraction)
         self.autotuner = CpuIoAutoTuner(self) if autotune else None
         self.io_profile = io_profile
@@ -8074,32 +8075,67 @@ class SeestarQueuedStacker:
         return stacked, rejected_pct
 
     def _combine_hq_by_tiles(
-        self, images_list, weights, kappa, winsor_limits, tile_h=512
+        self,
+        images_list,
+        masks_list=None,
+        batch_id=0,
+        tile_h=512,
+        use_memmap=False,
     ):
         """Combine les mini-stacks en bandes pour limiter la RAM."""
-        H, W, _ = images_list[0].shape
-        final = np.zeros_like(images_list[0], dtype=np.float32)
+        from numpy.lib.format import open_memmap
+
+        H, W, C = images_list[0].shape
+        tile_h = int(os.getenv("SEESTAR_TILE_H", tile_h))
+
+        if use_memmap:
+            tmp_path = os.path.join(
+                tempfile.gettempdir(), f"hq_batch{batch_id:04d}.dat"
+            )
+            logger.info(
+                f"Batch-1 mode: using disk-backed memmap ({tmp_path}) tile_h={tile_h}"
+            )
+            try:
+                stacked = open_memmap(
+                    tmp_path, mode="w+", dtype=np.float32, shape=(H, W, C)
+                )
+                stacked[:] = 0.0
+            except Exception as e:
+                raise RuntimeError("Memmap creation failed") from e
+        else:
+            stacked = np.zeros((H, W, C), dtype=np.float32)
+
         wht = np.zeros((H, W), dtype=np.float32)
+
+        weights = masks_list if masks_list is not None else [np.ones((H, W), dtype=np.float32)] * len(images_list)
 
         for y0 in range(0, H, tile_h):
             y1 = min(y0 + tile_h, H)
             cube = np.stack([img[y0:y1] for img in images_list], axis=0)
             w_cube = np.stack([cov[y0:y1] for cov in weights], axis=0)
             if self.stack_final_combine == "winsorized_sigma_clip":
-                stacked, _ = self._stack_winsorized_sigma(
+                stacked_band, _ = self._stack_winsorized_sigma(
                     cube,
                     w_cube,
-                    kappa=kappa,
-                    winsor_limits=winsor_limits,
+                    kappa=self.stack_kappa_high,
+                    winsor_limits=self.winsor_limits,
                 )
             elif self.stack_final_combine == "median":
-                stacked, _ = _stack_median(cube, w_cube)
+                stacked_band, _ = _stack_median(cube, w_cube)
             else:
-                stacked, _ = _stack_mean(cube, w_cube)
-            final[y0:y1] += stacked * np.sum(w_cube, axis=0)[..., None]
+                stacked_band, _ = _stack_mean(cube, w_cube)
+            stacked[y0:y1] += stacked_band * np.sum(w_cube, axis=0)[..., None]
             wht[y0:y1] += np.sum(w_cube, axis=0)
 
-        return np.nan_to_num(final / np.maximum(wht[..., None], 1e-6))
+        for y0 in range(0, H, tile_h):
+            y1 = min(y0 + tile_h, H)
+            stacked[y0:y1] = np.nan_to_num(
+                stacked[y0:y1] / np.maximum(wht[y0:y1][..., None], 1e-6)
+            )
+
+        if use_memmap:
+            stacked.flush()
+        return stacked
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
@@ -8816,11 +8852,17 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     "HQ combine : trop de RAM, bascule en passe 2 par bandes"
                 )
+                use_memmap = False
+                try:
+                    if self.settings.batch_size == 1:
+                        use_memmap = True
+                except Exception:
+                    use_memmap = False
                 final_sci_image_HWC = self._combine_hq_by_tiles(
                     final_output_images_list,
                     final_output_weights_list,
-                    kappa=self.stack_kappa_high,
-                    winsor_limits=self.winsor_limits,
+                    batch_id=current_batch_num,
+                    use_memmap=use_memmap,
                 )
             else:
                 if self.stack_final_combine == "winsorized_sigma_clip":
@@ -9436,6 +9478,10 @@ class SeestarQueuedStacker:
             self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
         elif not solved_ok:
             self.unsolved_classic_batch_files.add(sci_fits)
+
+        if isinstance(stacked_np, np.memmap):
+            del stacked_np
+            gc.collect()
 
         return sci_fits, wht_paths
 
