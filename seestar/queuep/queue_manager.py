@@ -8176,6 +8176,8 @@ class SeestarQueuedStacker:
 
             per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
             group_size = max(1, max_bytes // max(per_img_bytes, 1))
+            if use_memmap:
+                group_size = 1
 
             mode = getattr(self, "stacking_mode", "mean")
 
