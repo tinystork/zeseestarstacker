@@ -241,7 +241,10 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
 
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
-        with fits.open(path, memmap=False) as hd:
+        # Use ``memmap=True`` so only the requested slice is loaded in
+        # memory.  ``memmap=False`` would read the entire image and quickly
+        # exhaust RAM when stacking thousands of files.
+        with fits.open(path, memmap=True) as hd:
             data = hd[0].data
             hdr = hd[0].header
         if data.ndim == 2 and hdr.get("BAYERPAT"):
