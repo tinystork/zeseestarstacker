@@ -8127,12 +8127,14 @@ class SeestarQueuedStacker:
             winsor_limits,
             apply_rewinsor,
         )
+
         cube_bytes = sum(img.nbytes for img in images)
         if cube_bytes > max_mem_bytes:
             raise RuntimeError(
                 f"Stack exceeds max_mem_bytes ({cube_bytes} > {max_mem_bytes})"
             )
         total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
+
         use_executor = (
             self.max_stack_workers > 1
             and getattr(self, "batch_size", 0) != 1
@@ -8165,6 +8167,7 @@ class SeestarQueuedStacker:
 
         tile_h = int(os.getenv("SEESTAR_TILE_H", tile_h))
 
+
         if not isinstance(file_paths[0], (str, bytes, os.PathLike)):
             images_list = file_paths
             file_paths = None
@@ -8184,6 +8187,7 @@ class SeestarQueuedStacker:
                     raise RuntimeError(f"Cannot open {first_path}")
                 H, W = img0.shape[:2]
                 C = img0.shape[2] if img0.ndim == 3 else 1
+
 
         if use_memmap:
             tmp_path = os.path.join(
@@ -8243,6 +8247,7 @@ class SeestarQueuedStacker:
 
             mode = getattr(self, "stacking_mode", "mean")
 
+
             total_items = len(file_paths) if file_paths is not None else len(images_list)
             for s in range(0, total_items, group_size):
                 imgs = []
@@ -8280,6 +8285,7 @@ class SeestarQueuedStacker:
                             sl = sl * mask_slice
                         imgs.append(sl.astype(np.float32))
                         covs.append(cov[y0:y1])
+
 
                 if mode == "winsorized-sigma" or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip":
                     stacked, _ = self._stack_winsorized_sigma(
@@ -8607,7 +8613,9 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
+
                         ordered_img_paths,
+
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
                         self.winsor_limits,
@@ -8646,7 +8654,9 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
+
                         ordered_img_paths,
+
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -8685,7 +8695,9 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
+
                         ordered_img_paths,
+
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -8719,7 +8731,9 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
+
                         ordered_img_paths,
+
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
