@@ -245,6 +245,16 @@ def main():
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
     logger.debug("final image shape %s", final.shape)
+
+    # ----- reorder for FITS axis conventions -----
+    if final.ndim == 3:
+        h, w, c = final.shape
+        if c == 1:  # squeeze monochrome
+            final = final.reshape(h, w)
+        else:  # FITS expects (C, W, H)
+            final = final.transpose(2, 1, 0)
+    # --------------------------------------------
+
     fits.writeto(
         os.path.join(args.out, "final.fits"),
         final.astype(np.float32),
