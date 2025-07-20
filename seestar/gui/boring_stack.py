@@ -14,6 +14,7 @@ from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
 
 
+
 def _init_logger(out_dir: str) -> None:
     log_path = os.path.join(out_dir, "boring_stack.log")
     logging.basicConfig(
@@ -26,7 +27,9 @@ def _init_logger(out_dir: str) -> None:
     )
 
 
+
 logger = logging.getLogger(__name__)
+
 
 try:
     if "--out" in sys.argv:
@@ -89,6 +92,7 @@ def solve_with_astrometry_net(path: str, api_key: str):
 def warp_image(img: np.ndarray, wcs_in: WCS, wcs_ref: WCS, shape_ref: tuple[int, int]):
     from seestar.core.reprojection import reproject_to_reference_wcs
     return reproject_to_reference_wcs(img, wcs_in, wcs_ref, shape_ref)
+
 
 
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
@@ -185,7 +189,9 @@ def read_rows(csv_path):
             weight = row[weight_idx].strip()
         rows_out.append({"path": cell, "weight": weight})
 
+
     return rows_out
+
 
 
 def read_paths(csv_path):
@@ -218,6 +224,7 @@ def get_image_shape(path):
 
 
 def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
+
     """Return RGB slice (y0:y1) aligned to reference grid."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
@@ -236,6 +243,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
     warped = warp_image(data, wcs, wcs_ref, shape_ref)
+
     return warped[y0:y1]
 
 
@@ -286,7 +294,9 @@ def stream_stack(
     )
 
     wcs_cache: dict[str, object] = {}
+
     wcs_ref: WCS | None = None
+
     for i, row in enumerate(rows, 1):
         path = row["path"]
         if path in wcs_cache:
@@ -311,6 +321,7 @@ def stream_stack(
         if wcs is None:
             raise RuntimeError("Plate-solve failed for " + path)
         wcs_cache[path] = wcs
+
         if wcs_ref is None:
             wcs_ref = wcs
         print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
@@ -318,6 +329,7 @@ def stream_stack(
 
     if wcs_ref is None:
         raise RuntimeError("Reference WCS not resolved")
+
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
@@ -335,6 +347,7 @@ def stream_stack(
             open_aligned_slice(
                 r["path"], y0, y1, wcs_cache[r["path"]], wcs_ref, shape_ref
             )
+
             for r in rows
         ]
         tile_wht_list = [
