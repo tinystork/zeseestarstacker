@@ -302,18 +302,18 @@ def stream_stack(
         if path in wcs_cache:
             continue
         method = "local"
-        wcs = _reproj().solve_local_plate(path)
+        wcs = solve_local_plate(path)
         if wcs is None:
-            wcs = _reproj().get_wcs_from_astap(path)
+            wcs = get_wcs_from_astap(path)
             if wcs is not None:
                 method = "astap"
         if wcs is None:
-            wcs = _reproj().solve_with_astrometry_local(path)
+            wcs = solve_with_astrometry_local(path)
             if wcs is not None:
                 method = "astrometry_local"
         if wcs is None and api_key:
             try:
-                wcs = _reproj().solve_with_astrometry_net(path, api_key)
+                wcs = solve_with_astrometry_net(path, api_key)
                 if wcs is not None:
                     method = "astrometry_net"
             except Exception:
