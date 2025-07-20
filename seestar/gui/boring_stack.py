@@ -106,6 +106,9 @@ def get_image_shape(path):
             raise RuntimeError(f"Failed to read {path}")
 
 
+    shape = data.shape
+
+
     if data.ndim == 2:
         h, w = shape
         c = 1
@@ -215,8 +218,15 @@ def main():
     flush_mmap(cum_wht)
     del cum_sum
     del cum_wht
-    os.remove(sum_path)
-    os.remove(wht_path)
+    gc.collect()
+    try:
+        os.remove(sum_path)
+    except Exception as e:
+        print(f"WARNING: could not remove {sum_path}: {e}", file=sys.stderr)
+    try:
+        os.remove(wht_path)
+    except Exception as e:
+        print(f"WARNING: could not remove {wht_path}: {e}", file=sys.stderr)
     return 0
 
 
