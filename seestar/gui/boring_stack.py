@@ -241,19 +241,33 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
 
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
-        # Use ``memmap=True`` so only the requested slice is loaded in
-        # memory.  ``memmap=False`` would read the entire image and quickly
-        # exhaust RAM when stacking thousands of files.
-        with fits.open(path, memmap=True) as hd:
+        # Use ``memmap=True`` and disable automatic scaling so that only
+        # the requested slice is read on demand.  ``memmap=False`` would
+        # load the entire image into RAM.
+        with fits.open(
+            path,
+            memmap=True,
+            do_not_scale_image_data=True,
+            ignore_blank=True,
+        ) as hd:
+
             data = hd[0].data
             hdr = hd[0].header
+
+        # Manually apply BSCALE/BZERO if present so the resulting array is
+        # equivalent to ``hd[0].data`` with scaling enabled.
+        bscale = hdr.get("BSCALE", 1.0)
+        bzero = hdr.get("BZERO", 0.0)
+        if bscale != 1.0 or bzero != 0.0:
+            data = data.astype(np.float32, copy=False) * float(bscale) + float(bzero)
+        else:
+            data = data.astype(np.float32, copy=False)
+
         if data.ndim == 2 and hdr.get("BAYERPAT"):
-            data = cv2.cvtColor(
-                data.astype(np.uint16), cv2.COLOR_BayerRG2RGB_EA
-            )
+            # ``cvtColor`` expects integer input; cast back for demosaicing.
+            data = cv2.cvtColor(data.astype(np.uint16), cv2.COLOR_BayerRG2RGB_EA)
         else:
             data = to_hwc(data)
-        data = data.astype(np.float32, copy=False)
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
