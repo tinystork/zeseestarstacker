@@ -87,7 +87,12 @@ def read_paths(csv_path):
 def open_slice(path, y0, y1):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
-        with fits.open(path, memmap=True) as hd:
+        # Using memmap=True fails when FITS files contain scaling keywords such
+        # as BZERO/BSCALE/BLANK. These are fairly common and cause astropy to
+        # raise a ValueError because the data cannot be memory mapped. Reading
+        # the data without memory mapping avoids this issue while keeping the
+        # rest of the logic unchanged.
+        with fits.open(path, memmap=False) as hd:
             data = hd[0].data[y0:y1]
             arr = np.asarray(data, dtype=np.float32)
     else:
