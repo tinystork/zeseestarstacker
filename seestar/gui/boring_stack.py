@@ -455,61 +455,72 @@ def stream_stack(
         logger.debug(
             f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
         )
-        img_slices = []
-        weights_list: list[float] = []
-        for idx, r in enumerate(rows, 1):
-            img_slice = open_aligned_slice(
-                r["path"],
-                y0,
-                y1,
-                wcs_cache[r["path"]],
-                wcs_ref,
-                shape_ref,
-                use_solver=use_solver,
-            )
-            weight = float(r.get("weight") or 1.0)
-            if img_slice.ndim == 2:
-                img_slice = img_slice[..., None]
-            if img_slice.shape[2] != C:
-                if img_slice.shape[2] == 3 and C == 1:
-                    img_slice = cv2.cvtColor(img_slice, cv2.COLOR_RGB2GRAY)[..., None]
-                elif img_slice.shape[2] == 1 and C == 3:
-                    img_slice = np.repeat(img_slice, 3, axis=2)
-                else:
-                    raise ValueError(
-                        f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
-                    )
-            img_slice = winsorize(img_slice, kappa, winsor)
-            img_slices.append(img_slice)
-            weights_list.append(weight)
-            del img_slice
-            gc.collect()
-            image_count += 1
-            if image_count % 100 == 0:
-                vm = psutil.virtual_memory()
-                ram_mb = vm.used / (1024 ** 2)
-                cache_mb = getattr(vm, "cached", 0.0) / (1024 ** 2)
-                logger.info(
-                    "Loaded %d images | RAM %.1f MB | Cache %.1f MB",
-                    image_count,
-                    ram_mb,
-                    cache_mb,
-                )
-                print(
-                    f"{image_count} images loaded | RAM {ram_mb:.1f}MB | Cache {cache_mb:.1f}MB",
-                    flush=True,
-                )
+        per_img_bytes = rows_h * W * C * 4
+        group_size = max(1, max_mem_bytes // max(per_img_bytes, 1))
 
-        stacked_tile, _ = _stack_winsorized_sigma(
-            img_slices,
-            np.array(weights_list, dtype=np.float32),
-            kappa=kappa,
-            winsor_limits=(winsor, winsor),
-            max_mem_bytes=max_mem_bytes,
-        )
-        cum_sum[y0:y1] = stacked_tile.astype(np.float32)
-        cum_wht[y0:y1] = np.sum(weights_list)
-        del img_slices, weights_list
+        tile_sum = np.zeros((rows_h, W, C), dtype=np.float32)
+        tile_wht = 0.0
+        for s in range(0, len(rows), group_size):
+            img_slices = []
+            weights_list: list[float] = []
+            for idx, r in enumerate(rows[s : s + group_size], 1):
+                img_slice = open_aligned_slice(
+                    r["path"],
+                    y0,
+                    y1,
+                    wcs_cache[r["path"]],
+                    wcs_ref,
+                    shape_ref,
+                    use_solver=use_solver,
+                )
+                weight = float(r.get("weight") or 1.0)
+                if img_slice.ndim == 2:
+                    img_slice = img_slice[..., None]
+                if img_slice.shape[2] != C:
+                    if img_slice.shape[2] == 3 and C == 1:
+                        img_slice = cv2.cvtColor(img_slice, cv2.COLOR_RGB2GRAY)[..., None]
+                    elif img_slice.shape[2] == 1 and C == 3:
+                        img_slice = np.repeat(img_slice, 3, axis=2)
+                    else:
+                        raise ValueError(
+                            f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
+                        )
+                img_slice = winsorize(img_slice, kappa, winsor)
+                img_slices.append(img_slice)
+                weights_list.append(weight)
+                del img_slice
+                gc.collect()
+                image_count += 1
+                if image_count % 100 == 0:
+                    vm = psutil.virtual_memory()
+                    ram_mb = vm.used / (1024 ** 2)
+                    cache_mb = getattr(vm, "cached", 0.0) / (1024 ** 2)
+                    logger.info(
+                        "Loaded %d images | RAM %.1f MB | Cache %.1f MB",
+                        image_count,
+                        ram_mb,
+                        cache_mb,
+                    )
+                    print(
+                        f"{image_count} images loaded | RAM {ram_mb:.1f}MB | Cache {cache_mb:.1f}MB",
+                        flush=True,
+                    )
+
+            stacked_tile, _ = _stack_winsorized_sigma(
+                img_slices,
+                np.array(weights_list, dtype=np.float32),
+                kappa=kappa,
+                winsor_limits=(winsor, winsor),
+                max_mem_bytes=max_mem_bytes,
+            )
+            weight_sum = float(np.sum(weights_list))
+            tile_sum += stacked_tile.astype(np.float32) * weight_sum
+            tile_wht += weight_sum
+            del img_slices, weights_list
+            gc.collect()
+
+        cum_sum[y0:y1] = tile_sum
+        cum_wht[y0:y1] = tile_wht
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
         gc.collect()
