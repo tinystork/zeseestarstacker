@@ -99,12 +99,12 @@ def get_image_shape(path):
     if ext in {".fit", ".fits"}:
         with fits.open(path, memmap=False) as hd:
             data = to_hwc(hd[0].data)
+
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if data is None:
             raise RuntimeError(f"Failed to read {path}")
 
-    shape = data.shape
 
     if data.ndim == 2:
         h, w = shape
