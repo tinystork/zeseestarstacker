@@ -51,6 +51,21 @@ except Exception:
 # Allow running as a standalone script
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    from seestar.core.stack_methods import (
+        _stack_kappa_sigma,
+        _stack_linear_fit_clip,
+        _stack_mean,
+        _stack_median,
+        _stack_winsorized_sigma,
+    )
+else:
+    from seestar.core.stack_methods import (
+        _stack_kappa_sigma,
+        _stack_linear_fit_clip,
+        _stack_mean,
+        _stack_median,
+        _stack_winsorized_sigma,
+    )
 
 
 def _reproj():
@@ -428,8 +443,8 @@ def stream_stack(
         logger.debug(
             f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
         )
-        cum_sum_tile = np.zeros((rows_h, W, C), dtype=np.float32)
-        cum_wht_tile = np.zeros((rows_h, W), dtype=np.float32)
+        img_slices = []
+        weights_list: list[float] = []
         for idx, r in enumerate(rows, 1):
             img_slice = open_aligned_slice(
                 r["path"],
@@ -453,8 +468,8 @@ def stream_stack(
                         f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
                     )
             img_slice = winsorize(img_slice, kappa, winsor)
-            cum_sum_tile += img_slice * weight
-            cum_wht_tile += weight
+            img_slices.append(img_slice)
+            weights_list.append(weight)
             del img_slice
             gc.collect()
             image_count += 1
@@ -473,9 +488,15 @@ def stream_stack(
                     flush=True,
                 )
 
-        cum_sum[y0:y1] += cum_sum_tile
-        cum_wht[y0:y1] += cum_wht_tile
-        del cum_sum_tile, cum_wht_tile
+        stacked_tile, _ = _stack_winsorized_sigma(
+            img_slices,
+            np.array(weights_list, dtype=np.float32),
+            kappa=kappa,
+            winsor_limits=(winsor, winsor),
+        )
+        cum_sum[y0:y1] = stacked_tile.astype(np.float32)
+        cum_wht[y0:y1] = np.sum(weights_list)
+        del img_slices, weights_list
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
         gc.collect()
