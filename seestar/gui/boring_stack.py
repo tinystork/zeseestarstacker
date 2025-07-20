@@ -540,7 +540,11 @@ def main():
     logger.debug("final image shape %s", final.shape)
 
     if final.ndim == 3 and final.shape[2] == 3:
-        fits_data = final.transpose(2, 1, 0)
+        # Write colour data in (C, H, W) order so each channel is stored as a
+        # separate FITS plane.  This preserves the RGB information instead of
+        # swapping the height and width axes which produced a greyscale image
+        # in some FITS viewers.
+        fits_data = final.transpose(2, 0, 1)
     else:
         fits_data = final.squeeze()
 
