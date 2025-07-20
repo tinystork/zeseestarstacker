@@ -224,11 +224,11 @@ def get_image_shape(path):
 
 
 def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
+    """Return RGB slice (``y0:y1``) aligned to reference grid if possible."""
 
-    """Return RGB slice (y0:y1) aligned to reference grid."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
-        with fits.open(path, memmap=True) as hd:
+        with fits.open(path, memmap=False) as hd:
             data = hd[0].data
             hdr = hd[0].header
         if data.ndim == 2 and hdr.get("BAYERPAT"):
@@ -242,9 +242,10 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    warped = warp_image(data, wcs, wcs_ref, shape_ref)
+    if wcs is not None and wcs_ref is not None:
+        data = warp_image(data, wcs, wcs_ref, shape_ref)
 
-    return warped[y0:y1]
+    return data[y0:y1]
 
 
 def winsorize(tile, kappa, limit):
@@ -318,17 +319,22 @@ def stream_stack(
                     method = "astrometry_net"
             except Exception:
                 wcs = None
+
         if wcs is None:
-            raise RuntimeError("Plate-solve failed for " + path)
+            logger.warning("Plate-solve failed for %s", path)
+        else:
+            if wcs_ref is None:
+                wcs_ref = wcs
+            print(
+                f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
+            )
         wcs_cache[path] = wcs
 
-        if wcs_ref is None:
-            wcs_ref = wcs
-        print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
-    print("ALIGN OK")
+    if wcs_ref is not None:
+        print("ALIGN OK")
 
     if wcs_ref is None:
-        raise RuntimeError("Reference WCS not resolved")
+        logger.warning("Reference WCS not resolved; stacking without alignment")
 
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
