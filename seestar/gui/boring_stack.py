@@ -290,6 +290,17 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
 
 
 def winsorize(tile, kappa, limit):
+    """Winsorize ``tile`` in-place and return a floating point view.
+
+    ``numpy.clip`` requires the output array to have a dtype compatible
+    with the clipping bounds.  When a debayered image is fed in, ``tile``
+    can be ``uint16`` which causes ``np.clip`` to raise a casting error
+    when the calculated bounds are floating point.  Cast to ``float32``
+    first so clipping succeeds and subsequent calculations operate on
+    floating point data.
+    """
+
+    tile = tile.astype(np.float32, copy=False)
     med = np.median(tile, axis=0, keepdims=True)
     mad = np.median(np.abs(tile - med), axis=0, keepdims=True) * 1.4826
     lo = med - kappa * mad
