@@ -10,10 +10,9 @@ import math
 import os
 import csv
 import platform  # NOUVEL import
-import subprocess  # NOUVEL import
+import subprocess, shutil, sys
 
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
-import sys  # Pour sys.executable
 
 # ----------------------------------------------------
 import tempfile  # <-- AJOUTÉ
@@ -7006,6 +7005,41 @@ class SeestarStackerGUI:
             self.settings.astap_path = ""
             self.settings.astap_data_dir = ""
             self.settings.astrometry_solve_field_dir = ""
+
+        if self.settings.batch_size == 1:
+            csv_path = getattr(
+                self.settings,
+                "order_csv_path",
+                os.path.join(self.settings.input_folder, "zenalakyser_order.csv"),
+            )
+            if os.path.isfile(csv_path):
+                out_dir = os.path.join(self.settings.output_folder, "boring")
+                os.makedirs(out_dir, exist_ok=True)
+
+                self.logger.info(
+                    "Batch-1 detected: delegating to boring_stack.py"
+                )
+                cmd = [
+                    sys.executable,
+                    "-u",
+                    os.path.join(os.path.dirname(__file__), "boring_stack.py"),
+                    "--csv",
+                    csv_path,
+                    "--out",
+                    out_dir,
+                    "--tile",
+                    str(self.settings.tile_height or 512),
+                    "--kappa",
+                    str(self.settings.kappa or 3),
+                    "--winsor",
+                    str(self.settings.winsor_limits[0] or 0.05),
+                ]
+                ret = subprocess.run(cmd, check=False)
+                if ret.returncode != 0:
+                    tk.messagebox.showerror(
+                        "Stack error", "boring_stack.py failed. Check the log."
+                    )
+                return
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print(
