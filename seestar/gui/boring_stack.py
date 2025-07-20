@@ -22,11 +22,65 @@ def parse_args():
 
 
 def read_paths(csv_path):
-    files = []
-    with open(csv_path, newline="") as f:
-        for row in csv.reader(f):
-            if row:
-                files.append(row[0])
+    """Read file paths from ``csv_path`` respecting optional headers.
+
+    The CSV may contain a simple list of paths or a full ``stack_plan.csv``
+    with additional columns.  In the latter case the ``file_path`` column is
+    used.  A header row like ``order,file`` or ``index,file`` is also
+    supported.  Relative paths are resolved against the CSV location.
+    """
+
+    files: list[str] = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+
+    if not rows:
+        return files
+
+    header = [c.strip().lower() for c in rows[0]]
+    file_idx = None
+    data_rows = rows
+
+    if "file_path" in header:
+        file_idx = header.index("file_path")
+        data_rows = rows[1:]
+    else:
+        has_header = any(
+            h in {"order", "file", "filename", "path", "index"} for h in header
+        )
+        if has_header:
+            data_rows = rows[1:]
+
+    base_dir = os.path.dirname(csv_path)
+
+    for row in data_rows:
+        if not row:
+            continue
+
+        if file_idx is not None:
+            if len(row) <= file_idx:
+                continue
+            cell = row[file_idx].strip()
+        else:
+            cell = row[0].strip()
+            if cell.isdigit() and len(row) > 1:
+                cell = row[1].strip()
+
+        if not cell or cell.lower() in {
+            "order",
+            "file",
+            "filename",
+            "path",
+            "index",
+            "file_path",
+        }:
+            continue
+
+        if not os.path.isabs(cell):
+            cell = os.path.join(base_dir, cell)
+
+        files.append(cell)
+
     return files
 
 
@@ -60,7 +114,11 @@ def flush_mmap(mmap_obj):
     try:
         MADV_DONTNEED = 4
         libc = ctypes.CDLL(None)
-        libc.madvise(ctypes.c_void_p(int(mmap_obj.ctypes.data)), mmap_obj.nbytes, MADV_DONTNEED)
+        libc.madvise(
+            ctypes.c_void_p(int(mmap_obj.ctypes.data)),
+            mmap_obj.nbytes,
+            MADV_DONTNEED,
+        )
     except Exception:
         pass
 
@@ -105,7 +163,11 @@ def main():
         print(f"{progress:.1f}%", flush=True)
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
-    fits.writeto(os.path.join(args.out, "final.fits"), final.astype(np.float32), overwrite=True)
+    fits.writeto(
+        os.path.join(args.out, "final.fits"),
+        final.astype(np.float32),
+        overwrite=True,
+    )
     flush_mmap(cum_sum)
     flush_mmap(cum_wht)
     del cum_sum
