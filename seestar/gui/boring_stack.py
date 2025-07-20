@@ -12,11 +12,22 @@ import cv2
 from numpy.lib.format import open_memmap
 
 
-def to_hwc(arr: np.ndarray) -> np.ndarray:
-    """Return a view of *arr* in (H, W, C) order.
-    If arr.ndim == 3 and arr.shape[0] in (1,2,3,4) we assume (C,H,W)."""
-    if arr.ndim == 3 and arr.shape[0] <= 4:
-        return arr.transpose(1, 2, 0)
+def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
+    """Return ``arr`` in ``(H, W, C)`` order if necessary."""
+    if arr.ndim == 3:
+        # Typical case: channel-first (C, H, W)
+        if arr.shape[0] <= 4:
+            return arr.transpose(1, 2, 0)
+
+        # Less common: (W, H, C) with header confirming orientation
+        if (
+            hdr is not None
+            and arr.shape[2] <= 4
+            and hdr.get("NAXIS1") == arr.shape[0]
+            and hdr.get("NAXIS2") == arr.shape[1]
+        ):
+            return arr.transpose(1, 0, 2)
+
     return arr
 
 
@@ -98,13 +109,13 @@ def get_image_shape(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
         with fits.open(path, memmap=False) as hd:
-            data = to_hwc(hd[0].data)
+
+            data = to_hwc(hd[0].data, hd[0].header)
 
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if data is None:
             raise RuntimeError(f"Failed to read {path}")
-
 
     shape = data.shape
 
@@ -126,7 +137,9 @@ def open_slice(path, y0, y1):
         # the data without memory mapping avoids this issue while keeping the
         # rest of the logic unchanged.
         with fits.open(path, memmap=False) as hd:
-            data = to_hwc(hd[0].data)[y0:y1]
+
+            data = to_hwc(hd[0].data, hd[0].header)[y0:y1]
+
             arr = data.astype(np.float32, copy=False)
     else:
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
