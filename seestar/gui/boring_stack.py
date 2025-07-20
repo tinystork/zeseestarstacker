@@ -5,6 +5,9 @@ import sys
 import gc
 import ctypes
 import logging
+import time
+
+import psutil
 
 import numpy as np
 from astropy.io import fits
@@ -25,6 +28,14 @@ def _init_logger(out_dir: str) -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+def _format_seconds(secs: float) -> str:
+    """Return HH:MM:SS string for ``secs`` seconds."""
+    secs = max(0, int(secs))
+    m, s = divmod(secs, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 
@@ -318,6 +329,8 @@ def stream_stack(
 
     logger.info("Début du traitement")
 
+    stream_stack._start_time = time.monotonic()
+
     stream_stack._next_pct = 0.0
 
     first = rows[0]["path"]
@@ -422,7 +435,18 @@ def stream_stack(
             )
         progress = 100.0 * y1 / H
         if progress >= stream_stack._next_pct or y1 == H:
-            print(f"{progress:.1f}%", flush=True)
+            elapsed = time.monotonic() - stream_stack._start_time
+            frac = y1 / H
+            eta = (elapsed / frac) * (1 - frac) if frac > 0 else 0.0
+            swap_used_mb = psutil.swap_memory().used / (1024 ** 2)
+            eta_str = _format_seconds(eta)
+            logger.info(
+                "Progress %5.1f%% | ETA %s | Swap %.1f MB",
+                progress,
+                eta_str,
+                swap_used_mb,
+            )
+            print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
 
     return cum_sum, cum_wht
