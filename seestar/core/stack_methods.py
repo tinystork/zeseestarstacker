@@ -1,5 +1,6 @@
 # Stacking algorithms duplicated from ZeMosaic
 
+import os
 import numpy as np
 import logging
 from typing import Optional, Sequence, Tuple
@@ -88,7 +89,7 @@ def _stack_winsorized_sigma_iter(
     apply_rewinsor: bool = True,
     max_iters: int = 5,
     kappa_decay: float = 0.9,
-    max_mem_bytes: int = 2_000_000_000,
+    max_mem_bytes: int = int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000)),
 ) -> Tuple[np.ndarray, float]:
 
     """Iterative Winsorized sigma clipping.
@@ -114,7 +115,8 @@ def _stack_winsorized_sigma_iter(
         Multiplicative decay for ``kappa`` at each iteration.
 
     max_mem_bytes : int, optional
-        Abort if stacking would exceed this memory usage.
+        Abort if stacking would exceed this memory usage. Defaults to the value
+        of the ``SEESTAR_MAX_MEM`` environment variable (2 GB if unset).
 
     Returns
     -------
@@ -218,6 +220,7 @@ def _stack_winsorized_sigma(
     kappa: float = 3.0,
     winsor_limits: Tuple[float, float] = (0.05, 0.05),
     apply_rewinsor: bool = True,
+    max_mem_bytes: Optional[int] = None,
 ) -> Tuple[np.ndarray, float]:
     """Compatibility wrapper for iterative Winsorized sigma clipping."""
     return _stack_winsorized_sigma_iter(
@@ -226,5 +229,8 @@ def _stack_winsorized_sigma(
         kappa=kappa,
         winsor_limits=winsor_limits,
         apply_rewinsor=apply_rewinsor,
+        max_mem_bytes=max_mem_bytes
+        if max_mem_bytes is not None
+        else int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000)),
     )
 

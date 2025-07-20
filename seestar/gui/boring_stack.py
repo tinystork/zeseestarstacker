@@ -151,6 +151,12 @@ def parse_args():
     p.add_argument("--tile", type=int, default=512, help="Tile height")
     p.add_argument("--kappa", type=float, default=3.0, help="Kappa value")
     p.add_argument("--winsor", type=float, default=0.05, help="Winsor limit")
+    p.add_argument(
+        "--max-mem",
+        type=float,
+        default=None,
+        help="Maximum memory per stack in GB (overrides SEESTAR_MAX_MEM)",
+    )
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
     p.add_argument(
         "--use-solver",
@@ -357,6 +363,7 @@ def stream_stack(
     winsor=0.05,
     api_key=None,
     use_solver=True,
+    max_mem=None,
 ):
     rows = read_rows(csv_path)
     if not rows:
@@ -367,6 +374,11 @@ def stream_stack(
     stream_stack._start_time = time.monotonic()
 
     stream_stack._next_pct = 0.0
+
+    if max_mem is None:
+        max_mem_bytes = int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000))
+    else:
+        max_mem_bytes = int(float(max_mem) * 1024 ** 3)
 
     first = rows[0]["path"]
     H, W, C = get_image_shape(first)
@@ -493,6 +505,7 @@ def stream_stack(
             np.array(weights_list, dtype=np.float32),
             kappa=kappa,
             winsor_limits=(winsor, winsor),
+            max_mem_bytes=max_mem_bytes,
         )
         cum_sum[y0:y1] = stacked_tile.astype(np.float32)
         cum_wht[y0:y1] = np.sum(weights_list)
@@ -555,6 +568,7 @@ def main():
         winsor=args.winsor,
         api_key=args.api_key,
         use_solver=args.use_solver,
+        max_mem=args.max_mem,
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
