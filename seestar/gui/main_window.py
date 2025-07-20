@@ -4923,11 +4923,31 @@ class SeestarStackerGUI:
             except tk.TclError:
                 pass
 
-        def _finish(retcode):
+
+        def _finish(retcode, output_lines):
             try:
                 if hasattr(self, "progress_manager") and self.progress_manager:
                     self.progress_manager.stop_timer()
-                if retcode != 0:
+
+                log_text = "\n".join(output_lines)
+                logger.debug("boring_stack.py output:\n%s", log_text)
+
+                if retcode == 0:
+                    final_path = os.path.join(out_dir, "final.fits")
+                    if os.path.exists(final_path):
+                        self.update_progress_gui(
+                            self.tr("stacking_finished", default="Stacking finished"),
+                            100,
+                        )
+                        try:
+                            messagebox.showinfo(
+                                "Stack complete",
+                                f"Output written to {final_path}",
+                            )
+                        except tk.TclError:
+                            pass
+                else:
+
                     messagebox.showerror(
                         "Stack error",
                         "boring_stack.py failed. Check the log.",
@@ -4951,6 +4971,9 @@ class SeestarStackerGUI:
             self.progress_manager.start_timer()
 
         start_time = time.monotonic()
+
+        output_lines = []
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -4964,6 +4987,9 @@ class SeestarStackerGUI:
                 if not line:
                     continue
                 text = line.strip()
+
+                output_lines.append(text)
+
                 if text.endswith("%"):
                     try:
                         pct = float(text.rstrip("%"))
@@ -4993,7 +5019,9 @@ class SeestarStackerGUI:
                 None,
             )
         finally:
-            self.root.after(0, _finish, retcode)
+
+            self.root.after(0, _finish, retcode, output_lines)
+
 
 
     def stop_processing(self):
