@@ -6661,6 +6661,8 @@ class SeestarStackerGUI:
         8. Lancer le thread de traitement du backend.
         MODIFIED: Ajout d'un CRITICAL CHECK pour vérifier mosaic_settings avant l'envoi au backend.
         """
+        if self.settings.batch_size == 1:
+            self.settings.enable_preview = False
         print(
             "DEBUG (GUI start_processing): Début tentative démarrage du traitement..."
         )
