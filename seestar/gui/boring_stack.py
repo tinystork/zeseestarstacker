@@ -405,23 +405,27 @@ def stream_stack(
     for y0 in range(0, H, tile_h):
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
-        tile_stack = []
-        tile_wht_list = []
+        logger.debug(
+            f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
+        )
+        cum_sum_tile = np.zeros((rows_h, W, C), dtype=np.float32)
+        cum_wht_tile = np.zeros((rows_h, W), dtype=np.float32)
         for idx, r in enumerate(rows, 1):
-            tile_stack.append(
-                open_aligned_slice(
-                    r["path"],
-                    y0,
-                    y1,
-                    wcs_cache[r["path"]],
-                    wcs_ref,
-                    shape_ref,
-                    use_solver=use_solver,
-                )
+            img_slice = open_aligned_slice(
+                r["path"],
+                y0,
+                y1,
+                wcs_cache[r["path"]],
+                wcs_ref,
+                shape_ref,
+                use_solver=use_solver,
             )
-            tile_wht_list.append(
-                np.full((rows_h, W), float(r.get("weight") or 1.0), np.float32)
-            )
+            weight = float(r.get("weight") or 1.0)
+            img_slice = winsorize(img_slice, kappa, winsor)
+            cum_sum_tile += img_slice * weight
+            cum_wht_tile += weight
+            del img_slice
+            gc.collect()
             image_count += 1
             if image_count % 100 == 0:
                 vm = psutil.virtual_memory()
@@ -437,15 +441,16 @@ def stream_stack(
                     f"{image_count} images loaded | RAM {ram_mb:.1f}MB | Cache {cache_mb:.1f}MB",
                     flush=True,
                 )
-        tile = np.stack(tile_stack, axis=0)
-        wht = np.stack(tile_wht_list, axis=0)
-        winsorize(tile, kappa, winsor)
-        cum_sum[y0:y1] += np.sum(tile * wht[..., None], axis=0)
-        cum_wht[y0:y1] += np.sum(wht, axis=0)
-        del tile_stack, tile_wht_list, tile, wht
-        gc.collect()
+
+        cum_sum[y0:y1] += cum_sum_tile
+        cum_wht[y0:y1] += cum_wht_tile
+        del cum_sum_tile, cum_wht_tile
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
+        gc.collect()
+        logger.debug(
+            f"RAM après la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
+        )
         if y0 == 0:
             logger.debug(
                 "stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape
