@@ -74,6 +74,7 @@ def warp_image(img: np.ndarray, wcs_in: WCS, wcs_ref: WCS, shape_ref: tuple[int,
     return reproject_to_reference_wcs(img, wcs_in, wcs_ref, shape_ref)
 
 
+
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
     """Return ``arr`` in ``(H, W, C)`` order if necessary."""
     if arr.ndim == 3:
@@ -170,7 +171,6 @@ def read_rows(csv_path):
 
     return rows_out
 
-
 def read_paths(csv_path):
     """Return list of paths only (legacy helper)."""
     return [r["path"] for r in read_rows(csv_path)]
@@ -201,6 +201,7 @@ def get_image_shape(path):
 
 
 def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
+
     """Return RGB slice (y0:y1) aligned to reference grid."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
@@ -218,7 +219,9 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
+
     warped = warp_image(data, wcs, wcs_ref, shape_ref)
+
     return warped[y0:y1]
 
 
@@ -269,7 +272,9 @@ def stream_stack(
     )
 
     wcs_cache: dict[str, object] = {}
+
     wcs_ref: WCS | None = None
+
     for i, row in enumerate(rows, 1):
         path = row["path"]
         if path in wcs_cache:
@@ -294,6 +299,7 @@ def stream_stack(
         if wcs is None:
             raise RuntimeError("Plate-solve failed for " + path)
         wcs_cache[path] = wcs
+
         if wcs_ref is None:
             wcs_ref = wcs
         print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
@@ -301,6 +307,7 @@ def stream_stack(
 
     if wcs_ref is None:
         raise RuntimeError("Reference WCS not resolved")
+
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
@@ -315,9 +322,11 @@ def stream_stack(
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
         tile_stack = [
+
             open_aligned_slice(
                 r["path"], y0, y1, wcs_cache[r["path"]], wcs_ref, shape_ref
             )
+
             for r in rows
         ]
         tile_wht_list = [
