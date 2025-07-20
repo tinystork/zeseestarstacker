@@ -9,6 +9,15 @@ import traceback
 import numpy as np
 from astropy.io import fits
 import cv2
+from numpy.lib.format import open_memmap
+
+
+def to_hwc(arr: np.ndarray) -> np.ndarray:
+    """Return a view of *arr* in (H, W, C) order.
+    If arr.ndim == 3 and arr.shape[0] in (1,2,3,4) we assume (C,H,W)."""
+    if arr.ndim == 3 and arr.shape[0] <= 4:
+        return arr.transpose(1, 2, 0)
+    return arr
 
 
 def parse_args():
@@ -89,7 +98,7 @@ def get_image_shape(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
         with fits.open(path, memmap=False) as hd:
-            data = hd[0].data
+            data = to_hwc(hd[0].data)
             shape = data.shape
     else:
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -97,7 +106,7 @@ def get_image_shape(path):
             raise RuntimeError(f"Failed to read {path}")
         shape = img.shape
 
-    if len(shape) == 2:
+    if data.ndim == 2:
         h, w = shape
         c = 1
     else:
@@ -114,8 +123,8 @@ def open_slice(path, y0, y1):
         # the data without memory mapping avoids this issue while keeping the
         # rest of the logic unchanged.
         with fits.open(path, memmap=False) as hd:
-            data = hd[0].data[y0:y1]
-            arr = np.asarray(data, dtype=np.float32)
+            data = to_hwc(hd[0].data)[y0:y1]
+            arr = data.astype(np.float32, copy=False)
     else:
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if img is None:
@@ -149,32 +158,25 @@ def flush_mmap(mmap_obj):
         pass
 
 
-def main():
-    args = parse_args()
-    os.makedirs(args.out, exist_ok=True)
-    files = read_paths(args.csv)
+def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05):
+    files = read_paths(csv_path)
     if not files:
-        print("CSV is empty", file=sys.stderr)
-        return 1
+        raise RuntimeError("CSV is empty")
+
     first = files[0]
     H, W, C = get_image_shape(first)
 
-    sum_path = os.path.join(args.out, "cum_sum.npy")
-    wht_path = os.path.join(args.out, "cum_wht.npy")
-    cum_sum = np.memmap(sum_path, mode="w+", dtype=np.float32, shape=(H, W, C))
+    cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
-    cum_wht = np.memmap(wht_path, mode="w+", dtype=np.float32, shape=(H, W))
+    cum_wht = open_memmap(out_wht, "w+", dtype=np.float32, shape=(H, W))
     cum_wht[:] = 1
 
-    tile_h = int(args.tile)
-    nfiles = len(files)
+    tile_h = int(tile)
     for y0 in range(0, H, tile_h):
         y1 = min(y0 + tile_h, H)
-        tile_slices = []
-        for fp in files:
-            tile_slices.append(open_slice(fp, y0, y1))
+        tile_slices = [open_slice(fp, y0, y1) for fp in files]
         tile = np.stack(tile_slices, axis=0)
-        winsorize(tile, args.kappa, args.winsor)
+        winsorize(tile, kappa, winsor)
         cum_sum[y0:y1] += tile.sum(axis=0)
         cum_wht[y0:y1] += tile.shape[0]
         del tile_slices
@@ -184,6 +186,24 @@ def main():
         flush_mmap(cum_wht)
         progress = 100.0 * y1 / H
         print(f"{progress:.1f}%", flush=True)
+
+    return cum_sum, cum_wht
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    sum_path = os.path.join(args.out, "cum_sum.npy")
+    wht_path = os.path.join(args.out, "cum_wht.npy")
+    cum_sum, cum_wht = stream_stack(
+        args.csv,
+        sum_path,
+        wht_path,
+        tile=args.tile,
+        kappa=args.kappa,
+        winsor=args.winsor,
+    )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
     fits.writeto(
@@ -201,6 +221,25 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.getenv("BORING_TEST"):
+        import tempfile
+        import shutil
+
+        tmp = tempfile.mkdtemp()
+        fits.writeto(
+            os.path.join(tmp, "c_hw.fits"),
+            (np.arange(60, dtype=np.uint16).reshape(3, 4, 5)),
+            overwrite=True,
+        )
+        csv_path = os.path.join(tmp, "plan.csv")
+        with open(csv_path, "w") as f:
+            f.write("file_path\n" + tmp + "/c_hw.fits\n")
+        stream_stack(csv_path, os.path.join(tmp, "sum.npy"), os.path.join(tmp, "wht.npy"))
+        arr = np.load(os.path.join(tmp, "sum.npy"), mmap_mode="r")
+        assert arr.shape == (4, 5, 3), arr.shape
+        shutil.rmtree(tmp)
+        sys.exit(0)
+
     try:
         sys.exit(main())
     except Exception:
