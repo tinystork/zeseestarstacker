@@ -8111,6 +8111,7 @@ class SeestarQueuedStacker:
         kappa=3.0,
         winsor_limits=(0.05, 0.05),
         apply_rewinsor=True,
+        max_mem_bytes=int(os.getenv("SEESTAR_MAX_MEM", 1_000_000_000)),
     ):
         """Run winsorized sigma clipping in a separate process."""
         self.update_progress(
@@ -8126,7 +8127,12 @@ class SeestarQueuedStacker:
             winsor_limits,
             apply_rewinsor,
         )
-        total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
+        cube_bytes = sum(getattr(img, "nbytes", 0) for img in images)
+        if cube_bytes > max_mem_bytes:
+            raise RuntimeError(
+                f"Stack exceeds max_mem_bytes ({cube_bytes}>{max_mem_bytes})"
+            )
+        total_bytes = cube_bytes
         use_executor = (
             self.max_stack_workers > 1
             and getattr(self, "batch_size", 0) != 1
@@ -8145,7 +8151,7 @@ class SeestarQueuedStacker:
 
     def _combine_hq_by_tiles(
         self,
-        images_list,
+        file_paths,
         weights,
         kappa,
         winsor_limits,
@@ -8159,8 +8165,23 @@ class SeestarQueuedStacker:
 
         tile_h = int(os.getenv("SEESTAR_TILE_H", tile_h))
 
-        H, W = images_list[0].shape[:2]
-        C = images_list[0].shape[2] if images_list[0].ndim == 3 else 1
+        first = file_paths[0]
+        if isinstance(first, str):
+            ext = os.path.splitext(first)[1].lower()
+            if ext in {".fits", ".fit", ".fts", ".tif", ".tiff"}:
+                with fits.open(first, memmap=True) as hdul:
+                    data0 = hdul[0].data
+                    if data0.ndim == 3 and data0.shape[0] in {3, 4}:
+                        data0 = np.moveaxis(data0, 0, -1)
+                    H, W = data0.shape[:2]
+                    C = data0.shape[2] if data0.ndim == 3 else 1
+            else:
+                img0 = cv2.imread(first, cv2.IMREAD_UNCHANGED)
+                H, W = img0.shape[:2]
+                C = img0.shape[2] if img0.ndim == 3 else 1
+        else:
+            H, W = first.shape[:2]
+            C = first.shape[2] if first.ndim == 3 else 1
 
         if use_memmap:
             tmp_path = os.path.join(
@@ -8217,21 +8238,34 @@ class SeestarQueuedStacker:
 
             per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
             group_size = max(1, max_bytes // max(per_img_bytes, 1))
-            if use_memmap:
-                group_size = 1
 
             mode = getattr(self, "stacking_mode", "mean")
 
-            for s in range(0, len(images_list), group_size):
+            for s in range(0, len(file_paths), group_size):
                 imgs = []
                 covs = []
-                for idx, (img, cov) in enumerate(
-                    zip(images_list[s : s + group_size], weights[s : s + group_size])
+                for idx, (fp, cov) in enumerate(
+                    zip(file_paths[s : s + group_size], weights[s : s + group_size])
                 ):
-                    sl = img[y0:y1]
+                    if isinstance(fp, str):
+                        ext = os.path.splitext(fp)[1].lower()
+                        if ext in {".fits", ".fit", ".fts", ".tif", ".tiff"}:
+                            with fits.open(fp, memmap=True) as hd:
+                                arr = hd[0].data
+                                if arr.ndim == 3 and arr.shape[0] in {3, 4}:
+                                    arr = np.moveaxis(arr, 0, -1)
+                                sl = arr[y0:y1].astype(np.float32, copy=False)
+                        else:
+                            img = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
+                            if img is None:
+                                raise RuntimeError(f"Failed to read {fp}")
+                            sl = img[y0:y1].astype(np.float32)
+                    else:
+                        sl = fp[y0:y1].astype(np.float32, copy=False)
+
                     if masks_list is not None:
                         m = masks_list[s + idx]
-                        mask_slice = m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1]
+                        mask_slice = m[y0:y1][..., None] if sl.ndim == 3 else m[y0:y1]
                         np.multiply(sl, mask_slice, out=sl, casting="unsafe")
                     imgs.append(sl)
                     covs.append(cov[y0:y1])
@@ -8561,7 +8595,7 @@ class SeestarQueuedStacker:
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        image_data_list,
+                        getattr(self, "_current_batch_paths", []),
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
                         self.winsor_limits,
@@ -8599,7 +8633,7 @@ class SeestarQueuedStacker:
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        image_data_list,
+                        getattr(self, "_current_batch_paths", []),
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -8637,7 +8671,7 @@ class SeestarQueuedStacker:
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        image_data_list,
+                        getattr(self, "_current_batch_paths", []),
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -8670,7 +8704,7 @@ class SeestarQueuedStacker:
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        image_data_list,
+                        getattr(self, "_current_batch_paths", []),
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
