@@ -31,6 +31,7 @@ def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
             and hdr.get("NAXIS2") == arr.shape[1]
         ):
             return arr.transpose(1, 0, 2)
+
     return arr
 
 
@@ -112,13 +113,16 @@ def get_image_shape(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
         with fits.open(path, memmap=False) as hd:
+
             data = to_hwc(hd[0].data, hd[0].header)
+
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if data is None:
             raise RuntimeError(f"Failed to read {path}")
 
     shape = data.shape
+
 
     if data.ndim == 2:
         h, w = shape
@@ -138,7 +142,9 @@ def open_slice(path, y0, y1):
         # the data without memory mapping avoids this issue while keeping the
         # rest of the logic unchanged.
         with fits.open(path, memmap=False) as hd:
+
             data = to_hwc(hd[0].data, hd[0].header)[y0:y1]
+
             arr = data.astype(np.float32, copy=False)
     else:
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -215,6 +221,7 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
+
     os.makedirs(args.out, exist_ok=True)
 
     sum_path = os.path.join(args.out, "cum_sum.npy")
@@ -255,7 +262,9 @@ if __name__ == "__main__":
     if os.getenv("BORING_TEST"):
         import tempfile
         import shutil
+
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
+
 
         tmp = tempfile.mkdtemp()
         fits.writeto(
