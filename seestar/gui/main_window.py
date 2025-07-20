@@ -37,6 +37,7 @@ from ..queuep.queue_manager import (
 from .ui_utils import ToolTip
 from .boring_stack import read_paths
 
+
 logger = logging.getLogger(__name__)
 
 logger.debug("-" * 20)
@@ -4923,6 +4924,123 @@ class SeestarStackerGUI:
             except tk.TclError:
                 pass
 
+        def _finish(retcode, output_lines):
+            try:
+                if hasattr(self, "progress_manager") and self.progress_manager:
+                    self.progress_manager.stop_timer()
+
+                log_text = "\n".join(output_lines)
+                logger.debug("boring_stack.py output:\n%s", log_text)
+
+                if retcode == 0:
+                    final_path = os.path.join(out_dir, "final.fits")
+                    if os.path.exists(final_path):
+                        self.update_progress_gui(
+                            self.tr("stacking_finished", default="Stacking finished"),
+                            100,
+                        )
+                        try:
+                            messagebox.showinfo(
+                                "Stack complete",
+                                f"Output written to {final_path}",
+                            )
+                        except tk.TclError:
+                            pass
+                else:
+                    messagebox.showerror(
+                        "Stack error",
+                        "boring_stack.py failed. Check the log.",
+                    )
+            finally:
+                self.processing = False
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.NORMAL)
+                if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                    self.stop_button.config(state=tk.DISABLED)
+                self._set_parameter_widgets_state(tk.NORMAL)
+
+        self.processing = True
+        if hasattr(self, "start_button") and self.start_button.winfo_exists():
+            self.start_button.config(state=tk.DISABLED)
+        if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+            self.stop_button.config(state=tk.NORMAL)
+        self._set_parameter_widgets_state(tk.DISABLED)
+        if hasattr(self, "progress_manager") and self.progress_manager:
+            self.progress_manager.reset()
+            self.progress_manager.start_timer()
+
+        start_time = time.monotonic()
+        output_lines = []
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            for line in proc.stdout:
+                if not line:
+                    continue
+                text = line.strip()
+                output_lines.append(text)
+                if text.endswith("%"):
+                    try:
+                        pct = float(text.rstrip("%"))
+                    except ValueError:
+                        continue
+                    elapsed = time.monotonic() - start_time
+                    if pct > 0:
+                        rem_sec = elapsed * (100 - pct) / pct
+                        h, r = divmod(int(rem_sec), 3600)
+                        m, s = divmod(r, 60)
+                        eta = f"{h:02}:{m:02}:{s:02}"
+                    else:
+                        eta = self.tr("eta_calculating", default="Calculating...")
+
+                    processed = int(round((pct / 100.0) * total_files))
+                    self.root.after(0, _gui_update, pct, eta, processed)
+                else:
+                    self.root.after(0, self.update_progress_gui, text, None)
+
+            retcode = proc.wait()
+        except Exception as e:
+            retcode = -1
+            self.root.after(
+                0,
+                self.update_progress_gui,
+                f"Error running boring_stack: {e}",
+                None,
+            )
+        finally:
+            self.root.after(0, _finish, retcode, output_lines)
+
+
+    def _run_boring_stack_process(self, cmd, csv_path, out_dir):
+        """Execute boring_stack.py and update GUI progress."""
+
+        total_files = 0
+        try:
+            total_files = len(read_paths(csv_path))
+        except Exception:
+            total_files = 0
+
+        def _gui_update(progress, eta, processed):
+            try:
+                if hasattr(self, "progress_manager") and self.progress_manager:
+                    self.progress_manager.update_progress(f"{progress:.1f}%", progress)
+                    if hasattr(self.progress_manager, "set_remaining"):
+                        self.progress_manager.set_remaining(eta)
+                default_fmt = self.tr(
+                    "aligned_files_label_format", default="Aligned: {count}"
+                )
+                self.aligned_files_var.set(default_fmt.format(count=processed))
+                remaining = max(0, total_files - processed)
+                self.remaining_files_var.set(f"{remaining}/{total_files}")
+            except tk.TclError:
+                pass
+
 
         def _finish(retcode, output_lines):
             try:
@@ -7167,6 +7285,7 @@ class SeestarStackerGUI:
                     name="BoringStackWorker",
                 ).start()
                 return
+
 
         # --- 6. Appel à queued_stacker.start_processing ---
         print(

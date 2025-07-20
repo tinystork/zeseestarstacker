@@ -84,6 +84,27 @@ def read_paths(csv_path):
     return files
 
 
+def get_image_shape(path):
+    """Return (height, width, channels) for an image file."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".fit", ".fits"}:
+        with fits.open(path, memmap=False) as hd:
+            data = hd[0].data
+            shape = data.shape
+    else:
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise RuntimeError(f"Failed to read {path}")
+        shape = img.shape
+
+    if len(shape) == 2:
+        h, w = shape
+        c = 1
+    else:
+        h, w, c = shape
+    return h, w, c
+
+
 def open_slice(path, y0, y1):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
@@ -136,10 +157,7 @@ def main():
         print("CSV is empty", file=sys.stderr)
         return 1
     first = files[0]
-    slice0 = open_slice(first, 0, 1)
-    H = slice0.shape[0] * 1
-    W = slice0.shape[1]
-    C = slice0.shape[2]
+    H, W, C = get_image_shape(first)
 
     sum_path = os.path.join(args.out, "cum_sum.npy")
     wht_path = os.path.join(args.out, "cum_wht.npy")
