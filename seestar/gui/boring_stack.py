@@ -550,6 +550,7 @@ def main():
         overwrite=True,
     )
     preview = np.clip(final, 0, 1) ** 0.5
+    preview = np.clip(preview * 255, 0, 255).astype(np.uint8)
     if preview.ndim == 3 and preview.shape[2] == 1:
         preview = preview[:, :, 0]
     imageio.imwrite(os.path.join(args.out, "preview.png"), preview)
