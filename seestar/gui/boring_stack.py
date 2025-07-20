@@ -108,13 +108,22 @@ def warp_image(img: np.ndarray, wcs_in: WCS, wcs_ref: WCS, shape_ref: tuple[int,
 
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
     """Return ``arr`` in ``(H, W, C)`` order if necessary."""
+    if arr.ndim == 2:
+        # Convert grayscale planes to explicit channel dimension
+        return arr[..., None]
+
     if arr.ndim == 3:
         # Typical case: channel-first (C, H, W)
         if arr.shape[0] <= 4:
             return arr.transpose(1, 2, 0)
 
         # Less common: (W, H, C) with header confirming orientation
-        if (hdr is not None and arr.shape[2] <= 4 and hdr.get("NAXIS1") == arr.shape[0] and hdr.get("NAXIS2") == arr.shape[1]):
+        if (
+            hdr is not None
+            and arr.shape[2] <= 4
+            and hdr.get("NAXIS1") == arr.shape[0]
+            and hdr.get("NAXIS2") == arr.shape[1]
+        ):
             return arr.transpose(1, 0, 2)
 
     return arr
@@ -432,6 +441,17 @@ def stream_stack(
                 use_solver=use_solver,
             )
             weight = float(r.get("weight") or 1.0)
+            if img_slice.ndim == 2:
+                img_slice = img_slice[..., None]
+            if img_slice.shape[2] != C:
+                if img_slice.shape[2] == 3 and C == 1:
+                    img_slice = cv2.cvtColor(img_slice, cv2.COLOR_RGB2GRAY)[..., None]
+                elif img_slice.shape[2] == 1 and C == 3:
+                    img_slice = np.repeat(img_slice, 3, axis=2)
+                else:
+                    raise ValueError(
+                        f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
+                    )
             img_slice = winsorize(img_slice, kappa, winsor)
             cum_sum_tile += img_slice * weight
             cum_wht_tile += weight
