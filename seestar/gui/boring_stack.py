@@ -54,6 +54,8 @@ def read_paths(csv_path):
     supported.  Relative paths are resolved against the CSV location.
     """
 
+    logger.info("lecture de stack_plan.csv: %s", csv_path)
+
     files: list[str] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
@@ -187,6 +189,10 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
     if not files:
         raise RuntimeError("CSV is empty")
 
+    logger.info("Début du traitement")
+
+    stream_stack._next_pct = 0.0
+
     first = files[0]
     H, W, C = get_image_shape(first)
     logger.debug("stream_stack: %d files, first=%s, shape=%dx%dx%d", len(files), first, H, W, C)
@@ -213,7 +219,9 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
         if y0 == 0:
             logger.debug("stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape)
         progress = 100.0 * y1 / H
-        print(f"{progress:.1f}%", flush=True)
+        if progress >= stream_stack._next_pct or y1 == H:
+            print(f"{progress:.1f}%", flush=True)
+            stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
 
     return cum_sum, cum_wht
 
