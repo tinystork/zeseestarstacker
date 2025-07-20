@@ -1956,6 +1956,9 @@ class SeestarQueuedStacker:
             "DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W..."
         )
 
+        if hasattr(self, "settings") and not getattr(self.settings, "enable_preview", True):
+            return
+
         if self.preview_callback is None:
             logger.debug(
                 "DEBUG QM [_update_preview_sum_w]: Callback preview non défini. Sortie."
