@@ -16,6 +16,15 @@ from numpy.lib.format import open_memmap
 
 logger = logging.getLogger(__name__)
 
+# Allow running as a standalone script
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+
+def _reproj():
+    from seestar import reproject_utils as ru
+    return ru
+
 
 def _reproj():
     from seestar import reproject_utils as ru
