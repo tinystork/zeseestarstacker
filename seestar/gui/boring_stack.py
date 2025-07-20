@@ -117,6 +117,19 @@ def parse_args():
     p.add_argument("--kappa", type=float, default=3.0, help="Kappa value")
     p.add_argument("--winsor", type=float, default=0.05, help="Winsor limit")
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
+    p.add_argument(
+        "--use-solver",
+        dest="use_solver",
+        action="store_true",
+        help="Use third-party solver for WCS alignment",
+    )
+    p.add_argument(
+        "--no-solver",
+        dest="use_solver",
+        action="store_false",
+        help="Disable third-party solver and skip reprojection",
+    )
+    p.set_defaults(use_solver=True)
     return p.parse_args()
 
 
@@ -223,7 +236,7 @@ def get_image_shape(path):
     return h, w, c
 
 
-def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
+def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True):
     """Return RGB slice (``y0:y1``) aligned to reference grid if possible."""
 
     ext = os.path.splitext(path)[1].lower()
@@ -242,7 +255,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    if wcs is not None and wcs_ref is not None:
+    if use_solver and wcs is not None and wcs_ref is not None:
         data = warp_image(data, wcs, wcs_ref, shape_ref)
 
     return data[y0:y1]
@@ -272,7 +285,15 @@ def flush_mmap(mmap_obj):
 
 
 def stream_stack(
-    csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05, api_key=None
+    csv_path,
+    out_sum,
+    out_wht,
+    *,
+    tile=512,
+    kappa=3.0,
+    winsor=0.05,
+    api_key=None,
+    use_solver=True,
 ):
     rows = read_rows(csv_path)
     if not rows:
@@ -298,43 +319,47 @@ def stream_stack(
 
     wcs_ref: WCS | None = None
 
-    for i, row in enumerate(rows, 1):
-        path = row["path"]
-        if path in wcs_cache:
-            continue
-        method = "local"
-        wcs = solve_local_plate(path)
-        if wcs is None:
-            wcs = get_wcs_from_astap(path)
-            if wcs is not None:
-                method = "astap"
-        if wcs is None:
-            wcs = solve_with_astrometry_local(path)
-            if wcs is not None:
-                method = "astrometry_local"
-        if wcs is None and api_key:
-            try:
-                wcs = solve_with_astrometry_net(path, api_key)
+    if use_solver:
+        for i, row in enumerate(rows, 1):
+            path = row["path"]
+            if path in wcs_cache:
+                continue
+            method = "local"
+            wcs = solve_local_plate(path)
+            if wcs is None:
+                wcs = get_wcs_from_astap(path)
                 if wcs is not None:
-                    method = "astrometry_net"
-            except Exception:
-                wcs = None
+                    method = "astap"
+            if wcs is None:
+                wcs = solve_with_astrometry_local(path)
+                if wcs is not None:
+                    method = "astrometry_local"
+            if wcs is None and api_key:
+                try:
+                    wcs = solve_with_astrometry_net(path, api_key)
+                    if wcs is not None:
+                        method = "astrometry_net"
+                except Exception:
+                    wcs = None
 
-        if wcs is None:
-            logger.warning("Plate-solve failed for %s", path)
-        else:
-            if wcs_ref is None:
-                wcs_ref = wcs
-            print(
-                f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
-            )
-        wcs_cache[path] = wcs
+            if wcs is None:
+                logger.warning("Plate-solve failed for %s", path)
+            else:
+                if wcs_ref is None:
+                    wcs_ref = wcs
+                print(
+                    f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
+                )
+            wcs_cache[path] = wcs
 
-    if wcs_ref is not None:
-        print("ALIGN OK")
+        if wcs_ref is not None:
+            print("ALIGN OK")
 
-    if wcs_ref is None:
-        logger.warning("Reference WCS not resolved; stacking without alignment")
+        if wcs_ref is None:
+            logger.warning("Reference WCS not resolved; stacking without alignment")
+    else:
+        for row in rows:
+            wcs_cache[row["path"]] = None
 
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
@@ -351,9 +376,14 @@ def stream_stack(
         rows_h = y1 - y0
         tile_stack = [
             open_aligned_slice(
-                r["path"], y0, y1, wcs_cache[r["path"]], wcs_ref, shape_ref
+                r["path"],
+                y0,
+                y1,
+                wcs_cache[r["path"]],
+                wcs_ref,
+                shape_ref,
+                use_solver=use_solver,
             )
-
             for r in rows
         ]
         tile_wht_list = [
@@ -396,6 +426,7 @@ def main():
         kappa=args.kappa,
         winsor=args.winsor,
         api_key=args.api_key,
+        use_solver=args.use_solver,
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
