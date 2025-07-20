@@ -4,7 +4,6 @@ import os
 import sys
 import gc
 import ctypes
-import traceback
 import logging
 
 import numpy as np
@@ -15,7 +14,28 @@ from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
 
 
+
+def _init_logger(out_dir: str) -> None:
+    log_path = os.path.join(out_dir, "boring_stack.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+
+
 logger = logging.getLogger(__name__)
+
+
+try:
+    if "--out" in sys.argv:
+        _init_logger(sys.argv[sys.argv.index("--out") + 1])
+except Exception:
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
 
 # Allow running as a standalone script
 if __package__ in (None, ""):
@@ -169,7 +189,10 @@ def read_rows(csv_path):
             weight = row[weight_idx].strip()
         rows_out.append({"path": cell, "weight": weight})
 
+
     return rows_out
+
+
 
 def read_paths(csv_path):
     """Return list of paths only (legacy helper)."""
@@ -218,7 +241,6 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
-
 
     warped = warp_image(data, wcs, wcs_ref, shape_ref)
 
@@ -322,7 +344,6 @@ def stream_stack(
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
         tile_stack = [
-
             open_aligned_slice(
                 r["path"], y0, y1, wcs_cache[r["path"]], wcs_ref, shape_ref
             )
@@ -356,7 +377,6 @@ def stream_stack(
 
 def main():
     args = parse_args()
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -434,5 +454,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        traceback.print_exc(limit=3)
+        logging.exception("Fatal error in boring_stack")
         sys.exit(1)

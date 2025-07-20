@@ -4971,7 +4971,9 @@ class SeestarStackerGUI:
 
         start_time = time.monotonic()
         output_lines = []
+        log_path = os.path.join(out_dir, "boring_stack.log")
         try:
+            log_file = open(log_path, "w", encoding="utf-8")
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -4984,6 +4986,8 @@ class SeestarStackerGUI:
                 if not line:
                     continue
                 text = line.strip()
+                log_file.write(text + "\n")
+                log_file.flush()
                 output_lines.append(text)
                 if text.endswith("%"):
                     try:
@@ -5005,8 +5009,14 @@ class SeestarStackerGUI:
                     self.root.after(0, self.update_progress_gui, text, None)
 
             retcode = proc.wait()
+            log_file.close()
         except Exception as e:
             retcode = -1
+            try:
+                log_file.write(f"Error running boring_stack: {e}\n")
+                log_file.close()
+            except Exception:
+                pass
             self.root.after(
                 0,
                 self.update_progress_gui,
@@ -5091,8 +5101,10 @@ class SeestarStackerGUI:
         start_time = time.monotonic()
 
         output_lines = []
+        log_path = os.path.join(out_dir, "boring_stack.log")
 
         try:
+            log_file = open(log_path, "w", encoding="utf-8")
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -5105,7 +5117,8 @@ class SeestarStackerGUI:
                 if not line:
                     continue
                 text = line.strip()
-
+                log_file.write(text + "\n")
+                log_file.flush()
                 output_lines.append(text)
 
                 if text.endswith("%"):
@@ -5128,8 +5141,14 @@ class SeestarStackerGUI:
                     self.root.after(0, self.update_progress_gui, text, None)
 
             retcode = proc.wait()
+            log_file.close()
         except Exception as e:
             retcode = -1
+            try:
+                log_file.write(f"Error running boring_stack: {e}\n")
+                log_file.close()
+            except Exception:
+                pass
             self.root.after(
                 0,
                 self.update_progress_gui,
