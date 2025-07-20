@@ -401,25 +401,42 @@ def stream_stack(
     )
 
     tile_h = int(tile)
+    image_count = 0
     for y0 in range(0, H, tile_h):
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
-        tile_stack = [
-            open_aligned_slice(
-                r["path"],
-                y0,
-                y1,
-                wcs_cache[r["path"]],
-                wcs_ref,
-                shape_ref,
-                use_solver=use_solver,
+        tile_stack = []
+        tile_wht_list = []
+        for idx, r in enumerate(rows, 1):
+            tile_stack.append(
+                open_aligned_slice(
+                    r["path"],
+                    y0,
+                    y1,
+                    wcs_cache[r["path"]],
+                    wcs_ref,
+                    shape_ref,
+                    use_solver=use_solver,
+                )
             )
-            for r in rows
-        ]
-        tile_wht_list = [
-            np.full((rows_h, W), float(r.get("weight") or 1.0), np.float32)
-            for r in rows
-        ]
+            tile_wht_list.append(
+                np.full((rows_h, W), float(r.get("weight") or 1.0), np.float32)
+            )
+            image_count += 1
+            if image_count % 100 == 0:
+                vm = psutil.virtual_memory()
+                ram_mb = vm.used / (1024 ** 2)
+                cache_mb = getattr(vm, "cached", 0.0) / (1024 ** 2)
+                logger.info(
+                    "Loaded %d images | RAM %.1f MB | Cache %.1f MB",
+                    image_count,
+                    ram_mb,
+                    cache_mb,
+                )
+                print(
+                    f"{image_count} images loaded | RAM {ram_mb:.1f}MB | Cache {cache_mb:.1f}MB",
+                    flush=True,
+                )
         tile = np.stack(tile_stack, axis=0)
         wht = np.stack(tile_wht_list, axis=0)
         winsorize(tile, kappa, winsor)
@@ -448,6 +465,19 @@ def stream_stack(
             )
             print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
+
+    vm_end = psutil.virtual_memory()
+    ram_end_mb = vm_end.used / (1024 ** 2)
+    cache_end_mb = getattr(vm_end, "cached", 0.0) / (1024 ** 2)
+    logger.info(
+        "Final RAM %.1f MB | Cache %.1f MB",
+        ram_end_mb,
+        cache_end_mb,
+    )
+    print(
+        f"Final RAM {ram_end_mb:.1f}MB | Cache {cache_end_mb:.1f}MB",
+        flush=True,
+    )
 
     return cum_sum, cum_wht
 
