@@ -7268,6 +7268,12 @@ class SeestarStackerGUI:
             self.settings.astap_path = ""
             self.settings.astap_data_dir = ""
             self.settings.astrometry_solve_field_dir = ""
+            # Force final combine to mean when no solver is used
+            self.stack_final_combine_var.set("mean")
+            if hasattr(self, "final_key_to_label"):
+                self.stack_final_display_var.set(
+                    self.final_key_to_label.get("mean", "mean")
+                )
 
         if self.settings.batch_size == 1:
             csv_path = getattr(
@@ -7297,6 +7303,10 @@ class SeestarStackerGUI:
                     "--winsor",
                     str(self.settings.winsor_limits[0] or 0.05),
                 ]
+                if self.settings.use_third_party_solver:
+                    cmd.append("--use-solver")
+                else:
+                    cmd.append("--no-solver")
                 threading.Thread(
                     target=self._run_boring_stack_process,
                     args=(cmd, csv_path, out_dir),
