@@ -12,6 +12,7 @@ from astropy.io import fits
 import cv2
 import imageio
 from numpy.lib.format import open_memmap
+from astropy.wcs import WCS
 
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,52 @@ def _reproj():
     return ru
 
 
-def _reproj():
-    from seestar import reproject_utils as ru
-    return ru
+def solve_local_plate(path: str):
+    """Return WCS from FITS header if present."""
+    try:
+        hdr = fits.getheader(path, memmap=False)
+        wcs = WCS(hdr)
+        return wcs if wcs.is_celestial else None
+    except Exception:
+        return None
+
+
+def get_wcs_from_astap(path: str):
+    """Load ``path``.wcs if it exists."""
+    wcs_path = os.path.splitext(path)[0] + ".wcs"
+    if os.path.isfile(wcs_path):
+        try:
+            hdr = fits.getheader(wcs_path, memmap=False)
+            return WCS(hdr)
+        except Exception:
+            return None
+    return None
+
+
+def solve_with_astrometry_local(path: str):
+    """Attempt local astrometry.net solve-field via zemosaic."""
+    try:
+        from zemosaic import zemosaic_astrometry as za
+        hdr = fits.getheader(path, memmap=False)
+        cfg = os.environ.get("ANSVR_CONFIG", "")
+        if not cfg:
+            return None
+        return za.solve_with_ansvr(path, hdr, cfg)
+    except Exception:
+        return None
+
+
+def solve_with_astrometry_net(path: str, api_key: str):
+    """Call astrometry.net web solve via zemosaic."""
+    from zemosaic import zemosaic_astrometry as za
+    hdr = fits.getheader(path, memmap=False)
+    return za.solve_with_astrometry_net(path, hdr, api_key)
+
+
+def warp_image(img: np.ndarray, wcs_in: WCS, wcs_ref: WCS, shape_ref: tuple[int, int]):
+    from seestar.core.reprojection import reproject_to_reference_wcs
+    return reproject_to_reference_wcs(img, wcs_in, wcs_ref, shape_ref)
+
 
 
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
@@ -127,7 +171,6 @@ def read_rows(csv_path):
 
     return rows_out
 
-
 def read_paths(csv_path):
     """Return list of paths only (legacy helper)."""
     return [r["path"] for r in read_rows(csv_path)]
@@ -157,7 +200,8 @@ def get_image_shape(path):
     return h, w, c
 
 
-def open_aligned_slice(path, y0, y1, wcs, shape_ref):
+def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref):
+
     """Return RGB slice (y0:y1) aligned to reference grid."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fit", ".fits", ".fts"):
@@ -175,7 +219,9 @@ def open_aligned_slice(path, y0, y1, wcs, shape_ref):
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    warped = _reproj().warp_image(data, wcs, shape_ref)
+
+    warped = warp_image(data, wcs, wcs_ref, shape_ref)
+
     return warped[y0:y1]
 
 
@@ -226,6 +272,9 @@ def stream_stack(
     )
 
     wcs_cache: dict[str, object] = {}
+
+    wcs_ref: WCS | None = None
+
     for i, row in enumerate(rows, 1):
         path = row["path"]
         if path in wcs_cache:
@@ -250,8 +299,15 @@ def stream_stack(
         if wcs is None:
             raise RuntimeError("Plate-solve failed for " + path)
         wcs_cache[path] = wcs
+
+        if wcs_ref is None:
+            wcs_ref = wcs
         print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
     print("ALIGN OK")
+
+    if wcs_ref is None:
+        raise RuntimeError("Reference WCS not resolved")
+
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
@@ -266,7 +322,11 @@ def stream_stack(
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
         tile_stack = [
-            open_aligned_slice(r["path"], y0, y1, wcs_cache[r["path"]], shape_ref)
+
+            open_aligned_slice(
+                r["path"], y0, y1, wcs_cache[r["path"]], wcs_ref, shape_ref
+            )
+
             for r in rows
         ]
         tile_wht_list = [
