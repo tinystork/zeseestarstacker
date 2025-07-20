@@ -5,11 +5,15 @@ import sys
 import gc
 import ctypes
 import traceback
+import logging
 
 import numpy as np
 from astropy.io import fits
 import cv2
 from numpy.lib.format import open_memmap
+
+
+logger = logging.getLogger(__name__)
 
 
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
@@ -125,6 +129,7 @@ def get_image_shape(path):
         c = 1
     else:
         h, w, c = shape
+    logger.debug("get_image_shape(%s) -> %s", path, (h, w, c))
     return h, w, c
 
 
@@ -148,6 +153,9 @@ def open_slice(path, y0, y1):
         arr = img[y0:y1].astype(np.float32)
     if arr.ndim == 2:
         arr = arr[..., None]
+    if y0 == 0 and not hasattr(open_slice, "_logged"):
+        logger.debug("open_slice(%s, %d, %d) -> %s", path, y0, y1, arr.shape)
+        open_slice._logged = True
     return arr
 
 
@@ -181,11 +189,13 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
 
     first = files[0]
     H, W, C = get_image_shape(first)
+    logger.debug("stream_stack: %d files, first=%s, shape=%dx%dx%d", len(files), first, H, W, C)
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
     cum_wht = open_memmap(out_wht, "w+", dtype=np.float32, shape=(H, W))
     cum_wht[:] = 1
+    logger.debug("allocated accumulators: cum_sum %s, cum_wht %s", cum_sum.shape, cum_wht.shape)
 
     tile_h = int(tile)
     for y0 in range(0, H, tile_h):
@@ -200,6 +210,8 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
         gc.collect()
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
+        if y0 == 0:
+            logger.debug("stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape)
         progress = 100.0 * y1 / H
         print(f"{progress:.1f}%", flush=True)
 
@@ -208,6 +220,8 @@ def stream_stack(csv_path, out_sum, out_wht, *, tile=512, kappa=3.0, winsor=0.05
 
 def main():
     args = parse_args()
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
+
     os.makedirs(args.out, exist_ok=True)
 
     sum_path = os.path.join(args.out, "cum_sum.npy")
@@ -222,6 +236,7 @@ def main():
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
+    logger.debug("final image shape %s", final.shape)
     fits.writeto(
         os.path.join(args.out, "final.fits"),
         final.astype(np.float32),
@@ -247,6 +262,9 @@ if __name__ == "__main__":
     if os.getenv("BORING_TEST"):
         import tempfile
         import shutil
+
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(message)s")
+
 
         tmp = tempfile.mkdtemp()
         fits.writeto(
