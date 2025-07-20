@@ -4923,6 +4923,7 @@ class SeestarStackerGUI:
             except tk.TclError:
                 pass
 
+
         def _finish(retcode, output_lines):
             try:
                 if hasattr(self, "progress_manager") and self.progress_manager:
@@ -4946,6 +4947,7 @@ class SeestarStackerGUI:
                         except tk.TclError:
                             pass
                 else:
+
                     messagebox.showerror(
                         "Stack error",
                         "boring_stack.py failed. Check the log.",
@@ -4969,7 +4971,9 @@ class SeestarStackerGUI:
             self.progress_manager.start_timer()
 
         start_time = time.monotonic()
+
         output_lines = []
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -4983,7 +4987,9 @@ class SeestarStackerGUI:
                 if not line:
                     continue
                 text = line.strip()
+
                 output_lines.append(text)
+
                 if text.endswith("%"):
                     try:
                         pct = float(text.rstrip("%"))
@@ -5013,7 +5019,9 @@ class SeestarStackerGUI:
                 None,
             )
         finally:
+
             self.root.after(0, _finish, retcode, output_lines)
+
 
 
     def stop_processing(self):
