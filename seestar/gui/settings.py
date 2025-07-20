@@ -2787,6 +2787,20 @@ class SettingsManager:
         )
         return True
 
+    @property
+    def tile_height(self):
+        return TILE_HEIGHT
+
+    @property
+    def winsor_limits(self):
+        try:
+            parts = [float(x.strip()) for x in str(self.stack_winsor_limits).split(',')]
+            if len(parts) == 2:
+                return (parts[0], parts[1])
+        except Exception:
+            pass
+        return (0.05, 0.05)
+
     # Fin settings.py
 
     # Fin settings.py
