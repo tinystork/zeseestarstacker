@@ -250,6 +250,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
             do_not_scale_image_data=True,
             ignore_blank=True,
         ) as hd:
+
             data = hd[0].data
             hdr = hd[0].header
 
