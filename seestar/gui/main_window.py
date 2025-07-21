@@ -1230,7 +1230,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.weight_keys = ["none", "snr", "stars"]
+        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "snr", "stars"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
