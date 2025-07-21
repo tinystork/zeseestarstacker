@@ -7302,11 +7302,20 @@ class SeestarStackerGUI:
                     str(self.settings.kappa or 3),
                     "--winsor",
                     str(self.settings.winsor_limits[0] or 0.05),
+                    "--norm",
+                    str(self.settings.stack_norm_method or "none"),
+                    "--weight",
+                    str(self.settings.stack_weight_method or "none"),
+                    "--reject",
+                    (
+                        "winsorized_sigma"
+                        if self.settings.stack_reject_algo == "winsorized_sigma_clip"
+                        else str(self.settings.stack_reject_algo or "none")
+                    ),
+                    "--batch-size",
+                    "1",
                 ]
-                if self.settings.use_third_party_solver:
-                    cmd.append("--use-solver")
-                else:
-                    cmd.append("--no-solver")
+                cmd.append("--no-solver")
                 threading.Thread(
                     target=self._run_boring_stack_process,
                     args=(cmd, csv_path, out_dir),
