@@ -3,6 +3,14 @@ import csv
 import os
 import sys
 
+# Ensure console encoding supports UTF-8 characters (e.g. emojis)
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # When executed directly, ensure the package root is discoverable.
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
