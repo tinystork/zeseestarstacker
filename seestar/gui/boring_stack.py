@@ -513,11 +513,13 @@ def stream_stack(
                 winsor_limits=(winsor, winsor),
                 max_mem_bytes=max_mem_bytes,
             )
+            # FIX MEMLEAK: clean stacked_tile immediately
             weight_sum = float(np.sum(weights_list))
             tile_sum += stacked_tile.astype(np.float32) * weight_sum
             tile_wht += weight_sum
+            del stacked_tile  # FIX MEMLEAK
             del img_slices, weights_list
-            gc.collect()
+            gc.collect()  # FIX MEMLEAK
 
         cum_sum[y0:y1] = tile_sum
         cum_wht[y0:y1] = tile_wht
