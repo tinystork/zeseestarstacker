@@ -16,8 +16,11 @@ import cv2
 import imageio
 from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
+from seestar.core.alignment import SeestarAligner
+from seestar.core.image_processing import load_and_validate_fits, debayer_image
 
-
+logger = logging.getLogger(__name__)
+aligner = None  
 
 def _init_logger(out_dir: str) -> None:
     log_path = os.path.join(out_dir, "boring_stack.log")
@@ -322,8 +325,20 @@ def get_image_shape(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits"}:
         with fits.open(path, memmap=False) as hd:
+            data = hd[0].data
+            hdr = hd[0].header
 
-            data = to_hwc(hd[0].data, hd[0].header)
+        if data.ndim == 2 and hdr.get("BAYERPAT"):
+            # Simule le débayering pour obtenir les vraies dimensions
+            h, w = data.shape
+            c = 3
+        else:
+            data = to_hwc(data, hdr)
+            h, w = data.shape[:2]
+            c = data.shape[2] if data.ndim == 3 else 1
+
+        logger.debug("get_image_shape(%s) -> %s", path, (h, w, c))
+        return h, w, c
 
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -363,22 +378,38 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
         # equivalent to ``hd[0].data`` with scaling enabled.
         bscale = hdr.get("BSCALE", 1.0)
         bzero = hdr.get("BZERO", 0.0)
-        if bscale != 1.0 or bzero != 0.0:
-            data = data.astype(np.float32, copy=False) * float(bscale) + float(bzero)
-        else:
-            data = data.astype(np.float32, copy=False)
+        data = data.astype(np.float32, copy=False) * bscale + bzero
 
-        if data.ndim == 2 and hdr.get("BAYERPAT"):
-            # ``cvtColor`` expects integer input; cast back for demosaicing.
-            data = cv2.cvtColor(data.astype(np.uint16), cv2.COLOR_BayerRG2RGB_EA)
+        if data.ndim == 2:
+            bayer = hdr.get("BAYERPAT", "RGGB")  # Par défaut si absent
+            try:
+                if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
+                    code = getattr(cv2, f"COLOR_Bayer{bayer.upper()}2RGB_EA", cv2.COLOR_BayerRG2RGB_EA)
+                else:
+                    code = cv2.COLOR_BayerRG2RGB_EA
+                data = cv2.cvtColor(data.astype(np.uint16), code)
+                logger.debug("Debayering image %s using pattern: %s", path, bayer)
+            except Exception as e:
+                logger.warning("Could not debayer %s: %s", path, e)
         else:
             data = to_hwc(data)
+
     else:
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    if use_solver and wcs is not None and wcs_ref is not None:
-        data = warp_image(data, wcs, wcs_ref, shape_ref)
+    if use_solver:
+        try:
+            from seestar.core.alignment import SeestarAligner
+            global aligner
+            if aligner and hasattr(aligner, "reference_image_data") and aligner.reference_image_data is not None:
+                aligned, ok = aligner._align_image(data, aligner.reference_image_data, os.path.basename(path))
+                if ok:
+                    data = aligned
+                else:
+                    print(f"⚠️ Alignement échoué pour {path}")
+        except Exception as e:
+            print(f"❌ Erreur alignement local: {e}")
 
     return data[y0:y1]
 
@@ -502,7 +533,25 @@ def stream_stack(
     min_weight=0.1,
     progress_callback=None,
 ):
+    global aligner
     rows = read_rows(csv_path)
+    aligner = SeestarAligner()
+    aligner.correct_hot_pixels = correct_hot_pixels
+    aligner.hot_pixel_threshold = hot_threshold
+    aligner.neighborhood_size = hot_neighborhood
+    input_folder = os.path.dirname(rows[0]["path"])
+    files_to_scan = [os.path.basename(row["path"]) for row in rows]
+    tmp_output_dir = os.path.join(input_folder, "_temp_align_ref")
+
+    os.makedirs(tmp_output_dir, exist_ok=True)
+    
+    ref_img, _ = aligner._get_reference_image(input_folder, files_to_scan, tmp_output_dir)
+    if ref_img is not None:
+        aligner.reference_image_data = ref_img
+        print("✅ Image de référence chargée pour alignement local")
+    else:
+
+        aligner = SeestarAligner()
     if not rows:
         raise RuntimeError("CSV is empty")
 
@@ -754,7 +803,7 @@ def stream_stack(
             gc.collect()  # FIX MEMLEAK
 
         cum_sum[y0:y1] = tile_sum
-        cum_wht[y0:y1] = tile_wht
+        cum_wht[y0:y1] = tile_wht if isinstance(tile_wht, np.ndarray) else np.full((rows_h, W), float(tile_wht), dtype=np.float32)
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
         gc.collect()
@@ -811,8 +860,8 @@ def main():
         args.weight = "stars"
 
 
-    if args.batch_size == 1:
-        args.use_solver = False
+#    if args.batch_size == 1:
+#        args.use_solver = False
 
     os.makedirs(args.out, exist_ok=True)
 
