@@ -585,7 +585,7 @@ def main():
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
-    logger.debug("final image shape %s", final.shape)
+    logger.debug("final image shape before squeeze: %s", final.shape)
 
     if final.ndim == 3 and final.shape[2] == 3:
         # Write colour data in (C, H, W) order so each channel is stored as a
@@ -593,6 +593,11 @@ def main():
         # swapping the height and width axes which produced a greyscale image
         # in some FITS viewers.
         fits_data = final.transpose(2, 0, 1)
+    elif final.ndim == 3 and final.shape[2] == 1:
+        # Single channel image: duplicate the plane so that FITS viewers treat
+        # the output as RGB.  Each duplicated channel is stored in its own
+        # plane to remain consistent with the RGB case above.
+        fits_data = np.repeat(final, 3, axis=2).transpose(2, 0, 1)
     else:
         fits_data = final.squeeze()
 
