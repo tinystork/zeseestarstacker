@@ -525,9 +525,12 @@ def stream_stack(
         for row in rows:
             wcs_cache[row["path"]] = None
 
-    # Preload full images once for normalization and weighting
-    full_images = []
-    for row in rows:
+    # Compute normalization and weights without loading all images # FIX MEMLEAK
+    norm_params = {}
+    weights_scalar: list[float] = []
+    ref_low = ref_high = None
+    ref_sky = None
+    for idx, row in enumerate(rows):
         img = open_aligned_slice(
             row["path"],
             0,
@@ -537,11 +540,36 @@ def stream_stack(
             shape_ref,
             use_solver=False,
         )
-        full_images.append(img)
+        if norm_method == "linear_fit":
+            data = img.astype(np.float32, copy=False)
+            axis = (0, 1) if data.ndim == 3 else None
+            low = np.nanpercentile(data, 25.0, axis=axis)
+            high = np.nanpercentile(data, 90.0, axis=axis)
+            if idx == 0:
+                ref_low = low
+                ref_high = high
+                norm_params[idx] = (np.ones_like(low, dtype=np.float32), np.zeros_like(low, dtype=np.float32))
+            else:
+                d_src = high - low
+                d_ref = ref_high - ref_low
+                a = np.where(d_src > 1e-5, d_ref / np.maximum(d_src, 1e-9), 1.0)
+                b = ref_low - a * low
+                norm_params[idx] = (a.astype(np.float32), b.astype(np.float32))
+        elif norm_method == "sky_mean":
+            def sky_val(im: np.ndarray) -> float:
+                if im.ndim == 3 and im.shape[2] == 3:
+                    lum = 0.299 * im[..., 0] + 0.587 * im[..., 1] + 0.114 * im[..., 2]
+                else:
+                    lum = im
+                return float(np.nanpercentile(lum, 25.0))
 
-    norm_params = _compute_norm_params(full_images, norm_method)
-    weights_scalar = []
-    for img in full_images:
+            offset = sky_val(img.astype(np.float32, copy=False))
+            if idx == 0:
+                ref_sky = offset
+                norm_params[idx] = 0.0
+            else:
+                norm_params[idx] = ref_sky - offset
+
         w = 1.0
         if weight_method == "snr":
             w = _calc_snr(img)
@@ -549,9 +577,8 @@ def stream_stack(
             w = _calc_star_score(img)
         weights_scalar.append(max(float(w), 1e-9))
 
-    for img in full_images:
-        del img
-    gc.collect()
+        del img  # FIX MEMLEAK
+        gc.collect()  # FIX MEMLEAK
 
 
     out_sum = os.path.abspath(str(out_sum)).strip()
@@ -578,9 +605,10 @@ def stream_stack(
         tile_sum = np.zeros((rows_h, W, C), dtype=np.float32)
         tile_wht = 0.0
         for s in range(0, len(rows), group_size):
-            img_slices = []
-            weights_list: list[float] = []
-            for idx, r in enumerate(rows[s : s + group_size], start=s):
+            batch = rows[s : s + group_size]
+            batch_imgs = np.empty((len(batch), rows_h, W, C), dtype=np.float32)  # FIX MEMLEAK
+            weights_arr = np.empty(len(batch), dtype=np.float32)  # FIX MEMLEAK
+            for j, (idx, r) in enumerate(zip(range(s, s + len(batch)), batch)):
                 img_slice = open_aligned_slice(
                     r["path"],
                     y0,
@@ -609,10 +637,10 @@ def stream_stack(
                     img_slice = img_slice.astype(np.float32) + norm_params[idx]
                 if reject_algo == "winsorized_sigma":
                     img_slice = winsorize(img_slice, kappa, winsor)
-                img_slices.append(img_slice)
-                weights_list.append(weight)
-                del img_slice
-                gc.collect()
+                batch_imgs[j] = img_slice
+                weights_arr[j] = weight
+                del img_slice  # FIX MEMLEAK
+                gc.collect()  # FIX MEMLEAK
                 image_count += 1
                 if image_count % 100 == 0:
                     vm = psutil.virtual_memory()
@@ -631,30 +659,30 @@ def stream_stack(
 
             if reject_algo == "winsorized_sigma":
                 stacked_tile, _ = _stack_winsorized_sigma(
-                    img_slices,
-                    np.array(weights_list, dtype=np.float32),
+                    batch_imgs,
+                    weights_arr,
                     kappa=kappa,
                     winsor_limits=(winsor, winsor),
                     max_mem_bytes=max_mem_bytes,
                 )
             elif reject_algo == "kappa_sigma":
                 stacked_tile, _ = _stack_kappa_sigma(
-                    img_slices,
-                    np.array(weights_list, dtype=np.float32),
+                    batch_imgs,
+                    weights_arr,
                     sigma_low=kappa,
                     sigma_high=kappa,
                 )
             else:
                 stacked_tile, _ = _stack_mean(
-                    img_slices,
-                    np.array(weights_list, dtype=np.float32),
+                    batch_imgs,
+                    weights_arr,
                 )
             # FIX MEMLEAK: clean stacked_tile immediately
-            weight_sum = float(np.sum(weights_list))
+            weight_sum = float(np.sum(weights_arr))
             tile_sum += stacked_tile.astype(np.float32) * weight_sum
             tile_wht += weight_sum
             del stacked_tile  # FIX MEMLEAK
-            del img_slices, weights_list
+            del batch_imgs, weights_arr  # FIX MEMLEAK
             gc.collect()  # FIX MEMLEAK
 
         cum_sum[y0:y1] = tile_sum
@@ -761,6 +789,8 @@ def main():
     imageio.imwrite(os.path.join(args.out, "preview.png"), preview)
     flush_mmap(cum_sum)
     flush_mmap(cum_wht)
+    cum_sum._mmap.close()  # FIX MEMLEAK
+    cum_wht._mmap.close()  # FIX MEMLEAK
     del cum_sum
     del cum_wht
     gc.collect()
