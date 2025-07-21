@@ -1230,7 +1230,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "quality"]
+        self.weight_keys = ["none", "snr", "stars"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
@@ -7372,7 +7372,7 @@ class SeestarStackerGUI:
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.stack_weight_method == "quality",
+            "use_weighting": self.settings.stack_weight_method != "none",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
             "snr_exp": self.settings.snr_exponent,
