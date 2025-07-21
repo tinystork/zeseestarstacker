@@ -6818,14 +6818,23 @@ class SeestarStackerGUI:
         if getattr(self.settings, "batch_size", 0) != 1:
             return False
 
-        csv_path = getattr(self.settings, "order_csv_path", "") or os.path.join(
-            self.settings.input_folder, "stack_plan.csv"
-        )
+        explicit_path = getattr(self.settings, "order_csv_path", "")
+        default_path = os.path.join(self.settings.input_folder, "stack_plan.csv")
 
-        if not os.path.isfile(csv_path):
+        candidate_paths = [p for p in (explicit_path, default_path) if p]
+        csv_path = None
+        for p in candidate_paths:
+            if os.path.isfile(p):
+                csv_path = p
+                break
+
+        if csv_path is None:
             self.logger.warning(
                 "Batch size 1 without CSV – reverting to normal behaviour"
             )
+            self.settings.batch_size = 0
+            self.settings.order_csv_path = ""
+            self.settings.order_file_list = []
             return False
 
         self.logger.info(

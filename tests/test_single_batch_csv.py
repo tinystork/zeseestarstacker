@@ -125,3 +125,24 @@ def test_single_batch_csv_with_additional_columns(tmp_path):
     assert activated
     assert gui.settings.batch_size == 1
     assert gui.settings.order_csv_path == str(csv_path)
+
+
+def test_single_batch_csv_missing_file(tmp_path):
+    """When batch_size==1 but no CSV exists, batch_size should reset to 0."""
+
+    gui = SeestarStackerGUI.__new__(SeestarStackerGUI)
+    gui.logger = logging.getLogger("test")
+    gui.settings = types.SimpleNamespace(
+        input_folder=str(tmp_path),
+        batch_size=1,
+        stacking_mode="kappa-sigma",
+        reproject_between_batches=True,
+        use_drizzle=True,
+        order_csv_path="",
+    )
+    gui.queued_stacker = SeestarQueuedStacker()
+
+    activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
+    assert not activated
+    assert gui.settings.batch_size == 0
+    assert gui.settings.order_csv_path == ""
