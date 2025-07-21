@@ -234,13 +234,15 @@ def _stack_worker(args):
     )
 
     if mode == "winsorized-sigma":
-        return _stack_winsorized_sigma(
+        res = _stack_winsorized_sigma(
             images,
             weights,
             kappa=max(kappa_low, kappa_high),
             winsor_limits=winsor_limits,
             apply_rewinsor=apply_rewinsor,
         )
+        gc.collect()  # FIX MEMLEAK
+        return res
     elif mode == "kappa-sigma":
         return _stack_kappa_sigma(
             images,
@@ -8320,6 +8322,8 @@ class SeestarQueuedStacker:
                 else:
                     tile_sum += stacked * cov_sum[..., None]
                     tile_wht += cov_sum
+                del stacked  # FIX MEMLEAK
+                gc.collect()  # FIX MEMLEAK
 
 
             if use_memmap:
@@ -8352,6 +8356,18 @@ class SeestarQueuedStacker:
             final.flush()
             tile_sum_mm.flush()
             tile_wht_mm.flush()
+
+            # FIX MEMLEAK: close and delete temporary memmaps
+            try:
+                if hasattr(tile_sum_mm, "_mmap") and tile_sum_mm._mmap:
+                    tile_sum_mm._mmap.close()
+                if hasattr(tile_wht_mm, "_mmap") and tile_wht_mm._mmap:
+                    tile_wht_mm._mmap.close()
+            except Exception:
+                pass
+            del tile_sum_mm
+            del tile_wht_mm
+            gc.collect()  # FIX MEMLEAK
 
             try:
                 os.remove(tmp_path + "_sum")
@@ -8635,6 +8651,7 @@ class SeestarQueuedStacker:
                         kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                         winsor_limits=self.winsor_limits,
                     )
+                    gc.collect()  # FIX MEMLEAK
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
                 if getattr(self, "apply_batch_feathering", True):
                     h, w = batch_coverage_map_2d.shape
@@ -9177,6 +9194,7 @@ class SeestarQueuedStacker:
                         kappa=self.stack_kappa_high,
                         winsor_limits=self.winsor_limits,
                     )
+                    gc.collect()  # FIX MEMLEAK
                 elif self.stack_final_combine == "median":
                     final_sci_image_HWC, _ = _stack_median(cube, w_cube)
                 else:
@@ -11018,6 +11036,10 @@ class SeestarQueuedStacker:
                 # La documentation suggère que la suppression de la référence devrait suffire
                 # mais un appel explicite à close() existe sur certaines versions/objets
                 if (
+                    hasattr(self.cumulative_sum_memmap, "flush")
+                ):
+                    self.cumulative_sum_memmap.flush()
+                if (
                     hasattr(self.cumulative_sum_memmap, "_mmap")
                     and self.cumulative_sum_memmap._mmap is not None
                 ):
@@ -11041,6 +11063,10 @@ class SeestarQueuedStacker:
         ):
             try:
                 if (
+                    hasattr(self.cumulative_wht_memmap, "flush")
+                ):
+                    self.cumulative_wht_memmap.flush()
+                if (
                     hasattr(self.cumulative_wht_memmap, "_mmap")
                     and self.cumulative_wht_memmap._mmap is not None
                 ):
@@ -11055,7 +11081,7 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap WHT: {e_close_wht}"
                 )
-
+        gc.collect()  # FIX MEMLEAK
         # Optionnel: Essayer de supprimer les fichiers .npy si le nettoyage est activé
         # Cela devrait être fait dans le bloc finally de _worker après l'appel à _save_final_stack
         # if self.perform_cleanup:
