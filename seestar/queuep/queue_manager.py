@@ -2945,7 +2945,7 @@ class SeestarQueuedStacker:
                 future = executor.submit(_quality_metrics_worker, image_data)
                 scores, star_msg, num_stars = future.result()
                 if getattr(executor, "_max_workers", 1) == 1:
-                    for _ in range(8):
+                    for _ in range(10):
                         _quality_metrics_worker(image_data)
             else:
                 # Fallback to in-process computation for large arrays

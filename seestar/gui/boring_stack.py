@@ -554,6 +554,8 @@ def stream_stack(
     gc.collect()
 
 
+    out_sum = os.path.abspath(str(out_sum)).strip()
+    out_wht = os.path.abspath(str(out_wht)).strip()
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
     cum_wht = open_memmap(out_wht, "w+", dtype=np.float32, shape=(H, W))
@@ -713,8 +715,8 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    sum_path = os.path.join(args.out, "cum_sum.npy")
-    wht_path = os.path.join(args.out, "cum_wht.npy")
+    sum_path = os.path.abspath(os.path.join(args.out, "cum_sum.npy")).strip()
+    wht_path = os.path.abspath(os.path.join(args.out, "cum_wht.npy")).strip()
     cum_sum, cum_wht = stream_stack(
         args.csv,
         sum_path,
