@@ -55,6 +55,8 @@ EN_TRANSLATIONS = {
     "weight_method_none": "None",
     "weight_method_snr": "SNR",
     "weight_method_stars": "Stars",
+    "weight_method_noise_variance": "Noise Variance (1/σ²)",
+    "weight_method_noise_fwhm": "Noise + FWHM",
     "reject_algo_kappa_sigma": "Kappa-Sigma Clip",
     "reject_algo_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "reject_algo_linear_fit_clip": "Linear Fit Clip",

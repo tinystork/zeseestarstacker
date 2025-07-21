@@ -55,6 +55,8 @@ FR_TRANSLATIONS = {
     "weight_method_none": "Aucune",
     "weight_method_snr": "SNR",
     "weight_method_stars": "Étoiles",
+    "weight_method_noise_variance": "Variance Bruit (1/σ²)",
+    "weight_method_noise_fwhm": "Bruit + FWHM",
     "reject_algo_kappa_sigma": "Kappa-Sigma Clip",
     "reject_algo_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "reject_algo_linear_fit_clip": "Linear Fit Clip",
