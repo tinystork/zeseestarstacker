@@ -5,6 +5,13 @@ import numpy as np
 import logging
 from typing import Optional, Sequence, Tuple
 
+try:
+    from scipy.stats.mstats import winsorize as _scipy_winsorize
+    SCIPY_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    _scipy_winsorize = None
+    SCIPY_AVAILABLE = False
+
 
 try:  # optional acceleration
     import bottleneck as bn  # type: ignore
@@ -16,6 +23,26 @@ NANSTD = bn.nanstd if bn else np.nanstd
 
 
 logger = logging.getLogger(__name__)
+
+
+def _winsorize_axis0_numpy(arr: np.ndarray, limits: Tuple[float, float]) -> np.ndarray:
+    """Vectorized winsorization along the first axis using NumPy.
+
+    This is a lightweight fallback used when SciPy is unavailable. It also
+    avoids the performance hit of ``scipy.stats.mstats.winsorize`` on large
+    arrays.
+    """
+
+    low, high = limits
+    arr = arr.astype(np.float32, copy=False)
+    result = arr.copy()
+    if low > 0:
+        lower = np.nanquantile(arr, low, axis=0)
+        result = np.maximum(result, lower)
+    if high > 0:
+        upper = np.nanquantile(arr, 1.0 - high, axis=0)
+        result = np.minimum(result, upper)
+    return result
 
 
 def _stack_mean(images, weights=None):
@@ -143,9 +170,6 @@ def _stack_winsorized_sigma_iter(
         apply_rewinsor,
     )
 
-    from scipy.stats.mstats import winsorize
-
-
     shape = images[0].shape
     exp_bytes = len(images) * np.prod(shape) * 4
     if exp_bytes > max_mem_bytes:
@@ -157,9 +181,13 @@ def _stack_winsorized_sigma_iter(
     kappa_iter = float(kappa)
 
     for itr in range(max_iters):
-        arr_masked = np.ma.array(arr, mask=~mask)
-        arr_w = winsorize(arr_masked, limits=winsor_limits, axis=0)
-        arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
+        if SCIPY_AVAILABLE:
+            arr_masked = np.ma.array(arr, mask=~mask)
+            arr_w = _scipy_winsorize(arr_masked, limits=winsor_limits, axis=0)
+            arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
+        else:
+            arr_masked = np.where(mask, arr, np.nan)
+            arr_w_data = _winsorize_axis0_numpy(arr_masked, winsor_limits)
 
         mu_w = NANMEAN(arr_w_data, axis=0)
         sigma_w = NANSTD(arr_w_data, axis=0, ddof=1)
@@ -180,9 +208,13 @@ def _stack_winsorized_sigma_iter(
         if kappa_decay < 1.0:
             kappa_iter = kappa * (kappa_decay ** (itr + 1))
 
-    arr_masked = np.ma.array(arr, mask=~mask)
-    arr_w_final = winsorize(arr_masked, limits=winsor_limits, axis=0)
-    arr_w_final = np.asarray(arr_w_final.filled(np.nan), dtype=np.float32)
+    if SCIPY_AVAILABLE:
+        arr_masked = np.ma.array(arr, mask=~mask)
+        arr_w_final = _scipy_winsorize(arr_masked, limits=winsor_limits, axis=0)
+        arr_w_final = np.asarray(arr_w_final.filled(np.nan), dtype=np.float32)
+    else:
+        arr_masked = np.where(mask, arr, np.nan)
+        arr_w_final = _winsorize_axis0_numpy(arr_masked, winsor_limits)
 
     arr_nan = np.where(mask, arr, np.nan)
     if apply_rewinsor:
