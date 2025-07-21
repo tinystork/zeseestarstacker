@@ -181,6 +181,48 @@ def parse_args():
         help="Pixel rejection algorithm",
     )
     p.add_argument(
+        "--no-hot-pixels",
+        dest="correct_hot_pixels",
+        action="store_false",
+        help="Disable hot pixel correction",
+    )
+    p.add_argument(
+        "--hot-threshold",
+        type=float,
+        default=3.0,
+        help="Hot pixel sigma threshold",
+    )
+    p.add_argument(
+        "--hot-neighborhood",
+        type=int,
+        default=5,
+        help="Hot pixel neighbourhood size",
+    )
+    p.add_argument(
+        "--use-weighting",
+        action="store_true",
+        default=False,
+        help="Enable quality based weighting",
+    )
+    p.add_argument(
+        "--snr-exp",
+        type=float,
+        default=1.0,
+        help="Exponent for SNR weighting",
+    )
+    p.add_argument(
+        "--stars-exp",
+        type=float,
+        default=0.5,
+        help="Exponent for star weighting",
+    )
+    p.add_argument(
+        "--min-weight",
+        type=float,
+        default=0.1,
+        help="Minimum weight value",
+    )
+    p.add_argument(
         "--use-solver",
         dest="use_solver",
         action="store_true",
@@ -451,6 +493,14 @@ def stream_stack(
     norm_method="none",
     weight_method="none",
     reject_algo="winsorized_sigma",
+    correct_hot_pixels=True,
+    hot_threshold=3.0,
+    hot_neighborhood=5,
+    use_weighting=False,
+    snr_exp=1.0,
+    stars_exp=0.5,
+    min_weight=0.1,
+    progress_callback=None,
 ):
     rows = read_rows(csv_path)
     if not rows:
@@ -540,6 +590,14 @@ def stream_stack(
             shape_ref,
             use_solver=False,
         )
+        if correct_hot_pixels:
+            try:
+                from seestar.core.hot_pixels import detect_and_correct_hot_pixels
+                img = detect_and_correct_hot_pixels(
+                    img, hot_threshold, hot_neighborhood
+                )
+            except Exception:
+                pass
         if norm_method == "linear_fit":
             data = img.astype(np.float32, copy=False)
             axis = (0, 1) if data.ndim == 3 else None
@@ -571,11 +629,13 @@ def stream_stack(
                 norm_params[idx] = ref_sky - offset
 
         w = 1.0
-        if weight_method == "snr":
-            w = _calc_snr(img)
-        elif weight_method == "stars":
-            w = _calc_star_score(img)
-        weights_scalar.append(max(float(w), 1e-9))
+        if use_weighting:
+            if weight_method == "snr":
+                w = _calc_snr(img) ** snr_exp
+            elif weight_method == "stars":
+                w = _calc_star_score(img) ** stars_exp
+        w = max(float(w), min_weight, 1e-9)
+        weights_scalar.append(w)
 
         del img  # FIX MEMLEAK
         gc.collect()  # FIX MEMLEAK
@@ -618,6 +678,14 @@ def stream_stack(
                     shape_ref,
                     use_solver=use_solver,
                 )
+                if correct_hot_pixels:
+                    try:
+                        from seestar.core.hot_pixels import detect_and_correct_hot_pixels
+                        img_slice = detect_and_correct_hot_pixels(
+                            img_slice, hot_threshold, hot_neighborhood
+                        )
+                    except Exception:
+                        pass
                 weight = float(r.get("weight") or 1.0) * weights_scalar[idx]
                 if img_slice.ndim == 2:
                     img_slice = img_slice[..., None]
@@ -711,6 +779,11 @@ def stream_stack(
                 swap_used_mb,
             )
             print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
+            if progress_callback:
+                try:
+                    progress_callback(progress, eta_str)
+                except Exception:
+                    pass
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
 
     vm_end = psutil.virtual_memory()
@@ -758,6 +831,13 @@ def main():
         norm_method=args.norm,
         weight_method=args.weight,
         reject_algo=args.reject,
+        correct_hot_pixels=args.correct_hot_pixels,
+        hot_threshold=args.hot_threshold,
+        hot_neighborhood=args.hot_neighborhood,
+        use_weighting=args.use_weighting,
+        snr_exp=args.snr_exp,
+        stars_exp=args.stars_exp,
+        min_weight=args.min_weight,
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
