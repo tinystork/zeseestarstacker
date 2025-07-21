@@ -6,6 +6,7 @@ import gc
 import ctypes
 import logging
 import time
+from typing import List, Dict, Tuple
 
 import psutil
 
@@ -158,6 +159,25 @@ def parse_args():
         help="Maximum memory per stack in GB (overrides SEESTAR_MAX_MEM)",
     )
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
+    p.add_argument("--batch-size", type=int, default=1, help="Batch size")
+    p.add_argument(
+        "--norm",
+        default="none",
+        choices=["linear_fit", "sky_mean", "none"],
+        help="Normalization method",
+    )
+    p.add_argument(
+        "--weight",
+        default="none",
+        choices=["snr", "stars", "none", "noise_variance", "noise_fwhm", "quality"],
+        help="Weighting method",
+    )
+    p.add_argument(
+        "--reject",
+        default="winsorized_sigma",
+        choices=["kappa_sigma", "winsorized_sigma", "none"],
+        help="Pixel rejection algorithm",
+    )
     p.add_argument(
         "--use-solver",
         dest="use_solver",
@@ -339,6 +359,68 @@ def winsorize(tile, kappa, limit):
     return tile
 
 
+def _calc_snr(img: np.ndarray) -> float:
+    if img.ndim == 3 and img.shape[2] == 3:
+        data = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
+    else:
+        data = img
+    finite = data[np.isfinite(data)]
+    if finite.size < 50:
+        return 0.0
+    signal = np.median(finite)
+    mad = np.median(np.abs(finite - signal))
+    noise = max(mad * 1.4826, 1e-9)
+    return float(np.clip(signal / noise, 0.0, 1e9))
+
+
+def _calc_star_score(img: np.ndarray) -> float:
+    try:
+        import astroalign as aa
+
+        _t, (src, _dst) = aa.find_transform(img, img)
+        num = len(src)
+    except Exception:
+        num = 0
+    max_stars = 200.0
+    return float(np.clip(num / max_stars, 0.0, 1.0))
+
+
+def _compute_norm_params(images: list[np.ndarray], method: str):
+    if not images or method == "none":
+        return {}
+
+    params = {}
+    ref = images[0].astype(np.float32, copy=False)
+
+    if method == "linear_fit":
+        axis = (0, 1) if ref.ndim == 3 else None
+        ref_low = np.nanpercentile(ref, 25.0, axis=axis)
+        ref_high = np.nanpercentile(ref, 90.0, axis=axis)
+        for i, img in enumerate(images):
+            data = img.astype(np.float32, copy=False)
+            low = np.nanpercentile(data, 25.0, axis=axis)
+            high = np.nanpercentile(data, 90.0, axis=axis)
+            d_src = high - low
+            d_ref = ref_high - ref_low
+            a = np.where(d_src > 1e-5, d_ref / np.maximum(d_src, 1e-9), 1.0)
+            b = ref_low - a * low
+            params[i] = (a.astype(np.float32), b.astype(np.float32))
+    elif method == "sky_mean":
+        def sky_val(im: np.ndarray) -> float:
+            if im.ndim == 3 and im.shape[2] == 3:
+                lum = 0.299 * im[..., 0] + 0.587 * im[..., 1] + 0.114 * im[..., 2]
+            else:
+                lum = im
+            return float(np.nanpercentile(lum, 25.0))
+
+        ref_sky = sky_val(ref)
+        for i, img in enumerate(images):
+            offset = ref_sky - sky_val(img.astype(np.float32, copy=False))
+            params[i] = float(offset)
+
+    return params
+
+
 def flush_mmap(mmap_obj):
     mmap_obj.flush()
     try:
@@ -364,6 +446,9 @@ def stream_stack(
     api_key=None,
     use_solver=True,
     max_mem=None,
+    norm_method="none",
+    weight_method="none",
+    reject_algo="winsorized_sigma",
 ):
     rows = read_rows(csv_path)
     if not rows:
@@ -438,6 +523,34 @@ def stream_stack(
         for row in rows:
             wcs_cache[row["path"]] = None
 
+    # Preload full images once for normalization and weighting
+    full_images = []
+    for row in rows:
+        img = open_aligned_slice(
+            row["path"],
+            0,
+            H,
+            wcs_cache[row["path"]],
+            wcs_ref,
+            shape_ref,
+            use_solver=False,
+        )
+        full_images.append(img)
+
+    norm_params = _compute_norm_params(full_images, norm_method)
+    weights_scalar = []
+    for img in full_images:
+        w = 1.0
+        if weight_method == "snr":
+            w = _calc_snr(img)
+        elif weight_method == "stars":
+            w = _calc_star_score(img)
+        weights_scalar.append(max(float(w), 1e-9))
+
+    for img in full_images:
+        del img
+    gc.collect()
+
 
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
@@ -463,7 +576,7 @@ def stream_stack(
         for s in range(0, len(rows), group_size):
             img_slices = []
             weights_list: list[float] = []
-            for idx, r in enumerate(rows[s : s + group_size], 1):
+            for idx, r in enumerate(rows[s : s + group_size], start=s):
                 img_slice = open_aligned_slice(
                     r["path"],
                     y0,
@@ -473,7 +586,7 @@ def stream_stack(
                     shape_ref,
                     use_solver=use_solver,
                 )
-                weight = float(r.get("weight") or 1.0)
+                weight = float(r.get("weight") or 1.0) * weights_scalar[idx]
                 if img_slice.ndim == 2:
                     img_slice = img_slice[..., None]
                 if img_slice.shape[2] != C:
@@ -485,7 +598,13 @@ def stream_stack(
                         raise ValueError(
                             f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
                         )
-                img_slice = winsorize(img_slice, kappa, winsor)
+                if norm_method == "linear_fit" and idx in norm_params:
+                    a, b = norm_params[idx]
+                    img_slice = img_slice.astype(np.float32) * a + b
+                elif norm_method == "sky_mean" and idx in norm_params:
+                    img_slice = img_slice.astype(np.float32) + norm_params[idx]
+                if reject_algo == "winsorized_sigma":
+                    img_slice = winsorize(img_slice, kappa, winsor)
                 img_slices.append(img_slice)
                 weights_list.append(weight)
                 del img_slice
@@ -506,13 +625,26 @@ def stream_stack(
                         flush=True,
                     )
 
-            stacked_tile, _ = _stack_winsorized_sigma(
-                img_slices,
-                np.array(weights_list, dtype=np.float32),
-                kappa=kappa,
-                winsor_limits=(winsor, winsor),
-                max_mem_bytes=max_mem_bytes,
-            )
+            if reject_algo == "winsorized_sigma":
+                stacked_tile, _ = _stack_winsorized_sigma(
+                    img_slices,
+                    np.array(weights_list, dtype=np.float32),
+                    kappa=kappa,
+                    winsor_limits=(winsor, winsor),
+                    max_mem_bytes=max_mem_bytes,
+                )
+            elif reject_algo == "kappa_sigma":
+                stacked_tile, _ = _stack_kappa_sigma(
+                    img_slices,
+                    np.array(weights_list, dtype=np.float32),
+                    sigma_low=kappa,
+                    sigma_high=kappa,
+                )
+            else:
+                stacked_tile, _ = _stack_mean(
+                    img_slices,
+                    np.array(weights_list, dtype=np.float32),
+                )
             # FIX MEMLEAK: clean stacked_tile immediately
             weight_sum = float(np.sum(weights_list))
             tile_sum += stacked_tile.astype(np.float32) * weight_sum
@@ -568,6 +700,14 @@ def stream_stack(
 def main():
     args = parse_args()
 
+    if args.weight in {"noise_variance", "quality"}:
+        args.weight = "snr"
+    elif args.weight == "noise_fwhm":
+        args.weight = "stars"
+
+    if args.batch_size == 1:
+        args.use_solver = False
+
     os.makedirs(args.out, exist_ok=True)
 
     sum_path = os.path.join(args.out, "cum_sum.npy")
@@ -582,6 +722,9 @@ def main():
         api_key=args.api_key,
         use_solver=args.use_solver,
         max_mem=args.max_mem,
+        norm_method=args.norm,
+        weight_method=args.weight,
+        reject_algo=args.reject,
     )
 
     final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)

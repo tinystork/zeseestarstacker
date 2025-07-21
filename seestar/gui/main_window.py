@@ -1230,7 +1230,7 @@ class SeestarStackerGUI:
             )
         )
 
-        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "quality"]
+        self.weight_keys = ["none", "snr", "stars"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
@@ -7302,11 +7302,20 @@ class SeestarStackerGUI:
                     str(self.settings.kappa or 3),
                     "--winsor",
                     str(self.settings.winsor_limits[0] or 0.05),
+                    "--norm",
+                    str(self.settings.stack_norm_method or "none"),
+                    "--weight",
+                    str(self.settings.stack_weight_method or "none"),
+                    "--reject",
+                    (
+                        "winsorized_sigma"
+                        if self.settings.stack_reject_algo == "winsorized_sigma_clip"
+                        else str(self.settings.stack_reject_algo or "none")
+                    ),
+                    "--batch-size",
+                    "1",
                 ]
-                if self.settings.use_third_party_solver:
-                    cmd.append("--use-solver")
-                else:
-                    cmd.append("--no-solver")
+                cmd.append("--no-solver")
                 threading.Thread(
                     target=self._run_boring_stack_process,
                     args=(cmd, csv_path, out_dir),
@@ -7363,7 +7372,7 @@ class SeestarStackerGUI:
             "neighborhood_size": self.settings.neighborhood_size,
             "bayer_pattern": self.settings.bayer_pattern,
             "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.stack_weight_method == "quality",
+            "use_weighting": self.settings.stack_weight_method != "none",
             "weight_by_snr": self.settings.weight_by_snr,
             "weight_by_stars": self.settings.weight_by_stars,
             "snr_exp": self.settings.snr_exponent,
