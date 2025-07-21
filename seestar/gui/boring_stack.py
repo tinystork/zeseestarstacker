@@ -169,7 +169,9 @@ def parse_args():
     p.add_argument(
         "--weight",
         default="none",
+
         choices=["snr", "stars", "none", "noise_variance", "noise_fwhm", "quality"],
+
         help="Weighting method",
     )
     p.add_argument(
@@ -704,6 +706,7 @@ def main():
         args.weight = "snr"
     elif args.weight == "noise_fwhm":
         args.weight = "stars"
+
 
     if args.batch_size == 1:
         args.use_solver = False
