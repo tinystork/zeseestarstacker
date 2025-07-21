@@ -2,6 +2,10 @@ import argparse
 import csv
 import os
 import sys
+
+# When executed directly, ensure the package root is discoverable.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 import gc
 import ctypes
 import logging
