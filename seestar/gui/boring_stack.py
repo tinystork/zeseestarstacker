@@ -14,7 +14,9 @@ except Exception:
 
 # When executed directly, ensure the package root is discoverable.
 if __package__ in (None, ""):
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    sys.path.insert(
+        0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    )
 import gc
 import ctypes
 import logging
@@ -74,7 +76,9 @@ except Exception:
 
 # Allow running as a standalone script
 if __package__ in (None, ""):
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    sys.path.insert(
+        0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    )
     from seestar.core.stack_methods import (
         _stack_kappa_sigma,
         _stack_linear_fit_clip,
@@ -297,7 +301,10 @@ def read_rows(csv_path):
         weight_idx = header.index("weight") if "weight" in header else None
         data_rows = rows[1:]
     else:
-        has_header = any(h in {"order", "file", "filename", "path", "index", "weight"} for h in header)
+        has_header = any(
+            h in {"order", "file", "filename", "path", "index", "weight"}
+            for h in header
+        )
         if has_header:
             data_rows = rows[1:]
             if "weight" in header:
@@ -408,7 +415,11 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
             bayer = hdr.get("BAYERPAT", "RGGB")  # Par défaut si absent
             try:
                 if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
-                    code = getattr(cv2, f"COLOR_Bayer{bayer.upper()}2RGB_EA", cv2.COLOR_BayerRG2RGB_EA)
+                    code = getattr(
+                        cv2,
+                        f"COLOR_Bayer{bayer.upper()}2RGB_EA",
+                        cv2.COLOR_BayerRG2RGB_EA,
+                    )
                 else:
                     code = cv2.COLOR_BayerRG2RGB_EA
                 data = cv2.cvtColor(data.astype(np.uint16), code)
@@ -427,8 +438,14 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
             from seestar.core.alignment import SeestarAligner
 
             global aligner
-            if aligner and hasattr(aligner, "reference_image_data") and aligner.reference_image_data is not None:
-                aligned, ok = aligner._align_image(data, aligner.reference_image_data, os.path.basename(path))
+            if (
+                aligner
+                and hasattr(aligner, "reference_image_data")
+                and aligner.reference_image_data is not None
+            ):
+                aligned, ok = aligner._align_image(
+                    data, aligner.reference_image_data, os.path.basename(path)
+                )
                 if ok:
                     data = aligned
                 else:
@@ -464,7 +481,11 @@ def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
             bayer = hdr.get("BAYERPAT", "RGGB")
             try:
                 if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
-                    code = getattr(cv2, f"COLOR_Bayer{bayer.upper()}2RGB_EA", cv2.COLOR_BayerRG2RGB_EA)
+                    code = getattr(
+                        cv2,
+                        f"COLOR_Bayer{bayer.upper()}2RGB_EA",
+                        cv2.COLOR_BayerRG2RGB_EA,
+                    )
                 else:
                     code = cv2.COLOR_BayerRG2RGB_EA
                 data = cv2.cvtColor(data.astype(np.uint16), code)
@@ -617,7 +638,9 @@ def classic_stack(
     if ref_img is None:
         raise RuntimeError("Failed to select reference image")
     aligner.reference_image_data = ref_img
-    logger.info("Reference selected: %s", ref_hdr.get("HIERARCH SEESTAR REF SRCFILE", "auto"))
+    logger.info(
+        "Reference selected: %s", ref_hdr.get("HIERARCH SEESTAR REF SRCFILE", "auto")
+    )
 
     shape_ref = ref_img.shape[:2]
     H, W = shape_ref
@@ -655,7 +678,9 @@ def classic_stack(
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
 
-                img = detect_and_correct_hot_pixels(img, hot_threshold, hot_neighborhood)
+                img = detect_and_correct_hot_pixels(
+                    img, hot_threshold, hot_neighborhood
+                )
             except Exception:
                 pass
 
@@ -682,7 +707,9 @@ def classic_stack(
         else:
             img = img.astype(np.float32)
 
-        aligned, ok = aligner._align_image(img, aligner.reference_image_data, os.path.basename(path))
+        aligned, ok = aligner._align_image(
+            img, aligner.reference_image_data, os.path.basename(path)
+        )
         if not ok and use_solver:
             if path not in wcs_cache:
                 wcs = solve_local_plate(path)
@@ -709,9 +736,13 @@ def classic_stack(
     weights_arr = np.asarray(weights, dtype=np.float32)
 
     if reject_algo == "winsorized_sigma":
-        final, _ = _stack_winsorized_sigma(images, weights_arr, kappa=kappa, winsor_limits=(winsor, winsor))
+        final, _ = _stack_winsorized_sigma(
+            images, weights_arr, kappa=kappa, winsor_limits=(winsor, winsor)
+        )
     elif reject_algo == "kappa_sigma":
-        final, _ = _stack_kappa_sigma(images, weights_arr, sigma_low=kappa, sigma_high=kappa)
+        final, _ = _stack_kappa_sigma(
+            images, weights_arr, sigma_low=kappa, sigma_high=kappa
+        )
     else:
         final, _ = _stack_mean(images, weights_arr)
 
@@ -759,7 +790,9 @@ def stream_stack(
 
     os.makedirs(tmp_output_dir, exist_ok=True)
 
-    ref_img, _ = aligner._get_reference_image(input_folder, files_to_scan, tmp_output_dir)
+    ref_img, _ = aligner._get_reference_image(
+        input_folder, files_to_scan, tmp_output_dir
+    )
     if ref_img is not None:
         aligner.reference_image_data = ref_img
         _safe_print("✅ Image de référence chargée pour alignement local")
@@ -824,7 +857,9 @@ def stream_stack(
             else:
                 if wcs_ref is None:
                     wcs_ref = wcs
-                _safe_print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
+                _safe_print(
+                    f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
+                )
             wcs_cache[path] = wcs
 
         if wcs_ref is not None:
@@ -859,7 +894,9 @@ def stream_stack(
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
 
-                img = detect_and_correct_hot_pixels(img, hot_threshold, hot_neighborhood)
+                img = detect_and_correct_hot_pixels(
+                    img, hot_threshold, hot_neighborhood
+                )
             except Exception:
                 pass
         if norm_method == "linear_fit":
@@ -870,7 +907,10 @@ def stream_stack(
             if idx == 0:
                 ref_low = low
                 ref_high = high
-                norm_params[idx] = (np.ones_like(low, dtype=np.float32), np.zeros_like(low, dtype=np.float32))
+                norm_params[idx] = (
+                    np.ones_like(low, dtype=np.float32),
+                    np.zeros_like(low, dtype=np.float32),
+                )
             else:
                 d_src = high - low
                 d_ref = ref_high - ref_low
@@ -917,14 +957,18 @@ def stream_stack(
     cum_sum[:] = 0
     cum_wht = open_memmap(out_wht, "w+", dtype=np.float32, shape=(H, W))
     cum_wht[:] = 1
-    logger.debug("allocated accumulators: cum_sum %s, cum_wht %s", cum_sum.shape, cum_wht.shape)
+    logger.debug(
+        "allocated accumulators: cum_sum %s, cum_wht %s", cum_sum.shape, cum_wht.shape
+    )
 
     tile_h = int(tile)
     image_count = 0
     for y0 in range(0, H, tile_h):
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
-        logger.debug(f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB")
+        logger.debug(
+            f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
+        )
         per_img_bytes = rows_h * W * C * 4
         group_size = max(1, max_mem_bytes // max(per_img_bytes, 1))
 
@@ -935,13 +979,20 @@ def stream_stack(
             batch_files = aligned_paths[s : s + group_size]
             batch_imgs = np.empty((len(batch_files), rows_h, W, C), dtype=np.float32)
             weights_arr = np.empty(len(batch_files), dtype=np.float32)
-            for j, (idx, p) in enumerate(zip(range(s, s + len(batch_files)), batch_files)):
+            for j, (idx, p) in enumerate(
+                zip(range(s, s + len(batch_files)), batch_files)
+            ):
                 arr = np.load(p, mmap_mode="r")
                 img_slice = arr[y0:y1]
                 if correct_hot_pixels:
                     try:
-                        from seestar.core.hot_pixels import detect_and_correct_hot_pixels
-                        img_slice = detect_and_correct_hot_pixels(img_slice, hot_threshold, hot_neighborhood)
+                        from seestar.core.hot_pixels import (
+                            detect_and_correct_hot_pixels,
+                        )
+
+                        img_slice = detect_and_correct_hot_pixels(
+                            img_slice, hot_threshold, hot_neighborhood
+                        )
                     except Exception:
                         pass
                 weight = float(rows[idx].get("weight") or 1.0) * weights_scalar[idx]
@@ -949,11 +1000,15 @@ def stream_stack(
                     img_slice = img_slice[..., None]
                 if img_slice.shape[2] != C:
                     if img_slice.shape[2] == 3 and C == 1:
-                        img_slice = cv2.cvtColor(img_slice, cv2.COLOR_RGB2GRAY)[..., None]
+                        img_slice = cv2.cvtColor(img_slice, cv2.COLOR_RGB2GRAY)[
+                            ..., None
+                        ]
                     elif img_slice.shape[2] == 1 and C == 3:
                         img_slice = np.repeat(img_slice, 3, axis=2)
                     else:
-                        raise ValueError(f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}")
+                        raise ValueError(
+                            f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
+                        )
                 if norm_method == "linear_fit" and idx in norm_params:
                     a, b = norm_params[idx]
                     img_slice = img_slice.astype(np.float32) * a + b
@@ -1011,12 +1066,16 @@ def stream_stack(
 
         cum_sum[y0:y1] = tile_sum
         cum_wht[y0:y1] = (
-            tile_wht if isinstance(tile_wht, np.ndarray) else np.full((rows_h, W), float(tile_wht), dtype=np.float32)
+            tile_wht
+            if isinstance(tile_wht, np.ndarray)
+            else np.full((rows_h, W), float(tile_wht), dtype=np.float32)
         )
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
         gc.collect()
-        logger.debug(f"RAM après la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB")
+        logger.debug(
+            f"RAM après la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
+        )
         if y0 == 0:
             logger.debug("stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape)
         progress = 100.0 * y1 / H
@@ -1076,15 +1135,22 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    final, weight_map = classic_stack(
+    sum_path = os.path.join(args.out, "_cum_sum.npy")
+    wht_path = os.path.join(args.out, "_cum_wht.npy")
+
+    cum_sum, cum_wht = stream_stack(
         args.csv,
-        norm_method=args.norm,
-        weight_method=args.weight,
-        reject_algo=args.reject,
+        sum_path,
+        wht_path,
+        tile=args.tile,
         kappa=args.kappa,
         winsor=args.winsor,
         api_key=args.api_key,
         use_solver=args.use_solver,
+        max_mem=args.max_mem,
+        norm_method=args.norm,
+        weight_method=args.weight,
+        reject_algo=args.reject,
         correct_hot_pixels=args.correct_hot_pixels,
         hot_threshold=args.hot_threshold,
         hot_neighborhood=args.hot_neighborhood,
@@ -1092,7 +1158,37 @@ def main():
         snr_exp=args.snr_exp,
         stars_exp=args.stars_exp,
         min_weight=args.min_weight,
+        cleanup_temp_files=args.cleanup_temp_files,
     )
+
+    if cum_sum.ndim == 3:
+        weight_map = cum_wht.astype(np.float32)
+        final = np.divide(
+            cum_sum,
+            cum_wht[..., None],
+            out=np.zeros_like(cum_sum),
+            where=cum_wht[..., None] > 1e-9,
+        )
+    else:
+        weight_map = cum_wht.astype(np.float32)
+        final = np.divide(
+            cum_sum,
+            cum_wht,
+            out=np.zeros_like(cum_sum),
+            where=cum_wht > 1e-9,
+        )
+
+    flush_mmap(cum_sum)
+    flush_mmap(cum_wht)
+    del cum_sum, cum_wht
+    gc.collect()
+
+    try:
+        if args.cleanup_temp_files:
+            os.remove(sum_path)
+            os.remove(wht_path)
+    except Exception:
+        pass
 
     logger.debug("final image shape before squeeze: %s", final.shape)
 
