@@ -666,6 +666,8 @@ def classic_stack(
 
     images: list[np.ndarray] = []
     weights: list[float] = []
+    align_success = 0
+    align_failure = 0
     wcs_cache: dict[str, WCS | None] = {}
 
     for idx, row in enumerate(rows, 1):
@@ -726,12 +728,23 @@ def classic_stack(
                 except Exception as e:
                     logger.warning("WCS align failed for %s: %s", path, e)
         if not ok:
+            align_failure += 1
+            _safe_print(f"⚠️ Alignement échoué pour {path}")
             logger.warning("Alignment failed for %s", path)
+            continue
+        else:
+            align_success += 1
+            _safe_print(f"✅ Alignement réussi pour {path}")
         images.append(aligned.astype(np.float32))
         weights.append(w)
         logger.info("Loaded %d/%d: %s", idx, len(rows), os.path.basename(path))
 
     weights_arr = np.asarray(weights, dtype=np.float32)
+
+    _safe_print(
+        f"Alignements réussis: {align_success} | Échecs: {align_failure}",
+        flush=True,
+    )
 
     if reject_algo == "winsorized_sigma":
         final, _ = _stack_winsorized_sigma(
