@@ -4,9 +4,10 @@ Utilise DAOStarFinder pour la détection d'étoiles et ORB pour les descripteurs
 """
 import cv2
 import numpy as np
-import traceback 
+import traceback
 from photutils.detection import DAOStarFinder
 from astropy.stats import sigma_clipped_stats
+from .alignment import SeestarAligner
 
 print("DEBUG [FastAlignerModule]: Module en cours de chargement (V_DAO_Integrated)...")
 
@@ -352,10 +353,14 @@ class FastAligner:
 # =============================================================================
 #  FastSeestarAligner (Adaptateur)                                              ==========================================================================
 # =============================================================================
-class FastSeestarAligner:
+class FastSeestarAligner(SeestarAligner):
 
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, move_to_unaligned_callback=None):
+        super().__init__(move_to_unaligned_callback=move_to_unaligned_callback)
         self._fa = FastAligner(debug=debug)
+
+    def _get_reference_image(self, input_folder, files_to_scan, output_folder_for_saving_temp_ref):
+        return super()._get_reference_image(input_folder, files_to_scan, output_folder_for_saving_temp_ref)
 
 
 # DANS seestar/core/fast_aligner_module.py
@@ -478,6 +483,7 @@ class FastSeestarAligner:
 
 
     def set_progress_callback(self, cb):
+        super().set_progress_callback(cb)
         self._fa.set_progress_callback(cb)
 
 
