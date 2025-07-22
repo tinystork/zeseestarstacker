@@ -906,8 +906,9 @@ def stream_stack(
 
                     img, ref_img, os.path.basename(row["path"])
                 )
-            if not ok:
+            if not ok or aligned_img is None:
                 _safe_print(f"⚠️ Alignement échoué pour {row['path']}")
+                aligned_img = img
             img = aligned_img
         else:
             img = open_aligned_slice(
