@@ -391,5 +391,6 @@ FR_TRANSLATIONS = {
         "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
         "Continuer avec Drizzle ?",
     ),
+    "stack_plan_missing_file_error": "Fichier indique dans stack_plan.csv introuvable :\n{path}",
 }
 # --- END OF FILE seestar/localization/fr.py ---
