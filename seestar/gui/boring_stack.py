@@ -441,7 +441,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                 and hasattr(aligner, "reference_image_data")
                 and aligner.reference_image_data is not None
             ):
-                aligned, ok = aligner._align_image(
+                aligned, _, ok = aligner._align_image(
                     data, aligner.reference_image_data, os.path.basename(path)
                 )
                 if ok:
@@ -707,7 +707,7 @@ def classic_stack(
         else:
             img = img.astype(np.float32)
 
-        aligned, ok = aligner._align_image(
+        aligned, _, ok = aligner._align_image(
             img, aligner.reference_image_data, os.path.basename(path)
         )
         if not ok and use_solver:
@@ -788,6 +788,7 @@ def stream_stack(
     min_weight=0.1,
     progress_callback=None,
     cleanup_temp_files=True,
+    batch_size=0,
 ):
     global aligner
     rows = read_rows(csv_path)
@@ -795,18 +796,22 @@ def stream_stack(
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
+    local_align_only = batch_size == 1 and not use_solver
     input_folder = os.path.dirname(rows[0]["path"])
     files_to_scan = [os.path.basename(row["path"]) for row in rows]
     tmp_output_dir = os.path.join(input_folder, "_temp_align_ref")
 
     os.makedirs(tmp_output_dir, exist_ok=True)
 
-    ref_img, _ = aligner._get_reference_image(
+    ref_img, ref_hdr = aligner._get_reference_image(
         input_folder, files_to_scan, tmp_output_dir
     )
     if ref_img is None:
         raise RuntimeError("Aucune référence trouvée pour l'alignement local.")
     aligner.reference_image_data = ref_img
+    ref_basename = None
+    if ref_hdr is not None:
+        ref_basename = ref_hdr.get("HIERARCH SEESTAR REF SRCFILE")
     _safe_print("✅ Image de référence chargée pour alignement local")
     if not rows:
         raise RuntimeError("CSV is empty")
@@ -890,15 +895,28 @@ def stream_stack(
     ref_low = ref_high = None
     ref_sky = None
     for idx, row in enumerate(rows):
-        img = open_aligned_slice(
-            row["path"],
-            0,
-            H,
-            wcs_cache[row["path"]],
-            wcs_ref,
-            shape_ref,
-            use_solver=use_solver,
-        )
+        if local_align_only:
+            img, _ = _read_image(row["path"])
+            if ref_basename and os.path.basename(row["path"]) == ref_basename:
+                aligned_img = ref_img.astype(np.float32)
+                ok = True
+            else:
+                aligned_img, _, ok = aligner._align_image(
+                    img, ref_img, os.path.basename(row["path"])
+                )
+            if not ok:
+                _safe_print(f"⚠️ Alignement échoué pour {row['path']}")
+            img = aligned_img
+        else:
+            img = open_aligned_slice(
+                row["path"],
+                0,
+                H,
+                wcs_cache[row["path"]],
+                wcs_ref,
+                shape_ref,
+                use_solver=use_solver,
+            )
         if correct_hot_pixels:
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
@@ -1176,6 +1194,7 @@ def main():
         stars_exp=args.stars_exp,
         min_weight=args.min_weight,
         cleanup_temp_files=args.cleanup_temp_files,
+        batch_size=args.batch_size,
     )
 
     if cum_sum.ndim == 3:
