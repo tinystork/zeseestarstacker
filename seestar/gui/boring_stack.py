@@ -31,7 +31,7 @@ import cv2
 import imageio
 from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
-from seestar.core.alignment import SeestarAligner
+from seestar.core.fast_aligner_module import FastSeestarAligner
 
 logger = logging.getLogger(__name__)
 aligner = None
@@ -435,8 +435,6 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
 
     if use_solver:
         try:
-            from seestar.core.alignment import SeestarAligner
-
             global aligner
             if (
                 aligner
@@ -625,7 +623,7 @@ def classic_stack(
     if not rows:
         raise RuntimeError("CSV is empty")
 
-    aligner = SeestarAligner()
+    aligner = FastSeestarAligner(debug=True)
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
@@ -780,7 +778,7 @@ def stream_stack(
 ):
     global aligner
     rows = read_rows(csv_path)
-    aligner = SeestarAligner()
+    aligner = FastSeestarAligner(debug=True)
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
