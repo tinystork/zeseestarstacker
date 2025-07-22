@@ -58,7 +58,7 @@ def _safe_print(*args, **kwargs) -> None:
     """Print without raising if the output stream is closed."""
     try:
         print(*args, **kwargs)
-    except OSError:
+    except (OSError, ValueError):
         logger.debug("stdout/stderr unavailable", exc_info=True)
 
 
