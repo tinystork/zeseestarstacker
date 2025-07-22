@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 import sys
+import shutil
 
 # Ensure console encoding supports UTF-8 characters (e.g. emojis)
 try:
@@ -256,6 +257,13 @@ def parse_args():
         dest="use_solver",
         action="store_false",
         help="Disable third-party solver and skip reprojection",
+    )
+    p.add_argument(
+        "--cleanup-temp-files",
+        dest="cleanup_temp_files",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cleanup temporary aligned files after processing",
     )
     p.set_defaults(use_solver=True)
     return p.parse_args()
@@ -732,6 +740,7 @@ def stream_stack(
     stars_exp=0.5,
     min_weight=0.1,
     progress_callback=None,
+    cleanup_temp_files=True,
 ):
     global aligner
     rows = read_rows(csv_path)
@@ -822,9 +831,13 @@ def stream_stack(
         for row in rows:
             wcs_cache[row["path"]] = None
 
-    # Compute normalization and weights without loading all images # FIX MEMLEAK
+    aligned_dir = os.path.join(input_folder, "_aligned_tmp")
+    os.makedirs(aligned_dir, exist_ok=True)
+
+    # Align each image once and save it for later
     norm_params = {}
     weights_scalar: list[float] = []
+    aligned_paths: list[str] = []
     ref_low = ref_high = None
     ref_sky = None
     for idx, row in enumerate(rows):
@@ -835,7 +848,7 @@ def stream_stack(
             wcs_cache[row["path"]],
             wcs_ref,
             shape_ref,
-            use_solver=False,
+            use_solver=use_solver,
         )
         if correct_hot_pixels:
             try:
@@ -884,6 +897,11 @@ def stream_stack(
         w = max(float(w), min_weight, 1e-9)
         weights_scalar.append(w)
 
+        # Save aligned image for later stacking
+        temp_path = os.path.join(aligned_dir, f"aligned_{idx:04d}.npy")
+        np.save(temp_path, img.astype(np.float32))
+        aligned_paths.append(temp_path)
+
         del img  # FIX MEMLEAK
         gc.collect()  # FIX MEMLEAK
 
@@ -906,28 +924,21 @@ def stream_stack(
 
         tile_sum = np.zeros((rows_h, W, C), dtype=np.float32)
         tile_wht = 0.0
-        for s in range(0, len(rows), group_size):
-            batch = rows[s : s + group_size]
-            batch_imgs = np.empty((len(batch), rows_h, W, C), dtype=np.float32)  # FIX MEMLEAK
-            weights_arr = np.empty(len(batch), dtype=np.float32)  # FIX MEMLEAK
-            for j, (idx, r) in enumerate(zip(range(s, s + len(batch)), batch)):
-                img_slice = open_aligned_slice(
-                    r["path"],
-                    y0,
-                    y1,
-                    wcs_cache[r["path"]],
-                    wcs_ref,
-                    shape_ref,
-                    use_solver=use_solver,
-                )
+        # Load aligned images from disk in manageable batches
+        for s in range(0, len(aligned_paths), group_size):
+            batch_files = aligned_paths[s : s + group_size]
+            batch_imgs = np.empty((len(batch_files), rows_h, W, C), dtype=np.float32)
+            weights_arr = np.empty(len(batch_files), dtype=np.float32)
+            for j, (idx, p) in enumerate(zip(range(s, s + len(batch_files)), batch_files)):
+                arr = np.load(p, mmap_mode="r")
+                img_slice = arr[y0:y1]
                 if correct_hot_pixels:
                     try:
                         from seestar.core.hot_pixels import detect_and_correct_hot_pixels
-
                         img_slice = detect_and_correct_hot_pixels(img_slice, hot_threshold, hot_neighborhood)
                     except Exception:
                         pass
-                weight = float(r.get("weight") or 1.0) * weights_scalar[idx]
+                weight = float(rows[idx].get("weight") or 1.0) * weights_scalar[idx]
                 if img_slice.ndim == 2:
                     img_slice = img_slice[..., None]
                 if img_slice.shape[2] != C:
@@ -1026,6 +1037,9 @@ def stream_stack(
                 except Exception:
                     pass
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
+
+    if cleanup_temp_files:
+        shutil.rmtree(aligned_dir, ignore_errors=True)
 
     vm_end = psutil.virtual_memory()
     ram_end_mb = vm_end.used / (1024**2)

@@ -6255,6 +6255,10 @@ class SeestarStackerGUI:
                     "--batch-size",
                     "1",
                 ]
+                if self.settings.cleanup_temp:
+                    cmd.append("--cleanup-temp-files")
+                else:
+                    cmd.append("--no-cleanup-temp-files")
                 cmd.append("--no-solver")
                 threading.Thread(
                     target=self._run_boring_stack_process,
