@@ -951,7 +951,7 @@ def stream_stack(
             axis = (0, 1) if data.ndim == 3 else None
             low = np.nanpercentile(data, 25.0, axis=axis)
             high = np.nanpercentile(data, 90.0, axis=axis)
-            if idx == 0:
+            if ref_low is None:
                 ref_low = low
                 ref_high = high
                 norm_params[idx] = (
@@ -974,7 +974,8 @@ def stream_stack(
                 return float(np.nanpercentile(lum, 25.0))
 
             offset = sky_val(img.astype(np.float32, copy=False))
-            if idx == 0:
+            # Use the first successfully processed image as the reference
+            if ref_sky is None:
                 ref_sky = offset
                 norm_params[idx] = 0.0
             else:
