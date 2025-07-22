@@ -32,7 +32,8 @@ from seestar.core.alignment import SeestarAligner
 from seestar.core.image_processing import load_and_validate_fits, debayer_image
 
 logger = logging.getLogger(__name__)
-aligner = None  
+aligner = None
+
 
 def _init_logger(out_dir: str) -> None:
     log_path = os.path.join(out_dir, "boring_stack.log")
@@ -58,9 +59,8 @@ def _safe_print(*args, **kwargs) -> None:
     """Print without raising if the output stream is closed."""
     try:
         print(*args, **kwargs)
-    except (OSError, ValueError):
-        logger.debug("stdout/stderr unavailable", exc_info=True)
-
+    except (OSError, ValueError) as e:
+        logger.debug("stdout/stderr unavailable: %s", e)
 
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,7 @@ else:
 
 def _reproj():
     from seestar import reproject_utils as ru
+
     return ru
 
 
@@ -123,6 +124,7 @@ def solve_with_astrometry_local(path: str):
     """Attempt local astrometry.net solve-field via zemosaic."""
     try:
         from zemosaic import zemosaic_astrometry as za
+
         hdr = fits.getheader(path, memmap=False)
         cfg = os.environ.get("ANSVR_CONFIG", "")
         if not cfg:
@@ -135,14 +137,15 @@ def solve_with_astrometry_local(path: str):
 def solve_with_astrometry_net(path: str, api_key: str):
     """Call astrometry.net web solve via zemosaic."""
     from zemosaic import zemosaic_astrometry as za
+
     hdr = fits.getheader(path, memmap=False)
     return za.solve_with_astrometry_net(path, hdr, api_key)
 
 
 def warp_image(img: np.ndarray, wcs_in: WCS, wcs_ref: WCS, shape_ref: tuple[int, int]):
     from seestar.core.reprojection import reproject_to_reference_wcs
-    return reproject_to_reference_wcs(img, wcs_in, wcs_ref, shape_ref)
 
+    return reproject_to_reference_wcs(img, wcs_in, wcs_ref, shape_ref)
 
 
 def to_hwc(arr: np.ndarray, hdr: fits.Header | None = None) -> np.ndarray:
@@ -192,9 +195,7 @@ def parse_args():
     p.add_argument(
         "--weight",
         default="none",
-
         choices=["snr", "stars", "none", "noise_variance", "noise_fwhm", "quality"],
-
         help="Weighting method",
     )
     p.add_argument(
@@ -289,9 +290,7 @@ def read_rows(csv_path):
         weight_idx = header.index("weight") if "weight" in header else None
         data_rows = rows[1:]
     else:
-        has_header = any(
-            h in {"order", "file", "filename", "path", "index", "weight"} for h in header
-        )
+        has_header = any(h in {"order", "file", "filename", "path", "index", "weight"} for h in header)
         if has_header:
             data_rows = rows[1:]
             if "weight" in header:
@@ -330,9 +329,7 @@ def read_rows(csv_path):
             weight = row[weight_idx].strip()
         rows_out.append({"path": cell, "weight": weight})
 
-
     return rows_out
-
 
 
 def read_paths(csv_path):
@@ -421,6 +418,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
     if use_solver:
         try:
             from seestar.core.alignment import SeestarAligner
+
             global aligner
             if aligner and hasattr(aligner, "reference_image_data") and aligner.reference_image_data is not None:
                 aligned, ok = aligner._align_image(data, aligner.reference_image_data, os.path.basename(path))
@@ -501,6 +499,7 @@ def _compute_norm_params(images: list[np.ndarray], method: str):
             b = ref_low - a * low
             params[i] = (a.astype(np.float32), b.astype(np.float32))
     elif method == "sky_mean":
+
         def sky_val(im: np.ndarray) -> float:
             if im.ndim == 3 and im.shape[2] == 3:
                 lum = 0.299 * im[..., 0] + 0.587 * im[..., 1] + 0.114 * im[..., 2]
@@ -564,7 +563,7 @@ def stream_stack(
     tmp_output_dir = os.path.join(input_folder, "_temp_align_ref")
 
     os.makedirs(tmp_output_dir, exist_ok=True)
-    
+
     ref_img, _ = aligner._get_reference_image(input_folder, files_to_scan, tmp_output_dir)
     if ref_img is not None:
         aligner.reference_image_data = ref_img
@@ -584,7 +583,7 @@ def stream_stack(
     if max_mem is None:
         max_mem_bytes = int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000))
     else:
-        max_mem_bytes = int(float(max_mem) * 1024 ** 3)
+        max_mem_bytes = int(float(max_mem) * 1024**3)
 
     first = rows[0]["path"]
     H, W, C = get_image_shape(first)
@@ -630,9 +629,7 @@ def stream_stack(
             else:
                 if wcs_ref is None:
                     wcs_ref = wcs
-                _safe_print(
-                    f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
-                )
+                _safe_print(f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}")
             wcs_cache[path] = wcs
 
         if wcs_ref is not None:
@@ -662,9 +659,8 @@ def stream_stack(
         if correct_hot_pixels:
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
-                img = detect_and_correct_hot_pixels(
-                    img, hot_threshold, hot_neighborhood
-                )
+
+                img = detect_and_correct_hot_pixels(img, hot_threshold, hot_neighborhood)
             except Exception:
                 pass
         if norm_method == "linear_fit":
@@ -683,6 +679,7 @@ def stream_stack(
                 b = ref_low - a * low
                 norm_params[idx] = (a.astype(np.float32), b.astype(np.float32))
         elif norm_method == "sky_mean":
+
             def sky_val(im: np.ndarray) -> float:
                 if im.ndim == 3 and im.shape[2] == 3:
                     lum = 0.299 * im[..., 0] + 0.587 * im[..., 1] + 0.114 * im[..., 2]
@@ -709,25 +706,20 @@ def stream_stack(
         del img  # FIX MEMLEAK
         gc.collect()  # FIX MEMLEAK
 
-
     out_sum = os.path.abspath(str(out_sum)).strip()
     out_wht = os.path.abspath(str(out_wht)).strip()
     cum_sum = open_memmap(out_sum, "w+", dtype=np.float32, shape=(H, W, C))
     cum_sum[:] = 0
     cum_wht = open_memmap(out_wht, "w+", dtype=np.float32, shape=(H, W))
     cum_wht[:] = 1
-    logger.debug(
-        "allocated accumulators: cum_sum %s, cum_wht %s", cum_sum.shape, cum_wht.shape
-    )
+    logger.debug("allocated accumulators: cum_sum %s, cum_wht %s", cum_sum.shape, cum_wht.shape)
 
     tile_h = int(tile)
     image_count = 0
     for y0 in range(0, H, tile_h):
         y1 = min(y0 + tile_h, H)
         rows_h = y1 - y0
-        logger.debug(
-            f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
-        )
+        logger.debug(f"RAM avant la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB")
         per_img_bytes = rows_h * W * C * 4
         group_size = max(1, max_mem_bytes // max(per_img_bytes, 1))
 
@@ -750,9 +742,8 @@ def stream_stack(
                 if correct_hot_pixels:
                     try:
                         from seestar.core.hot_pixels import detect_and_correct_hot_pixels
-                        img_slice = detect_and_correct_hot_pixels(
-                            img_slice, hot_threshold, hot_neighborhood
-                        )
+
+                        img_slice = detect_and_correct_hot_pixels(img_slice, hot_threshold, hot_neighborhood)
                     except Exception:
                         pass
                 weight = float(r.get("weight") or 1.0) * weights_scalar[idx]
@@ -764,9 +755,7 @@ def stream_stack(
                     elif img_slice.shape[2] == 1 and C == 3:
                         img_slice = np.repeat(img_slice, 3, axis=2)
                     else:
-                        raise ValueError(
-                            f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}"
-                        )
+                        raise ValueError(f"Image channel mismatch: expected {C}, got {img_slice.shape[2]}")
                 if norm_method == "linear_fit" and idx in norm_params:
                     a, b = norm_params[idx]
                     img_slice = img_slice.astype(np.float32) * a + b
@@ -781,8 +770,8 @@ def stream_stack(
                 image_count += 1
                 if image_count % 100 == 0:
                     vm = psutil.virtual_memory()
-                    ram_mb = vm.used / (1024 ** 2)
-                    cache_mb = getattr(vm, "cached", 0.0) / (1024 ** 2)
+                    ram_mb = vm.used / (1024**2)
+                    cache_mb = getattr(vm, "cached", 0.0) / (1024**2)
                     logger.info(
                         "Loaded %d images | RAM %.1f MB | Cache %.1f MB",
                         image_count,
@@ -823,23 +812,21 @@ def stream_stack(
             gc.collect()  # FIX MEMLEAK
 
         cum_sum[y0:y1] = tile_sum
-        cum_wht[y0:y1] = tile_wht if isinstance(tile_wht, np.ndarray) else np.full((rows_h, W), float(tile_wht), dtype=np.float32)
+        cum_wht[y0:y1] = (
+            tile_wht if isinstance(tile_wht, np.ndarray) else np.full((rows_h, W), float(tile_wht), dtype=np.float32)
+        )
         flush_mmap(cum_sum)
         flush_mmap(cum_wht)
         gc.collect()
-        logger.debug(
-            f"RAM après la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB"
-        )
+        logger.debug(f"RAM après la tuile {y0}-{y1} : {psutil.virtual_memory().used / 1024**2:.2f} MB")
         if y0 == 0:
-            logger.debug(
-                "stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape
-            )
+            logger.debug("stacked first tile -> cum_sum slice %s", cum_sum[y0:y1].shape)
         progress = 100.0 * y1 / H
         if progress >= stream_stack._next_pct or y1 == H:
             elapsed = time.monotonic() - stream_stack._start_time
             frac = y1 / H
             eta = (elapsed / frac) * (1 - frac) if frac > 0 else 0.0
-            swap_used_mb = psutil.swap_memory().used / (1024 ** 2)
+            swap_used_mb = psutil.swap_memory().used / (1024**2)
             eta_str = _format_seconds(eta)
             logger.info(
                 "Progress %5.1f%% | ETA %s | Swap %.1f MB",
@@ -856,8 +843,8 @@ def stream_stack(
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
 
     vm_end = psutil.virtual_memory()
-    ram_end_mb = vm_end.used / (1024 ** 2)
-    cache_end_mb = getattr(vm_end, "cached", 0.0) / (1024 ** 2)
+    ram_end_mb = vm_end.used / (1024**2)
+    cache_end_mb = getattr(vm_end, "cached", 0.0) / (1024**2)
     logger.info(
         "Final RAM %.1f MB | Cache %.1f MB",
         ram_end_mb,
@@ -879,9 +866,8 @@ def main():
     elif args.weight == "noise_fwhm":
         args.weight = "stars"
 
-
-#    if args.batch_size == 1:
-#        args.use_solver = False
+    #    if args.batch_size == 1:
+    #        args.use_solver = False
 
     os.makedirs(args.out, exist_ok=True)
 
