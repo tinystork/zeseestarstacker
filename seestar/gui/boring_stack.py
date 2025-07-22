@@ -29,7 +29,6 @@ import imageio
 from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
 from seestar.core.alignment import SeestarAligner
-from seestar.core.image_processing import load_and_validate_fits, debayer_image
 
 logger = logging.getLogger(__name__)
 aligner = None
@@ -432,6 +431,43 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
     return data[y0:y1]
 
 
+def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
+    """Return image array and FITS header if applicable."""
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".fit", ".fits", ".fts"}:
+        with fits.open(
+            path,
+            memmap=False,
+            do_not_scale_image_data=True,
+            ignore_blank=True,
+        ) as hd:
+            data = hd[0].data
+            hdr = hd[0].header
+        bscale = hdr.get("BSCALE", 1.0)
+        bzero = hdr.get("BZERO", 0.0)
+        data = data.astype(np.float32, copy=False) * bscale + bzero
+        if data.ndim == 2:
+            bayer = hdr.get("BAYERPAT", "RGGB")
+            try:
+                if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
+                    code = getattr(cv2, f"COLOR_Bayer{bayer.upper()}2RGB_EA", cv2.COLOR_BayerRG2RGB_EA)
+                else:
+                    code = cv2.COLOR_BayerRG2RGB_EA
+                data = cv2.cvtColor(data.astype(np.uint16), code)
+            except Exception:
+                logger.warning("Could not debayer %s", path)
+        else:
+            data = to_hwc(data, hdr)
+        return data.astype(np.float32), hdr
+
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise RuntimeError(f"Failed to read {path}")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
+    return img, None
+
+
 def winsorize(tile, kappa, limit):
     """Winsorize ``tile`` in-place and return a floating point view.
 
@@ -527,6 +563,151 @@ def flush_mmap(mmap_obj):
         )
     except Exception:
         pass
+
+
+def classic_stack(
+    csv_path: str,
+    *,
+    norm_method: str = "linear_fit",
+    weight_method: str = "none",
+    reject_algo: str = "none",
+    kappa: float = 3.0,
+    winsor: float = 0.05,
+    api_key: str | None = None,
+    use_solver: bool = True,
+    correct_hot_pixels: bool = True,
+    hot_threshold: float = 3.0,
+    hot_neighborhood: int = 5,
+    use_weighting: bool = False,
+    snr_exp: float = 1.0,
+    stars_exp: float = 0.5,
+    min_weight: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stack images sequentially like a classic stacker."""
+
+    global aligner
+
+    rows = read_rows(csv_path)
+    if not rows:
+        raise RuntimeError("CSV is empty")
+
+    aligner = SeestarAligner()
+    aligner.correct_hot_pixels = correct_hot_pixels
+    aligner.hot_pixel_threshold = hot_threshold
+    aligner.neighborhood_size = hot_neighborhood
+
+    input_folder = os.path.dirname(rows[0]["path"])
+    cand_files = [os.path.basename(r["path"]) for r in rows[:20]]
+    tmp_dir = os.path.join(input_folder, "_temp_align_ref")
+    os.makedirs(tmp_dir, exist_ok=True)
+    ref_img, ref_hdr = aligner._get_reference_image(input_folder, cand_files, tmp_dir)
+    if ref_img is None:
+        raise RuntimeError("Failed to select reference image")
+    aligner.reference_image_data = ref_img
+    logger.info("Reference selected: %s", ref_hdr.get("HIERARCH SEESTAR REF SRCFILE", "auto"))
+
+    shape_ref = ref_img.shape[:2]
+    H, W = shape_ref
+    C = ref_img.shape[2] if ref_img.ndim == 3 else 1
+
+    wcs_ref = None
+    if ref_hdr is not None:
+        try:
+            wcs_ref = WCS(ref_hdr)
+        except Exception:
+            wcs_ref = None
+
+    axis = (0, 1) if ref_img.ndim == 3 else None
+    ref_low = np.nanpercentile(ref_img, 25.0, axis=axis)
+    ref_high = np.nanpercentile(ref_img, 90.0, axis=axis)
+
+    def sky_val(im: np.ndarray) -> float:
+        if im.ndim == 3 and im.shape[2] == 3:
+            lum = 0.299 * im[..., 0] + 0.587 * im[..., 1] + 0.114 * im[..., 2]
+        else:
+            lum = im
+        return float(np.nanpercentile(lum, 25.0))
+
+    ref_sky = sky_val(ref_img)
+
+    images: list[np.ndarray] = []
+    weights: list[float] = []
+    wcs_cache: dict[str, WCS | None] = {}
+
+    for idx, row in enumerate(rows, 1):
+        path = row["path"]
+        img, hdr = _read_image(path)
+
+        if correct_hot_pixels:
+            try:
+                from seestar.core.hot_pixels import detect_and_correct_hot_pixels
+
+                img = detect_and_correct_hot_pixels(img, hot_threshold, hot_neighborhood)
+            except Exception:
+                pass
+
+        w = 1.0
+        if use_weighting:
+            if weight_method == "snr":
+                w = _calc_snr(img) ** snr_exp
+            elif weight_method == "stars":
+                w = _calc_star_score(img) ** stars_exp
+        w *= float(row.get("weight") or 1.0)
+        w = max(float(w), min_weight, 1e-9)
+
+        if norm_method == "linear_fit":
+            data = img.astype(np.float32, copy=False)
+            low = np.nanpercentile(data, 25.0, axis=axis)
+            high = np.nanpercentile(data, 90.0, axis=axis)
+            d_src = high - low
+            d_ref = ref_high - ref_low
+            a = np.where(d_src > 1e-5, d_ref / np.maximum(d_src, 1e-9), 1.0)
+            b = ref_low - a * low
+            img = data * a + b
+        elif norm_method == "sky_mean":
+            img = img.astype(np.float32) + (ref_sky - sky_val(img.astype(np.float32)))
+        else:
+            img = img.astype(np.float32)
+
+        aligned, ok = aligner._align_image(img, aligner.reference_image_data, os.path.basename(path))
+        if not ok and use_solver:
+            if path not in wcs_cache:
+                wcs = solve_local_plate(path)
+                if wcs is None:
+                    wcs = get_wcs_from_astap(path)
+                if wcs is None:
+                    wcs = solve_with_astrometry_local(path)
+                if wcs is None and api_key:
+                    wcs = solve_with_astrometry_net(path, api_key)
+                wcs_cache[path] = wcs
+            wcs = wcs_cache.get(path)
+            if wcs is not None and wcs_ref is not None:
+                try:
+                    aligned = warp_image(img, wcs, wcs_ref, shape_ref)
+                    ok = True
+                except Exception as e:
+                    logger.warning("WCS align failed for %s: %s", path, e)
+        if not ok:
+            logger.warning("Alignment failed for %s", path)
+        images.append(aligned.astype(np.float32))
+        weights.append(w)
+        logger.info("Loaded %d/%d: %s", idx, len(rows), os.path.basename(path))
+
+    weights_arr = np.asarray(weights, dtype=np.float32)
+
+    if reject_algo == "winsorized_sigma":
+        final, _ = _stack_winsorized_sigma(images, weights_arr, kappa=kappa, winsor_limits=(winsor, winsor))
+    elif reject_algo == "kappa_sigma":
+        final, _ = _stack_kappa_sigma(images, weights_arr, sigma_low=kappa, sigma_high=kappa)
+    else:
+        final, _ = _stack_mean(images, weights_arr)
+
+    weight_map = np.full((H, W), float(np.sum(weights_arr)), dtype=np.float32)
+
+    bg = np.median(final) if np.isfinite(final).any() else 0.0
+    final = final - bg
+
+    return final.astype(np.float32), weight_map
 
 
 def stream_stack(
@@ -871,21 +1052,15 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    sum_path = os.path.abspath(os.path.join(args.out, "cum_sum.npy")).strip()
-    wht_path = os.path.abspath(os.path.join(args.out, "cum_wht.npy")).strip()
-    cum_sum, cum_wht = stream_stack(
+    final, weight_map = classic_stack(
         args.csv,
-        sum_path,
-        wht_path,
-        tile=args.tile,
+        norm_method=args.norm,
+        weight_method=args.weight,
+        reject_algo=args.reject,
         kappa=args.kappa,
         winsor=args.winsor,
         api_key=args.api_key,
         use_solver=args.use_solver,
-        max_mem=args.max_mem,
-        norm_method=args.norm,
-        weight_method=args.weight,
-        reject_algo=args.reject,
         correct_hot_pixels=args.correct_hot_pixels,
         hot_threshold=args.hot_threshold,
         hot_neighborhood=args.hot_neighborhood,
@@ -895,7 +1070,6 @@ def main():
         min_weight=args.min_weight,
     )
 
-    final = cum_sum / np.maximum(cum_wht[..., None], 1e-6)
     logger.debug("final image shape before squeeze: %s", final.shape)
 
     if final.ndim == 3 and final.shape[2] == 3:
@@ -922,21 +1096,10 @@ def main():
     if preview.ndim == 3 and preview.shape[2] == 1:
         preview = preview[:, :, 0]
     imageio.imwrite(os.path.join(args.out, "preview.png"), preview)
-    flush_mmap(cum_sum)
-    flush_mmap(cum_wht)
-    cum_sum._mmap.close()  # FIX MEMLEAK
-    cum_wht._mmap.close()  # FIX MEMLEAK
-    del cum_sum
-    del cum_wht
-    gc.collect()
-    try:
-        os.remove(sum_path)
-    except Exception as e:
-        _safe_print(f"WARNING: could not remove {sum_path}: {e}", file=sys.stderr)
-    try:
-        os.remove(wht_path)
-    except Exception as e:
-        _safe_print(f"WARNING: could not remove {wht_path}: {e}", file=sys.stderr)
+
+    weight_path = os.path.join(args.out, "weight_map.npy")
+    np.save(weight_path, weight_map.astype(np.float32))
+
     return 0
 
 
@@ -956,13 +1119,8 @@ if __name__ == "__main__":
         csv_path = os.path.join(tmp, "plan.csv")
         with open(csv_path, "w") as f:
             f.write("file_path\n" + tmp + "/c_hw.fits\n")
-        stream_stack(
-            csv_path,
-            os.path.join(tmp, "sum.npy"),
-            os.path.join(tmp, "wht.npy"),
-        )
-        arr = np.load(os.path.join(tmp, "sum.npy"), mmap_mode="r")
-        assert arr.shape == (4, 5, 3), arr.shape
+        img, wht = classic_stack(csv_path)
+        assert img.shape == (4, 5, 3), img.shape
         shutil.rmtree(tmp)
         sys.exit(0)
 
