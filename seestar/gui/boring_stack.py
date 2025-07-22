@@ -1015,10 +1015,14 @@ def stream_stack(
                 eta_str,
                 swap_used_mb,
             )
-            _safe_print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
+            # Ligne de texte simple pour la GUI principale (se termine par '%').
+            _safe_print(f"{progress:.1f}%", flush=True)
             if progress_callback:
                 try:
-                    progress_callback(progress, eta_str)
+                    # Mise à jour de la barre de progression
+                    progress_callback(f"{progress:.1f}%", progress)
+                    # Mise à jour de l'ETA dans la GUI
+                    progress_callback(f"ETA_UPDATE:{eta_str}", None)
                 except Exception:
                     pass
             stream_stack._next_pct = min(stream_stack._next_pct + 10.0, 100.0)
