@@ -6091,7 +6091,20 @@ class SeestarStackerGUI:
             self._update_low_wht_mask_options_state()  # S'assurer d'appeler ceci aussi
         print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        special_single = self._prepare_single_batch_if_needed()
+        try:
+            special_single = self._prepare_single_batch_if_needed()
+        except FileNotFoundError as fnfe:
+            messagebox.showerror(
+                self.tr("error"),
+                self.tr(
+                    "stack_plan_missing_file_error",
+                    default="File listed in stack_plan.csv not found:\n{path}",
+                ).format(path=str(fnfe)),
+            )
+            if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.NORMAL)
+            print(f"DEBUG (GUI start_processing): Missing file in stack_plan - {fnfe}")
+            return
         if special_single:
             self.batch_size.set(self.settings.batch_size)
             self.stacking_mode.set(self.settings.stacking_mode)

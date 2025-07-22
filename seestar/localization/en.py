@@ -392,5 +392,6 @@ EN_TRANSLATIONS = {
     "use_best_reference_button": "Use Recommended Reference",
     "status_label": "Status:",
     "apply_snr_rejection": "Apply SNR Rejection",
+    "stack_plan_missing_file_error": "File listed in stack_plan.csv not found:\n{path}",
 }
 # --- END OF FILE seestar/localization/en.py ---
