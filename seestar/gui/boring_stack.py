@@ -901,7 +901,9 @@ def stream_stack(
                 aligned_img = ref_img.astype(np.float32)
                 ok = True
             else:
+
                 aligned_img, _, ok = aligner._align_image(
+
                     img, ref_img, os.path.basename(row["path"])
                 )
             if not ok:
