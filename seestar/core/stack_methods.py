@@ -5,10 +5,15 @@ import numpy as np
 import logging
 from typing import Optional, Sequence, Tuple
 
-try:
-    from scipy.stats.mstats import winsorize as _scipy_winsorize
-    SCIPY_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
+USE_SCIPY_WINSOR = os.getenv("SEESTAR_USE_SCIPY_WINSOR", "0") == "1"
+if USE_SCIPY_WINSOR:
+    try:
+        from scipy.stats.mstats import winsorize as _scipy_winsorize
+        SCIPY_AVAILABLE = True
+    except Exception:  # pragma: no cover - optional dependency
+        _scipy_winsorize = None
+        SCIPY_AVAILABLE = False
+else:  # Prefer the NumPy fallback for better performance
     _scipy_winsorize = None
     SCIPY_AVAILABLE = False
 
@@ -28,20 +33,31 @@ logger = logging.getLogger(__name__)
 def _winsorize_axis0_numpy(arr: np.ndarray, limits: Tuple[float, float]) -> np.ndarray:
     """Vectorized winsorization along the first axis using NumPy.
 
-    This is a lightweight fallback used when SciPy is unavailable. It also
-    avoids the performance hit of ``scipy.stats.mstats.winsorize`` on large
-    arrays.
+    This replicates the behaviour of ``scipy.stats.mstats.winsorize`` with
+    ``inclusive=(False, False)`` which matches the default of SciPy. The
+    implementation is significantly faster for large arrays than the SciPy
+    version which relies on ``apply_along_axis``.
     """
 
     low, high = limits
     arr = arr.astype(np.float32, copy=False)
     result = arr.copy()
+
+    n = arr.shape[0]
+    order = np.argsort(arr, axis=0)
+
     if low > 0:
-        lower = np.nanquantile(arr, low, axis=0)
-        result = np.maximum(result, lower)
+        lowidx = int(round(low * n))
+        low_values = np.take_along_axis(arr, order, axis=0)[lowidx]
+        idx = order[:lowidx]
+        np.put_along_axis(result, idx, low_values, axis=0)
+
     if high > 0:
-        upper = np.nanquantile(arr, 1.0 - high, axis=0)
-        result = np.minimum(result, upper)
+        upidx = n - int(round(high * n))
+        up_values = np.take_along_axis(arr, order, axis=0)[upidx - 1]
+        idx = order[upidx:]
+        np.put_along_axis(result, idx, up_values, axis=0)
+
     return result
 
 
