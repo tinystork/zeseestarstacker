@@ -436,7 +436,12 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
         except Exception as e:
             _safe_print(f"❌ Erreur alignement local: {e}")
 
-    return data[y0:y1]
+    slice_data = data[y0:y1].copy()
+    if "aligned" in locals():
+        del aligned
+    del data
+    gc.collect()
+    return slice_data
 
 
 def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
@@ -902,8 +907,9 @@ def stream_stack(
         np.save(temp_path, img.astype(np.float32))
         aligned_paths.append(temp_path)
 
-        del img  # FIX MEMLEAK
-        gc.collect()  # FIX MEMLEAK
+        # Release the aligned image to keep memory usage low
+        del img
+        gc.collect()
 
     out_sum = os.path.abspath(str(out_sum)).strip()
     out_wht = os.path.abspath(str(out_wht)).strip()
