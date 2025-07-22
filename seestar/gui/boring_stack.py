@@ -500,6 +500,20 @@ def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
     return img, None
 
 
+def _move_unaligned_file(src: str, dest_dir: str, index: int) -> None:
+    """Move ``src`` into ``dest_dir`` with a unique name."""
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        base = os.path.basename(src)
+        dest = os.path.join(dest_dir, base)
+        if os.path.exists(dest):
+            root, ext = os.path.splitext(base)
+            dest = os.path.join(dest_dir, f"{root}_{index:04d}{ext}")
+        shutil.move(src, dest)
+    except Exception as e:
+        logger.warning("Failed moving %s to unaligned_files: %s", src, e)
+
+
 def winsorize(tile, kappa, limit):
     """Winsorize ``tile`` in-place and return a floating point view.
 
@@ -797,6 +811,8 @@ def stream_stack(
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
     local_align_only = batch_size == 1 and not use_solver
+    out_dir = os.path.dirname(os.path.abspath(out_sum))
+    unaligned_dir = os.path.join(out_dir, "unaligned_files")
     input_folder = os.path.dirname(rows[0]["path"])
     files_to_scan = [os.path.basename(row["path"]) for row in rows]
     tmp_output_dir = os.path.join(input_folder, "_temp_align_ref")
@@ -901,14 +917,15 @@ def stream_stack(
                 aligned_img = ref_img.astype(np.float32)
                 ok = True
             else:
-
                 aligned_img, _, ok = aligner._align_image(
-
                     img, ref_img, os.path.basename(row["path"])
                 )
             if not ok or aligned_img is None:
                 _safe_print(f"⚠️ Alignement échoué pour {row['path']}")
-                aligned_img = img
+                _move_unaligned_file(row["path"], unaligned_dir, idx)
+                del img
+                gc.collect()
+                continue
             img = aligned_img
         else:
             img = open_aligned_slice(
