@@ -54,6 +54,14 @@ def _format_seconds(secs: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _safe_print(*args, **kwargs) -> None:
+    """Print without raising if the output stream is closed."""
+    try:
+        print(*args, **kwargs)
+    except OSError:
+        logger.debug("stdout/stderr unavailable", exc_info=True)
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -419,9 +427,9 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                 if ok:
                     data = aligned
                 else:
-                    print(f"⚠️ Alignement échoué pour {path}")
+                    _safe_print(f"⚠️ Alignement échoué pour {path}")
         except Exception as e:
-            print(f"❌ Erreur alignement local: {e}")
+            _safe_print(f"❌ Erreur alignement local: {e}")
 
     return data[y0:y1]
 
@@ -560,7 +568,7 @@ def stream_stack(
     ref_img, _ = aligner._get_reference_image(input_folder, files_to_scan, tmp_output_dir)
     if ref_img is not None:
         aligner.reference_image_data = ref_img
-        print("✅ Image de référence chargée pour alignement local")
+        _safe_print("✅ Image de référence chargée pour alignement local")
     else:
 
         aligner = SeestarAligner()
@@ -622,13 +630,13 @@ def stream_stack(
             else:
                 if wcs_ref is None:
                     wcs_ref = wcs
-                print(
+                _safe_print(
                     f"Solved {i}/{len(rows)}: {os.path.basename(path)} via {method}"
                 )
             wcs_cache[path] = wcs
 
         if wcs_ref is not None:
-            print("ALIGN OK")
+            _safe_print("ALIGN OK")
 
         if wcs_ref is None:
             logger.warning("Reference WCS not resolved; stacking without alignment")
@@ -781,7 +789,7 @@ def stream_stack(
                         ram_mb,
                         cache_mb,
                     )
-                    print(
+                    _safe_print(
                         f"{image_count} images loaded | RAM {ram_mb:.1f}MB | Cache {cache_mb:.1f}MB",
                         flush=True,
                     )
@@ -839,7 +847,7 @@ def stream_stack(
                 eta_str,
                 swap_used_mb,
             )
-            print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
+            _safe_print(f"{progress:.1f}% ETA {eta_str} SWAP {swap_used_mb:.1f}MB", flush=True)
             if progress_callback:
                 try:
                     progress_callback(progress, eta_str)
@@ -855,7 +863,7 @@ def stream_stack(
         ram_end_mb,
         cache_end_mb,
     )
-    print(
+    _safe_print(
         f"Final RAM {ram_end_mb:.1f}MB | Cache {cache_end_mb:.1f}MB",
         flush=True,
     )
@@ -938,11 +946,11 @@ def main():
     try:
         os.remove(sum_path)
     except Exception as e:
-        print(f"WARNING: could not remove {sum_path}: {e}", file=sys.stderr)
+        _safe_print(f"WARNING: could not remove {sum_path}: {e}", file=sys.stderr)
     try:
         os.remove(wht_path)
     except Exception as e:
-        print(f"WARNING: could not remove {wht_path}: {e}", file=sys.stderr)
+        _safe_print(f"WARNING: could not remove {wht_path}: {e}", file=sys.stderr)
     return 0
 
 
