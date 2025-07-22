@@ -815,7 +815,6 @@ def stream_stack(
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
-    local_align_only = batch_size == 1 and not use_solver
     out_dir = os.path.dirname(os.path.abspath(out_sum))
     unaligned_dir = os.path.join(out_dir, "unaligned_files")
     input_folder = os.path.dirname(rows[0]["path"])
