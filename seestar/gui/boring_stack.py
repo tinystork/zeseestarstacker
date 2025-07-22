@@ -793,12 +793,10 @@ def stream_stack(
     ref_img, _ = aligner._get_reference_image(
         input_folder, files_to_scan, tmp_output_dir
     )
-    if ref_img is not None:
-        aligner.reference_image_data = ref_img
-        _safe_print("✅ Image de référence chargée pour alignement local")
-    else:
-
-        aligner = SeestarAligner()
+    if ref_img is None:
+        raise RuntimeError("Aucune référence trouvée pour l'alignement local.")
+    aligner.reference_image_data = ref_img
+    _safe_print("✅ Image de référence chargée pour alignement local")
     if not rows:
         raise RuntimeError("CSV is empty")
 
@@ -950,6 +948,14 @@ def stream_stack(
         # Release the aligned image to keep memory usage low
         del img
         gc.collect()
+
+        if progress_callback:
+            try:
+                msg = f"Aligné {idx + 1}/{len(rows)}"
+                pct = 100.0 * (idx + 1) / len(rows)
+                progress_callback(msg, pct)
+            except Exception:
+                pass
 
     out_sum = os.path.abspath(str(out_sum)).strip()
     out_wht = os.path.abspath(str(out_wht)).strip()
