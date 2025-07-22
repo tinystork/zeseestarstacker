@@ -1072,6 +1072,22 @@ def main():
 
     logger.debug("final image shape before squeeze: %s", final.shape)
 
+    # --- Chromatic balancing step (similar to queue_manager) ---
+    if final.ndim == 3 and final.shape[2] == 3:
+        try:
+            from seestar.enhancement.color_correction import ChromaticBalancer
+
+            chroma = ChromaticBalancer(border_size=25, blur_radius=8)
+            max_val = float(np.nanmax(final))
+            if max_val > 0:
+                scaled = np.clip(final / max_val, 0.0, 1.0)
+                corrected = chroma.normalize_stack(scaled)
+                final = np.clip(corrected, 0.0, 1.0) * max_val
+            else:
+                final = chroma.normalize_stack(np.clip(final, 0.0, 1.0))
+        except Exception as e:
+            logger.warning("ChromaticBalancer failed: %s", e)
+
     if final.ndim == 3 and final.shape[2] == 3:
         # Write colour data in (C, H, W) order so each channel is stored as a
         # separate FITS plane.  This preserves the RGB information instead of
