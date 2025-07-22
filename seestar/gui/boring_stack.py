@@ -441,7 +441,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                 and hasattr(aligner, "reference_image_data")
                 and aligner.reference_image_data is not None
             ):
-                aligned, ok = aligner._align_image(
+                aligned, _, ok = aligner._align_image(
                     data, aligner.reference_image_data, os.path.basename(path)
                 )
                 if ok:
@@ -707,7 +707,7 @@ def classic_stack(
         else:
             img = img.astype(np.float32)
 
-        aligned, ok = aligner._align_image(
+        aligned, _, ok = aligner._align_image(
             img, aligner.reference_image_data, os.path.basename(path)
         )
         if not ok and use_solver:
@@ -901,7 +901,9 @@ def stream_stack(
                 aligned_img = ref_img.astype(np.float32)
                 ok = True
             else:
-                aligned_img, ok = aligner._align_image(
+
+                aligned_img, _, ok = aligner._align_image(
+
                     img, ref_img, os.path.basename(row["path"])
                 )
             if not ok:
