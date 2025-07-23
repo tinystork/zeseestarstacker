@@ -436,6 +436,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
     if use_solver:
         try:
             global aligner
+            ok = False
             if (
                 aligner
                 and hasattr(aligner, "reference_image_data")
@@ -446,8 +447,14 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                 )
                 if ok:
                     data = aligned
-                else:
-                    _safe_print(f"⚠️ Alignement échoué pour {path}")
+            if not ok and wcs is not None and wcs_ref is not None:
+                try:
+                    data = warp_image(data, wcs, wcs_ref, shape_ref)
+                    ok = True
+                except Exception as e:
+                    logger.warning("WCS align failed for %s: %s", path, e)
+            if not ok:
+                _safe_print(f"⚠️ Alignement échoué pour {path}")
         except Exception as e:
             _safe_print(f"❌ Erreur alignement local: {e}")
 
@@ -810,7 +817,6 @@ def stream_stack(
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
-    local_align_only = batch_size == 1 and not use_solver
     out_dir = os.path.dirname(os.path.abspath(out_sum))
     unaligned_dir = os.path.join(out_dir, "unaligned_files")
     input_folder = os.path.dirname(rows[0]["path"])
@@ -911,32 +917,15 @@ def stream_stack(
     ref_low = ref_high = None
     ref_sky = None
     for idx, row in enumerate(rows):
-        if local_align_only:
-            img, _ = _read_image(row["path"])
-            if ref_basename and os.path.basename(row["path"]) == ref_basename:
-                aligned_img = ref_img.astype(np.float32)
-                ok = True
-            else:
-                aligned_img, _, ok = aligner._align_image(
-                    img, ref_img, os.path.basename(row["path"])
-                )
-            if not ok or aligned_img is None:
-                _safe_print(f"⚠️ Alignement échoué pour {row['path']}")
-                _move_unaligned_file(row["path"], unaligned_dir, idx)
-                del img
-                gc.collect()
-                continue
-            img = aligned_img
-        else:
-            img = open_aligned_slice(
-                row["path"],
-                0,
-                H,
-                wcs_cache[row["path"]],
-                wcs_ref,
-                shape_ref,
-                use_solver=use_solver,
-            )
+        img = open_aligned_slice(
+            row["path"],
+            0,
+            H,
+            wcs_cache.get(row["path"]),
+            wcs_ref,
+            shape_ref,
+            use_solver=use_solver,
+        )
         if correct_hot_pixels:
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
