@@ -378,6 +378,18 @@ initial WCS is reused for every batch. Subsequent batches are reprojected using
 a new fixed-orientation grid so the image orientation stays constant and small
 rotation drifts are eliminated.
 
+### Command-Line Stacking
+
+Use `seestar/gui/boring_stack.py` for headless single-batch processing. Set
+`--chunk-size` to periodically flush intermediate stacks:
+
+```bash
+python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
+    --batch-size 1 --chunk-size 50
+```
+
+When `--chunk-size` is used with `--batch-size 1`, results are combined in
+chunks of N images so incremental stacking works without a `stack_plan.csv`.
 
 ---
 

@@ -3883,9 +3883,14 @@ class SeestarQueuedStacker:
                                 )
                                 self._current_batch_paths.append(file_path)
 
+                                trigger = (
+                                    getattr(self, "chunk_size", None)
+                                    if self.batch_size == 1 and getattr(self, "chunk_size", None)
+                                    else self.batch_size
+                                )
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
-                                    >= self.batch_size
+                                    >= trigger
                                 ):
                                     self.stacked_batches_count += 1
                                     num_in_batch = len(
@@ -4052,9 +4057,14 @@ class SeestarQueuedStacker:
                                     )
                                     self._current_batch_paths.append(file_path)
 
+                                trigger = (
+                                    getattr(self, "chunk_size", None)
+                                    if self.batch_size == 1 and getattr(self, "chunk_size", None)
+                                    else self.batch_size
+                                )
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
-                                    >= self.batch_size
+                                    >= trigger
                                 ):
                                     self.stacked_batches_count += 1
                                     self._send_eta_update()
@@ -11475,6 +11485,7 @@ class SeestarQueuedStacker:
         preserve_linear_output=False,
         reproject_between_batches=None,
         reproject_coadd_final=None,
+        chunk_size=None,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -11703,6 +11714,7 @@ class SeestarQueuedStacker:
 
         self.move_stacked = bool(move_stacked)
         self.partial_save_interval = max(1, int(partial_save_interval))
+        self.chunk_size = int(chunk_size) if chunk_size else None
 
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
 

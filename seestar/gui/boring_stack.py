@@ -172,6 +172,14 @@ def parse_args():
     p.add_argument("--max-mem", type=float, default=None, help="(unused)")
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
     p.add_argument("--batch-size", type=int, default=1, help="Batch size")
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Flush intermediate results every N images when batch size is 1"
+        ),
+    )
     p.add_argument("--norm", default="none", choices=["linear_fit", "sky_mean", "none"], help="Normalization")
     p.add_argument(
         "--weight",
@@ -259,6 +267,7 @@ def main() -> int:
             normalize_method=args.norm,
             weighting_method=args.weight,
             batch_size=args.batch_size,
+            chunk_size=args.chunk_size,
             ordered_files=ordered_files,
             correct_hot_pixels=args.correct_hot_pixels,
             hot_pixel_threshold=args.hot_threshold,
