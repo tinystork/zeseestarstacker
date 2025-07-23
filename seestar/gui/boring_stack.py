@@ -171,6 +171,10 @@ def main() -> int:
     # the GUI's batch-size-1 handling ("mode 0").
     input_dir = os.path.dirname(os.path.abspath(args.csv))
 
+    # ``tile`` is ignored by ``SeestarQueuedStacker`` but remains configurable
+    # via ``SEESTAR_TILE_H`` to aid debugging memory usage.
+    os.environ["SEESTAR_TILE_H"] = str(args.tile)
+
     stacker = SeestarQueuedStacker()
     ok = stacker.start_processing(
         input_dir=input_dir,
