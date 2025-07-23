@@ -32,6 +32,7 @@ import imageio
 from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
 from seestar.core.fast_aligner_module import FastSeestarAligner
+from seestar.core.image_processing import load_and_validate_fits, debayer_image
 
 logger = logging.getLogger(__name__)
 aligner = None
@@ -390,49 +391,7 @@ def get_image_shape(path):
 def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True):
     """Return RGB slice (``y0:y1``) aligned to reference grid if possible."""
 
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".fit", ".fits", ".fts"):
-        # Use ``memmap=True`` and disable automatic scaling so that only
-        # the requested slice is read on demand.  ``memmap=False`` would
-        # load the entire image into RAM.
-        with fits.open(
-            path,
-            memmap=True,
-            do_not_scale_image_data=True,
-            ignore_blank=True,
-        ) as hd:
-
-            data = hd[0].data
-            hdr = hd[0].header
-
-        # Manually apply BSCALE/BZERO if present so the resulting array is
-        # equivalent to ``hd[0].data`` with scaling enabled.
-        bscale = hdr.get("BSCALE", 1.0)
-        bzero = hdr.get("BZERO", 0.0)
-        data = data.astype(np.float32, copy=False) * bscale + bzero
-
-        if data.ndim == 2:
-            bayer = hdr.get("BAYERPAT", "RGGB")  # Par défaut si absent
-            try:
-                if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
-                    code = getattr(
-                        cv2,
-                        f"COLOR_Bayer{bayer.upper()}2RGB_EA",
-                        cv2.COLOR_BayerRG2RGB_EA,
-                    )
-                else:
-                    code = cv2.COLOR_BayerRG2RGB_EA
-                data = cv2.cvtColor(data.astype(np.uint16), code)
-                logger.debug("Debayering image %s using pattern: %s", path, bayer)
-            except Exception as e:
-                logger.warning("Could not debayer %s: %s", path, e)
-        else:
-            data = to_hwc(data)
-
-    else:
-        data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
-
+    data, hdr = _read_image(path)
 
     try:
         global aligner
@@ -475,39 +434,34 @@ def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
 
     ext = os.path.splitext(path)[1].lower()
     if ext in {".fit", ".fits", ".fts"}:
-        with fits.open(
-            path,
-            memmap=False,
-            do_not_scale_image_data=True,
-            ignore_blank=True,
-        ) as hd:
-            data = hd[0].data
-            hdr = hd[0].header
-        bscale = hdr.get("BSCALE", 1.0)
-        bzero = hdr.get("BZERO", 0.0)
-        data = data.astype(np.float32, copy=False) * bscale + bzero
+        data, hdr = load_and_validate_fits(path)
+        if data is None:
+            raise RuntimeError(f"Failed to load {path}")
         if data.ndim == 2:
             bayer = hdr.get("BAYERPAT", "RGGB")
             try:
-                if bayer.upper() in {"RGGB", "GRBG", "GBRG", "BGGR"}:
-                    code = getattr(
-                        cv2,
-                        f"COLOR_Bayer{bayer.upper()}2RGB_EA",
-                        cv2.COLOR_BayerRG2RGB_EA,
-                    )
-                else:
-                    code = cv2.COLOR_BayerRG2RGB_EA
-                data = cv2.cvtColor(data.astype(np.uint16), code)
-            except Exception:
-                logger.warning("Could not debayer %s", path)
+                data = debayer_image(data, bayer)
+                logger.debug("Debayering image %s using pattern: %s", path, bayer)
+            except Exception as e:
+                logger.warning("Could not debayer %s: %s", path, e)
         else:
             data = to_hwc(data, hdr)
+
+        if data.ndim == 3 and data.shape[2] == 3:
+            r, g, b = data[..., 0], data[..., 1], data[..., 2]
+            med_r, med_g, med_b = np.median(r), np.median(g), np.median(b)
+            if med_g > 1e-6:
+                gain_r = np.clip(med_g / max(med_r, 1e-6), 0.5, 2.0)
+                gain_b = np.clip(med_g / max(med_b, 1e-6), 0.5, 2.0)
+                data[..., 0] *= gain_r
+                data[..., 2] *= gain_b
+
         return data.astype(np.float32), hdr
 
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise RuntimeError(f"Failed to read {path}")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     return img, None
 
 
