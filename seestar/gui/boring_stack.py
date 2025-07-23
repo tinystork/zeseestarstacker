@@ -175,7 +175,18 @@ def main() -> int:
     # via ``SEESTAR_TILE_H`` to aid debugging memory usage.
     os.environ["SEESTAR_TILE_H"] = str(args.tile)
 
+    def log_progress(message: str, progress: object | None = None) -> None:
+        """Simple progress callback that tolerates non-numeric ``progress``."""
+        if progress is None:
+            logger.info(message)
+            return
+        if isinstance(progress, (int, float)):
+            logger.info("[%d%%] %s", int(progress), message)
+        else:
+            logger.info("%s (%s)", message, progress)
+
     stacker = SeestarQueuedStacker()
+    stacker.progress_callback = log_progress
     ok = stacker.start_processing(
         input_dir=input_dir,
         output_dir=args.out,
