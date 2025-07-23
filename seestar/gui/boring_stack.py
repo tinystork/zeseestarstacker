@@ -8,6 +8,108 @@ import shutil
 import tempfile
 import gc, os
 
+import gc
+from itertools import islice
+import numpy as np
+
+
+def _grouper(it, chunk):
+    """Yield successive lists of length ≤ chunk from *it*."""
+    it = iter(it)
+    while True:
+        part = list(islice(it, chunk))
+        if not part:
+            break
+        yield part
+
+
+def _two_pass_chunked_stack(
+    file_list: list[str],
+    reject_mode: str = "kappa_sigma",
+    kappa_low: float = 3.0,
+    kappa_high: float = 3.0,
+    winsor_limits: tuple[float, float] = (0.05, 0.05),
+    chunk_size: int = 40,
+):
+    """
+    Global-rejection stacking without OOM for very large file lists.
+
+    • Pass-1  –  global mean / variance (vectorised Welford) chunk × chunk  
+    • Pass-2  –  build a global mask and accumulate only accepted pixels.
+
+    Memory ≈ 4 × (H × W × C) + ≤ 60 images.
+    Returns (H, W) if monochrome else (H, W, C) float32 in [0-1].
+    """
+    if not file_list:
+        raise ValueError("file_list is empty")
+
+    ref_data = load_and_validate_fits(file_list[0])[0].astype(np.float32, copy=False)
+    if ref_data.ndim == 2:
+        ref_data = ref_data[..., None]
+    H, W, C = ref_data.shape
+    del ref_data
+
+    mean = np.zeros((H, W, C), np.float32)
+    M2 = np.zeros_like(mean)
+    n_im = 0
+
+    for paths in _grouper(file_list, chunk_size):
+        blk = np.stack(
+            [
+                (lambda d: d if d.ndim == 3 else d[..., None])(
+                    load_and_validate_fits(p)[0].astype(np.float32, copy=False)
+                )
+                for p in paths
+            ],
+            axis=0,
+        )
+
+        k = blk.shape[0]
+        delta = blk - mean
+        mean += delta.sum(axis=0) / (n_im + k)
+        M2 += (delta * (blk - mean)).sum(axis=0)
+        n_im += k
+
+        del blk, delta
+        gc.collect()
+
+    var = M2 / max(n_im - 1, 1)
+    sigma = np.sqrt(var, dtype=np.float32)
+
+    if reject_mode == "winsorized_sigma":
+        low_b = np.percentile(mean, winsor_limits[0] * 100.0)
+        high_b = np.percentile(mean, 100.0 - winsor_limits[1] * 100.0)
+
+    acc = np.zeros_like(mean)
+    wht = np.zeros_like(mean)
+
+    for paths in _grouper(file_list, chunk_size):
+        blk = np.stack(
+            [
+                (lambda d: d if d.ndim == 3 else d[..., None])(
+                    load_and_validate_fits(p)[0].astype(np.float32, copy=False)
+                )
+                for p in paths
+            ],
+            axis=0,
+        )
+
+        if reject_mode == "kappa_sigma":
+            msk = (blk >= mean - kappa_low * sigma) & (blk <= mean + kappa_high * sigma)
+        else:
+            blk = np.clip(blk, low_b, high_b, out=blk)
+            msk = np.ones_like(blk, dtype=bool)
+
+        w = msk.astype(np.float32)
+        acc += (blk * w).sum(axis=0)
+        wht += w.sum(axis=0)
+
+        del blk, msk, w
+        gc.collect()
+
+    res = acc / np.clip(wht, 1e-6, None)
+    return np.squeeze(res)
+
 def _cleanup_stacker(stacker):
     """Free all heavy resources held by a SeestarQueuedStacker instance."""
     if stacker is None:
@@ -72,6 +174,7 @@ import numpy.lib.format as _np_format
 _np_format.open_memmap = _safe_open_memmap
 
 from seestar.queuep.queue_manager import SeestarQueuedStacker
+from ..core.image_processing import load_and_validate_fits, save_fits_image
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +304,9 @@ def main() -> int:
         return 1
 
     ordered_files = [r["path"] for r in rows]
+    file_list = ordered_files
+    out_path = os.path.join(args.out, "final.fits")
+    hdr_ref = load_and_validate_fits(file_list[0])[1]
     # ``SeestarQueuedStacker`` expects ``input_dir`` to match the folder
     # containing ``stack_plan.csv`` when ``batch_size`` equals 1.  Using the
     # first image directory breaks this detection when files span multiple
@@ -212,6 +318,22 @@ def main() -> int:
     # ``tile`` is ignored by ``SeestarQueuedStacker`` but remains configurable
     # via ``SEESTAR_TILE_H`` to aid debugging memory usage.
     os.environ["SEESTAR_TILE_H"] = str(args.tile)
+
+    if args.batch_size == 1:  # boring_stack specific path
+        chunk = max(20, min(60, args.tile or 40))
+        print(f"[Two-pass] global reject with {chunk}-image chunks")
+
+        stacked = _two_pass_chunked_stack(
+            file_list,
+            reject_mode=args.reject,
+            kappa_low=args.kappa,
+            kappa_high=args.kappa,
+            winsor_limits=(args.winsor, args.winsor),
+            chunk_size=chunk,
+        )
+
+        save_fits_image(out_path, stacked, header=hdr_ref)
+        return
 
     def log_progress(message: str, progress: object | None = None) -> None:
         """Simple progress callback that tolerates non-numeric ``progress``."""
@@ -236,7 +358,7 @@ def main() -> int:
             winsor_limits=(args.winsor, args.winsor),
             normalize_method=args.norm,
             weighting_method=args.weight,
-            batch_size=1,
+            batch_size=args.batch_size,
             ordered_files=ordered_files,
             correct_hot_pixels=args.correct_hot_pixels,
             hot_pixel_threshold=args.hot_threshold,
