@@ -3900,6 +3900,8 @@ class SeestarQueuedStacker:
                                     )
                                     if stacked_np is None:
                                         current_batch_items_with_masks_for_stack_batch.clear()
+                                        if getattr(self, "batch_size", 1) == 1:
+                                            getattr(self, "_indices_cache", {}).clear()
                                         gc.collect()
                                     else:
                                         # 2. Ensure WCS on the stacked image
@@ -3978,6 +3980,8 @@ class SeestarQueuedStacker:
                                         current_batch_items_with_masks_for_stack_batch.clear()
                                         self._current_batch_paths = []
                                         self._save_partial_stack()
+                                        if getattr(self, "batch_size", 1) == 1:
+                                            getattr(self, "_indices_cache", {}).clear()
                                         gc.collect()
 
                             else:
@@ -6364,6 +6368,8 @@ class SeestarQueuedStacker:
                 del prepared_img_after_initial_proc
             if image_for_alignment_or_drizzle_input is not None:
                 del image_for_alignment_or_drizzle_input
+            if getattr(self, "batch_size", 1) == 1:
+                getattr(self, "_indices_cache", {}).clear()
             gc.collect()
 
     #############################################################################################################################
@@ -6464,6 +6470,8 @@ class SeestarQueuedStacker:
                 None,
             )
 
+        if getattr(self, "batch_size", 1) == 1:
+            getattr(self, "_indices_cache", {}).clear()
         gc.collect()
         logger.debug(
             f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}."
