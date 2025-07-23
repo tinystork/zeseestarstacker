@@ -41,6 +41,7 @@ from .stack_methods import (
     _stack_kappa_sigma,
     _stack_linear_fit_clip,
 )
+from .streaming_stack import stack_disk_streaming
 from .incremental_reprojection import reproject_and_combine
 from .reprojection import resolve_all_wcs
 from .reprojection_utils import collect_headers, compute_final_output_grid
@@ -66,6 +67,7 @@ __all__ = [
     '_stack_median',
     '_stack_kappa_sigma',
     '_stack_linear_fit_clip',
+    'stack_disk_streaming',
     'create_master_tile_simple',
     'reproject_and_combine',
     'resolve_all_wcs',
