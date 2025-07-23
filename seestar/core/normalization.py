@@ -17,7 +17,7 @@ def _normalize_images_linear_fit(image_list, reference_index=0, low_percentile=2
         if img is None:
             normalized.append(None)
             continue
-        data = img.astype(np.float32, copy=True)
+        data = img.astype(np.float32, copy=False)
         if i == reference_index:
             normalized.append(data)
             continue
@@ -49,7 +49,7 @@ def _normalize_images_sky_mean(image_list, reference_index=0, sky_percentile=25.
         if img is None:
             normalized.append(None)
             continue
-        data = img.astype(np.float32, copy=True)
+        data = img.astype(np.float32, copy=False)
         if i == reference_index:
             normalized.append(data)
             continue
