@@ -60,6 +60,15 @@ import astroalign as aa
 import cv2
 import numpy as np
 import psutil
+_PROC = psutil.Process(os.getpid())  # Monitor RAM usage
+
+def _log_mem(tag: str) -> None:
+    """DEBUG helper to log current RSS in MB."""
+    try:
+        rss = _PROC.memory_info().rss / (1024 * 1024)
+        logger.debug("RAM usage [%s]: %.1f MB", tag, rss)
+    except Exception:
+        pass
 try:
     from numpy.lib.format import open_memmap
 except Exception:  # pragma: no cover - very unlikely
@@ -68,7 +77,7 @@ except Exception:  # pragma: no cover - very unlikely
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
-
+    
     def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
         Y, X = np.ogrid[:h, :w]
         cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
@@ -1184,6 +1193,8 @@ class SeestarQueuedStacker:
         self.failed_align_count = 0
         self.failed_stack_count = 0
         self.skipped_files_count = 0
+        self.aligned_temp_dir = None
+        self.aligned_temp_paths = []
         self.photutils_bn_applied_in_session = False
         self.bn_globale_applied_in_session = False
         self.cb_applied_in_session = False
@@ -1461,6 +1472,8 @@ class SeestarQueuedStacker:
             self.classic_batch_output_dir = os.path.join(
                 self.output_folder, "classic_batch_outputs"
             )
+            if self.batch_size == 1:
+                self.aligned_temp_dir = os.path.join(self.output_folder, "aligned_tmp")
 
             # Définir le chemin du dossier memmap mais ne le créer que si nécessaire plus tard
             memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
@@ -1469,6 +1482,8 @@ class SeestarQueuedStacker:
 
             os.makedirs(self.output_folder, exist_ok=True)
             os.makedirs(self.unaligned_folder, exist_ok=True)
+            if self.batch_size == 1 and self.aligned_temp_dir:
+                os.makedirs(self.aligned_temp_dir, exist_ok=True)
 
             if self.drizzle_active_session or self.is_mosaic_run:
                 os.makedirs(self.drizzle_temp_dir, exist_ok=True)
@@ -1508,6 +1523,15 @@ class SeestarQueuedStacker:
                     except Exception as e:
                         self.update_progress(
                             f"⚠️ Erreur nettoyage {self.classic_batch_output_dir}: {e}"
+                        )
+                if self.aligned_temp_dir:
+                    try:
+                        if os.path.isdir(self.aligned_temp_dir):
+                            shutil.rmtree(self.aligned_temp_dir)
+                        os.makedirs(self.aligned_temp_dir, exist_ok=True)
+                    except Exception as e:
+                        self.update_progress(
+                            f"⚠️ Erreur nettoyage {self.aligned_temp_dir}: {e}"
                         )
             self.update_progress(f"🗄️ Dossiers prêts.")
         except OSError as e:
@@ -3721,6 +3745,7 @@ class SeestarQueuedStacker:
                         f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}"
                     )
 
+                    _log_mem("before_align")
                     if use_local_aligner_for_this_mosaic_run:
                         logger.debug(
                             f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file."
@@ -3737,6 +3762,7 @@ class SeestarQueuedStacker:
                             daofind_threshold_sigma_config=self.fa_daofind_thr_sig,
                             max_stars_to_describe_config=self.fa_max_stars_descr,
                         )
+                        _log_mem("after_align")
 
                         self.processed_files_count += (
                             1  # Mis ici car _process_file est appelé
@@ -3786,6 +3812,7 @@ class SeestarQueuedStacker:
                         logger.debug(
                             f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file."
                         )  # DEBUG
+                        _log_mem("before_align")
                         item_result_tuple = self._process_file(
                             file_path,
                             reference_image_data_for_global_alignment,  # Passé mais pas utilisé pour l'alignement direct dans ce mode
@@ -3793,6 +3820,7 @@ class SeestarQueuedStacker:
                                 False if self.reproject_between_batches else True
                             ),
                         )
+                        _log_mem("after_align")
                         self.processed_files_count += 1
                         if (
                             item_result_tuple
@@ -4046,17 +4074,36 @@ class SeestarQueuedStacker:
                                     logger.debug(
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'."
                                     )
-                                    classic_stack_item = (
-                                        aligned_data,
-                                        header_orig,
-                                        scores_val,
-                                        wcs_gen_val,
-                                        valid_mask_val,
-                                    )
-                                    current_batch_items_with_masks_for_stack_batch.append(
-                                        classic_stack_item
-                                    )
-                                    self._current_batch_paths.append(file_path)
+                                    if self.batch_size == 1:
+                                        img_p, mask_p = self._save_aligned_temp(aligned_data, valid_mask_val)
+                                        if img_p and mask_p:
+                                            classic_stack_item = (
+                                                img_p,
+                                                header_orig,
+                                                scores_val,
+                                                wcs_gen_val,
+                                                mask_p,
+                                            )
+                                            self.aligned_temp_paths.append(img_p)
+                                            self._current_batch_paths.append(img_p)
+                                        else:
+                                            self.failed_stack_count += 1
+                                            classic_stack_item = None
+                                        del aligned_data, valid_mask_val
+                                        gc.collect()
+                                    else:
+                                        classic_stack_item = (
+                                            aligned_data,
+                                            header_orig,
+                                            scores_val,
+                                            wcs_gen_val,
+                                            valid_mask_val,
+                                        )
+                                        self._current_batch_paths.append(file_path)
+                                    if classic_stack_item is not None:
+                                        current_batch_items_with_masks_for_stack_batch.append(
+                                            classic_stack_item
+                                        )
 
                                 trigger = (
                                     getattr(self, "chunk_size", None)
@@ -4659,6 +4706,7 @@ class SeestarQueuedStacker:
             if self.perform_cleanup:
                 self.update_progress("🧹 Nettoyage final des fichiers temporaires...")
                 self._cleanup_drizzle_temp_files()  # Dossier des inputs Drizzle (aligned_input_*.fits)
+                self._cleanup_aligned_temp_files()  # Fichiers alignés batch=1
                 self._cleanup_drizzle_batch_outputs()  # Dossier des sorties Drizzle par lot (batch_*_sci.fits, batch_*_wht_*.fits)
                 self._cleanup_classic_batch_outputs()  # Dossier des sorties Classic par lot
                 self._cleanup_mosaic_panel_stacks_temp()  # Dossier des stacks de panneaux (si ancienne logique ou tests)
@@ -8438,6 +8486,7 @@ class SeestarQueuedStacker:
         logger.debug(
             f"DEBUG QM [_stack_batch]: Début pour lot #{current_batch_num} avec {num_physical_images_in_batch_initial} items."
         )
+        _log_mem("before_stack")
 
         # --- 1. Filtrer les items valides et extraire les composants ---
         # Un item est valide si image, header, scores, et valid_pixel_mask sont non None
@@ -8460,6 +8509,10 @@ class SeestarQueuedStacker:
                 continue
 
             img_np, hdr, score, _wcs_obj, mask_2d = item_tuple  # Déballer
+            if isinstance(img_np, str):
+                img_np = np.load(img_np, mmap_mode="r")
+            if isinstance(mask_2d, str):
+                mask_2d = np.load(mask_2d, mmap_mode="r")
 
             if img_np is None or hdr is None or score is None or mask_2d is None:
                 self.update_progress(
@@ -8923,6 +8976,7 @@ class SeestarQueuedStacker:
             logger.error(f"Erreur stacking NumPy batch #{current_batch_num}: {e}")
             traceback.print_exc(limit=2)
             return None, None, None
+        _log_mem("after_stack")
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
     #########################################################################################################################################
@@ -10532,13 +10586,13 @@ class SeestarQueuedStacker:
                         "Accumulateurs memmap SUM/WHT non disponibles pour stacking classique."
                     )
 
-                if getattr(self, "batch_size", 0) == 1 and self.all_input_filepaths:
+                if getattr(self, "batch_size", 0) == 1 and self.aligned_temp_paths:
                     self.update_progress("   -> Streaming final stack (batch_size=1)...")
                     try:
                         stacked_path = stack_disk_streaming(
-                            self.all_input_filepaths,
+                            self.aligned_temp_paths,
                             mode=self.stacking_mode,
-                            weights=[1.0] * len(self.all_input_filepaths),
+                            weights=[1.0] * len(self.aligned_temp_paths),
                             chunk_rows=256,
                             kappa=self.kappa,
                             sigma_low=self.stack_kappa_low,
@@ -12548,6 +12602,35 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=2)
             return None
 
+    ###########################################################################
+    #############################
+
+    def _save_aligned_temp(self, img: np.ndarray, mask: np.ndarray) -> tuple[str, str] | tuple[None, None]:
+        """Save aligned image and mask to ``aligned_tmp`` directory.
+
+        Returns
+        -------
+        tuple[str, str] | tuple[None, None]
+            Paths to the image and mask files, or ``(None, None)`` on error.
+        """
+        if self.aligned_temp_dir is None:
+            return None, None
+        os.makedirs(self.aligned_temp_dir, exist_ok=True)
+
+        idx = self.aligned_files_count
+        img_path = os.path.join(self.aligned_temp_dir, f"aligned_{idx:05d}.npy")
+        mask_path = os.path.join(self.aligned_temp_dir, f"mask_{idx:05d}.npy")
+
+        try:
+            _log_mem("before_save")
+            np.save(img_path, img.astype(np.float32))
+            np.save(mask_path, mask.astype(np.uint8))
+            _log_mem("after_save")
+            return img_path, mask_path
+        except Exception as e:
+            self.update_progress(f"❌ Save aligned temp failed: {e}", "WARN")
+            return None, None
+
     ################################################################################################################################################
 
     def _list_drizzle_temp_files(self):
@@ -12619,6 +12702,22 @@ class SeestarQueuedStacker:
                 )
         # else: # Log optionnel si le dossier n'existait pas
         # self.update_progress("ⓘ Dossier temp Drizzle non trouvé pour nettoyage (normal si Drizzle inactif ou déjà nettoyé).")
+
+    ###########################################################################
+    #############################
+
+    def _cleanup_aligned_temp_files(self):
+        """Remove all temporary aligned images saved to disk."""
+        if self.aligned_temp_dir and os.path.isdir(self.aligned_temp_dir):
+            try:
+                shutil.rmtree(self.aligned_temp_dir)
+                self.update_progress(
+                    f"🧹 Dossier temporaire aligné supprimé: {os.path.basename(self.aligned_temp_dir)}"
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Erreur suppression dossier temp aligné ({os.path.basename(self.aligned_temp_dir)}): {e}"
+                )
 
     ################################################################################################################################################
 
