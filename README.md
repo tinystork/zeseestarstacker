@@ -388,10 +388,12 @@ python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
     --batch-size 1 --chunk-size 50
 ```
 
+
 When `--chunk-size` is used with `--batch-size 1`, results are combined in
 chunks of N images so incremental stacking works without a `stack_plan.csv`.
 If a `stack_plan.csv` is present, it will be ignored unless `--chunk-size` is
 omitted.
+
 
 ---
 
