@@ -163,7 +163,13 @@ def main() -> int:
         return 1
 
     ordered_files = [r["path"] for r in rows]
-    input_dir = os.path.dirname(ordered_files[0])
+    # ``SeestarQueuedStacker`` expects ``input_dir`` to match the folder
+    # containing ``stack_plan.csv`` when ``batch_size`` equals 1.  Using the
+    # first image directory breaks this detection when files span multiple
+    # subfolders, preventing the special single-batch mode from activating.
+    # Point ``input_dir`` to the CSV location instead so the behaviour mirrors
+    # the GUI's batch-size-1 handling ("mode 0").
+    input_dir = os.path.dirname(os.path.abspath(args.csv))
 
     stacker = SeestarQueuedStacker()
     ok = stacker.start_processing(
