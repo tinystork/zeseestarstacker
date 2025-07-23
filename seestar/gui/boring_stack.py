@@ -146,9 +146,13 @@ def main() -> int:
     os.makedirs(args.out, exist_ok=True)
     logging.basicConfig(
         level=logging.DEBUG,
-        format="%(asctime)s | %(levelname)s | %(message)s",
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(args.out, "boring_stack.log"), mode="w", encoding="utf-8"),
+            logging.FileHandler(
+                os.path.join(args.out, "boring_stack.log"),
+                mode="w",
+                encoding="utf-8",
+            ),
             logging.StreamHandler(sys.stdout),
         ],
     )
