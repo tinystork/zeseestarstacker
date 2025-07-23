@@ -99,6 +99,7 @@ from seestar.core.stack_methods import (
     _stack_median,
     _stack_winsorized_sigma,
 )
+from seestar.core.streaming_stack import stack_disk_streaming
 from seestar.gui.settings import SettingsManager, TILE_HEIGHT
 
 # --- Third-Party Library Imports ---
@@ -10531,46 +10532,75 @@ class SeestarQueuedStacker:
                         "Accumulateurs memmap SUM/WHT non disponibles pour stacking classique."
                     )
 
-                final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
-                self.update_progress(
-                    f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]"
-                )
-                logger.debug(
-                    f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]"
-                )
+                if getattr(self, "batch_size", 0) == 1 and self.all_input_filepaths:
+                    self.update_progress("   -> Streaming final stack (batch_size=1)...")
+                    try:
+                        stacked_path = stack_disk_streaming(
+                            self.all_input_filepaths,
+                            mode=self.stacking_mode,
+                            weights=[1.0] * len(self.all_input_filepaths),
+                            chunk_rows=256,
+                            kappa=self.kappa,
+                            sigma_low=self.stack_kappa_low,
+                            sigma_high=self.stack_kappa_high,
+                            winsor_limits=self.winsor_limits,
+                        )
+                        with fits.open(stacked_path, memmap=True) as hdul:
+                            final_image_initial_raw = hdul[0].data.astype(np.float32)
+                        final_wht_map_for_postproc = np.ones(final_image_initial_raw.shape[:2], dtype=np.float32)
+                        os.remove(stacked_path)
+                        self._close_memmaps()
+                        use_stream = True
+                    except Exception as e_stream:
+                        self.update_progress(f"   -> Streaming stack failed: {e_stream}", "WARN")
+                        use_stream = False
+                    if not use_stream:
+                        final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
+                        final_wht_map_2d_from_memmap = np.array(
+                            self.cumulative_wht_memmap, dtype=np.float32
+                        )
+                else:
+                    final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
+                    final_wht_map_2d_from_memmap = np.array(
+                        self.cumulative_wht_memmap, dtype=np.float32
+                    )
+                if 'final_sum' in locals():
+                    self.update_progress(
+                        f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]"
+                    )
+                    logger.debug(
+                        f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]"
+                    )
+                    self.update_progress(
+                        f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]"
+                    )
+                    logger.debug(
+                        f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]"
+                    )
 
-                final_wht_map_2d_from_memmap = np.array(
-                    self.cumulative_wht_memmap, dtype=np.float32
-                )
-                self.update_progress(
-                    f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]"
-                )
-                logger.debug(
-                    f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]"
-                )
+                if 'final_sum' in locals():
+                    self._close_memmaps()
 
-                self._close_memmaps()
+                    eps = 1e-9
+                    final_wht_map_for_postproc = np.maximum(
+                        final_wht_map_2d_from_memmap, 0.0
+                    )
+                    wht_safe = np.maximum(final_wht_map_2d_from_memmap, eps)[
+                        ..., np.newaxis
+                    ]
 
-                eps = 1e-9
-                final_wht_map_for_postproc = np.maximum(
-                    final_wht_map_2d_from_memmap, 0.0
-                )
-                wht_safe = np.maximum(final_wht_map_2d_from_memmap, eps)[
-                    ..., np.newaxis
-                ]
-
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    final_image_initial_raw = final_sum / wht_safe
-                final_image_initial_raw = np.nan_to_num(
-                    final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0
-                )
-                final_image_initial_raw = final_image_initial_raw.astype(np.float32)
-                self.update_progress(
-                    f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
-                )
-                logger.debug(
-                    f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
-                )
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        final_image_initial_raw = final_sum / wht_safe
+                    final_image_initial_raw = np.nan_to_num(
+                        final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    final_image_initial_raw = final_image_initial_raw.astype(np.float32)
+                    self.update_progress(
+                        f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
+                    )
+                    logger.debug(
+                        f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
+                    )
 
         except Exception as e_get_raw:
             self.processing_error = (
