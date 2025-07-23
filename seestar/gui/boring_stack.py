@@ -5,6 +5,18 @@ import sys
 import time
 import logging
 import shutil
+import tempfile
+
+from numpy.lib.format import open_memmap as _orig_open_memmap
+
+
+def _safe_open_memmap(filename, *args, **kwargs):
+    """Fallback to a temp directory if the original path fails."""
+    try:
+        return _orig_open_memmap(filename, *args, **kwargs)
+    except OSError:
+        tmp_path = os.path.join(tempfile.gettempdir(), os.path.basename(str(filename)))
+        return _orig_open_memmap(tmp_path, *args, **kwargs)
 
 # Ensure UTF-8 console for progress messages
 try:
@@ -17,6 +29,9 @@ except Exception:
 # When executed directly from source, make project root importable
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+import numpy.lib.format as _np_format
+_np_format.open_memmap = _safe_open_memmap
 
 from seestar.queuep.queue_manager import SeestarQueuedStacker
 
