@@ -433,6 +433,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
         data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB).astype(np.float32)
 
+
     if use_solver:
         try:
             global aligner
@@ -448,6 +449,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                 if ok:
                     data = aligned
             if not ok and wcs is not None and wcs_ref is not None:
+
                 try:
                     data = warp_image(data, wcs, wcs_ref, shape_ref)
                     ok = True
@@ -455,8 +457,10 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
                     logger.warning("WCS align failed for %s: %s", path, e)
             if not ok:
                 _safe_print(f"⚠️ Alignement échoué pour {path}")
+
         except Exception as e:
             _safe_print(f"❌ Erreur alignement local: {e}")
+
 
     slice_data = data[y0:y1].copy()
     if "aligned" in locals():
