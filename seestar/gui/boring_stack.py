@@ -270,6 +270,9 @@ def main() -> int:
 
         while stacker.is_running():
             time.sleep(1)
+            if args.batch_size == 1:
+                getattr(stacker, "_indices_cache", {}).clear()
+                gc.collect()
 
         final_path = getattr(stacker, "final_stacked_path", None)
         if final_path and os.path.isfile(final_path):
