@@ -91,6 +91,7 @@ def read_paths(csv_path):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Batch-1 stacking using QueueManager")
+    # Weight options mirror the GUI: snr, stars, noise variance and noise+FWHM
     p.add_argument("--csv", required=True, help="CSV with file list")
     p.add_argument("--out", required=True, help="Output directory")
     p.add_argument("--tile", type=int, default=512, help="Tile height (ignored)")
@@ -100,7 +101,12 @@ def parse_args():
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
     p.add_argument("--batch-size", type=int, default=1, help="Batch size")
     p.add_argument("--norm", default="none", choices=["linear_fit", "sky_mean", "none"], help="Normalization")
-    p.add_argument("--weight", default="none", choices=["snr", "stars", "none"], help="Weighting method")
+    p.add_argument(
+        "--weight",
+        default="none",
+        choices=["snr", "stars", "noise_variance", "noise_fwhm", "none"],
+        help="Weighting method",
+    )
     p.add_argument("--reject", default="winsorized_sigma", choices=["kappa_sigma", "winsorized_sigma", "none"], help="Rejection algorithm")
     p.add_argument("--no-hot-pixels", dest="correct_hot_pixels", action="store_false")
     p.add_argument("--hot-threshold", type=float, default=3.0)
