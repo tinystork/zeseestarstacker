@@ -336,7 +336,7 @@ def main() -> int:
             chunk_size=chunk,
         )
 
-        save_fits_image(out_path, stacked, header=hdr_ref)
+        save_fits_image(stacked, out_path, header=hdr_ref)
         return
 
     def log_progress(message: str, progress: object | None = None) -> None:
