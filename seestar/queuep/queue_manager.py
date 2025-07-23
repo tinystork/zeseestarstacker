@@ -1059,8 +1059,9 @@ class SeestarQueuedStacker:
         # Cumulative weight map across all batches
         from numpy.lib.format import open_memmap
 
-        seestar_root = Path(__file__).resolve().parents[1]
-        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
+        fd, temp_path = tempfile.mkstemp(prefix="cumulative_wht_", suffix=".dat")
+        os.close(fd)
+        self.cumulative_wht_path = temp_path
         H, W = 1, 1
         self.cumulative_wht_memmap = open_memmap(
             self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
