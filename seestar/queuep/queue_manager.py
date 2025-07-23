@@ -12264,7 +12264,9 @@ class SeestarQueuedStacker:
         use_plan = requested_batch_size <= 0 and os.path.isfile(plan_path)
 
         special_single_csv = (
-            requested_batch_size == 1 and os.path.isfile(plan_path)
+            requested_batch_size == 1
+            and os.path.isfile(plan_path)
+            and chunk_size is None
         )
 
         if getattr(self, "queue_prepared", False):
