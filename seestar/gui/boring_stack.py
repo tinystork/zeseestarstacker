@@ -31,7 +31,9 @@ import cv2
 import imageio
 from numpy.lib.format import open_memmap
 from astropy.wcs import WCS
-from seestar.core.fast_aligner_module import FastSeestarAligner
+# Use the astroalign-based aligner to match the behaviour of the standard
+# stacking pipeline when batch_size == 1.
+from seestar.core import SeestarAligner
 from seestar.core.image_processing import load_and_validate_fits, debayer_image
 
 logger = logging.getLogger(__name__)
@@ -602,7 +604,8 @@ def classic_stack(
     if not rows:
         raise RuntimeError("CSV is empty")
 
-    aligner = FastSeestarAligner(debug=True)
+    # Align using the astroalign-based pipeline like in batch_size==0
+    aligner = SeestarAligner()
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
@@ -771,7 +774,8 @@ def stream_stack(
 ):
     global aligner
     rows = read_rows(csv_path)
-    aligner = FastSeestarAligner(debug=True)
+    # Use the same astroalign-based aligner as the standard queue manager
+    aligner = SeestarAligner()
     aligner.correct_hot_pixels = correct_hot_pixels
     aligner.hot_pixel_threshold = hot_threshold
     aligner.neighborhood_size = hot_neighborhood
