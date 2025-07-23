@@ -391,7 +391,7 @@ def get_image_shape(path):
 
 
 def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True):
-    """Return RGB slice (``y0:y1``) aligned to reference grid if possible."""
+    """Return (slice, success) aligned to reference grid if possible."""
 
     data, hdr = _read_image(path)
 
@@ -428,7 +428,7 @@ def open_aligned_slice(path, y0, y1, wcs, wcs_ref, shape_ref, *, use_solver=True
         del aligned
     del data
     gc.collect()
-    return slice_data
+    return slice_data, ok
 
 
 def _read_image(path: str) -> tuple[np.ndarray, fits.Header | None]:
@@ -876,10 +876,11 @@ def stream_stack(
     norm_params = {}
     weights_scalar: list[float] = []
     aligned_paths: list[str] = []
+    valid_rows: list[dict] = []
     ref_low = ref_high = None
     ref_sky = None
     for idx, row in enumerate(rows):
-        img = open_aligned_slice(
+        img, ok = open_aligned_slice(
             row["path"],
             0,
             H,
@@ -888,6 +889,9 @@ def stream_stack(
             shape_ref,
             use_solver=use_solver,
         )
+        if not ok:
+            _move_unaligned_file(row["path"], unaligned_dir, idx)
+            continue
         if correct_hot_pixels:
             try:
                 from seestar.core.hot_pixels import detect_and_correct_hot_pixels
@@ -905,7 +909,7 @@ def stream_stack(
             if ref_low is None:
                 ref_low = low
                 ref_high = high
-                norm_params[idx] = (
+                norm_params[len(aligned_paths)] = (
                     np.ones_like(low, dtype=np.float32),
                     np.zeros_like(low, dtype=np.float32),
                 )
@@ -914,7 +918,10 @@ def stream_stack(
                 d_ref = ref_high - ref_low
                 a = np.where(d_src > 1e-5, d_ref / np.maximum(d_src, 1e-9), 1.0)
                 b = ref_low - a * low
-                norm_params[idx] = (a.astype(np.float32), b.astype(np.float32))
+                norm_params[len(aligned_paths)] = (
+                    a.astype(np.float32),
+                    b.astype(np.float32),
+                )
         elif norm_method == "sky_mean":
 
             def sky_val(im: np.ndarray) -> float:
@@ -928,9 +935,9 @@ def stream_stack(
             # Use the first successfully processed image as the reference
             if ref_sky is None:
                 ref_sky = offset
-                norm_params[idx] = 0.0
+                norm_params[len(aligned_paths)] = 0.0
             else:
-                norm_params[idx] = ref_sky - offset
+                norm_params[len(aligned_paths)] = ref_sky - offset
 
         w = 1.0
         if use_weighting:
@@ -945,6 +952,7 @@ def stream_stack(
         temp_path = os.path.join(aligned_dir, f"aligned_{idx:04d}.npy")
         np.save(temp_path, img.astype(np.float32))
         aligned_paths.append(temp_path)
+        valid_rows.append(row)
 
         # Release the aligned image to keep memory usage low
         del img
@@ -1002,7 +1010,8 @@ def stream_stack(
                         )
                     except Exception:
                         pass
-                weight = float(rows[idx].get("weight") or 1.0) * weights_scalar[idx]
+                row = valid_rows[idx]
+                weight = float(row.get("weight") or 1.0) * weights_scalar[idx]
                 if img_slice.ndim == 2:
                     img_slice = img_slice[..., None]
                 if img_slice.shape[2] != C:
