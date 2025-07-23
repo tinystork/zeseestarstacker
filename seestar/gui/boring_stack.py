@@ -174,7 +174,11 @@ import numpy.lib.format as _np_format
 _np_format.open_memmap = _safe_open_memmap
 
 from seestar.queuep.queue_manager import SeestarQueuedStacker
-from ..core.image_processing import load_and_validate_fits, save_fits_image
+# Import helpers from the core package.  Use an absolute import so that this
+# script can be executed directly without Python considering it a package
+# relative module.  When ``__package__`` is ``None`` the project root is added
+# to ``sys.path`` above, allowing this import to succeed.
+from seestar.core.image_processing import load_and_validate_fits, save_fits_image
 
 logger = logging.getLogger(__name__)
 
