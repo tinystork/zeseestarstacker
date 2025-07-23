@@ -6,6 +6,44 @@ import time
 import logging
 import shutil
 import tempfile
+import gc, os
+
+def _cleanup_stacker(stacker):
+    """Free all heavy resources held by a SeestarQueuedStacker instance."""
+    if stacker is None:
+        return
+    # 1. finish async drizzle jobs
+    try:
+        stacker._wait_drizzle_processes()
+    except Exception:
+        pass
+    # 2. shutdown executors
+    for exe_name in ("drizzle_executor", "quality_executor"):
+        exe = getattr(stacker, exe_name, None)
+        if exe:
+            exe.shutdown(wait=True, cancel_futures=True)
+    # 3. flush / close memmaps
+    for arr_name in ("cumulative_sum_memmap", "cumulative_wht_memmap"):
+        arr = getattr(stacker, arr_name, None)
+        if arr is not None:
+            try:
+                arr.flush()
+                if hasattr(arr, "_mmap") and arr._mmap is not None:
+                    arr._mmap.close()
+            except Exception:
+                pass
+    # 4. delete memmap files if requested
+    if getattr(stacker, "perform_cleanup", False):
+        for path_name in ("cumulative_sum_path", "cumulative_wht_path"):
+            p = getattr(stacker, path_name, None)
+            if p and os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+    # 5. clear caches & run GC
+    getattr(stacker, "_indices_cache", {}).clear()
+    gc.collect()
 
 from numpy.lib.format import open_memmap as _orig_open_memmap
 
@@ -186,48 +224,51 @@ def main() -> int:
             logger.info("%s (%s)", message, progress)
 
     stacker = SeestarQueuedStacker()
-    stacker.progress_callback = log_progress
-    ok = stacker.start_processing(
-        input_dir=input_dir,
-        output_dir=args.out,
-        stacking_mode="winsorized-sigma",
-        kappa=args.kappa,
-        stack_kappa_low=args.kappa,
-        stack_kappa_high=args.kappa,
-        winsor_limits=(args.winsor, args.winsor),
-        normalize_method=args.norm,
-        weighting_method=args.weight,
-        batch_size=1,
-        ordered_files=ordered_files,
-        correct_hot_pixels=args.correct_hot_pixels,
-        hot_pixel_threshold=args.hot_threshold,
-        neighborhood_size=args.hot_neighborhood,
-        use_weighting=args.use_weighting,
-        snr_exp=args.snr_exp,
-        stars_exp=args.stars_exp,
-        min_w=args.min_weight,
-        use_drizzle=False,
-        reproject_between_batches=False,
-        api_key=args.api_key,
-        perform_cleanup=args.cleanup_temp_files,
-    )
-    if not ok:
-        logger.error("start_processing failed")
-        return 1
+    try:
+        stacker.progress_callback = log_progress
+        ok = stacker.start_processing(
+            input_dir=input_dir,
+            output_dir=args.out,
+            stacking_mode="winsorized-sigma",
+            kappa=args.kappa,
+            stack_kappa_low=args.kappa,
+            stack_kappa_high=args.kappa,
+            winsor_limits=(args.winsor, args.winsor),
+            normalize_method=args.norm,
+            weighting_method=args.weight,
+            batch_size=1,
+            ordered_files=ordered_files,
+            correct_hot_pixels=args.correct_hot_pixels,
+            hot_pixel_threshold=args.hot_threshold,
+            neighborhood_size=args.hot_neighborhood,
+            use_weighting=args.use_weighting,
+            snr_exp=args.snr_exp,
+            stars_exp=args.stars_exp,
+            min_w=args.min_weight,
+            use_drizzle=False,
+            reproject_between_batches=False,
+            api_key=args.api_key,
+            perform_cleanup=args.cleanup_temp_files,
+        )
+        if not ok:
+            logger.error("start_processing failed")
+            return 1
 
-    while stacker.is_running():
-        time.sleep(1)
+        while stacker.is_running():
+            time.sleep(1)
 
-    final_path = getattr(stacker, "final_stacked_path", None)
-    if final_path and os.path.isfile(final_path):
-        dest = os.path.join(args.out, "final.fits")
-        shutil.copy2(final_path, dest)
-        logger.info("Final FITS copied to %s", dest)
-    preview = os.path.splitext(final_path)[0] + ".png" if final_path else None
-    if preview and os.path.isfile(preview):
-        shutil.copy2(preview, os.path.join(args.out, "preview.png"))
+        final_path = getattr(stacker, "final_stacked_path", None)
+        if final_path and os.path.isfile(final_path):
+            dest = os.path.join(args.out, "final.fits")
+            shutil.copy2(final_path, dest)
+            logger.info("Final FITS copied to %s", dest)
+        preview = os.path.splitext(final_path)[0] + ".png" if final_path else None
+        if preview and os.path.isfile(preview):
+            shutil.copy2(preview, os.path.join(args.out, "preview.png"))
 
-    return 0
+        return 0
+    finally:
+        _cleanup_stacker(stacker)
 
 
 if __name__ == "__main__":
