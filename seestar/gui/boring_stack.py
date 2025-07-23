@@ -32,6 +32,8 @@ def _cleanup_stacker(stacker):
                     arr._mmap.close()
             except Exception:
                 pass
+            finally:
+                gc.collect()
     # 4. close any remaining memmaps via the stacker helper
     if hasattr(stacker, "_close_memmaps"):
         try:
@@ -55,12 +57,18 @@ from numpy.lib.format import open_memmap as _orig_open_memmap
 
 
 def _safe_open_memmap(filename, *args, **kwargs):
-    """Fallback to a temp directory if the original path fails."""
+    """Fallback to a temp directory if the original path fails.
+
+    ``gc.collect`` is invoked after creation to free any residual buffers.
+    """
     try:
-        return _orig_open_memmap(filename, *args, **kwargs)
+        mm = _orig_open_memmap(filename, *args, **kwargs)
     except OSError:
         tmp_path = os.path.join(tempfile.gettempdir(), os.path.basename(str(filename)))
-        return _orig_open_memmap(tmp_path, *args, **kwargs)
+        mm = _orig_open_memmap(tmp_path, *args, **kwargs)
+    finally:
+        gc.collect()
+    return mm
 
 # Ensure UTF-8 console for progress messages
 try:
