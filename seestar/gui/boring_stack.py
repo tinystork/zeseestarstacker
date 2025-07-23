@@ -6,7 +6,19 @@ import time
 import logging
 import shutil
 import tempfile
-import gc, os
+import gc
+import psutil
+import numpy as np
+
+_PROC = psutil.Process(os.getpid())  # Track process RAM for DEBUG logs
+
+def _log_mem(tag: str) -> None:
+    """Log RSS memory to help locate leaks."""
+    try:
+        rss = _PROC.memory_info().rss / (1024 * 1024)
+        logger.debug("RAM usage [%s]: %.1f MB", tag, rss)
+    except Exception:
+        pass
 
 def _cleanup_stacker(stacker):
     """Free all heavy resources held by a SeestarQueuedStacker instance."""
@@ -22,7 +34,7 @@ def _cleanup_stacker(stacker):
         exe = getattr(stacker, exe_name, None)
         if exe:
             exe.shutdown(wait=True, cancel_futures=True)
-    # 3. flush / close memmaps
+    # 3. flush / close memmaps and drop references
     for arr_name in ("cumulative_sum_memmap", "cumulative_wht_memmap"):
         arr = getattr(stacker, arr_name, None)
         if arr is not None:
@@ -33,6 +45,7 @@ def _cleanup_stacker(stacker):
             except Exception:
                 pass
             finally:
+                setattr(stacker, arr_name, None)
                 gc.collect()
     # 4. close any remaining memmaps via the stacker helper
     if hasattr(stacker, "_close_memmaps"):
@@ -40,6 +53,8 @@ def _cleanup_stacker(stacker):
             stacker._close_memmaps()
         except Exception:
             pass
+        finally:
+            gc.collect()
     # 5. delete memmap files if requested
     if getattr(stacker, "perform_cleanup", False):
         for path_name in ("cumulative_sum_path", "cumulative_wht_path"):
@@ -52,6 +67,7 @@ def _cleanup_stacker(stacker):
     # 6. clear caches & run GC
     getattr(stacker, "_indices_cache", {}).clear()
     gc.collect()
+    _log_mem("cleanup")
 
 from numpy.lib.format import open_memmap as _orig_open_memmap
 
@@ -68,6 +84,7 @@ def _safe_open_memmap(filename, *args, **kwargs):
         mm = _orig_open_memmap(tmp_path, *args, **kwargs)
     finally:
         gc.collect()
+        _log_mem(f"memmap_open:{os.path.basename(str(filename))}")
     return mm
 
 # Ensure UTF-8 console for progress messages
@@ -247,15 +264,16 @@ def main() -> int:
         """Simple progress callback that tolerates non-numeric ``progress``."""
         if progress is None:
             logger.info(message)
-            return
-        if isinstance(progress, (int, float)):
+        elif isinstance(progress, (int, float)):
             logger.info("[%d%%] %s", int(progress), message)
         else:
             logger.info("%s (%s)", message, progress)
+        _log_mem(f"progress:{message}")
 
     stacker = SeestarQueuedStacker()
     try:
         stacker.progress_callback = log_progress
+        _log_mem("before_start")  # DEBUG: baseline RAM
         ok = stacker.start_processing(
             input_dir=input_dir,
             output_dir=args.out,
@@ -281,6 +299,7 @@ def main() -> int:
             api_key=args.api_key,
             perform_cleanup=args.cleanup_temp_files,
         )
+        _log_mem("after_start")  # DEBUG: after stacker launch
         if not ok:
             logger.error("start_processing failed")
             return 1
@@ -288,8 +307,9 @@ def main() -> int:
         while stacker.is_running():
             time.sleep(1)
             if args.batch_size == 1:
-                getattr(stacker, "_indices_cache", {}).clear()
+                getattr(stacker, "_indices_cache", {}).clear()  # avoid cache buildup
                 gc.collect()
+            _log_mem("loop")  # DEBUG: track RAM during run
 
         final_path = getattr(stacker, "final_stacked_path", None)
         if final_path and os.path.isfile(final_path):
@@ -300,9 +320,12 @@ def main() -> int:
         if preview and os.path.isfile(preview):
             shutil.copy2(preview, os.path.join(args.out, "preview.png"))
 
+        _log_mem("after_copy")  # DEBUG: after writing results
+
         return 0
     finally:
         _cleanup_stacker(stacker)
+        _log_mem("after_cleanup")  # DEBUG: final RAM state
 
 
 if __name__ == "__main__":
