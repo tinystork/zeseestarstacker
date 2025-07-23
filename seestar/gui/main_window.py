@@ -12,6 +12,14 @@ import csv
 import platform  # NOUVEL import
 import subprocess, shutil, sys
 
+# Import psutil lazily for automatic chunk size estimation
+try:
+    import psutil
+    _psutil_available = True
+except Exception:
+    psutil = None
+    _psutil_available = False
+
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
 
 # ----------------------------------------------------
@@ -5914,6 +5922,22 @@ class SeestarStackerGUI:
 
         return True
 
+    def _get_auto_chunk_size(self) -> int:
+        """Return an automatic chunk size based on system RAM."""
+        if not _psutil_available:
+            return 50
+        try:
+            total_gb = psutil.virtual_memory().total / (1024 ** 3)
+        except Exception:
+            return 50
+        if total_gb >= 64:
+            return 100
+        if total_gb >= 32:
+            return 50
+        if total_gb >= 16:
+            return 25
+        return 10
+
     def start_processing(self):
         """
         Démarre le traitement. Ordre crucial pour la gestion des paramètres :
@@ -6377,6 +6401,9 @@ class SeestarStackerGUI:
             "reproject_between_batches": self.settings.reproject_between_batches,
             "reproject_coadd_final": self.settings.reproject_coadd_final,
         }
+
+        if self.settings.batch_size == 1:
+            start_proc_kwargs["chunk_size"] = self._get_auto_chunk_size()
         import inspect
 
         sig = inspect.signature(self.queued_stacker.start_processing)
