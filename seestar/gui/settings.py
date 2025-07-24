@@ -619,6 +619,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NEW: read boring thread mode ---
+            self.boring_thread_mode = getattr(
+                gui_instance,
+                "boring_thread_var",
+                tk.BooleanVar(value=default_values_from_code.get("boring_thread_mode", False)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): boring_thread_mode lu (attribut UI ou défaut): {self.boring_thread_mode}"
+            )
+            # --- END NEW ---
+
             self.mosaic_mode_active = bool(
                 getattr(
                     gui_instance,
@@ -1104,6 +1115,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NEW: Apply boring thread mode ---
+            getattr(gui_instance, "boring_thread_var", tk.BooleanVar()).set(
+                self.boring_thread_mode
+            )
+            if hasattr(gui_instance, "_toggle_boring_thread"):
+                gui_instance._toggle_boring_thread()
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): boring_thread_mode appliqué à l'UI (valeur: {self.boring_thread_mode})"
+            )
+            # --- END NEW ---
+
             getattr(gui_instance, "preview_stretch_method", tk.StringVar()).set(
                 self.preview_stretch_method
             )
@@ -1301,6 +1323,13 @@ class SettingsManager:
             f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}"
         )
         # --- FIN NOUVEAU ---
+
+        # --- NEW: boring thread mode default ---
+        defaults_dict["boring_thread_mode"] = False
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'boring_thread_mode'={defaults_dict['boring_thread_mode']}"
+        )
+        # --- END NEW ---
 
         # --- NOUVEAU : Préserver la sortie linéaire ---
         defaults_dict["preserve_linear_output"] = False
@@ -2195,6 +2224,22 @@ class SettingsManager:
                 self.use_third_party_solver = current_use_solver_val
             # --- FIN NOUVEAU ---
 
+            # --- NEW: Validation of boring_thread_mode ---
+            logger.debug("    -> Validating boring_thread_mode...")
+            current_boring_val = getattr(
+                self,
+                "boring_thread_mode",
+                defaults_fallback["boring_thread_mode"],
+            )
+            if not isinstance(current_boring_val, bool):
+                messages.append(
+                    f"Option 'Boring Thread Mode' ('{current_boring_val}') invalide, réinitialisée à {defaults_fallback['boring_thread_mode']}."
+                )
+                self.boring_thread_mode = defaults_fallback["boring_thread_mode"]
+            else:
+                self.boring_thread_mode = current_boring_val
+            # --- END NEW ---
+
             logger.debug("    -> Validating reproject_coadd_final...")
             current_rc_val = getattr(
                 self,
@@ -2547,6 +2592,11 @@ class SettingsManager:
                 getattr(self, "use_third_party_solver", True)
             ),
             # --- FIN NOUVEAU ---
+            # --- NEW: Save boring thread mode ---
+            "boring_thread_mode": bool(
+                getattr(self, "boring_thread_mode", False)
+            ),
+            # --- END NEW ---
             "local_solver_preference": str(
                 getattr(self, "local_solver_preference", "none")
             ),

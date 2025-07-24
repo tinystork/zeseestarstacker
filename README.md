@@ -35,6 +35,9 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   SNR-based weighting
     *   Star count/sharpness analysis
 *   **Memory Optimization:** Batch processing with auto RAM management
+*   **Threaded Boring Stack Mode:** Set **Batch Size** to `0` (or enable the
+    *Threaded Boring Stack* checkbox) to run `boring_stack.py` in a dedicated
+    worker thread for minimal memory usage.
 
 The Expert tab's **Output FITS Format** panel features a checkbox labeled
 **Preserve Linear Output**. Enabling it saves the stacked FITS directly from the
@@ -400,6 +403,12 @@ When `--chunk-size` is used with `--batch-size 1`, results are combined in
 chunks of N images so incremental stacking works without a `stack_plan.csv`.
 If a `stack_plan.csv` is present, it will be ignored unless `--chunk-size` is
 omitted.
+
+### Threaded Boring Stack from the GUI
+
+Set **Batch Size** to `0` or tick the *Threaded Boring Stack* checkbox in the
+Stacking tab. The GUI will launch `boring_stack.py` in a background thread using
+your `stack_plan.csv` and display progress as it runs.
 
 
 ---

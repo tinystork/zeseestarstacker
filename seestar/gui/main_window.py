@@ -338,6 +338,7 @@ class SeestarStackerGUI:
         if hasattr(self, "_update_spinbox_from_float"):
             self._update_spinbox_from_float()
         self._update_drizzle_options_state()
+        self._toggle_boring_thread()
         self._update_show_folders_button_state()
         self.update_ui_language()
 
@@ -485,6 +486,7 @@ class SeestarStackerGUI:
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
         self.max_hq_mem_var = tk.DoubleVar(value=8)
         self.batch_size = tk.IntVar(value=10)
+        self.boring_thread_var = tk.BooleanVar(value=False)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
         self.neighborhood_size = tk.IntVar(value=5)
@@ -687,6 +689,19 @@ class SeestarStackerGUI:
         except Exception as e:
             print(f"ERREUR inattendue dans _update_final_scnr_options_state: {e}")
             traceback.print_exc(limit=1)
+
+    def _toggle_boring_thread(self):
+        """Set batch_size to 0 and disable its spinbox when boring mode is active."""
+        try:
+            if self.boring_thread_var.get():
+                self.batch_size.set(0)
+                if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
+                    self.batch_spinbox.config(state=tk.DISABLED)
+            else:
+                if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
+                    self.batch_spinbox.config(state=tk.NORMAL)
+        except tk.TclError:
+            pass
 
     # Assurez-vous d'appeler cette méthode aussi dans SettingsManager.apply_to_ui
     # et dans SeestarStackerGUI.__init__ après avoir appliqué les settings
@@ -1229,6 +1244,13 @@ class SeestarStackerGUI:
             width=5,
         )
         self.batch_spinbox.pack(side=tk.LEFT)
+        self.boring_thread_check = ttk.Checkbutton(
+            batch_frame,
+            text=self.tr("enable_boring_thread", default="Threaded Boring Stack"),
+            variable=self.boring_thread_var,
+            command=self._toggle_boring_thread,
+        )
+        self.boring_thread_check.pack(side=tk.LEFT, padx=5)
         self.drizzle_options_frame = ttk.LabelFrame(tab_stacking, text="Drizzle Options")
         self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
         self.drizzle_check = ttk.Checkbutton(
