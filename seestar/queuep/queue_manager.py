@@ -63,10 +63,12 @@ import psutil
 _PROC = psutil.Process(os.getpid())  # Monitor RAM usage
 
 def _log_mem(tag: str) -> None:
-    """DEBUG helper to log current RSS in MB."""
+    """DEBUG helper to log current RSS and open files."""
     try:
-        rss = _PROC.memory_info().rss / (1024 * 1024)
-        logger.debug("RAM usage [%s]: %.1f MB", tag, rss)
+        proc = _PROC
+        rss = proc.memory_info().rss / (1024 * 1024)
+        open_files = len(proc.open_files())
+        logger.debug("RAM usage [%s]: %.1f MB | open files: %d", tag, rss, open_files)
     except Exception:
         pass
 try:
@@ -3729,6 +3731,9 @@ class SeestarQueuedStacker:
                             reference_header_for_global_alignment,
                         )
                         self.queue.task_done()
+                        _log_mem(f"after_image_{iteration_count}")
+                        getattr(self, "_indices_cache", {}).clear()
+                        gc.collect()
                         continue
 
                     file_name_for_log = os.path.basename(file_path)
@@ -3745,6 +3750,9 @@ class SeestarQueuedStacker:
                         )
                         self.skipped_files_count += 1
                         self.queue.task_done()
+                        _log_mem(f"after_image_{iteration_count}")
+                        getattr(self, "_indices_cache", {}).clear()
+                        gc.collect()
                         continue
 
                     if (
@@ -3759,6 +3767,9 @@ class SeestarQueuedStacker:
                         )
                         self.processed_files_count += 1
                         self.queue.task_done()
+                        _log_mem(f"after_image_{iteration_count}")
+                        getattr(self, "_indices_cache", {}).clear()
+                        gc.collect()
                         continue
 
                     item_result_tuple = None
@@ -4125,6 +4136,9 @@ class SeestarQueuedStacker:
                                             classic_stack_item = None
                                         if align_on_disk and isinstance(aligned_data, np.memmap):
                                             try:
+                                                aligned_data.flush()
+                                                if hasattr(aligned_data, "_mmap") and aligned_data._mmap is not None:
+                                                    aligned_data._mmap.close()
                                                 os.remove(aligned_data.filename)
                                             except Exception:
                                                 pass
@@ -4195,6 +4209,9 @@ class SeestarQueuedStacker:
                                 self._move_to_unaligned(file_path)
 
                     self.queue.task_done()
+                    _log_mem(f"after_image_{iteration_count}")
+                    getattr(self, "_indices_cache", {}).clear()
+                    gc.collect()
                 except Empty:
                     # --- NOUVELLE LOGIQUE POUR GÉRER LES DOSSIERS ADDITIONNELS (DÉBUT) ---
                     logger.debug(
@@ -6480,6 +6497,16 @@ class SeestarQueuedStacker:
             if prepared_img_after_initial_proc is not None:
                 del prepared_img_after_initial_proc
             if image_for_alignment_or_drizzle_input is not None:
+                if isinstance(image_for_alignment_or_drizzle_input, np.memmap):
+                    try:
+                        image_for_alignment_or_drizzle_input.flush()
+                        if (
+                            hasattr(image_for_alignment_or_drizzle_input, "_mmap")
+                            and image_for_alignment_or_drizzle_input._mmap is not None
+                        ):
+                            image_for_alignment_or_drizzle_input._mmap.close()
+                    except Exception:
+                        pass
                 del image_for_alignment_or_drizzle_input
             if align_on_disk and tmp_align_in_path and os.path.exists(tmp_align_in_path):
                 try:
@@ -6489,6 +6516,7 @@ class SeestarQueuedStacker:
             if getattr(self, "batch_size", 1) == 1:
                 getattr(self, "_indices_cache", {}).clear()
             gc.collect()
+            _log_mem("after_process_file")
 
     #############################################################################################################################
 
@@ -12691,6 +12719,10 @@ class SeestarQueuedStacker:
                 )
                 out_mm[:] = img
                 out_mm.flush()
+                if hasattr(out_mm, "_mmap") and out_mm._mmap is not None:
+                    out_mm._mmap.close()
+                del out_mm
+                gc.collect()
             else:
                 np.save(img_path, img.astype(np.float32))
             np.save(mask_path, mask.astype(np.uint8))
