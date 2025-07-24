@@ -41,6 +41,8 @@ EN_TRANSLATIONS = {
     "kappa_value": "Kappa:",
     "batch_size": "Batch Size:",
     "batch_size_auto": "(0=auto)",  # Gardé même si 0 n'est plus auto pour compatibilité affichage
+    "enable_boring_thread": "Threaded Boring Stack",
+    "tooltip_enable_boring_thread": "Runs boring_stack.py in a background thread and sets batch size to 0.",
     "hot_pixels_correction": "Hot Pixel Correction",
     "perform_hot_pixels_correction": "Correct hot pixels",
     "hot_pixel_threshold": "Threshold:",

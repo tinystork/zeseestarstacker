@@ -40,6 +40,8 @@ FR_TRANSLATIONS = {
     "kappa_value": "Kappa :",
     "batch_size": "Taille Lot :",
     "batch_size_auto": "(0=auto)",  # Gardé pour affichage
+    "enable_boring_thread": "Empilement Boring en Thread",
+    "tooltip_enable_boring_thread": "Lance boring_stack.py en arrière-plan et force batch_size à 0.",
     "hot_pixels_correction": "Correction Pixels Chauds",
     "perform_hot_pixels_correction": "Corriger pixels chauds",
     "hot_pixel_threshold": "Seuil :",
