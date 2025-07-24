@@ -1,6 +1,8 @@
 import logging
 import sys
 import types
+import os
+import numpy as np
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,7 @@ if "seestar.gui" not in sys.modules:
     gui_pkg.__path__ = [str(ROOT / "seestar" / "gui")]
     settings_mod = types.ModuleType("seestar.gui.settings")
     settings_mod.SettingsManager = object
+    settings_mod.TILE_HEIGHT = 512
     hist_mod = types.ModuleType("seestar.gui.histogram_widget")
     hist_mod.HistogramWidget = object
     gui_pkg.settings = settings_mod
@@ -146,3 +149,35 @@ def test_single_batch_csv_missing_file(tmp_path):
     assert not activated
     assert gui.settings.batch_size == 0
     assert gui.settings.order_csv_path == ""
+
+
+def test_align_on_disk_large_image(tmp_path):
+    from seestar.core.alignment import SeestarAligner
+    img = np.random.rand(100, 100, 3).astype(np.float32)
+    ref = img.copy()
+    aligner = SeestarAligner()
+    import astroalign as aa
+    import cv2
+
+    def dummy_find_transform(*args, **kwargs):
+        from skimage.transform import SimilarityTransform
+        return SimilarityTransform(), ([], [])
+
+    orig = aa.find_transform
+    aa.find_transform = dummy_find_transform
+    orig_warp = aligner._align_cpu
+    def dummy_align_cpu(self, img, M, dsize, out=None):
+        if out is None:
+            return img.copy()
+        out[:] = img
+        return out
+    aligner._align_cpu = dummy_align_cpu.__get__(aligner, SeestarAligner)
+    try:
+        aligned, success = aligner._align_image(img, ref, "x", use_disk=True)
+        assert success
+        assert isinstance(aligned, np.memmap)
+    finally:
+        aa.find_transform = orig
+        aligner._align_cpu = orig_warp
+        if isinstance(aligned, np.memmap):
+            os.remove(aligned.filename)
