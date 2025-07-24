@@ -141,7 +141,14 @@ from seestar.core.stack_methods import (
     _stack_winsorized_sigma,
 )
 from seestar.core.streaming_stack import stack_disk_streaming
-from seestar.gui.settings import SettingsManager, TILE_HEIGHT
+try:
+    from seestar.gui.settings import SettingsManager, TILE_HEIGHT
+except Exception:  # pragma: no cover - fallback for tests without GUI module
+    try:
+        from seestar.gui.settings import SettingsManager
+    except Exception:
+        SettingsManager = object
+    TILE_HEIGHT = 512
 
 # --- Third-Party Library Imports ---
 from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILABLE

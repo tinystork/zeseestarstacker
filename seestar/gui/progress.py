@@ -76,7 +76,9 @@ class ProgressManager:
         Version: V_ProgressManager_ColorLog_ApplyTags
         """
         now = _mono()
-        if progress is None and now - _PM_LAST_UI < _PM_MIN_DT:
+
+        if now - _PM_LAST_UI < _PM_MIN_DT:
+
             return
 
         def _update_ui():
