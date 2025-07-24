@@ -215,6 +215,7 @@ def parse_args():
     p.add_argument("--use-solver", dest="use_solver", action="store_true")
     p.add_argument("--no-solver", dest="use_solver", action="store_false")
     p.add_argument("--cleanup-temp-files", dest="cleanup_temp_files", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--align-on-disk", action="store_true", help="Use memmap files during alignment")
     p.set_defaults(use_solver=True)
     return p.parse_args()
 
@@ -270,7 +271,7 @@ def main() -> int:
             logger.info("%s (%s)", message, progress)
         _log_mem(f"progress:{message}")
 
-    stacker = SeestarQueuedStacker()
+    stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk)
     try:
         stacker.progress_callback = log_progress
         _log_mem("before_start")  # DEBUG: baseline RAM

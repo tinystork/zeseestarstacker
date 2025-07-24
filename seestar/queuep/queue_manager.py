@@ -938,6 +938,7 @@ class SeestarQueuedStacker:
         batch_size: int | None = None,
         settings: SettingsManager | None = None,
         autotune: bool = False,
+        align_on_disk: bool = False,
         *args,
         **kwargs,
     ):
@@ -947,6 +948,7 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
+        self.align_on_disk = align_on_disk
         # Keep track of background drizzle processes
         self.drizzle_processes = []
         # Dedicated pool for drizzle tasks.  Instance methods are made
@@ -3790,6 +3792,7 @@ class SeestarQueuedStacker:
                             daofind_fwhm_config=self.fa_daofind_fwhm,
                             daofind_threshold_sigma_config=self.fa_daofind_thr_sig,
                             max_stars_to_describe_config=self.fa_max_stars_descr,
+                            align_on_disk=self.align_on_disk,
                         )
                         _log_mem("after_align")
 
@@ -3848,6 +3851,7 @@ class SeestarQueuedStacker:
                             solve_astrometry_for_this_file=(
                                 False if self.reproject_between_batches else True
                             ),
+                            align_on_disk=self.align_on_disk,
                         )
                         _log_mem("after_align")
                         self.processed_files_count += 1
@@ -3914,6 +3918,7 @@ class SeestarQueuedStacker:
                             file_path,
                             reference_image_data_for_global_alignment,
                             solve_astrometry_for_this_file=solve_astrometry,
+                            align_on_disk=self.align_on_disk,
                         )
                         self.processed_files_count += 1
                         if (
@@ -4118,6 +4123,11 @@ class SeestarQueuedStacker:
                                         else:
                                             self.failed_stack_count += 1
                                             classic_stack_item = None
+                                        if align_on_disk and isinstance(aligned_data, np.memmap):
+                                            try:
+                                                os.remove(aligned_data.filename)
+                                            except Exception:
+                                                pass
                                         del aligned_data, valid_mask_val
                                         gc.collect()
                                     else:
@@ -5876,11 +5886,14 @@ class SeestarQueuedStacker:
         daofind_fwhm_config=3.5,
         daofind_threshold_sigma_config=6.0,
         max_stars_to_describe_config=750,
+        align_on_disk=None,
     ):
         """
         Traite un seul fichier image.
         Version: V_ProcessFile_M81_Debug_UltimateLog_1
         """
+        if align_on_disk is None:
+            align_on_disk = getattr(self, "align_on_disk", False)
         file_name = os.path.basename(file_path)
         quality_scores = {"snr": 0.0, "stars": 0.0}
         logger.debug(
@@ -6017,9 +6030,20 @@ class SeestarQueuedStacker:
                 f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}"
             )
 
-            image_for_alignment_or_drizzle_input = (
-                prepared_img_after_initial_proc.copy()
-            )
+            tmp_align_in_path = None
+            if align_on_disk:
+                tmp_align_in_path = tempfile.mktemp(suffix=".npy")
+                mm_in = np.lib.format.open_memmap(
+                    tmp_align_in_path,
+                    mode="w+",
+                    dtype=np.float32,
+                    shape=prepared_img_after_initial_proc.shape,
+                )
+                mm_in[:] = prepared_img_after_initial_proc
+                mm_in.flush()
+                image_for_alignment_or_drizzle_input = mm_in
+            else:
+                image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
             logger.debug(
                 f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]"
             )
@@ -6259,6 +6283,7 @@ class SeestarQueuedStacker:
                     reference_image_data_for_alignment,
                     file_name,
                     force_same_shape_as_ref=True,
+                    use_disk=align_on_disk,
                 )
 
                 if align_success_astroalign and aligned_img_astroalign is not None:
@@ -6456,6 +6481,11 @@ class SeestarQueuedStacker:
                 del prepared_img_after_initial_proc
             if image_for_alignment_or_drizzle_input is not None:
                 del image_for_alignment_or_drizzle_input
+            if align_on_disk and tmp_align_in_path and os.path.exists(tmp_align_in_path):
+                try:
+                    os.remove(tmp_align_in_path)
+                except Exception:
+                    pass
             if getattr(self, "batch_size", 1) == 1:
                 getattr(self, "_indices_cache", {}).clear()
             gc.collect()
@@ -12652,7 +12682,17 @@ class SeestarQueuedStacker:
 
         try:
             _log_mem("before_save")
-            np.save(img_path, img.astype(np.float32))
+            if isinstance(img, np.memmap):
+                out_mm = np.lib.format.open_memmap(
+                    img_path,
+                    mode="w+",
+                    dtype=np.float32,
+                    shape=img.shape,
+                )
+                out_mm[:] = img
+                out_mm.flush()
+            else:
+                np.save(img_path, img.astype(np.float32))
             np.save(mask_path, mask.astype(np.uint8))
             _log_mem("after_save")
             return img_path, mask_path

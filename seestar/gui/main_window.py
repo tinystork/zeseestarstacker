@@ -6135,6 +6135,12 @@ class SeestarStackerGUI:
             self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
             self.use_drizzle_var.set(self.settings.use_drizzle)
 
+        # Automatically enable disk-backed alignment when batching
+        try:
+            self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
+        except Exception:
+            self.queued_stacker.align_on_disk = False
+
         # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
         print(
             "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings..."
@@ -6297,6 +6303,7 @@ class SeestarStackerGUI:
                 else:
                     cmd.append("--no-cleanup-temp-files")
                 cmd.append("--no-solver")
+                cmd.append("--align-on-disk")
                 threading.Thread(
                     target=self._run_boring_stack_process,
                     args=(cmd, csv_path, out_dir),

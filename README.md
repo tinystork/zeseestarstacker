@@ -378,6 +378,13 @@ initial WCS is reused for every batch. Subsequent batches are reprojected using
 a new fixed-orientation grid so the image orientation stays constant and small
 rotation drifts are eliminated.
 
+### Alignment Options
+
+The aligner normally keeps intermediate arrays in memory. For very large
+images you can reduce memory usage by performing alignment on disk-backed
+``.npy`` files. Pass ``align_on_disk=True`` when using ``SeestarQueuedStacker``
+from Python or add ``--align-on-disk`` to ``boring_stack.py``.
+
 ### Command-Line Stacking
 
 Use `seestar/gui/boring_stack.py` for headless single-batch processing. Set
