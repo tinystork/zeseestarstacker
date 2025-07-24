@@ -3738,52 +3738,29 @@ class SeestarStackerGUI:
             return
 
         try:
-            print("  [RefreshPreview] Calling preview_manager.update_preview...")
-            processed_pil_image, _ = self.preview_manager.update_preview(
-                self.current_preview_data,
-                preview_params,
-                stack_count=self.preview_img_count,
-                total_images=self.preview_total_imgs,
-                current_batch=self.preview_current_batch,
-                total_batches=self.preview_total_batches,
-            )
+            def _worker(data_copy, params_copy):
+                pil_img, hist_data = self.preview_manager.process_image(data_copy, params_copy)
 
-            if self.current_preview_hist_data is not None:
-                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
-                    self.current_preview_hist_data.copy(),
-                    r=preview_params["r_gain"],
-                    g=preview_params["g_gain"],
-                    b=preview_params["b_gain"],
-                )
-            else:
-                data_for_histogram_analysis = None
-            print("  [RefreshPreview] Returned from preview_manager.update_preview.")
+                def _apply():
+                    self.preview_manager.display_processed_image(pil_img)
+                    if recalculate_histogram and self.histogram_widget:
+                        self.histogram_widget.update_histogram(hist_data)
+                        try:
+                            bp_ui = self.preview_black_point.get()
+                            wp_ui = self.preview_white_point.get()
+                            self.histogram_widget.set_range(bp_ui, wp_ui)
+                        except tk.TclError:
+                            pass
 
-            if recalculate_histogram:
-                if data_for_histogram_analysis is not None:
-                    print(
-                        f"    [RefreshPreview] data_for_histogram_analysis - Shape: {data_for_histogram_analysis.shape}, Range: [{np.nanmin(data_for_histogram_analysis):.4g} - {np.nanmax(data_for_histogram_analysis):.4g}]"
-                    )
-                else:
-                    print("    [RefreshPreview] data_for_histogram_analysis is None.")
+                self.root.after(0, _apply)
 
-                if self.histogram_widget:
-                    print("    [RefreshPreview] Calling histogram_widget.update_histogram (recalcul demandé)...")
-                    self.histogram_widget.update_histogram(data_for_histogram_analysis)
-                    print("    [RefreshPreview] Returned from histogram_widget.update_histogram.")
-                    try:
-                        bp_ui = self.preview_black_point.get()
-                        wp_ui = self.preview_white_point.get()
-                    except tk.TclError:
-                        bp_ui = None
-                        wp_ui = None
-                    if bp_ui is not None and wp_ui is not None:
-                        self.histogram_widget.set_range(bp_ui, wp_ui)
-            else:
-                print("  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False).")
-
-            if self.histogram_widget:
-                self.histogram_widget.set_range(preview_params["black_point"], preview_params["white_point"])
+            threading.Thread(
+                target=_worker,
+                args=(self.current_preview_data.copy(), preview_params.copy()),
+                daemon=True,
+                name="PreviewWorker",
+            ).start()
+            return
 
         except Exception as e:
             print(f"  [RefreshPreview] ERREUR CRITIQUE pendant traitement aperçu/histogramme: {e}")
