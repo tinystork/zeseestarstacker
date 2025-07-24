@@ -6258,6 +6258,19 @@ class SeestarStackerGUI:
             except tk.TclError:
                 pass
 
+        if self.settings.batch_size == 0:
+            csv_path = getattr(self.settings, "order_csv_path", "") or os.path.join(input_folder, "stack_plan.csv")
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "boring_stack.py"),
+                "--csv",
+                csv_path,
+                "--out",
+                output_folder,
+            ]
+            self._run_boring_stack_process(cmd, csv_path, output_folder)
+            return
+
         threading.Thread(target=_backend_start_worker, daemon=True, name="BackendStarter").start()
 
 
