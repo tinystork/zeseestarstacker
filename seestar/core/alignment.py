@@ -83,15 +83,17 @@ class SeestarAligner:
             if result is None:
                 result = np.zeros((dsize[1], dsize[0], img.shape[2]), dtype=img.dtype)
             for i in range(img.shape[2]):
-                cv2.warpAffine(
+
+                tmp = cv2.warpAffine(
                     img[:, :, i],
                     M,
                     dsize,
-                    dst=result[:, :, i],
+
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=np.nan,
                 )
+                result[:, :, i] = tmp
             return result
         return cv2.warpAffine(
             img,
