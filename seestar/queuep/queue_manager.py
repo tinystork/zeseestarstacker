@@ -2980,19 +2980,15 @@ class SeestarQueuedStacker:
         """Calculate SNR and star count using a separate process.
 
         Large arrays can cause issues when serialized for a ``ProcessPoolExecutor``
-        under Windows.  To avoid this, very large images (``>32 MB``) or runs with
-        ``batch_size == 1`` are processed in the current process instead of being
-        sent to the worker pool.
+        under Windows.  To avoid this, very large images (``>32 MB``) are
+        processed in the current process instead of being sent to the worker pool.
         """
 
         if image_data is None:
             return {"snr": 0.0, "stars": 0.0}
 
         try:
-            use_executor = (
-                getattr(self, "batch_size", 0) != 1
-                and image_data.nbytes <= 32 * 1024 * 1024
-            )
+            use_executor = image_data.nbytes <= 32 * 1024 * 1024
 
             if use_executor:
                 executor = (
@@ -8315,9 +8311,7 @@ class SeestarQueuedStacker:
         total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
 
         use_executor = (
-            self.max_stack_workers > 1
-            and getattr(self, "batch_size", 0) != 1
-            and total_bytes <= 32 * 1024 * 1024
+            self.max_stack_workers > 1 and total_bytes <= 32 * 1024 * 1024
         )
         if use_executor:
             with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
