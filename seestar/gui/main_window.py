@@ -3600,87 +3600,45 @@ class SeestarStackerGUI:
                 pass
 
     def apply_auto_stretch(self):
-        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        """Compute auto-stretch on a worker thread."""
+
         if (
             hasattr(self, "_final_stretch_set_by_processing_finished")
             and self._final_stretch_set_by_processing_finished
         ):
             self.logger.warning(
-                f"APPLY_AUTO_STRETCH (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
+                "APPLY_AUTO_STRETCH (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
             )
-            self.logger.warning("  Pile d'appels pour cet appel ignoré à apply_auto_stretch:")
-            for line in traceback.format_stack():
-                self.logger.warning(f"    {line.strip()}")
-            return  # Sortir tôt pour ne pas modifier le stretch
-        # --- FIN DU BLOC DE VERROU ---
-
-        # Si on arrive ici, le verrou n'était pas actif OU l'attribut n'existait pas (ce dernier cas ne devrait pas arriver après __init__)
-        self.logger.debug(">>>> Début SeestarStackerGUI.apply_auto_stretch (après vérif verrou)")
-        self.logger.debug("     Pile d'appels pour apply_auto_stretch:")
-        for line in traceback.format_stack():
-            self.logger.debug(f"       {line.strip()}")
-
-        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
-        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
-        # est plus spécifique pour la phase post-traitement. Si un auto-stretch est appelé PENDANT le traitement,
-        # c'est (pour l'instant) considéré comme normal (ex: par update_preview_from_stacker).
-
-        if not _tools_available:
-            messagebox.showerror(self.tr("error"), "Stretch tools not available.")
-            self.logger.warning("apply_auto_stretch: Tentative d'utilisation alors que _tools_available est False.")
             return
 
-        data_to_analyze = None
-        # Priorité 1: Données après WB du PreviewManager
-        if hasattr(self, "preview_manager") and self.preview_manager.image_data_wb is not None:
-            data_to_analyze = self.preview_manager.image_data_wb
-            self.logger.debug("  apply_auto_stretch: Utilisation de self.preview_manager.image_data_wb pour l'analyse.")
-        # Priorité 2: current_preview_data avec gains UI
-        elif self.current_preview_data is not None:
-            self.logger.info(
-                "  apply_auto_stretch: Fallback -> Utilisation de self.current_preview_data avec les gains UI actuels pour l'analyse."
-            )
-            if self.current_preview_data.ndim == 3:
-                try:
-                    r_gain = self.preview_r_gain.get()
-                    g_gain = self.preview_g_gain.get()
-                    b_gain = self.preview_b_gain.get()
-                    data_to_analyze = ColorCorrection.white_balance(self.current_preview_data, r_gain, g_gain, b_gain)
-                    self.logger.debug(
-                        f"    apply_auto_stretch: WB appliquée avec R={r_gain:.2f}, G={g_gain:.2f}, B={b_gain:.2f}"
-                    )
-                except tk.TclError as e_tcl:  # Erreur lecture des gains (fenêtre en fermeture?)
-                    self.logger.warning(
-                        f"    apply_auto_stretch: Erreur TclError lecture gains WB ({e_tcl}), utilisation current_preview_data brut."
-                    )
-                    data_to_analyze = self.current_preview_data
-                except Exception as e_wb:
-                    self.logger.error(
-                        f"    apply_auto_stretch: Erreur application WB manuelle pour auto-stretch: {e_wb}"
-                    )
-                    data_to_analyze = self.current_preview_data  # Fallback
-            else:  # Données N&B
-                data_to_analyze = self.current_preview_data
-        else:
-            self.logger.warning("apply_auto_stretch: Aucune donnée d'aperçu disponible.")
-            messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch requires an image preview."))
-            return
+        def _worker(data, wb_data):
+            if not _tools_available:
+                self.root.after(0, lambda: messagebox.showerror(self.tr("error"), "Stretch tools not available."))
+                return
 
-        if data_to_analyze is None:  # Double sécurité
-            self.logger.error("apply_auto_stretch: data_to_analyze est None après les tentatives de récupération.")
-            messagebox.showwarning(self.tr("warning"), self.tr("Auto Stretch: No data to analyze."))
-            return
+            if data is None:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        self.tr("warning"), self.tr("Auto Stretch: No data to analyze.")
+                    ),
+                )
+                return
 
-        try:
-            # calculate_auto_stretch est censé opérer sur des données déjà balancées en couleur
-            # et retourne des BP/WP normalisés à la plage des données d'entrée.
-            bp_calc, wp_calc = calculate_auto_stretch(data_to_analyze)
-            self.logger.info(
-                f"  apply_auto_stretch: calculate_auto_stretch sur données (approx range [{np.nanmin(data_to_analyze):.3f}-{np.nanmax(data_to_analyze):.3f}]) a retourné BP={bp_calc:.4f}, WP={wp_calc:.4f}"
-            )
+            try:
+                bp_calc, wp_calc = calculate_auto_stretch(data)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"
+                    ),
+                )
+                self.logger.error(f"apply_auto_stretch: {e}")
+                return
 
-            min_data_val = np.nanmin(data_to_analyze)
-            max_data_val = np.nanmax(data_to_analyze)
+            min_data_val = np.nanmin(data)
+            max_data_val = np.nanmax(data)
             range_data = max_data_val - min_data_val
             if range_data < 1e-9:
                 range_data = 1.0
@@ -3695,28 +3653,38 @@ class SeestarStackerGUI:
             if bp_ui_01 >= wp_ui_01 - 1e-4:
                 bp_ui_01 = max(0.0, wp_ui_01 - 1e-4)
 
-            self.logger.info(f"  apply_auto_stretch: Valeurs pour UI (0-1): BP_UI={bp_ui_01:.4f}, WP_UI={wp_ui_01:.4f}")
+            def _apply():
+                self.preview_black_point.set(round(bp_ui_01, 4))
+                self.preview_white_point.set(round(wp_ui_01, 4))
+                self.preview_stretch_method.set("Asinh")
+                if hasattr(self, "histogram_widget") and self.histogram_widget:
+                    self.histogram_widget.set_range(bp_ui_01, wp_ui_01)
+                self.update_progress_gui(
+                    f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp_ui_01:.3f} WP={wp_ui_01:.3f}",
+                    None,
+                )
+                self.refresh_preview(recalculate_histogram=True)
 
-            self.preview_black_point.set(round(bp_ui_01, 4))
-            self.preview_white_point.set(round(wp_ui_01, 4))
-            self.preview_stretch_method.set("Asinh")
+            self.root.after(0, _apply)
 
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.logger.debug("  apply_auto_stretch: Appel histogram_widget.set_range.")
-                self.histogram_widget.set_range(bp_ui_01, wp_ui_01)
+        data = None
+        if hasattr(self, "preview_manager") and self.preview_manager.image_data_wb is not None:
+            data = self.preview_manager.image_data_wb.copy()
+        elif self.current_preview_data is not None:
+            if self.current_preview_data.ndim == 3:
+                try:
+                    r_gain = self.preview_r_gain.get()
+                    g_gain = self.preview_g_gain.get()
+                    b_gain = self.preview_b_gain.get()
+                    data = ColorCorrection.white_balance(
+                        self.current_preview_data, r_gain, g_gain, b_gain
+                    )
+                except Exception:
+                    data = self.current_preview_data.copy()
+            else:
+                data = self.current_preview_data.copy()
 
-            self.update_progress_gui(
-                f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp_ui_01:.3f} WP={wp_ui_01:.3f}",
-                None,
-            )
-
-            self.logger.debug("  apply_auto_stretch: Appel refresh_preview (recalculate_histogram=True).")
-            self.refresh_preview(recalculate_histogram=True)  # Un AutoStretch manuel doit rafraîchir l'histogramme
-        except Exception as e:
-            self.logger.error(f"apply_auto_stretch: Erreur pendant calcul/application: {e}")
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}")
-            traceback.print_exc(limit=2)
-        # --- FIN DE VOTRE CODE ORIGINAL ---
+        threading.Thread(target=_worker, args=(data, None), daemon=True, name="AutoStretchWorker").start()
 
     def refresh_preview(self, recalculate_histogram=True):  # <--- SIGNATURE CORRIGÉE ICI
         """
@@ -4010,65 +3978,57 @@ class SeestarStackerGUI:
     ################################################################################################################################################################
 
     def apply_auto_white_balance(self):
-        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        """Compute auto white balance on a worker thread."""
+
         if (
             hasattr(self, "_final_stretch_set_by_processing_finished")
             and self._final_stretch_set_by_processing_finished
         ):
             self.logger.warning(
-                f"APPLY_AUTO_WHITE_BALANCE (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
-            )
-            self.logger.warning("  Pile d'appels pour cet appel ignoré à apply_auto_white_balance:")
-            for line in traceback.format_stack():
-                self.logger.warning(f"    {line.strip()}")
-            return  # Important pour ne pas exécuter le reste de la fonction ni déclencher de refresh
-        # --- FIN DU BLOC DE VERROU ---
-
-        self.logger.debug(">>>> Début SeestarStackerGUI.apply_auto_white_balance (après vérif verrou)")
-        self.logger.debug("     Pile d'appels pour apply_auto_white_balance:")
-        for line in traceback.format_stack():
-            self.logger.debug(f"       {line.strip()}")
-
-        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
-        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
-        # est plus spécifique pour la phase post-traitement.
-
-        if not _tools_available:
-            messagebox.showerror(self.tr("error"), "Stretch/Color tools not available.")
-            self.logger.warning(
-                "apply_auto_white_balance: Tentative d'utilisation alors que _tools_available est False."
+                "APPLY_AUTO_WHITE_BALANCE (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
             )
             return
 
-        if self.current_preview_data is None or self.current_preview_data.ndim != 3:
-            messagebox.showwarning(self.tr("warning"), self.tr("Auto WB requires a color image preview."))
-            self.logger.warning("apply_auto_white_balance: Aucune donnée d'aperçu couleur disponible.")
-            return
+        def _worker(data):
+            if not _tools_available:
+                self.root.after(0, lambda: messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."))
+                return
 
-        try:
-            self.logger.debug("  apply_auto_white_balance: Appel de calculate_auto_wb...")
-            r_gain, g_gain, b_gain = calculate_auto_wb(self.current_preview_data)
-            self.logger.info(
-                f"  apply_auto_white_balance: calculate_auto_wb a retourné Gains R={r_gain:.3f}, G={g_gain:.3f}, B={b_gain:.3f}"
-            )
+            if data is None or data.ndim != 3:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        self.tr("warning"), self.tr("Auto WB requires a color image preview.")
+                    ),
+                )
+                return
 
-            self.preview_r_gain.set(round(r_gain, 3))
-            self.preview_g_gain.set(round(g_gain, 3))
-            self.preview_b_gain.set(round(b_gain, 3))
+            try:
+                r_gain, g_gain, b_gain = calculate_auto_wb(data)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}"
+                    ),
+                )
+                self.logger.error(f"apply_auto_white_balance: {e}")
+                return
 
-            self.update_progress_gui(
-                f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}",
-                None,
-            )
+            def _apply():
+                self.preview_r_gain.set(round(r_gain, 3))
+                self.preview_g_gain.set(round(g_gain, 3))
+                self.preview_b_gain.set(round(b_gain, 3))
+                self.update_progress_gui(
+                    f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}",
+                    None,
+                )
+                self.refresh_preview(recalculate_histogram=True)
 
-            self.logger.debug("  apply_auto_white_balance: Appel refresh_preview (recalculate_histogram=True).")
-            # Un AutoWB manuel doit rafraîchir l'histogramme car les données analysées par l'histogramme (après WB) changent.
-            self.refresh_preview(recalculate_histogram=True)
-        except Exception as e:
-            self.logger.error(f"apply_auto_white_balance: Erreur pendant calcul/application: {e}")
-            messagebox.showerror(self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}")
-            traceback.print_exc(limit=2)
-        # --- FIN DE VOTRE CODE ORIGINAL ---
+            self.root.after(0, _apply)
+
+        data = self.current_preview_data.copy() if self.current_preview_data is not None else None
+        threading.Thread(target=_worker, args=(data,), daemon=True, name="AutoWBWorker").start()
 
     def reset_white_balance(self):
         self.preview_r_gain.set(1.0)
@@ -4299,133 +4259,130 @@ class SeestarStackerGUI:
     # --- FIN MÉTHODE MODIFIÉE ---
 
     def _run_boring_stack_process(self, cmd, csv_path, out_dir):
-        """Execute boring_stack.py and update GUI progress."""
+        """Execute ``boring_stack.py`` without blocking the GUI."""
 
-        total_files = 0
-        try:
-            total_files = len(read_paths(csv_path))
-        except Exception:
+        def _worker():
             total_files = 0
-
-        def _gui_update(progress, eta, processed):
             try:
-                if hasattr(self, "progress_manager") and self.progress_manager:
-                    self.progress_manager.update_progress(f"{progress:.1f}%", progress)
-                    if hasattr(self.progress_manager, "set_remaining"):
-                        self.progress_manager.set_remaining(eta)
-                default_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-                self.aligned_files_var.set(default_fmt.format(count=processed))
-                remaining = max(0, total_files - processed)
-                self.remaining_files_var.set(f"{remaining}/{total_files}")
-            except tk.TclError:
-                pass
-
-        def _finish(retcode, output_lines):
-            try:
-                if hasattr(self, "progress_manager") and self.progress_manager:
-                    self.progress_manager.stop_timer()
-
-                log_text = "\n".join(output_lines)
-                logger.debug("boring_stack.py output:\n%s", log_text)
-
-                if retcode == 0:
-                    final_path = os.path.join(out_dir, "final.fits")
-                    if os.path.exists(final_path):
-                        self.update_progress_gui(
-                            self.tr("stacking_finished", default="Stacking finished"),
-                            100,
-                        )
-                        try:
-                            messagebox.showinfo(
-                                "Stack complete",
-                                f"Output written to {final_path}",
-                            )
-                        except tk.TclError:
-                            pass
-                else:
-                    tail = "\n".join(output_lines[-10:])
-                    err_msg = f"boring_stack.py failed (code {retcode}).\n" f"Last lines:\n{tail}"
-                    print(err_msg)
-                    messagebox.showerror(
-                        "Stack error",
-                        err_msg,
-                    )
-            finally:
-                self.processing = False
-                if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                    self.start_button.config(state=tk.NORMAL)
-                if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                    self.stop_button.config(state=tk.DISABLED)
-                self._set_parameter_widgets_state(tk.NORMAL)
-
-        self.processing = True
-        if hasattr(self, "start_button") and self.start_button.winfo_exists():
-            self.start_button.config(state=tk.DISABLED)
-        if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-            self.stop_button.config(state=tk.NORMAL)
-        self._set_parameter_widgets_state(tk.DISABLED)
-        if hasattr(self, "progress_manager") and self.progress_manager:
-            self.progress_manager.reset()
-            self.progress_manager.start_timer()
-
-        start_time = time.monotonic()
-        output_lines = []
-        log_path = os.path.join(out_dir, "boring_stack.log")
-        try:
-            log_file = open(log_path, "w", encoding="utf-8")
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
-
-            for line in proc.stdout:
-                if not line:
-                    continue
-                text = line.strip()
-                log_file.write(text + "\n")
-                log_file.flush()
-                output_lines.append(text)
-                if text.endswith("%"):
-                    try:
-                        pct = float(text.rstrip("%"))
-                    except ValueError:
-                        continue
-                    elapsed = time.monotonic() - start_time
-                    if pct > 0:
-                        rem_sec = elapsed * (100 - pct) / pct
-                        h, r = divmod(int(rem_sec), 3600)
-                        m, s = divmod(r, 60)
-                        eta = f"{h:02}:{m:02}:{s:02}"
-                    else:
-                        eta = self.tr("eta_calculating", default="Calculating...")
-
-                    processed = int(round((pct / 100.0) * total_files))
-                    self.root.after(0, _gui_update, pct, eta, processed)
-                else:
-                    self.root.after(0, self.update_progress_gui, text, None)
-
-            retcode = proc.wait()
-            log_file.close()
-        except Exception as e:
-            retcode = -1
-            try:
-                log_file.write(f"Error running boring_stack: {e}\n")
-                log_file.close()
+                total_files = len(read_paths(csv_path))
             except Exception:
-                pass
-            self.root.after(
-                0,
-                self.update_progress_gui,
-                f"Error running boring_stack: {e}",
-                None,
-            )
-        finally:
-            self.root.after(0, _finish, retcode, output_lines)
+                total_files = 0
+
+            def _gui_update(progress, eta, processed):
+                try:
+                    if hasattr(self, "progress_manager") and self.progress_manager:
+                        self.progress_manager.update_progress(f"{progress:.1f}%", progress)
+                        if hasattr(self.progress_manager, "set_remaining"):
+                            self.progress_manager.set_remaining(eta)
+                    default_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+                    self.aligned_files_var.set(default_fmt.format(count=processed))
+                    remaining = max(0, total_files - processed)
+                    self.remaining_files_var.set(f"{remaining}/{total_files}")
+                except tk.TclError:
+                    pass
+
+            def _finish(retcode, output_lines):
+                try:
+                    if hasattr(self, "progress_manager") and self.progress_manager:
+                        self.progress_manager.stop_timer()
+
+                    log_text = "\n".join(output_lines)
+                    logger.debug("boring_stack.py output:\n%s", log_text)
+
+                    if retcode == 0:
+                        final_path = os.path.join(out_dir, "final.fits")
+                        if os.path.exists(final_path):
+                            self.update_progress_gui(
+                                self.tr("stacking_finished", default="Stacking finished"),
+                                100,
+                            )
+                            try:
+                                messagebox.showinfo(
+                                    "Stack complete",
+                                    f"Output written to {final_path}",
+                                )
+                            except tk.TclError:
+                                pass
+                    else:
+                        tail = "\n".join(output_lines[-10:])
+                        err_msg = (
+                            f"boring_stack.py failed (code {retcode}).\nLast lines:\n{tail}"
+                        )
+                        print(err_msg)
+                        messagebox.showerror("Stack error", err_msg)
+                finally:
+                    self.processing = False
+                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.DISABLED)
+                    self._set_parameter_widgets_state(tk.NORMAL)
+
+            self.processing = True
+            if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.DISABLED)
+            if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                self.stop_button.config(state=tk.NORMAL)
+            self._set_parameter_widgets_state(tk.DISABLED)
+            if hasattr(self, "progress_manager") and self.progress_manager:
+                self.progress_manager.reset()
+                self.progress_manager.start_timer()
+
+            start_time = time.monotonic()
+            output_lines = []
+            log_path = os.path.join(out_dir, "boring_stack.log")
+            try:
+                log_file = open(log_path, "w", encoding="utf-8")
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+
+                for line in proc.stdout:
+                    if not line:
+                        continue
+                    text = line.strip()
+                    log_file.write(text + "\n")
+                    log_file.flush()
+                    output_lines.append(text)
+                    if text.endswith("%"):
+                        try:
+                            pct = float(text.rstrip("%"))
+                        except ValueError:
+                            continue
+                        elapsed = time.monotonic() - start_time
+                        if pct > 0:
+                            rem_sec = elapsed * (100 - pct) / pct
+                            h, r = divmod(int(rem_sec), 3600)
+                            m, s = divmod(r, 60)
+                            eta = f"{h:02}:{m:02}:{s:02}"
+                        else:
+                            eta = self.tr("eta_calculating", default="Calculating...")
+
+                        processed = int(round((pct / 100.0) * total_files))
+                        self.root.after(0, _gui_update, pct, eta, processed)
+                    else:
+                        self.root.after(0, self.update_progress_gui, text, None)
+
+                retcode = proc.wait()
+                log_file.close()
+            except Exception as e:
+                retcode = -1
+                try:
+                    log_file.write(f"Error running boring_stack: {e}\n")
+                    log_file.close()
+                except Exception:
+                    pass
+                self.root.after(0, self.update_progress_gui, f"Error running boring_stack: {e}", None)
+            finally:
+                self.root.after(0, _finish, retcode, output_lines)
+
+        threading.Thread(target=_worker, daemon=True, name="BoringStackWorker").start()
 
     def stop_processing(self):
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
