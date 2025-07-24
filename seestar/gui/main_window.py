@@ -6115,320 +6115,137 @@ class SeestarStackerGUI:
             self._update_low_wht_mask_options_state()  # S'assurer d'appeler ceci aussi
         print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        try:
-            special_single = self._prepare_single_batch_if_needed()
-        except FileNotFoundError as fnfe:
-            messagebox.showerror(
-                self.tr("error"),
-                self.tr(
-                    "stack_plan_missing_file_error",
-                    default="File listed in stack_plan.csv not found:\n{path}",
-                ).format(path=str(fnfe)),
-            )
-            if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                self.start_button.config(state=tk.NORMAL)
-            print(f"DEBUG (GUI start_processing): Missing file in stack_plan - {fnfe}")
-            return
-        if special_single:
-            self.batch_size.set(self.settings.batch_size)
-            self.stacking_mode.set(self.settings.stacking_mode)
-            self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
-            self.use_drizzle_var.set(self.settings.use_drizzle)
-
-        # Automatically enable disk-backed alignment when batching
-        try:
-            self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
-        except Exception:
-            self.queued_stacker.align_on_disk = False
-
-        # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
-        print(
-            "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings..."
-        )
-        # ... (log de tous les paramètres envoyés au backend, inchangé) ...
-        print("  --- VALEURS ENVOYÉES AU BACKEND (depuis self.settings) ---")
-        params_to_log_for_backend = [
-            "input_folder",
-            "output_folder",
-            "reference_image_path",
-            "stacking_mode",
-            "kappa",
-            "batch_size",
-            "correct_hot_pixels",
-            "hot_pixel_threshold",
-            "neighborhood_size",
-            "bayer_pattern",
-            "cleanup_temp",
-            "use_quality_weighting",
-            "weight_by_snr",
-            "weight_by_stars",
-            "snr_exponent",
-            "stars_exponent",
-            "min_weight",
-            "use_drizzle",
-            "drizzle_scale",
-            "drizzle_wht_threshold",
-            "drizzle_mode",
-            "drizzle_kernel",
-            "drizzle_pixfrac",
-            "apply_chroma_correction",
-            "apply_final_scnr",
-            "final_scnr_target_channel",
-            "final_scnr_amount",
-            "final_scnr_preserve_luminosity",
-            "bn_grid_size_str",
-            "bn_perc_low",
-            "bn_perc_high",
-            "bn_std_factor",
-            "bn_min_gain",
-            "bn_max_gain",
-            "cb_border_size",
-            "cb_blur_radius",
-            "cb_min_b_factor",
-            "cb_max_b_factor",
-            "final_edge_crop_percent",
-            "apply_photutils_bn",
-            "photutils_bn_box_size",
-            "photutils_bn_filter_size",
-            "photutils_bn_sigma_clip",
-            "photutils_bn_exclude_percentile",
-            "apply_feathering",
-            "feather_blur_px",
-            "apply_batch_feathering",
-            "apply_low_wht_mask",
-            "low_wht_percentile",
-            "low_wht_soften_px",
-            "mosaic_mode_active",
-            "astrometry_api_key",
-            "mosaic_settings",
-            "astap_search_radius",
-        ]
-        for param_name in params_to_log_for_backend:
-            value = getattr(self.settings, param_name, f"ERREUR_ATTR_{param_name}")
-            if param_name == "astrometry_api_key":
-                print(f"    {param_name}: {'Présente' if value else 'Absente'} (longueur: {len(str(value))})")
-            elif param_name == "mosaic_settings":
-                print(f"    {param_name}: {value}")  # Afficher le dict complet
-            else:
-                print(f"    {param_name}: {value}")
-        print("  --- FIN VALEURS ENVOYÉES AU BACKEND ---")
-        print("DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée.")
-
-        # Sauvegarde d'un fichier .cfg résumant ce run
-        try:
-            cfg_name = f"{self.settings.output_filename}_stack_{time.strftime('%Y%m%d_%H%M%S')}.cfg"
-            cfg_path = os.path.join(self.settings.output_folder, cfg_name)
-            self.settings.export_run_settings(cfg_path)
-            self.logger.info(f"Configuration du run sauvegardée dans {cfg_path}")
-        except Exception as e_cfg:
-            self.logger.warning(f"Échec sauvegarde fichier cfg: {e_cfg}")
-        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
-        valeur_a_passer_pour_float32_gui = getattr(self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START")
-        print(
-            f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32_gui} (type: {type(valeur_a_passer_pour_float32_gui)})"
-        )
-        # === FIN AJOUT ===
-        # --- AJOUT DU BLOC DE VÉRIFICATION CRITIQUE ---
-        print("DEBUG (GUI start_processing): Phase 5.5 - Vérification critique avant appel backend...")
-        final_mosaic_settings_for_backend = self.settings.mosaic_settings.copy()
-        alignment_mode_to_backend = final_mosaic_settings_for_backend.get(
-            "alignment_mode", "NON_DÉFINI_DANS_DICT_BACKEND"
-        )
-        print(
-            f"  CRITICAL CHECK (GUI start_processing): mosaic_settings QUI SERA ENVOYÉ: {final_mosaic_settings_for_backend}"
-        )
-        print(f"  CRITICAL CHECK (GUI start_processing): alignment_mode DANS CE DICT: '{alignment_mode_to_backend}'")
-        # --- FIN AJOUT ---
-        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
-        valeur_a_passer_pour_float32 = getattr(self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START")
-        print(
-            f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32} (type: {type(valeur_a_passer_pour_float32)})"
-        )
-        # === FIN AJOUT ===
-
-        if not self.settings.use_third_party_solver:
-            self.settings.local_solver_preference = "none"
-            self.settings.reproject_between_batches = False
-            # Clear solver-specific settings to ensure no external solver is used
-            self.settings.astrometry_api_key = ""
-            self.settings.local_ansvr_path = ""
-            self.settings.astap_path = ""
-            self.settings.astap_data_dir = ""
-            self.settings.astrometry_solve_field_dir = ""
-            # Force final combine to mean when no solver is used
-            self.stack_final_combine_var.set("mean")
-            if hasattr(self, "final_key_to_label"):
-                self.stack_final_display_var.set(self.final_key_to_label.get("mean", "mean"))
-
-        if self.settings.batch_size == 1:
-            csv_path = getattr(
-                self.settings,
-                "order_csv_path",
-                os.path.join(self.settings.input_folder, "zenalakyser_order.csv"),
-            )
-            if os.path.isfile(csv_path):
-                out_dir = os.path.join(self.settings.output_folder, "boring")
-                os.makedirs(out_dir, exist_ok=True)
-
-                self.logger.info("Batch-1 detected: delegating to boring_stack.py")
-                cmd = [
-                    sys.executable,
-                    "-u",
-                    os.path.join(os.path.dirname(__file__), "boring_stack.py"),
-                    "--csv",
-                    csv_path,
-                    "--out",
-                    out_dir,
-                    "--tile",
-                    str(self.settings.tile_height or 512),
-                    "--kappa",
-                    str(self.settings.kappa or 3),
-                    "--winsor",
-                    str(self.settings.winsor_limits[0] or 0.05),
-                    "--norm",
-                    str(self.settings.stack_norm_method or "none"),
-                    "--weight",
-                    str(self.settings.stack_weight_method or "none"),
-                    "--reject",
-                    (
-                        "winsorized_sigma"
-                        if self.settings.stack_reject_algo == "winsorized_sigma_clip"
-                        else str(self.settings.stack_reject_algo or "none")
-                    ),
-                    "--batch-size",
-                    "1",
-                ]
-                if self.settings.cleanup_temp:
-                    cmd.append("--cleanup-temp-files")
-                else:
-                    cmd.append("--no-cleanup-temp-files")
-                cmd.append("--no-solver")
-                cmd.append("--align-on-disk")
-                threading.Thread(
-                    target=self._run_boring_stack_process,
-                    args=(cmd, csv_path, out_dir),
-                    daemon=True,
-                    name="BoringStackWorker",
-                ).start()
-                return
-
-        # --- 6. Appel à queued_stacker.start_processing ---
-        print("DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing...")
-
-        # Propager l'option GPU au backend
-        try:
-            import cv2
-
-            self.queued_stacker.use_gpu = bool(self.settings.use_gpu)
-            self.queued_stacker.use_cuda = bool(self.settings.use_gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
-            if hasattr(self.queued_stacker, "aligner") and self.queued_stacker.aligner:
-                self.queued_stacker.aligner.use_cuda = self.queued_stacker.use_cuda
-        except Exception:
-            self.queued_stacker.use_gpu = False
-            self.queued_stacker.use_cuda = False
-
-        start_proc_kwargs = {
-            "input_dir": self.settings.input_folder,
-            "output_dir": self.settings.output_folder,
-            "temp_folder": self.settings.temp_folder,
-            "output_filename": self.settings.output_filename,
-            "reference_path_ui": self.settings.reference_image_path,
-            "initial_additional_folders": folders_to_pass_to_backend,
-            "stacking_mode": self.settings.stacking_mode,
-            "kappa": self.settings.kappa,
-            "stack_kappa_low": self.settings.stack_kappa_low,
-            "stack_kappa_high": self.settings.stack_kappa_high,
-            "winsor_limits": (
-                tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
-                if isinstance(self.settings.stack_winsor_limits, str)
-                else (0.05, 0.05)
-            ),
-            "normalize_method": self.settings.stack_norm_method,
-            "weighting_method": self.settings.stack_weight_method,
-            "batch_size": self.settings.batch_size,
-            "ordered_files": getattr(self.settings, "order_file_list", None),
-            "correct_hot_pixels": self.settings.correct_hot_pixels,
-            "hot_pixel_threshold": self.settings.hot_pixel_threshold,
-            "neighborhood_size": self.settings.neighborhood_size,
-            "bayer_pattern": self.settings.bayer_pattern,
-            "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.stack_weight_method != "none",
-            "weight_by_snr": self.settings.weight_by_snr,
-            "weight_by_stars": self.settings.weight_by_stars,
-            "snr_exp": self.settings.snr_exponent,
-            "stars_exp": self.settings.stars_exponent,
-            "min_w": self.settings.min_weight,
-            "use_drizzle": self.settings.use_drizzle,
-            "drizzle_scale": float(self.settings.drizzle_scale),
-            "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
-            "drizzle_mode": self.settings.drizzle_mode,
-            "drizzle_kernel": self.settings.drizzle_kernel,
-            "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-            "apply_chroma_correction": self.settings.apply_chroma_correction,
-            "apply_final_scnr": self.settings.apply_final_scnr,
-            "final_scnr_target_channel": self.settings.final_scnr_target_channel,
-            "final_scnr_amount": self.settings.final_scnr_amount,
-            "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
-            "bn_grid_size_str": self.settings.bn_grid_size_str,
-            "bn_perc_low": self.settings.bn_perc_low,
-            "bn_perc_high": self.settings.bn_perc_high,
-            "bn_std_factor": self.settings.bn_std_factor,
-            "bn_min_gain": self.settings.bn_min_gain,
-            "bn_max_gain": self.settings.bn_max_gain,
-            "cb_border_size": self.settings.cb_border_size,
-            "cb_blur_radius": self.settings.cb_blur_radius,
-            "cb_min_b_factor": self.settings.cb_min_b_factor,
-            "cb_max_b_factor": self.settings.cb_max_b_factor,
-            "apply_master_tile_crop": self.settings.apply_master_tile_crop,
-            "master_tile_crop_percent": self.settings.master_tile_crop_percent,
-            "final_edge_crop_percent": self.settings.final_edge_crop_percent,
-            "apply_photutils_bn": self.settings.apply_photutils_bn,
-            "photutils_bn_box_size": self.settings.photutils_bn_box_size,
-            "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
-            "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
-            "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
-            "apply_feathering": self.settings.apply_feathering,
-            "feather_blur_px": self.settings.feather_blur_px,
-            "apply_batch_feathering": self.settings.apply_batch_feathering,
-            "apply_low_wht_mask": self.settings.apply_low_wht_mask,
-            "low_wht_percentile": self.settings.low_wht_percentile,
-            "low_wht_soften_px": self.settings.low_wht_soften_px,
-            "is_mosaic_run": self.settings.mosaic_mode_active,
-            "api_key": self.settings.astrometry_api_key,
-            "mosaic_settings": self.settings.mosaic_settings,
-            "astap_path": self.settings.astap_path,
-            "astap_data_dir": self.settings.astap_data_dir,
-            "local_ansvr_path": self.settings.local_ansvr_path,
-            "local_solver_preference": self.settings.local_solver_preference,
-            "astap_search_radius": self.settings.astap_search_radius,
-            "astap_downsample": self.settings.astap_downsample,
-            "astap_sensitivity": self.settings.astap_sensitivity,
-            "save_as_float32": self.settings.save_final_as_float32,
-            "preserve_linear_output": self.settings.preserve_linear_output,
-            "reproject_between_batches": self.settings.reproject_between_batches,
-            "reproject_coadd_final": self.settings.reproject_coadd_final,
-        }
-
-        if self.settings.batch_size == 1:
-            start_proc_kwargs["chunk_size"] = self._get_auto_chunk_size()
-        import inspect
-
-        sig = inspect.signature(self.queued_stacker.start_processing)
-        for k in list(start_proc_kwargs.keys()):
-            if k not in sig.parameters:
-                start_proc_kwargs.pop(k)
+        # Heavy preparation is now performed inside the worker thread to keep the
+        # GUI responsive.
 
         def _backend_start_worker():
+            try:
+                special_single = self._prepare_single_batch_if_needed()
+            except FileNotFoundError as fnfe:
+                def _prep_error():
+                    messagebox.showerror(
+                        self.tr("error"),
+                        self.tr(
+                            "stack_plan_missing_file_error",
+                            default="File listed in stack_plan.csv not found:\n{path}",
+                        ).format(path=str(fnfe)),
+                    )
+                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.DISABLED)
+                    self.processing = False
+                    self._set_parameter_widgets_state(tk.NORMAL)
+                self.root.after(0, _prep_error)
+                return
+
+            if special_single:
+                def _apply_single_settings():
+                    self.batch_size.set(self.settings.batch_size)
+                    self.stacking_mode.set(self.settings.stacking_mode)
+                    self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+                    self.use_drizzle_var.set(self.settings.use_drizzle)
+                self.root.after(0, _apply_single_settings)
+
+            # Automatically enable disk-backed alignment when batching
+            try:
+                self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
+            except Exception:
+                self.queued_stacker.align_on_disk = False
+
+            # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
+            print(
+                "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings..."
+            )
+            start_proc_kwargs = {
+                "input_dir": self.settings.input_folder,
+                "output_dir": self.settings.output_folder,
+                "temp_folder": self.settings.temp_folder,
+                "output_filename": self.settings.output_filename,
+                "reference_path_ui": self.settings.reference_image_path,
+                "initial_additional_folders": folders_to_pass_to_backend,
+                "stacking_mode": self.settings.stacking_mode,
+                "kappa": self.settings.kappa,
+                "stack_kappa_low": self.settings.stack_kappa_low,
+                "stack_kappa_high": self.settings.stack_kappa_high,
+                "winsor_limits": (
+                    tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
+                    if isinstance(self.settings.stack_winsor_limits, str)
+                    else (0.05, 0.05)
+                ),
+                "normalize_method": self.settings.stack_norm_method,
+                "weighting_method": self.settings.stack_weight_method,
+                "batch_size": self.settings.batch_size,
+                "ordered_files": getattr(self.settings, "order_file_list", None),
+                "correct_hot_pixels": self.settings.correct_hot_pixels,
+                "hot_pixel_threshold": self.settings.hot_pixel_threshold,
+                "neighborhood_size": self.settings.neighborhood_size,
+                "bayer_pattern": self.settings.bayer_pattern,
+                "perform_cleanup": self.settings.cleanup_temp,
+                "use_weighting": self.settings.stack_weight_method != "none",
+                "weight_by_snr": self.settings.weight_by_snr,
+                "weight_by_stars": self.settings.weight_by_stars,
+                "snr_exp": self.settings.snr_exponent,
+                "stars_exp": self.settings.stars_exponent,
+                "min_w": self.settings.min_weight,
+                "use_drizzle": self.settings.use_drizzle,
+                "drizzle_scale": float(self.settings.drizzle_scale),
+                "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
+                "drizzle_mode": self.settings.drizzle_mode,
+                "drizzle_kernel": self.settings.drizzle_kernel,
+                "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+                "apply_chroma_correction": self.settings.apply_chroma_correction,
+                "apply_final_scnr": self.settings.apply_final_scnr,
+                "final_scnr_target_channel": self.settings.final_scnr_target_channel,
+                "final_scnr_amount": self.settings.final_scnr_amount,
+                "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
+                "bn_grid_size_str": self.settings.bn_grid_size_str,
+                "bn_perc_low": self.settings.bn_perc_low,
+                "bn_perc_high": self.settings.bn_perc_high,
+                "bn_std_factor": self.settings.bn_std_factor,
+                "bn_min_gain": self.settings.bn_min_gain,
+                "bn_max_gain": self.settings.bn_max_gain,
+                "cb_border_size": self.settings.cb_border_size,
+                "cb_blur_radius": self.settings.cb_blur_radius,
+                "cb_min_b_factor": self.settings.cb_min_b_factor,
+                "cb_max_b_factor": self.settings.cb_max_b_factor,
+                "apply_master_tile_crop": self.settings.apply_master_tile_crop,
+                "master_tile_crop_percent": self.settings.master_tile_crop_percent,
+                "final_edge_crop_percent": self.settings.final_edge_crop_percent,
+                "apply_photutils_bn": self.settings.apply_photutils_bn,
+                "photutils_bn_box_size": self.settings.photutils_bn_box_size,
+                "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
+                "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
+                "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
+                "apply_feathering": self.settings.apply_feathering,
+                "feather_blur_px": self.settings.feather_blur_px,
+                "apply_batch_feathering": self.settings.apply_batch_feathering,
+                "apply_low_wht_mask": self.settings.apply_low_wht_mask,
+                "low_wht_percentile": self.settings.low_wht_percentile,
+                "low_wht_soften_px": self.settings.low_wht_soften_px,
+                "is_mosaic_run": self.settings.mosaic_mode_active,
+                "api_key": self.settings.astrometry_api_key,
+                "mosaic_settings": self.settings.mosaic_settings,
+                "astap_path": self.settings.astap_path,
+                "astap_data_dir": self.settings.astap_data_dir,
+                "local_ansvr_path": self.settings.local_ansvr_path,
+                "local_solver_preference": self.settings.local_solver_preference,
+                "astap_search_radius": self.settings.astap_search_radius,
+                "astap_downsample": self.settings.astap_downsample,
+                "astap_sensitivity": self.settings.astap_sensitivity,
+                "save_as_float32": self.settings.save_final_as_float32,
+                "preserve_linear_output": self.settings.preserve_linear_output,
+                "reproject_between_batches": self.settings.reproject_between_batches,
+                "reproject_coadd_final": self.settings.reproject_coadd_final,
+            }
+
+            if self.settings.batch_size == 1:
+                start_proc_kwargs["chunk_size"] = self._get_auto_chunk_size()
+
             processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
 
             def _on_finish():
-                self.logger.info(">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)")
-                self.logger.info("     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False.")
                 self._final_stretch_set_by_processing_finished = False
-                print(
-                    f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}"
-                )
-
                 if processing_started:
                     if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
                         self.stop_button.config(state=tk.NORMAL)
@@ -6447,8 +6264,6 @@ class SeestarStackerGUI:
                         None,
                     )
                     self._set_parameter_widgets_state(tk.NORMAL)
-                print("DEBUG (GUI start_processing): Fin de la méthode.")
-
             try:
                 self.root.after(0, _on_finish)
             except tk.TclError:
