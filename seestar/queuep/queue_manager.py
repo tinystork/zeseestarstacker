@@ -38,6 +38,7 @@ import traceback
 import inspect
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from multiprocessing import get_context
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue  # Essentiel pour la classe
@@ -957,7 +958,7 @@ class SeestarQueuedStacker:
         # picklable via ``__getstate__``/``__setstate__`` so we can always rely
         # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
         # platform.
-        Executor = ProcessPoolExecutor
+        Executor = lambda **kw: ProcessPoolExecutor(mp_context=get_context("spawn"), **kw)
 
         self.drizzle_executor = Executor(
             max_workers=max(1, self.num_threads // 2),
@@ -970,7 +971,8 @@ class SeestarQueuedStacker:
             except Exception:
                 q_fraction = 0.75
         self.quality_executor = ProcessPoolExecutor(
-            max_workers=_suggest_pool_size(q_fraction)
+            max_workers=_suggest_pool_size(q_fraction),
+            mp_context=get_context("spawn"),
         )
         logger.debug(
             "Quality pool started with %d workers", self.quality_executor._max_workers
@@ -2970,7 +2972,10 @@ class SeestarQueuedStacker:
             self.quality_executor, "_shutdown", False
         ):
             max_workers = _suggest_pool_size(0.75)
-            self.quality_executor = ProcessPoolExecutor(max_workers=max_workers)
+            self.quality_executor = ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=get_context("spawn"),
+            )
             logger.debug("Quality pool (re)started with %d workers", max_workers)
         return self.quality_executor
 
@@ -4453,7 +4458,7 @@ class SeestarQueuedStacker:
                         )
                         # Utilisation d'un ProcessPoolExecutor pour ne pas bloquer
                         # le thread principal lorsque le lot est volumineux.
-                        with ProcessPoolExecutor(max_workers=1) as driz_exec:
+                        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as driz_exec:
                             (
                                 batch_sci_path,
                                 batch_wht_paths,
@@ -8314,7 +8319,10 @@ class SeestarQueuedStacker:
             self.max_stack_workers > 1 and total_bytes <= 32 * 1024 * 1024
         )
         if use_executor:
-            with ProcessPoolExecutor(max_workers=self.max_stack_workers) as exe:
+            with ProcessPoolExecutor(
+                max_workers=self.max_stack_workers,
+                mp_context=get_context("spawn"),
+            ) as exe:
                 stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
         else:
             stacked, rejected_pct = _stack_worker(stack_args)
