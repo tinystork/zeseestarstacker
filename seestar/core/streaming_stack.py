@@ -4,6 +4,7 @@ import logging
 from typing import Sequence, Iterable
 import numpy as np
 from astropy.io import fits
+import psutil
 
 from .stack_methods import (
     _stack_mean,
@@ -14,6 +15,15 @@ from .stack_methods import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PROC = psutil.Process(os.getpid())
+
+def _log_mem(tag: str) -> None:
+    try:
+        rss = _PROC.memory_info().rss / (1024 * 1024)
+        logger.debug("RAM [%s]: %.1f MB", tag, rss)
+    except Exception:
+        pass
 
 
 def stack_disk_streaming(
@@ -103,5 +113,8 @@ def stack_disk_streaming(
             out_hdul.flush()
             del arr, chunk_result
             gc.collect()
+            _log_mem(f"chunk_{row_start}_{row_end}")
 
+    gc.collect()
+    _log_mem("stream_done")
     return out_path

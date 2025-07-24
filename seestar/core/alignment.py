@@ -309,11 +309,23 @@ class SeestarAligner:
                     aligned_img_final = np.clip(aligned_img_final, 0.0, None)
                 print(f"    Sortie finale pour entrée ADU (après clip >=0): Range: [{np.min(aligned_img_final):.4g}, {np.max(aligned_img_final):.4g}]")
 
-            if use_disk and tmp_in_path and os.path.exists(tmp_in_path):
-                try:
-                    os.remove(tmp_in_path)
-                except Exception:
-                    pass
+            if use_disk:
+                if isinstance(img_to_align_for_transform_application, np.memmap):
+                    try:
+                        img_to_align_for_transform_application.flush()
+                        if (
+                            hasattr(img_to_align_for_transform_application, "_mmap")
+                            and img_to_align_for_transform_application._mmap is not None
+                        ):
+                            img_to_align_for_transform_application._mmap.close()
+                    except Exception:
+                        pass
+                if tmp_in_path and os.path.exists(tmp_in_path):
+                    try:
+                        os.remove(tmp_in_path)
+                    except Exception:
+                        pass
+                gc.collect()
             return aligned_img_final, True
 
         except aa.MaxIterError as ae:
