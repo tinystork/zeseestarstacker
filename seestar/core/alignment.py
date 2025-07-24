@@ -12,6 +12,7 @@ import warnings
 import logging
 import gc
 import shutil
+import tempfile
 import concurrent.futures
 import traceback # Added for traceback printing
 try: from tqdm import tqdm # Optionnel, pour la barre de progression console
@@ -69,20 +70,34 @@ class SeestarAligner:
             else:
                 print(message)
 
-    def _align_cpu(self, img: np.ndarray, M: np.ndarray, dsize: tuple[int, int]) -> np.ndarray:
+    def _align_cpu(
+        self,
+        img: np.ndarray,
+        M: np.ndarray,
+        dsize: tuple[int, int],
+        out: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Apply affine transform using CPU."""
         if img.ndim == 3:
-            result = np.zeros((dsize[1], dsize[0], img.shape[2]), dtype=img.dtype)
+            result = out
+            if result is None:
+                result = np.zeros((dsize[1], dsize[0], img.shape[2]), dtype=img.dtype)
             for i in range(img.shape[2]):
-                result[:, :, i] = cv2.warpAffine(
-                    img[:, :, i], M, dsize,
+                tmp = cv2.warpAffine(
+                    img[:, :, i],
+                    M,
+                    dsize,
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=np.nan,
                 )
+                result[:, :, i] = tmp
             return result
         return cv2.warpAffine(
-            img, M, dsize,
+            img,
+            M,
+            dsize,
+            dst=out,
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=np.nan,
@@ -120,7 +135,7 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True):
+    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True, use_disk=False):
         """
         Aligns a single image to the reference.
 
@@ -138,7 +153,23 @@ class SeestarAligner:
             print(f"    Input img_to_align: None. Retour échec.")
             return None, False 
         
-        img_to_align_for_transform_application = img_to_align.astype(np.float32, copy=True) 
+        tmp_in_path = None
+        if use_disk:
+            tmp_in_path = tempfile.mktemp(suffix=".npy")
+            img_to_align_for_transform_application = np.lib.format.open_memmap(
+                tmp_in_path,
+                mode="w+",
+                dtype=np.float32,
+                shape=img_to_align.shape,
+            )
+            img_to_align_for_transform_application[:] = img_to_align.astype(
+                np.float32, copy=False
+            )
+            img_to_align_for_transform_application.flush()
+        else:
+            img_to_align_for_transform_application = img_to_align.astype(
+                np.float32, copy=True
+            )
         original_min_in = np.nanmin(img_to_align_for_transform_application)
         original_max_in = np.nanmax(img_to_align_for_transform_application)
         input_was_likely_01 = (original_max_in < 1.5 and original_max_in > -0.2 and original_min_in > -0.2 and original_min_in < 1.1)
@@ -214,28 +245,73 @@ class SeestarAligner:
                 cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
                 dsize_cv2 = (w_out, h_out)
 
-            align = self._align_cuda if getattr(self, "use_cuda", False) else self._align_cpu
+            align = self._align_cuda if (getattr(self, "use_cuda", False) and not use_disk) else self._align_cpu
             try:
-                aligned_img_final = align(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+                if use_disk:
+                    tmp_out_path = tempfile.mktemp(suffix=".npy")
+                    out_mm = np.lib.format.open_memmap(
+                        tmp_out_path,
+                        mode="w+",
+                        dtype=np.float32,
+                        shape=(dsize_cv2[1], dsize_cv2[0], img_to_align_for_transform_application.shape[2])
+                        if img_to_align_for_transform_application.ndim == 3
+                        else (dsize_cv2[1], dsize_cv2[0]),
+                    )
+                    aligned_img_final = align(
+                        img_to_align_for_transform_application,
+                        cv2_M_final,
+                        dsize_cv2,
+                        out=out_mm,
+                    )
+                    out_mm.flush()
+                else:
+                    aligned_img_final = align(
+                        img_to_align_for_transform_application, cv2_M_final, dsize_cv2
+                    )
             except Exception as cuda_err:
                 if getattr(self, "use_cuda", False):
                     self.use_cuda = False
                     self.update_progress("⚠️ CUDA align failed, falling back to CPU", None)
-                    aligned_img_final = self._align_cpu(img_to_align_for_transform_application, cv2_M_final, dsize_cv2)
+                    if use_disk:
+                        aligned_img_final = self._align_cpu(
+                            img_to_align_for_transform_application,
+                            cv2_M_final,
+                            dsize_cv2,
+                            out=out_mm,
+                        )
+                        out_mm.flush()
+                    else:
+                        aligned_img_final = self._align_cpu(
+                            img_to_align_for_transform_application, cv2_M_final, dsize_cv2
+                        )
                 else:
                     raise
             
             print(f"    APRÈS cv2.warpAffine: aligned_img_final - Range: [{np.nanmin(aligned_img_final):.4g}, {np.nanmax(aligned_img_final):.4g}]")
 
-            aligned_img_final = np.nan_to_num(aligned_img_final.astype(np.float32, copy=False), nan=0.0)
+            if use_disk and isinstance(aligned_img_final, np.memmap):
+                aligned_img_final[:] = np.nan_to_num(aligned_img_final, copy=False, nan=0.0)
+            else:
+                aligned_img_final = np.nan_to_num(aligned_img_final.astype(np.float32, copy=False), nan=0.0)
             
             if input_was_likely_01:
-                aligned_img_final = np.clip(aligned_img_final, 0.0, 1.0)
+                if use_disk and isinstance(aligned_img_final, np.memmap):
+                    np.clip(aligned_img_final, 0.0, 1.0, out=aligned_img_final)
+                else:
+                    aligned_img_final = np.clip(aligned_img_final, 0.0, 1.0)
                 print(f"    Sortie finale pour entrée ~0-1 (après clip [0,1]): Range: [{np.min(aligned_img_final):.4g}, {np.max(aligned_img_final):.4g}]")
             else:
-                aligned_img_final = np.clip(aligned_img_final, 0.0, None)
+                if use_disk and isinstance(aligned_img_final, np.memmap):
+                    np.clip(aligned_img_final, 0.0, None, out=aligned_img_final)
+                else:
+                    aligned_img_final = np.clip(aligned_img_final, 0.0, None)
                 print(f"    Sortie finale pour entrée ADU (après clip >=0): Range: [{np.min(aligned_img_final):.4g}, {np.max(aligned_img_final):.4g}]")
 
+            if use_disk and tmp_in_path and os.path.exists(tmp_in_path):
+                try:
+                    os.remove(tmp_in_path)
+                except Exception:
+                    pass
             return aligned_img_final, True
 
         except aa.MaxIterError as ae:
