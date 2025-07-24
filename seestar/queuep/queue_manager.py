@@ -4120,30 +4120,39 @@ class SeestarQueuedStacker:
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'."
                                     )
                                     if self.batch_size == 1:
-                                        img_p, mask_p = self._save_aligned_temp(aligned_data, valid_mask_val)
-                                        if img_p and mask_p:
+                                        if align_on_disk:
+                                            img_p, mask_p = self._save_aligned_temp(aligned_data, valid_mask_val)
+                                            if img_p and mask_p:
+                                                classic_stack_item = (
+                                                    img_p,
+                                                    header_orig,
+                                                    scores_val,
+                                                    wcs_gen_val,
+                                                    mask_p,
+                                                )
+                                                self.aligned_temp_paths.append(img_p)
+                                            else:
+                                                self.failed_stack_count += 1
+                                                classic_stack_item = None
+                                            if isinstance(aligned_data, np.memmap):
+                                                try:
+                                                    aligned_data.flush()
+                                                    if hasattr(aligned_data, "_mmap") and aligned_data._mmap is not None:
+                                                        aligned_data._mmap.close()
+                                                    os.remove(aligned_data.filename)
+                                                except Exception:
+                                                    pass
+                                            del aligned_data, valid_mask_val
+                                            gc.collect()
+                                        else:
                                             classic_stack_item = (
-                                                img_p,
+                                                aligned_data,
                                                 header_orig,
                                                 scores_val,
                                                 wcs_gen_val,
-                                                mask_p,
+                                                valid_mask_val,
                                             )
-                                            self.aligned_temp_paths.append(img_p)
-                                            self._current_batch_paths.append(img_p)
-                                        else:
-                                            self.failed_stack_count += 1
-                                            classic_stack_item = None
-                                        if align_on_disk and isinstance(aligned_data, np.memmap):
-                                            try:
-                                                aligned_data.flush()
-                                                if hasattr(aligned_data, "_mmap") and aligned_data._mmap is not None:
-                                                    aligned_data._mmap.close()
-                                                os.remove(aligned_data.filename)
-                                            except Exception:
-                                                pass
-                                        del aligned_data, valid_mask_val
-                                        gc.collect()
+                                            self._current_batch_paths.append(file_path)
                                     else:
                                         classic_stack_item = (
                                             aligned_data,
@@ -6622,6 +6631,20 @@ class SeestarQueuedStacker:
         logger.debug(
             f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}."
         )
+
+        # Clean up any temporary aligned files used for this batch
+        if getattr(self, "batch_size", 1) == 1:
+            for item in batch_items_to_stack:
+                if isinstance(item[0], str) and os.path.exists(item[0]):
+                    try:
+                        os.remove(item[0])
+                    except Exception:
+                        pass
+                if len(item) > 4 and isinstance(item[4], str) and os.path.exists(item[4]):
+                    try:
+                        os.remove(item[4])
+                    except Exception:
+                        pass
 
     def _flush_current_batch(
         self,
@@ -10680,7 +10703,7 @@ class SeestarQueuedStacker:
                             self.aligned_temp_paths,
                             mode=self.stacking_mode,
                             weights=[1.0] * len(self.aligned_temp_paths),
-                            chunk_rows=256,
+                            chunk_rows=0,
                             kappa=self.kappa,
                             sigma_low=self.stack_kappa_low,
                             sigma_high=self.stack_kappa_high,
@@ -10690,6 +10713,12 @@ class SeestarQueuedStacker:
                             final_image_initial_raw = hdul[0].data.astype(np.float32)
                         final_wht_map_for_postproc = np.ones(final_image_initial_raw.shape[:2], dtype=np.float32)
                         os.remove(stacked_path)
+                        for p in self.aligned_temp_paths:
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
+                        self.aligned_temp_paths = []
                         self._close_memmaps()
                         use_stream = True
                     except Exception as e_stream:
