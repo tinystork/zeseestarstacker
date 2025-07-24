@@ -74,6 +74,35 @@ try:
 except Exception:  # pragma: no cover - very unlikely
     open_memmap = None
 
+def _fits_open_safe(path, memmap=True, **kwargs):
+    """Open FITS file with optional memmap fallback."""
+    try:
+        return fits.open(path, memmap=memmap, **kwargs)
+    except ValueError as e:
+        if memmap and "Cannot load a memory-mapped image" in str(e):
+            logger.debug(
+                "memmap open failed for %s (%s). Retrying without memmap.",
+                path,
+                e,
+            )
+            return fits.open(path, memmap=False, **kwargs)
+        raise
+
+
+def _fits_getdata_safe(path, memmap=True, **kwargs):
+    """Get FITS data with memmap fallback."""
+    try:
+        return fits.getdata(path, memmap=memmap, **kwargs)
+    except Exception as e:
+        if memmap and "Cannot load a memory-mapped image" in str(e):
+            logger.debug(
+                "memmap getdata failed for %s (%s). Retrying without memmap.",
+                path,
+                e,
+            )
+            return fits.getdata(path, memmap=False, **kwargs)
+        raise
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
@@ -8246,7 +8275,7 @@ class SeestarQueuedStacker:
             first_path = file_paths[0]
             ext = os.path.splitext(first_path)[1].lower()
             if ext in [".fit", ".fits", ".fts", ".tif", ".tiff"]:
-                with fits.open(first_path, memmap=True) as hdul:
+                with _fits_open_safe(first_path, memmap=use_memmap) as hdul:
                     data0 = hdul[0].data
                     H, W = data0.shape[:2]
                     C = data0.shape[2] if data0.ndim == 3 else 1
@@ -8327,7 +8356,7 @@ class SeestarQueuedStacker:
                     ):
                         ext = os.path.splitext(fp)[1].lower()
                         if ext in [".fit", ".fits", ".fts", ".tif", ".tiff"]:
-                            with fits.open(fp, memmap=True) as hd:
+                            with _fits_open_safe(fp, memmap=use_memmap) as hd:
                                 img = hd[0].data
                                 sl = np.array(img[y0:y1], dtype=np.float32)
                         else:
@@ -9451,7 +9480,7 @@ class SeestarQueuedStacker:
         return stack.astype(np.float32), hdr
 
     def _load_and_prepare_simple(self, fits_path: str):
-        data = fits.getdata(fits_path, memmap=True).astype(np.float32, copy=False)
+        data = _fits_getdata_safe(fits_path, memmap=True).astype(np.float32, copy=False)
         hdr = fits.getheader(fits_path)
         try:
             input_wcs = WCS(hdr, naxis=2)
@@ -9931,7 +9960,7 @@ class SeestarQueuedStacker:
 
             # 2.2 Load coverage / weight map (or fallback)
             try:
-                coverage = fits.getdata(wht_paths[0], memmap=True).astype(np.float32, copy=False)
+                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(np.float32, copy=False)
                 np.nan_to_num(coverage, copy=False)
                 coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
@@ -10114,7 +10143,7 @@ class SeestarQueuedStacker:
                 wcs.pixel_shape = (w, h)
 
                 try:
-                    cov = fits.getdata(_wht_paths[0], memmap=True).astype(np.float32, copy=False)
+                    cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(np.float32, copy=False)
                     np.nan_to_num(cov, copy=False)
                     cov *= make_radial_weight_map(h, w)
                 except Exception:
@@ -10238,7 +10267,7 @@ class SeestarQueuedStacker:
             self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
             return
         try:
-            cov = fits.getdata(wht_paths[0], memmap=True).astype(np.float32, copy=False)
+            cov = _fits_getdata_safe(wht_paths[0], memmap=True).astype(np.float32, copy=False)
             np.nan_to_num(cov, copy=False)
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
@@ -10599,7 +10628,7 @@ class SeestarQueuedStacker:
                             sigma_high=self.stack_kappa_high,
                             winsor_limits=self.winsor_limits,
                         )
-                        with fits.open(stacked_path, memmap=True) as hdul:
+                        with _fits_open_safe(stacked_path, memmap=True) as hdul:
                             final_image_initial_raw = hdul[0].data.astype(np.float32)
                         final_wht_map_for_postproc = np.ones(final_image_initial_raw.shape[:2], dtype=np.float32)
                         os.remove(stacked_path)
