@@ -4120,7 +4120,7 @@ class SeestarQueuedStacker:
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Stacking Classique pour '{file_name_for_log}'."
                                     )
                                     if self.batch_size == 1:
-                                        if align_on_disk:
+                                        if self.align_on_disk:
                                             img_p, mask_p = self._save_aligned_temp(aligned_data, valid_mask_val)
                                             if img_p and mask_p:
                                                 classic_stack_item = (
