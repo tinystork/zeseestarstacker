@@ -3869,111 +3869,144 @@ class SeestarStackerGUI:
                 self.histogram_widget.plot_histogram(None)
             return
 
-        try:
-            files = sorted([f for f in os.listdir(input_folder) if f.lower().endswith((".fit", ".fits"))])
-            if not files:
-                print(
-                    f"  DEBUG GUI (_try_show_first_input_image): Aucun fichier FITS trouvé dans '{input_folder}'. Effacement aperçu."
+        def _worker():
+            try:
+                files = sorted(
+                    [f for f in os.listdir(input_folder) if f.lower().endswith((".fit", ".fits"))]
                 )
-                if hasattr(self, "preview_manager") and self.preview_manager:
-                    self.preview_manager.clear_preview(self.tr("No FITS files in input folder"))
-                if hasattr(self, "histogram_widget") and self.histogram_widget:
-                    self.histogram_widget.plot_histogram(None)
-                return
-
-            first_image_filename = files[0]
-            first_image_path = os.path.join(input_folder, first_image_filename)
-            self.update_progress_gui(
-                f"{self.tr('Loading preview for', default='Loading preview')}: {first_image_filename}...",
-                None,
-            )
-            print(f"  DEBUG GUI (_try_show_first_input_image): Chargement de '{first_image_path}'...")
-
-            # --- MODIFICATION ICI pour déballer le tuple ---
-            loaded_data_tuple = load_and_validate_fits(first_image_path)
-
-            img_data_from_load = None  # Doit être défini avant le if
-            header_from_load = None  # Doit être défini avant le if
-
-            if loaded_data_tuple is not None and loaded_data_tuple[0] is not None:
-                img_data_from_load, header_from_load = loaded_data_tuple  # Déballer
-                print(
-                    f"  DEBUG GUI (_try_show_first_input_image): load_and_validate_fits OK. Shape données: {img_data_from_load.shape}"
-                )
-            else:
-                raise ValueError(
-                    f"Échec chargement/validation de '{first_image_filename}' par load_and_validate_fits (retour None ou données None)."
-                )
-            # --- FIN MODIFICATION ---
-
-            img_for_preview = img_data_from_load
-
-            if img_for_preview.ndim == 2:
-                bayer_pattern_from_header = (
-                    header_from_load.get("BAYERPAT", self.settings.bayer_pattern)
-                    if header_from_load
-                    else self.settings.bayer_pattern
-                )
-                valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
-
-                if (
-                    isinstance(bayer_pattern_from_header, str)
-                    and bayer_pattern_from_header.upper() in valid_bayer_patterns
-                ):
+                if not files:
+                    def _no_files():
+                        if hasattr(self, "preview_manager") and self.preview_manager:
+                            self.preview_manager.clear_preview(self.tr("No FITS files in input folder"))
+                        if hasattr(self, "histogram_widget") and self.histogram_widget:
+                            self.histogram_widget.plot_histogram(None)
                     print(
-                        f"  DEBUG GUI (_try_show_first_input_image): Debayering aperçu initial (Pattern: {bayer_pattern_from_header.upper()})..."
+                        f"  DEBUG GUI (_try_show_first_input_image): Aucun fichier FITS trouvé dans '{input_folder}'. Effacement aperçu."
                     )
-                    try:
-                        img_for_preview = debayer_image(img_for_preview, bayer_pattern_from_header.upper())
-                    except ValueError as debayer_err:
-                        self.update_progress_gui(
-                            f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.",
-                            None,
-                        )
-                        print(f"    WARN GUI: Erreur Debayer aperçu initial: {debayer_err}. Affichage N&B.")
+                    self.root.after(0, _no_files)
+                    return
+
+                first_image_filename = files[0]
+                first_image_path = os.path.join(input_folder, first_image_filename)
+                self.root.after(
+                    0,
+                    lambda fn=first_image_filename: self.update_progress_gui(
+                        f"{self.tr('Loading preview for', default='Loading preview')}: {fn}...",
+                        None,
+                    ),
+                )
+                print(f"  DEBUG GUI (_try_show_first_input_image): Chargement de '{first_image_path}'...")
+
+                loaded_data_tuple = load_and_validate_fits(first_image_path)
+
+                img_data_from_load = None
+                header_from_load = None
+
+                if loaded_data_tuple is not None and loaded_data_tuple[0] is not None:
+                    img_data_from_load, header_from_load = loaded_data_tuple
+                    print(
+                        f"  DEBUG GUI (_try_show_first_input_image): load_and_validate_fits OK. Shape données: {img_data_from_load.shape}"
+                    )
                 else:
-                    print(
-                        f"  DEBUG GUI (_try_show_first_input_image): Pas de debayering pour aperçu (pas de pattern Bayer valide ou image supposée déjà couleur)."
+                    raise ValueError(
+                        f"Échec chargement/validation de '{first_image_filename}' par load_and_validate_fits (retour None ou données None)."
                     )
 
-            self.current_preview_data = img_for_preview.copy()
-            self.current_preview_hist_data = img_for_preview.copy()
-            self.current_stack_header = header_from_load.copy() if header_from_load else fits.Header()
+                img_for_preview = img_data_from_load
 
-            print(
-                f"  DEBUG GUI (_try_show_first_input_image): Données prêtes pour refresh_preview. Shape: {self.current_preview_data.shape}"
-            )
-            self.refresh_preview()
+                if img_for_preview.ndim == 2:
+                    bayer_pattern_from_header = (
+                        header_from_load.get("BAYERPAT", self.settings.bayer_pattern)
+                        if header_from_load
+                        else self.settings.bayer_pattern
+                    )
+                    valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
 
-            if self.current_stack_header:
-                self.update_image_info(self.current_stack_header)
+                    if (
+                        isinstance(bayer_pattern_from_header, str)
+                        and bayer_pattern_from_header.upper() in valid_bayer_patterns
+                    ):
+                        print(
+                            f"  DEBUG GUI (_try_show_first_input_image): Debayering aperçu initial (Pattern: {bayer_pattern_from_header.upper()})..."
+                        )
+                        try:
+                            img_for_preview = debayer_image(
+                                img_for_preview, bayer_pattern_from_header.upper()
+                            )
+                        except ValueError as debayer_err:
+                            self.root.after(
+                                0,
+                                lambda msg=f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.": self.update_progress_gui(
+                                    msg,
+                                    None,
+                                ),
+                            )
+                            print(
+                                f"    WARN GUI: Erreur Debayer aperçu initial: {debayer_err}. Affichage N&B."
+                            )
+                    else:
+                        print(
+                            f"  DEBUG GUI (_try_show_first_input_image): Pas de debayering pour aperçu (pas de pattern Bayer valide ou image supposée déjà couleur)."
+                        )
 
-            self.update_progress_gui(
-                f"{self.tr('Preview loaded', default='Preview loaded')}: {first_image_filename}",
-                None,
-            )
+                def _update_gui(img=img_for_preview, hdr=header_from_load, fn=first_image_filename):
+                    self.current_preview_data = img.copy()
+                    self.current_preview_hist_data = img.copy()
+                    self.current_stack_header = hdr.copy() if hdr else fits.Header()
+                    print(
+                        f"  DEBUG GUI (_try_show_first_input_image): Données prêtes pour refresh_preview. Shape: {self.current_preview_data.shape}"
+                    )
+                    self.refresh_preview()
+                    if self.current_stack_header:
+                        self.update_image_info(self.current_stack_header)
+                    self.update_progress_gui(
+                        f"{self.tr('Preview loaded', default='Preview loaded')}: {fn}",
+                        None,
+                    )
 
-        except FileNotFoundError:
-            print(f"  ERREUR GUI (_try_show_first_input_image): FileNotFoundError pour '{input_folder}'.")
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(self.tr("Input folder not found or inaccessible"))
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
-        except ValueError as ve:
-            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {ve}", None)
-            print(f"  ERREUR GUI (_try_show_first_input_image): ValueError - {ve}")
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(self.tr("Error loading preview (invalid format?)"))
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
-        except Exception as e:
-            self.update_progress_gui(f"⚠️ {self.tr('Error loading preview image')}: {e}", None)
-            print(f"  ERREUR GUI (_try_show_first_input_image): Exception inattendue - {type(e).__name__}: {e}")
-            traceback.print_exc(limit=2)
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(self.tr("Error loading preview"))
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
+                self.root.after(0, _update_gui)
+
+            except FileNotFoundError:
+                def _file_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(self.tr("Input folder not found or inaccessible"))
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): FileNotFoundError pour '{input_folder}'."
+                )
+                self.root.after(0, _file_err)
+            except ValueError as ve:
+                def _val_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(
+                            self.tr("Error loading preview (invalid format?)")
+                        )
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                    self.update_progress_gui(
+                        f"⚠️ {self.tr('Error loading preview image')}: {ve}", None
+                    )
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): ValueError - {ve}"
+                )
+                self.root.after(0, _val_err)
+            except Exception as e:
+                def _unk_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(self.tr("Error loading preview"))
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                    self.update_progress_gui(
+                        f"⚠️ {self.tr('Error loading preview image')}: {e}", None
+                    )
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): Exception inattendue - {type(e).__name__}: {e}"
+                )
+                traceback.print_exc(limit=2)
+                self.root.after(0, _unk_err)
+
+        threading.Thread(target=_worker, daemon=True, name="PreviewLoader").start()
 
     ################################################################################################################################################################
 
@@ -5235,94 +5268,116 @@ class SeestarStackerGUI:
         self.logger.info(
             "  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final..."
         )
-        try:
-            data_final = None
-            header_final = None
-            preview_load_error_msg = None
+        def _load_final_preview():
+            nonlocal processing_error_details
+            try:
+                data_final = None
+                header_final = None
+                preview_load_error_msg = None
 
-            if cosmetic_01_data_for_preview_from_backend is not None:
-                self.logger.info("    [PF_S4] Utilisation des données de prévisualisation fournies par le backend.")
-                data_final = cosmetic_01_data_for_preview_from_backend
-                header_final = final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
-            elif final_stack_path and os.path.exists(final_stack_path):
-                try:
-                    data_final, header_final = load_and_validate_fits(final_stack_path)
+                if cosmetic_01_data_for_preview_from_backend is not None:
                     self.logger.info(
-                        f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
+                        "    [PF_S4] Utilisation des données de prévisualisation fournies par le backend."
                     )
-                except Exception as e_load:
-                    preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
-                    self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
-            else:
-                preview_load_error_msg = "Fichier FITS final introuvable."
-                self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
-
-            if data_final is not None:
-                try:
-                    data_final_ds = downsample_image(data_final, factor=2)
-                except Exception:
-                    data_final_ds = data_final
-                self.current_preview_data = data_final_ds
-                self.current_preview_hist_data = data_final_ds
-                self._temp_data_for_final_histo = data_final_ds
-                self.current_stack_header = header_final if header_final else fits.Header()
-
-                if hasattr(self, "preview_manager") and self.preview_manager:
-                    linear_params = {
-                        "stretch_method": "Linear",
-                        "black_point": 0.0,
-                        "white_point": 1.0,
-                        "gamma": 1.0,
-                        "r_gain": 1.0,
-                        "g_gain": 1.0,
-                        "b_gain": 1.0,
-                        "brightness": 1.0,
-                        "contrast": 1.0,
-                        "saturation": 1.0,
-                    }
-                    self.preview_manager.update_preview(
-                        self.current_preview_data,
-                        linear_params,
-                        stack_count=images_stacked,
-                        total_images=images_stacked,
-                        current_batch=self.preview_current_batch,
-                        total_batches=self.preview_total_batches,
+                    data_final = cosmetic_01_data_for_preview_from_backend
+                    header_final = (
+                        final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
                     )
+                elif final_stack_path and os.path.exists(final_stack_path):
+                    try:
+                        data_final, header_final = load_and_validate_fits(final_stack_path)
+                        self.logger.info(
+                            f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
+                        )
+                    except Exception as e_load:
+                        preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
+                        self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
+                else:
+                    preview_load_error_msg = "Fichier FITS final introuvable."
+                    self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
-                    if hasattr(self, "histogram_widget") and self.histogram_widget:
-                        self.histogram_widget.update_histogram(self.current_preview_data)
-                        # Ensure the BP/WP range lines persist on the final histogram
-                        try:
-                            bp_ui = self.preview_black_point.get()
-                            wp_ui = self.preview_white_point.get()
-                        except tk.TclError:
-                            bp_ui = None
-                            wp_ui = None
-                        if bp_ui is not None and wp_ui is not None:
-                            self.histogram_widget.set_range(bp_ui, wp_ui)
-                        # Redraw the preview using existing histogram data
-                        self.refresh_preview(recalculate_histogram=False)
+                if data_final is not None:
+                    try:
+                        data_final_ds = downsample_image(data_final, factor=2)
+                    except Exception:
+                        data_final_ds = data_final
 
-                if self.current_stack_header:
-                    self.update_image_info(self.current_stack_header)
-            else:
-                if hasattr(self, "preview_manager"):
-                    self.preview_manager.clear_preview(preview_load_error_msg or "Preview load error")
-                if hasattr(self, "histogram_widget"):
-                    self.histogram_widget.plot_histogram(None)
+                    def _apply_gui_updates(df=data_final_ds, hdr=header_final):
+                        self.current_preview_data = df
+                        self.current_preview_hist_data = df
+                        self._temp_data_for_final_histo = df
+                        self.current_stack_header = hdr if hdr else fits.Header()
 
-            self.logger.info(
-                f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
-            )
-        except Exception as e_s4:
-            self.logger.error(
-                f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
-            )
-            if hasattr(self, "preview_manager"):
-                self.preview_manager.clear_preview(f"Erreur MAJEURE mise a jour apercu final: {e_s4}")
-            if hasattr(self, "histogram_widget"):
-                self.histogram_widget.plot_histogram(None)
-            processing_error_details = f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
+                        if hasattr(self, "preview_manager") and self.preview_manager:
+                            linear_params = {
+                                "stretch_method": "Linear",
+                                "black_point": 0.0,
+                                "white_point": 1.0,
+                                "gamma": 1.0,
+                                "r_gain": 1.0,
+                                "g_gain": 1.0,
+                                "b_gain": 1.0,
+                                "brightness": 1.0,
+                                "contrast": 1.0,
+                                "saturation": 1.0,
+                            }
+                            self.preview_manager.update_preview(
+                                self.current_preview_data,
+                                linear_params,
+                                stack_count=images_stacked,
+                                total_images=images_stacked,
+                                current_batch=self.preview_current_batch,
+                                total_batches=self.preview_total_batches,
+                            )
+
+                            if hasattr(self, "histogram_widget") and self.histogram_widget:
+                                self.histogram_widget.update_histogram(self.current_preview_data)
+                                try:
+                                    bp_ui = self.preview_black_point.get()
+                                    wp_ui = self.preview_white_point.get()
+                                except tk.TclError:
+                                    bp_ui = None
+                                    wp_ui = None
+                                if bp_ui is not None and wp_ui is not None:
+                                    self.histogram_widget.set_range(bp_ui, wp_ui)
+                                self.refresh_preview(recalculate_histogram=False)
+
+                        if self.current_stack_header:
+                            self.update_image_info(self.current_stack_header)
+
+                        self.logger.info(
+                            f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+                        )
+
+                    self.root.after(0, _apply_gui_updates)
+                else:
+                    def _no_data():
+                        if hasattr(self, "preview_manager"):
+                            self.preview_manager.clear_preview(preview_load_error_msg or "Preview load error")
+                        if hasattr(self, "histogram_widget"):
+                            self.histogram_widget.plot_histogram(None)
+                        self.logger.info(
+                            f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+                        )
+
+                    self.root.after(0, _no_data)
+            except Exception as e_s4:
+                def _err_handler():
+                    if hasattr(self, "preview_manager"):
+                        self.preview_manager.clear_preview(
+                            f"Erreur MAJEURE mise a jour apercu final: {e_s4}"
+                        )
+                    if hasattr(self, "histogram_widget"):
+                        self.histogram_widget.plot_histogram(None)
+                self.logger.error(
+                    f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
+                )
+                self.root.after(0, _err_handler)
+                processing_error_details = (
+                    f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
+                )
+
+        threading.Thread(target=_load_final_preview, daemon=True, name="FinalPreviewLoader").start()
 
         # --- Section 5: Génération et Affichage du Résumé ---
         # (Code original repris du log - ce bloc reste inchangé)
