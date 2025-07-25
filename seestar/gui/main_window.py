@@ -6338,7 +6338,7 @@ class SeestarStackerGUI:
                 "reproject_coadd_final": self.settings.reproject_coadd_final,
             }
 
-            if self.settings.batch_size == 1:
+            if self.settings.batch_size == 1 and not special_single:
                 start_proc_kwargs["chunk_size"] = self._get_auto_chunk_size()
 
             processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
