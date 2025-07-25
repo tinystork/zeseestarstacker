@@ -5,12 +5,13 @@ Version: V_ProgressManager_ColorLog_1
 """
 
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk
 from time import monotonic as _mono
 
 _PM_LAST_UI = 0.0
-_PM_MIN_DT = 0.20   # secondes mini entre deux MAJ GUI
+_PM_MIN_DT = 0.25   # secondes mini entre deux MAJ GUI (évite flood event loop)
 
 
 class ProgressManager:
@@ -78,8 +79,10 @@ class ProgressManager:
         now = _mono()
 
         if now - _PM_LAST_UI < _PM_MIN_DT:
-
             return
+
+        if threading.current_thread() is threading.main_thread():
+            print("Warning: ProgressManager.update_progress called from main thread")
 
         def _update_ui():
             global _PM_LAST_UI
