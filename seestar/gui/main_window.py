@@ -4386,7 +4386,7 @@ class SeestarStackerGUI:
                     log_file.write(text + "\n")
                     log_file.flush()
                     output_lines.append(text)
-                    pct_match = re.search(r"^\s*(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
+                    pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
                     if pct_match:
                         try:
                             pct = float(next(filter(None, pct_match.groups())))
