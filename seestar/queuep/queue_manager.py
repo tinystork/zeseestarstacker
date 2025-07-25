@@ -9634,38 +9634,38 @@ class SeestarQueuedStacker:
             return False
 
     def _create_sum_wht_memmaps(self, shape_hw):
-        """(Re)create SUM/WHT memmaps for the given output shape."""
+        """(Re)create SUM/WHT memmaps for the given output shape.
+
+        The previously processed batch count is preserved to avoid
+        skewing ETA calculations when memmaps are reallocated.
+        """
+        prev_count = getattr(self, "stacked_batches_count", 0)
+
         memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
         os.makedirs(memmap_dir, exist_ok=True)
         self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
         self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
         self.memmap_shape = (shape_hw[0], shape_hw[1], 3)
         self.batch_count_path = os.path.join(self.output_folder, "batches_count.txt")
-        mode = "w+"
+
         self.cumulative_sum_memmap = np.lib.format.open_memmap(
             self.sum_memmap_path,
-            mode=mode,
+            mode="w+",
             dtype=self.memmap_dtype_sum,
             shape=self.memmap_shape,
         )
         self.cumulative_wht_memmap = np.lib.format.open_memmap(
             self.wht_memmap_path,
-            mode=mode,
+            mode="w+",
             dtype=self.memmap_dtype_wht,
             shape=shape_hw,
         )
-        if mode == "w+":
-            self.cumulative_sum_memmap[:] = 0.0
-            self.cumulative_wht_memmap[:] = 0.0
-            self.stacked_batches_count = 0
-            self._update_batch_count_file()
-        else:
-            if os.path.exists(self.batch_count_path):
-                try:
-                    with open(self.batch_count_path, "r") as f:
-                        self.stacked_batches_count = int(f.read().strip())
-                except Exception:
-                    self.stacked_batches_count = 0
+
+        self.cumulative_sum_memmap[:] = 0.0
+        self.cumulative_wht_memmap[:] = 0.0
+
+        self.stacked_batches_count = prev_count
+        self._update_batch_count_file()
 
     def _ensure_memmaps_match_reference(self) -> None:
         """Ensure SUM/WHT memmaps match ``self.reference_shape``."""
@@ -9684,6 +9684,8 @@ class SeestarQueuedStacker:
 
         if need_recreate:
             self._close_memmaps()
+            prev_count = getattr(self, "stacked_batches_count", 0)
+
             memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
             os.makedirs(memmap_dir, exist_ok=True)
             self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
@@ -9703,6 +9705,8 @@ class SeestarQueuedStacker:
             )
             self.cumulative_wht_memmap[:] = 0.0
             self.memmap_shape = expected_sum_shape
+            self.stacked_batches_count = prev_count
+            self._update_batch_count_file()
             self.update_progress(f"Re-init memmaps → new shape {self.memmap_shape[:2]}")
 
     def finalize_continuous_stack(self):
