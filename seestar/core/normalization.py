@@ -50,6 +50,9 @@ def _normalize_images_sky_mean(image_list, reference_index=0, sky_percentile=25.
             normalized.append(None)
             continue
         data = img.astype(np.float32, copy=False)
+        # Ensure the array is writeable for in-place adjustment
+        if not data.flags.writeable:
+            data = data.copy()
         if i == reference_index:
             normalized.append(data)
             continue
