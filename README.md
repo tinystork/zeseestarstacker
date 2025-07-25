@@ -35,6 +35,9 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   SNR-based weighting
     *   Star count/sharpness analysis
 *   **Memory Optimization:** Batch processing with auto RAM management
+*   **Batch Size 0 Mode:** If a `stack_plan.csv` file is present in the input
+    folder, its `batch_id` column controls grouping when **Batch Size** is set
+    to `0`. Otherwise the backend automatically estimates a suitable size.
 *   **Threaded Boring Stack Mode:** Set **Batch Size** to `1` (or enable the
     *Threaded Boring Stack* checkbox) to run `boring_stack.py` in a dedicated
     worker thread for minimal memory usage.
