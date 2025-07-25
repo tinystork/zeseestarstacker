@@ -4301,6 +4301,19 @@ class SeestarStackerGUI:
             except Exception:
                 total_files = 0
 
+            def _setup_start_gui():
+                self.processing = True
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.DISABLED)
+                if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                    self.stop_button.config(state=tk.NORMAL)
+                self._set_parameter_widgets_state(tk.DISABLED)
+                if hasattr(self, "progress_manager") and self.progress_manager:
+                    self.progress_manager.reset()
+                    self.progress_manager.start_timer()
+
+            self.root.after(0, _setup_start_gui)
+
             def _gui_update(progress, eta, processed):
                 try:
                     if hasattr(self, "progress_manager") and self.progress_manager:
@@ -4350,16 +4363,6 @@ class SeestarStackerGUI:
                     if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
                         self.stop_button.config(state=tk.DISABLED)
                     self._set_parameter_widgets_state(tk.NORMAL)
-
-            self.processing = True
-            if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                self.start_button.config(state=tk.DISABLED)
-            if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                self.stop_button.config(state=tk.NORMAL)
-            self._set_parameter_widgets_state(tk.DISABLED)
-            if hasattr(self, "progress_manager") and self.progress_manager:
-                self.progress_manager.reset()
-                self.progress_manager.start_timer()
 
             start_time = time.monotonic()
             output_lines = []
