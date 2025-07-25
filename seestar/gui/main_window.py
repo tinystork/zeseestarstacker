@@ -4364,6 +4364,60 @@ class SeestarStackerGUI:
                         self.stop_button.config(state=tk.DISABLED)
                     self._set_parameter_widgets_state(tk.NORMAL)
 
+                    # --- Nouveau: afficher le resume apres un boring stack ---
+                    elapsed = time.monotonic() - start_time
+                    if hasattr(self, "tr") and hasattr(self, "localization"):
+                        tr = self.tr
+                    else:
+                        tr = lambda k, default=None: default or k
+                    summary_title = tr("processing_report_title", default="Processing Summary")
+                    status_text = (
+                        tr("stacking_finished", default="Stacking finished")
+                        if retcode == 0
+                        else tr("error", default="Error")
+                    )
+                    if (
+                        hasattr(self, "_format_duration")
+                        and hasattr(self, "tr")
+                        and hasattr(self, "localization")
+                    ):
+                        duration_str = self._format_duration(elapsed)
+                    else:
+                        duration_str = f"{int(round(elapsed))} s"
+                    summary_lines = [
+                        f"{tr('Status', default='Status')}: {status_text}",
+                        f"{tr('Total Processing Time', default='Total Processing Time')}: {duration_str}",
+                        f"{tr('Files Attempted', default='Files Attempted')}: {total_files}",
+                    ]
+                    final_path = os.path.join(out_dir, "final.fits")
+                    if retcode == 0 and os.path.exists(final_path):
+                        summary_lines.append(
+                            f"{tr('Final Stack File', default='Final Stack File')}:\n  {final_path}"
+                        )
+                    elif retcode == 0:
+                        summary_lines.append(
+                            f"{tr('Final Stack File', default='Final Stack File')}: {final_path} ({tr('Not Found!', default='Not Found!')})"
+                        )
+                    full_summary = "\n".join(summary_lines)
+                    if hasattr(self, "output_path"):
+                        try:
+                            can_open_output = bool(
+                                self.output_path.get()
+                                and os.path.isdir(self.output_path.get())
+                                and (retcode == 0)
+                            )
+                        except Exception:
+                            can_open_output = False
+                    else:
+                        can_open_output = False
+
+                    if (
+                        hasattr(self, "_show_summary_dialog")
+                        and getattr(self, "root", None) is not None
+                        and hasattr(self.root, "tk")
+                    ):
+                        self._show_summary_dialog(summary_title, full_summary, can_open_output)
+
             start_time = time.monotonic()
             output_lines = []
             log_path = os.path.join(out_dir, "boring_stack.log")
