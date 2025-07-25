@@ -6142,7 +6142,7 @@ class SeestarStackerGUI:
             try:
                 special_single = self._prepare_single_batch_if_needed()
             except FileNotFoundError as fnfe:
-                def _prep_error():
+                def _prep_error(fnfe=fnfe):
                     messagebox.showerror(
                         self.tr("error"),
                         self.tr(
