@@ -28,6 +28,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import re
 from pathlib import Path
 from tkinter import font as tkFont
 from tkinter import messagebox, ttk
@@ -4382,10 +4383,11 @@ class SeestarStackerGUI:
                     log_file.write(text + "\n")
                     log_file.flush()
                     output_lines.append(text)
-                    if text.endswith("%"):
+                    pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
+                    if pct_match:
                         try:
-                            pct = float(text.rstrip("%"))
-                        except ValueError:
+                            pct = float(next(filter(None, pct_match.groups())))
+                        except (ValueError, StopIteration):
                             continue
                         elapsed = time.monotonic() - start_time
                         if pct > 0:
