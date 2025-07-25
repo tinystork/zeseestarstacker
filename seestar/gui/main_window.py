@@ -4367,6 +4367,8 @@ class SeestarStackerGUI:
             start_time = time.monotonic()
             output_lines = []
             log_path = os.path.join(out_dir, "boring_stack.log")
+            last_pct = 0.0
+            last_processed = 0
             try:
                 log_file = open(log_path, "w", encoding="utf-8")
                 proc = subprocess.Popen(
@@ -4392,6 +4394,8 @@ class SeestarStackerGUI:
                             pct = float(next(filter(None, pct_match.groups())))
                         except (ValueError, StopIteration):
                             continue
+                        if pct < last_pct:
+                            pct = last_pct
                         elapsed = time.monotonic() - start_time
                         if pct > 0:
                             rem_sec = elapsed * (100 - pct) / pct
@@ -4402,6 +4406,10 @@ class SeestarStackerGUI:
                             eta = self.tr("eta_calculating", default="Calculating...")
 
                         processed = int(round((pct / 100.0) * total_files))
+                        if processed < last_processed:
+                            processed = last_processed
+                        last_pct = pct
+                        last_processed = processed
                         self.root.after(0, _gui_update, pct, eta, processed)
                     else:
                         self.root.after(0, self.update_progress_gui, text, None)
