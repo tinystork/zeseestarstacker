@@ -487,6 +487,7 @@ class SeestarStackerGUI:
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
         self.max_hq_mem_var = tk.DoubleVar(value=8)
         self.batch_size = tk.IntVar(value=10)
+        self.batch_size.trace_add("write", self._on_batch_size_changed)
         self.boring_thread_var = tk.BooleanVar(value=False)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
@@ -692,17 +693,33 @@ class SeestarStackerGUI:
             traceback.print_exc(limit=1)
 
     def _toggle_boring_thread(self):
-        """Set batch_size to 0 and disable its spinbox when boring mode is active."""
+        """Synchronize ``batch_size`` with the boring-thread checkbox."""
         try:
             if self.boring_thread_var.get():
-                self.batch_size.set(0)
+                if self.batch_size.get() != 1:
+                    self.batch_size.set(1)
                 if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
                     self.batch_spinbox.config(state=tk.DISABLED)
             else:
                 if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
                     self.batch_spinbox.config(state=tk.NORMAL)
+                if self.batch_size.get() == 1:
+                    self.batch_size.set(0)
         except tk.TclError:
             pass
+
+    def _on_batch_size_changed(self, *args):
+        """Toggle boring-thread mode when the batch size equals 1."""
+        try:
+            val = self.batch_size.get()
+        except tk.TclError:
+            return
+        if val == 1 and not self.boring_thread_var.get():
+            self.boring_thread_var.set(True)
+            self._toggle_boring_thread()
+        elif val != 1 and self.boring_thread_var.get():
+            self.boring_thread_var.set(False)
+            self._toggle_boring_thread()
 
     # Assurez-vous d'appeler cette méthode aussi dans SettingsManager.apply_to_ui
     # et dans SeestarStackerGUI.__init__ après avoir appliqué les settings
@@ -5921,11 +5938,11 @@ class SeestarStackerGUI:
         csv_path = os.path.join(self.settings.input_folder, "stack_plan.csv")
 
         if not os.path.isfile(csv_path):
-            self.logger.warning("Batch size 1 without CSV – reverting to normal behaviour")
+            self.logger.warning("Batch size 1 without CSV – aborting")
             self.settings.batch_size = 0
             self.settings.order_csv_path = ""
             self.settings.order_file_list = []
-            return False
+            raise FileNotFoundError(csv_path)
 
         self.logger.info(f"Stack plan CSV detected at '{csv_path}'. Preparing single batch")
 

@@ -3,6 +3,7 @@ import sys
 import types
 import os
 import numpy as np
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,7 +132,7 @@ def test_single_batch_csv_with_additional_columns(tmp_path):
 
 
 def test_single_batch_csv_missing_file(tmp_path):
-    """When batch_size==1 but no CSV exists, batch_size should reset to 0."""
+    """Missing ``stack_plan.csv`` should raise an error when ``batch_size`` is 1."""
 
     gui = SeestarStackerGUI.__new__(SeestarStackerGUI)
     gui.logger = logging.getLogger("test")
@@ -145,10 +146,8 @@ def test_single_batch_csv_missing_file(tmp_path):
     )
     gui.queued_stacker = SeestarQueuedStacker()
 
-    activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
-    assert not activated
-    assert gui.settings.batch_size == 0
-    assert gui.settings.order_csv_path == ""
+    with pytest.raises(FileNotFoundError):
+        SeestarStackerGUI._prepare_single_batch_if_needed(gui)
 
 
 def test_align_on_disk_large_image(tmp_path):
