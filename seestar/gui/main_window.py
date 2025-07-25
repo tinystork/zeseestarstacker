@@ -5267,8 +5267,9 @@ class SeestarStackerGUI:
         self.logger.info(
             "  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final..."
         )
+        preview_load_error_msg = None
         def _load_final_preview():
-            nonlocal processing_error_details
+            nonlocal processing_error_details, preview_load_error_msg
             try:
                 data_final = None
                 header_final = None
