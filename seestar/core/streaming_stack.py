@@ -7,6 +7,7 @@ from typing import Sequence, Iterable
 import numpy as np
 from astropy.io import fits
 import psutil
+from concurrent.futures import ThreadPoolExecutor
 
 from .stack_methods import (
     _stack_mean,
@@ -54,6 +55,32 @@ def _auto_chunk_rows(num_images: int, img_shape: tuple[int, ...]) -> int:
     return min(max_rows, h)
 
 
+def estimate_parallel_io_settings(
+    num_files: int,
+    shape_hw: tuple[int, int],
+    max_ram_frac: float = 0.3,
+    max_workers_cap: int = 8,
+) -> tuple[int, int]:
+    """Estimate ``chunk_rows`` and ``max_workers`` for parallel streaming."""
+    import psutil as _psutil
+
+    h, w = shape_hw
+    available = _psutil.virtual_memory().available
+    target_mem = available * max_ram_frac
+
+    img_mem_per_row = w * 4  # float32 bytes per row
+    max_chunk_rows = max(1, int(target_mem // (img_mem_per_row * num_files)))
+
+    chunk_rows = min(256, max_chunk_rows)
+    chunk_rows = max(8, chunk_rows)
+
+    bytes_per_image_chunk = chunk_rows * w * 4
+    max_possible_workers = int(target_mem // bytes_per_image_chunk)
+    max_workers = min(num_files, max_possible_workers, max_workers_cap)
+
+    return chunk_rows, max_workers
+
+
 def stack_disk_streaming(
     file_list: Sequence[str],
     *,
@@ -65,6 +92,7 @@ def stack_disk_streaming(
     sigma_high: float = 3.0,
     winsor_limits: tuple[float, float] = (0.05, 0.05),
     apply_rewinsor: bool = True,
+    parallel_io: bool = True,
 ) -> str:
     """Stack images from ``file_list`` using small row chunks.
 
@@ -83,6 +111,8 @@ def stack_disk_streaming(
         Parameters for rejection algorithms.
     apply_rewinsor : bool, optional
         See ``_stack_winsorized_sigma``.
+    parallel_io : bool, optional
+        Read chunks from disk in parallel when ``True``.
 
     Returns
     -------
@@ -106,12 +136,17 @@ def stack_disk_streaming(
     weights_arr = np.asarray(weights, dtype=np.float32)
 
     if chunk_rows <= 0:
-        chunk_rows = _auto_chunk_rows(len(file_list), shape)
+        chunk_rows, max_workers = estimate_parallel_io_settings(
+            len(file_list), shape, max_ram_frac=0.3
+        )
+    else:
+        max_workers = min(4, os.cpu_count() or 1)
 
     logger.debug(
-        "Streaming stack: %d files, chunk_rows=%d, shape=%s",
+        "Streaming stack: %d files, chunk_rows=%d, workers=%d, shape=%s",
         len(file_list),
         chunk_rows,
+        max_workers,
         shape,
     )
 
@@ -119,13 +154,30 @@ def stack_disk_streaming(
     with fits.open(out_path, mode="update", memmap=True) as out_hdul:
         for row_start in range(0, H, chunk_rows):
             row_end = min(row_start + chunk_rows, H)
-            chunk_slices = []
-            for path in file_list:
-                with fits.open(path, memmap=True) as hdul:
-                    sl = hdul[0].data[row_start:row_end]
-                    chunk_slices.append(sl.astype(np.float32, copy=False))
-            arr = np.stack(chunk_slices, axis=0)
-            del chunk_slices
+            if parallel_io:
+                def _read_chunk(path, row_start=row_start, row_end=row_end):
+                    try:
+                        with fits.open(path, memmap=True) as hdul:
+                            return hdul[0].data[row_start:row_end].astype(
+                                np.float32, copy=False
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to read chunk from {path}: {e}")
+                        return None
+
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    chunk_slices = list(pool.map(lambda p: _read_chunk(p), file_list))
+                chunk_slices = [sl for sl in chunk_slices if sl is not None]
+                arr = np.stack(chunk_slices, axis=0)
+                del chunk_slices
+            else:
+                chunk_slices = []
+                for path in file_list:
+                    with fits.open(path, memmap=True) as hdul:
+                        sl = hdul[0].data[row_start:row_end]
+                        chunk_slices.append(sl.astype(np.float32, copy=False))
+                arr = np.stack(chunk_slices, axis=0)
+                del chunk_slices
 
             if mode == "median":
                 chunk_result, _ = _stack_median(arr, weights_arr)
