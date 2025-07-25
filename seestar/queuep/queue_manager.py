@@ -3082,6 +3082,8 @@ class SeestarQueuedStacker:
         """
         Thread principal pour le traitement des images.
         """
+        if threading.current_thread() is threading.main_thread():
+            logger.warning("_worker running on main thread - this should not happen")
         logger.debug(
             "\n"
             + "=" * 10
@@ -5926,6 +5928,8 @@ class SeestarQueuedStacker:
         Traite un seul fichier image.
         Version: V_ProcessFile_M81_Debug_UltimateLog_1
         """
+        if threading.current_thread() is threading.main_thread():
+            logger.warning("_process_file executing on main thread - this may freeze the GUI")
         if align_on_disk is None:
             align_on_disk = getattr(self, "align_on_disk", False)
         file_name = os.path.basename(file_path)

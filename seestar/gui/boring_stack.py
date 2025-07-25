@@ -70,6 +70,7 @@ def _cleanup_stacker(stacker):
     _log_mem("cleanup")
 
 from numpy.lib.format import open_memmap as _orig_open_memmap
+import weakref
 
 
 def _safe_open_memmap(filename, *args, **kwargs):
@@ -85,6 +86,11 @@ def _safe_open_memmap(filename, *args, **kwargs):
     finally:
         gc.collect()
         _log_mem(f"memmap_open:{os.path.basename(str(filename))}")
+    try:
+        if hasattr(mm, "_mmap") and mm._mmap is not None:
+            weakref.finalize(mm, mm._mmap.close)
+    except Exception:
+        pass
     return mm
 
 # Ensure UTF-8 console for progress messages
@@ -307,9 +313,8 @@ def main() -> int:
 
         while stacker.is_running():
             time.sleep(1)
-            if args.batch_size == 1:
-                getattr(stacker, "_indices_cache", {}).clear()  # avoid cache buildup
-                gc.collect()
+            getattr(stacker, "_indices_cache", {}).clear()
+            gc.collect()
             _log_mem("loop")  # DEBUG: track RAM during run
 
         final_path = getattr(stacker, "final_stacked_path", None)
