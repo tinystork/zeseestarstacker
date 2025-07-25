@@ -1090,6 +1090,8 @@ class SeestarQueuedStacker:
         self.preview_callback = None
         self.queue = Queue()
         self.folders_lock = threading.Lock()
+        self.aligned_counter = 0
+        self.counter_lock = threading.Lock()
         self.processing_thread = None
         self.processed_files = set()
         self.additional_folders = []
@@ -1833,6 +1835,16 @@ class SeestarQueuedStacker:
             minutes, seconds = divmod(rem, 60)
             eta_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             self.update_progress(f"ETA_UPDATE:{eta_str}", None)
+
+    def _increment_aligned_counter(self):
+        """Thread-safe increment of the aligned files counter."""
+        with self.counter_lock:
+            self.aligned_counter += 1
+            current_aligned = self.aligned_counter
+        total = getattr(self, "files_in_queue", 1) or 1
+        self.update_progress(
+            f"Aligned: {current_aligned}", current_aligned / total * 100
+        )
 
     ########################################################################################################################################################
 
@@ -3524,6 +3536,7 @@ class SeestarQueuedStacker:
                     )
                 )
                 self.aligned_files_count += 1
+                self._increment_aligned_counter()
                 self.processed_files_count += 1
                 logger.debug(
                     f"DEBUG QM [_worker]: Mosaïque Locale: Panneau de référence ajouté à all_aligned_files_with_info_for_mosaic."
@@ -3847,6 +3860,7 @@ class SeestarQueuedStacker:
                                 )
                             )
                             self.aligned_files_count += 1
+                            self._increment_aligned_counter()
                             align_method_used_log = panel_header.get(
                                 "_ALIGN_METHOD_LOG", ("Unknown", None)
                             )[0]
@@ -3909,6 +3923,7 @@ class SeestarQueuedStacker:
                                 )
                             )
                             self.aligned_files_count += 1
+                            self._increment_aligned_counter()
                             align_method_used_log = panel_header.get(
                                 "_ALIGN_METHOD_LOG", ("Unknown", None)
                             )[0]
@@ -4076,6 +4091,7 @@ class SeestarQueuedStacker:
                             else:
                                 # --- MODE CLASSIQUE OU DRIZZLE ---
                                 self.aligned_files_count += 1
+                                self._increment_aligned_counter()
                                 (
                                     aligned_data,
                                     header_orig,
