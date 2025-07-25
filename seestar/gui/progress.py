@@ -11,7 +11,7 @@ from tkinter import ttk
 from time import monotonic as _mono
 
 _PM_LAST_UI = 0.0
-_PM_MIN_DT = 0.25   # secondes mini entre deux MAJ GUI (évite flood event loop)
+_PM_MIN_DT = 0.05   # secondes mini entre deux MAJ GUI (évite flood event loop)
 
 
 class ProgressManager:

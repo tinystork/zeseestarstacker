@@ -5027,6 +5027,9 @@ class SeestarStackerGUI:
                     # Le préfixe emoji est déjà dans le message original du backend
                     # actual_message_to_log = "⏳ " + actual_message_to_log
 
+            if isinstance(actual_message_to_log, str) and "terminé" in actual_message_to_log.lower():
+                progress = 100
+
             # Mettre à jour la barre et le log texte via ProgressManager
             # On passe le message (potentiellement modifié) et le niveau de log déterminé
             self.progress_manager.update_progress(actual_message_to_log, progress, level=log_level_for_pm)
