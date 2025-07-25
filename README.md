@@ -412,6 +412,8 @@ omitted.
 Set **Batch Size** to `1` or tick the *Threaded Boring Stack* checkbox in the
 Stacking tab. The GUI will launch `boring_stack.py` in a background thread using
 your `stack_plan.csv` and display progress as it runs.
+When a `stack_plan.csv` is present, the entire list is stacked as one batch and
+the chunk size parameter is ignored.
 
 
 ---

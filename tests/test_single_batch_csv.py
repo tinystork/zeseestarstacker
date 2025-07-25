@@ -180,3 +180,52 @@ def test_align_on_disk_large_image(tmp_path):
         aligner._align_cpu = orig_warp
         if isinstance(aligned, np.memmap):
             os.remove(aligned.filename)
+
+
+def test_threaded_csv_no_chunk(tmp_path):
+    files = []
+    for i in range(3):
+        fp = tmp_path / f"img{i}.fits"
+        fp.write_text("dummy")
+        files.append(fp)
+
+    csv_path = tmp_path / "stack_plan.csv"
+    csv_path.write_text("file_path\n" + "\n".join(f.name for f in files))
+
+    gui = SeestarStackerGUI.__new__(SeestarStackerGUI)
+    gui.logger = logging.getLogger("test")
+    gui.settings = types.SimpleNamespace(
+        input_folder=str(tmp_path),
+        output_folder=str(tmp_path),
+        temp_folder=str(tmp_path),
+        output_filename="out",
+        reference_image_path="",
+        batch_size=1,
+        stacking_mode="kappa-sigma",
+        reproject_between_batches=True,
+        use_drizzle=True,
+        order_csv_path="",
+    )
+    gui.queued_stacker = types.SimpleNamespace()
+    captured = {}
+
+    def fake_start(**kw):
+        captured.update(kw)
+        return True
+
+    gui.queued_stacker.start_processing = fake_start
+
+    activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
+    assert activated
+
+    kwargs = {
+        "batch_size": gui.settings.batch_size,
+        "ordered_files": gui.settings.order_file_list,
+    }
+    if gui.settings.batch_size == 1 and not activated:
+        kwargs["chunk_size"] = 99
+
+    gui.queued_stacker.start_processing(**kwargs)
+
+    assert "chunk_size" not in captured
+    assert captured["ordered_files"] == [str(p) for p in files]
