@@ -20,6 +20,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Winsorized Sigma Clip:** Rejected pixels are automatically replaced with the winsorized limits.
 *   **Quality Weighting (Optional but Recommended):** Analyzes each aligned frame based on Signal-to-Noise Ratio (SNR) and Star Count/Sharpness, assigns weights, and allows tuning via exponents and minimum weight.
 *   **Asynchronous Processing:** Performs alignment and stacking in a background thread, keeping the GUI responsive.
+*   **Thread-Safe Event Queue:** Worker threads post GUI updates to an internal queue polled on the Tk thread.
 *   **Batch Processing:** Processes images in memory-efficient batches.
 *   **Graphical User Interface (Tkinter):**
     *   Intuitive tabbed interface.
