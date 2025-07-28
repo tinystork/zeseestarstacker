@@ -4692,14 +4692,16 @@ class SeestarStackerGUI:
     def _poll_gui_events(self):
         """Process queued GUI events from worker threads."""
         if hasattr(self, "gui_event_queue"):
+            processed = 0
             try:
-                while True:
+                while processed < 100:
                     cb = self.gui_event_queue.get_nowait()
                     try:
                         if callable(cb):
                             cb()
                     finally:
                         self.gui_event_queue.task_done()
+                    processed += 1
             except Empty:
                 pass
         try:
