@@ -11,6 +11,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import traceback
 import concurrent.futures, time
+import threading
 
 _HIST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -88,6 +89,13 @@ class HistogramWidget(ttk.Frame):
     def update_histogram(self, data_for_analysis):
         """Version async : lance le calcul dans le pool, puis revient
         via Tk `after` pour tracer. 100 % thread-safe."""
+        if threading.current_thread() is not threading.main_thread():
+            print(
+                "WARNING: Accès widget Tkinter hors du main thread dans update_histogram"
+            )
+            # SAFE: Tkinter widget update via after_idle
+            self.after_idle(lambda d=data_for_analysis: self.update_histogram(d))
+            return
         print("DEBUG HistoWidget.update_histogram: Reçu data_for_analysis.")
         if data_for_analysis is not None:
             print(
@@ -128,6 +136,13 @@ class HistogramWidget(ttk.Frame):
 
     def _apply_histogram(self, fut):
         """Thread GUI : reçoit le résultat, trace sans recalculer les bins."""
+        if threading.current_thread() is not threading.main_thread():
+            print(
+                "WARNING: Accès widget Tkinter hors du main thread dans _apply_histogram"
+            )
+            # SAFE: Tkinter widget update via after_idle
+            self.after_idle(lambda f=fut: self._apply_histogram(f))
+            return
         if fut.cancelled() or fut.exception():
             return
         res = fut.result()
@@ -239,6 +254,13 @@ class HistogramWidget(ttk.Frame):
         MODIFIED: Amélioration du calcul de target_top_y_limit pour données [0,1].
         Version: HistoFix_YScaleFor01_4
         """
+        if threading.current_thread() is not threading.main_thread():
+            print(
+                "WARNING: Accès widget Tkinter hors du main thread dans plot_histogram"
+            )
+            # SAFE: Tkinter widget update via after_idle
+            self.after_idle(lambda h=hist_data_details_to_plot: self.plot_histogram(h))
+            return
         print(f"DEBUG HistoWidget.plot_histogram (V_HistoFix_YScaleFor01_4): Tentative de plot des barres.") # Version Log
         current_plot_min_x = self.data_min_for_current_plot
         current_plot_max_x = self.data_max_for_current_plot
@@ -407,6 +429,13 @@ class HistogramWidget(ttk.Frame):
         Les valeurs reçues (min_val_from_ui, max_val_from_ui) sont DANS L'ÉCHELLE 0-1.
         Version: HistoFix_YScaleFor01_1 (Intègre la logique de HistoFix_YZoomReset_LinesSeparate_1)
         """
+        if threading.current_thread() is not threading.main_thread():
+            print(
+                "WARNING: Accès widget Tkinter hors du main thread dans set_range"
+            )
+            # SAFE: Tkinter widget update via after_idle
+            self.after_idle(lambda mi=min_val_from_ui, ma=max_val_from_ui: self.set_range(mi, ma))
+            return
         plot_data_range = self.data_max_for_current_plot - self.data_min_for_current_plot
         if plot_data_range < 1e-9: plot_data_range = 1.0
 

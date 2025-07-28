@@ -7,8 +7,9 @@ import tkinter as tk
 import numpy as np
 from PIL import Image, ImageTk, ImageEnhance
 import traceback
-import platform # For finding fonts
-import os 
+import platform  # For finding fonts
+import os
+import threading
 
 # Import stretch/color tools using the package structure
 try:
@@ -223,6 +224,14 @@ class PreviewManager:
     def display_processed_image(self, pil_img):
         """Display PIL image on the canvas. Must run on main thread."""
 
+        if threading.current_thread() is not threading.main_thread():
+            print(
+                "WARNING: Accès widget Tkinter hors du main thread dans display_processed_image"
+            )
+            # SAFE: Tkinter widget update via after_idle
+            self.canvas.after_idle(lambda img=pil_img: self.display_processed_image(img))
+            return
+
         if pil_img is None:
             self.clear_preview("Preview Processing Error")
             return
@@ -255,7 +264,16 @@ class PreviewManager:
 
         pil_img, hist_data = self.process_image(raw_image_data, params)
         if pil_img is not None:
-            self.display_processed_image(pil_img)
+            if threading.current_thread() is threading.main_thread():
+                self.display_processed_image(pil_img)
+            else:
+                print(
+                    "WARNING: Accès widget Tkinter hors du main thread dans update_preview"
+                )
+                # SAFE: Tkinter widget update via after_idle
+                self.canvas.after_idle(
+                    lambda img=pil_img: self.display_processed_image(img)
+                )
         return pil_img, hist_data
 
 
