@@ -6345,18 +6345,18 @@ class SeestarStackerGUI:
                 if self.settings.batch_size == 1 and not special_single:
                     backend_kwargs["chunk_size"] = self._get_auto_chunk_size()
 
-                def _start_backend():
+                try:
+                    started = self.queued_stacker.start_processing(**backend_kwargs)
+                except Exception as e:
+                    started = False
+                    print(f"Backend start failed: {e}")
+
+                def _after_start(started=started, special_single=special_single):
                     if special_single:
                         self.batch_size.set(self.settings.batch_size)
                         self.stacking_mode.set(self.settings.stacking_mode)
                         self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
                         self.use_drizzle_var.set(self.settings.use_drizzle)
-
-                    try:
-                        started = self.queued_stacker.start_processing(**backend_kwargs)
-                    except Exception as e:
-                        started = False
-                        print(f"Backend start failed: {e}")
 
                     self._final_stretch_set_by_processing_finished = False
                     if started:
@@ -6379,9 +6379,9 @@ class SeestarStackerGUI:
                         self._set_parameter_widgets_state(tk.NORMAL)
 
                 if hasattr(self, "gui_event_queue"):
-                    self.gui_event_queue.put(_start_backend)
+                    self.gui_event_queue.put(_after_start)
                 else:
-                    self.root.after(0, _start_backend)
+                    self.root.after(0, _after_start)
 
             except FileNotFoundError as fnfe:
                 def _prep_error_inner(fnfe=fnfe):
