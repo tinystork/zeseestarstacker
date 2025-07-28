@@ -6178,6 +6178,42 @@ class SeestarStackerGUI:
                     self.start_button.config(state=tk.NORMAL)
                 return
 
+        # When the batch size equals 1, process the CSV using boring_stack.py
+        if int(getattr(self.batch_size, "get", lambda: 0)()) == 1:
+            # Sync settings now to read latest options
+            if hasattr(self, "settings") and hasattr(self.settings, "update_from_ui"):
+                try:
+                    self.settings.update_from_ui(self)
+                except Exception:
+                    pass
+
+            csv_path = os.path.join(self.settings.input_folder, "stack_plan.csv")
+            if not os.path.isfile(csv_path):
+                messagebox.showerror(
+                    self.tr("error"),
+                    self.tr(
+                        "stack_plan_missing_file_error",
+                        default="File listed in stack_plan.csv not found:\n{path}",
+                    ).format(path=csv_path),
+                )
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.NORMAL)
+                return
+
+            script = os.path.join(os.path.dirname(__file__), "boring_stack.py")
+            cmd = [
+                sys.executable,
+                script,
+                "--csv",
+                csv_path,
+                "--out",
+                self.settings.output_folder,
+                "--batch-size",
+                "1",
+            ]
+            self._run_boring_stack_process(cmd, csv_path, self.settings.output_folder)
+            return
+
         # --- 3. Initialisation de l'état de traitement du GUI ---
         print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI...")
         self.processing = True
