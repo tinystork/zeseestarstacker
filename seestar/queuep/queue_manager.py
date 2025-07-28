@@ -48,6 +48,8 @@ class GuiEventQueue(Queue):
     """Queue for scheduling GUI updates from worker threads."""
 
     pass
+
+
 import csv
 
 # --- Standard Library Imports ---
@@ -67,21 +69,54 @@ import astroalign as aa
 import cv2
 import numpy as np
 import psutil
+
 _PROC = psutil.Process(os.getpid())  # Monitor RAM usage
+_LOG_MEM_LAST = 0.0
+_LOG_MEM_DEBOUNCE = 1.0  # seconds
+
 
 def _log_mem(tag: str) -> None:
-    """DEBUG helper to log current RSS and open files."""
+    """DEBUG helper to log current RSS and optionally open files.
+
+    The check for open files can be expensive, so it is only performed if the
+    ``ZES_LOG_OPEN_FILES`` environment variable is set to ``"1"``. Logging is
+    also throttled to at most once every ``_LOG_MEM_DEBOUNCE`` seconds.
+    """
+
+    global _LOG_MEM_LAST
+    now = time.monotonic()
+    if now - _LOG_MEM_LAST < _LOG_MEM_DEBOUNCE:
+        return
+    _LOG_MEM_LAST = now
+
     try:
         proc = _PROC
         rss = proc.memory_info().rss / (1024 * 1024)
-        open_files = len(proc.open_files())
-        logger.debug("RAM usage [%s]: %.1f MB | open files: %d", tag, rss, open_files)
+        if os.environ.get("ZES_LOG_OPEN_FILES") == "1":
+            try:
+                open_files = len(proc.open_files())
+            except Exception:
+                open_files = -1
+        else:
+            open_files = -1
+        if open_files >= 0:
+            logger.debug(
+                "RAM usage [%s]: %.1f MB | open files: %d",
+                tag,
+                rss,
+                open_files,
+            )
+        else:
+            logger.debug("RAM usage [%s]: %.1f MB", tag, rss)
     except Exception:
         pass
+
+
 try:
     from numpy.lib.format import open_memmap
 except Exception:  # pragma: no cover - very unlikely
     open_memmap = None
+
 
 def _fits_open_safe(path, memmap=True, **kwargs):
     """Open FITS file with optional memmap fallback."""
@@ -112,10 +147,11 @@ def _fits_getdata_safe(path, memmap=True, **kwargs):
             return fits.getdata(path, memmap=False, **kwargs)
         raise
 
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
-    
+
     def make_radial_weight_map(h, w, feather_fraction=0.92, floor=0.10):
         Y, X = np.ogrid[:h, :w]
         cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
@@ -147,6 +183,7 @@ from seestar.core.stack_methods import (
     _stack_winsorized_sigma,
 )
 from seestar.core.streaming_stack import stack_disk_streaming
+
 try:
     from seestar.gui.settings import SettingsManager, TILE_HEIGHT
 except Exception:  # pragma: no cover - fallback for tests without GUI module
@@ -972,7 +1009,9 @@ class SeestarQueuedStacker:
         # picklable via ``__getstate__``/``__setstate__`` so we can always rely
         # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
         # platform.
-        Executor = lambda **kw: ProcessPoolExecutor(mp_context=get_context("spawn"), **kw)
+        Executor = lambda **kw: ProcessPoolExecutor(
+            mp_context=get_context("spawn"), **kw
+        )
 
         self.drizzle_executor = Executor(
             max_workers=max(1, self.num_threads // 2),
@@ -1819,7 +1858,10 @@ class SeestarQueuedStacker:
         # 2.b envoi protégé via la file dévénements GUI pour garantir le thread-safety
         if self.progress_callback:
             try:
-                if hasattr(self, "gui_event_queue") and self.gui_event_queue is not None:
+                if (
+                    hasattr(self, "gui_event_queue")
+                    and self.gui_event_queue is not None
+                ):
                     self.gui_event_queue.put(
                         lambda m=message, p=progress: self.progress_callback(m, p)
                     )
@@ -2050,7 +2092,9 @@ class SeestarQueuedStacker:
             "DEBUG QM [_update_preview_sum_w]: Tentative de mise à jour de l'aperçu SUM/W..."
         )
 
-        if hasattr(self, "settings") and not getattr(self.settings, "enable_preview", True):
+        if hasattr(self, "settings") and not getattr(
+            self.settings, "enable_preview", True
+        ):
             return
 
         if self.preview_callback is None:
@@ -3997,7 +4041,8 @@ class SeestarQueuedStacker:
 
                                 trigger = (
                                     getattr(self, "chunk_size", None)
-                                    if self.batch_size == 1 and getattr(self, "chunk_size", None)
+                                    if self.batch_size == 1
+                                    and getattr(self, "chunk_size", None)
                                     else self.batch_size
                                 )
                                 if (
@@ -4160,7 +4205,9 @@ class SeestarQueuedStacker:
                                     )
                                     if self.batch_size == 1:
                                         if self.align_on_disk:
-                                            img_p, mask_p = self._save_aligned_temp(aligned_data, valid_mask_val)
+                                            img_p, mask_p = self._save_aligned_temp(
+                                                aligned_data, valid_mask_val
+                                            )
                                             if img_p and mask_p:
                                                 classic_stack_item = (
                                                     img_p,
@@ -4176,7 +4223,11 @@ class SeestarQueuedStacker:
                                             if isinstance(aligned_data, np.memmap):
                                                 try:
                                                     aligned_data.flush()
-                                                    if hasattr(aligned_data, "_mmap") and aligned_data._mmap is not None:
+                                                    if (
+                                                        hasattr(aligned_data, "_mmap")
+                                                        and aligned_data._mmap
+                                                        is not None
+                                                    ):
                                                         aligned_data._mmap.close()
                                                     os.remove(aligned_data.filename)
                                                 except Exception:
@@ -4208,7 +4259,8 @@ class SeestarQueuedStacker:
 
                                 trigger = (
                                     getattr(self, "chunk_size", None)
-                                    if self.batch_size == 1 and getattr(self, "chunk_size", None)
+                                    if self.batch_size == 1
+                                    and getattr(self, "chunk_size", None)
                                     else self.batch_size
                                 )
                                 if (
@@ -4496,7 +4548,9 @@ class SeestarQueuedStacker:
                         )
                         # Utilisation d'un ProcessPoolExecutor pour ne pas bloquer
                         # le thread principal lorsque le lot est volumineux.
-                        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as driz_exec:
+                        with ProcessPoolExecutor(
+                            max_workers=1, mp_context=get_context("spawn")
+                        ) as driz_exec:
                             (
                                 batch_sci_path,
                                 batch_wht_paths,
@@ -5958,7 +6012,9 @@ class SeestarQueuedStacker:
         Version: V_ProcessFile_M81_Debug_UltimateLog_1
         """
         if threading.current_thread() is threading.main_thread():
-            logger.warning("_process_file executing on main thread - this may freeze the GUI")
+            logger.warning(
+                "_process_file executing on main thread - this may freeze the GUI"
+            )
         if align_on_disk is None:
             align_on_disk = getattr(self, "align_on_disk", False)
         file_name = os.path.basename(file_path)
@@ -6110,7 +6166,9 @@ class SeestarQueuedStacker:
                 mm_in.flush()
                 image_for_alignment_or_drizzle_input = mm_in
             else:
-                image_for_alignment_or_drizzle_input = prepared_img_after_initial_proc.copy()
+                image_for_alignment_or_drizzle_input = (
+                    prepared_img_after_initial_proc.copy()
+                )
             logger.debug(
                 f"     - (f) image_for_alignment_or_drizzle_input (copie de (d)) - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]"
             )
@@ -6558,7 +6616,11 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
                 del image_for_alignment_or_drizzle_input
-            if align_on_disk and tmp_align_in_path and os.path.exists(tmp_align_in_path):
+            if (
+                align_on_disk
+                and tmp_align_in_path
+                and os.path.exists(tmp_align_in_path)
+            ):
                 try:
                     os.remove(tmp_align_in_path)
                 except Exception:
@@ -6654,7 +6716,9 @@ class SeestarQueuedStacker:
                 try:
                     stacked_batch_data_np.flush()
                     stacked_batch_data_np._mmap.close()
-                    if hasattr(stacked_batch_data_np, "filename") and os.path.exists(stacked_batch_data_np.filename):
+                    if hasattr(stacked_batch_data_np, "filename") and os.path.exists(
+                        stacked_batch_data_np.filename
+                    ):
                         os.remove(stacked_batch_data_np.filename)
                 except Exception:
                     pass
@@ -6681,7 +6745,11 @@ class SeestarQueuedStacker:
                         os.remove(item[0])
                     except Exception:
                         pass
-                if len(item) > 4 and isinstance(item[4], str) and os.path.exists(item[4]):
+                if (
+                    len(item) > 4
+                    and isinstance(item[4], str)
+                    and os.path.exists(item[4])
+                ):
                     try:
                         os.remove(item[4])
                     except Exception:
@@ -8355,9 +8423,7 @@ class SeestarQueuedStacker:
             )
         total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
 
-        use_executor = (
-            self.max_stack_workers > 1 and total_bytes <= 32 * 1024 * 1024
-        )
+        use_executor = self.max_stack_workers > 1 and total_bytes <= 32 * 1024 * 1024
         if use_executor:
             with ProcessPoolExecutor(
                 max_workers=self.max_stack_workers,
@@ -8383,11 +8449,9 @@ class SeestarQueuedStacker:
         batch_id=0,
         use_memmap=False,
     ):
-
         """Combine les mini-stacks en bandes tout en limitant la RAM."""
 
         tile_h = int(os.getenv("SEESTAR_TILE_H", tile_h))
-
 
         if not isinstance(file_paths[0], (str, bytes, os.PathLike)):
             images_list = file_paths
@@ -8408,7 +8472,6 @@ class SeestarQueuedStacker:
                     raise RuntimeError(f"Cannot open {first_path}")
                 H, W = img0.shape[:2]
                 C = img0.shape[2] if img0.ndim == 3 else 1
-
 
         if use_memmap:
             tmp_path = os.path.join(
@@ -8439,7 +8502,6 @@ class SeestarQueuedStacker:
 
         wht = np.zeros((H, W), dtype=np.float32)
 
-
         # ``max_hq_mem`` is already stored in bytes. Do not multiply again
         # otherwise the computed group size becomes enormous, causing
         # ``_stack_winsorized_sigma`` to raise MemoryError.  Keep the value
@@ -8447,10 +8509,13 @@ class SeestarQueuedStacker:
         # configured limit.
         max_bytes = int(getattr(self, "max_hq_mem", 1))
 
-
         y0 = 0
         while y0 < H:
-            if use_memmap and psutil.virtual_memory().available < 100 * 1024 * 1024 and tile_h > 64:
+            if (
+                use_memmap
+                and psutil.virtual_memory().available < 100 * 1024 * 1024
+                and tile_h > 64
+            ):
                 tile_h = max(64, tile_h // 2)
             y1 = min(y0 + tile_h, H)
 
@@ -8468,8 +8533,9 @@ class SeestarQueuedStacker:
 
             mode = getattr(self, "stacking_mode", "mean")
 
-
-            total_items = len(file_paths) if file_paths is not None else len(images_list)
+            total_items = (
+                len(file_paths) if file_paths is not None else len(images_list)
+            )
             for s in range(0, total_items, group_size):
                 imgs = []
                 covs = []
@@ -8491,44 +8557,57 @@ class SeestarQueuedStacker:
                             sl = img[y0:y1].astype(np.float32)
                         if masks_list is not None:
                             m = masks_list[s + idx]
-                            mask_slice = m[y0:y1][..., None] if sl.ndim == 3 else m[y0:y1]
+                            mask_slice = (
+                                m[y0:y1][..., None] if sl.ndim == 3 else m[y0:y1]
+                            )
                             sl *= mask_slice
                         imgs.append(sl)
                         covs.append(cov[y0:y1])
                 else:
                     for idx, (img, cov) in enumerate(
-                        zip(images_list[s : s + group_size], weights[s : s + group_size])
+                        zip(
+                            images_list[s : s + group_size], weights[s : s + group_size]
+                        )
                     ):
                         sl = img[y0:y1]
                         if masks_list is not None:
                             m = masks_list[s + idx]
-                            mask_slice = m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1]
+                            mask_slice = (
+                                m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1]
+                            )
                             sl = sl * mask_slice
                         imgs.append(sl.astype(np.float32))
                         covs.append(cov[y0:y1])
 
-
-                if mode == "winsorized-sigma" or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip":
+                if (
+                    mode == "winsorized-sigma"
+                    or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
+                ):
                     stacked, _ = self._stack_winsorized_sigma(
                         imgs,
                         covs,
                         kappa=kappa,
                         winsor_limits=winsor_limits,
                     )
-                elif mode == "kappa-sigma" or getattr(self, "stack_reject_algo", "") == "kappa_sigma":
+                elif (
+                    mode == "kappa-sigma"
+                    or getattr(self, "stack_reject_algo", "") == "kappa_sigma"
+                ):
                     stacked, _ = _stack_kappa_sigma(
                         imgs,
                         covs,
                         sigma_low=self.stack_kappa_low,
                         sigma_high=self.stack_kappa_high,
                     )
-                elif mode == "linear_fit_clip" or getattr(self, "stack_reject_algo", "") == "linear_fit_clip":
+                elif (
+                    mode == "linear_fit_clip"
+                    or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
+                ):
                     stacked, _ = _stack_linear_fit_clip(imgs, covs)
                 elif mode == "median":
                     stacked, _ = _stack_median(imgs, covs)
                 else:
                     stacked, _ = _stack_mean(imgs, covs)
-
 
                 cov_sum = np.sum(covs, axis=0)
                 if use_memmap:
@@ -8543,7 +8622,6 @@ class SeestarQueuedStacker:
                     tile_wht += cov_sum
                 del stacked  # FIX MEMLEAK
                 gc.collect()  # FIX MEMLEAK
-
 
             if use_memmap:
                 np.divide(
@@ -8853,13 +8931,13 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-
                         ordered_img_paths,
-
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
                         self.winsor_limits,
-                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                        tile_h=getattr(
+                            getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                        ),
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
@@ -8895,13 +8973,13 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-
                         ordered_img_paths,
-
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
-                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                        tile_h=getattr(
+                            getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                        ),
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
@@ -8936,13 +9014,13 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-
                         ordered_img_paths,
-
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
-                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                        tile_h=getattr(
+                            getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                        ),
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
@@ -8972,13 +9050,13 @@ class SeestarQueuedStacker:
                     )
                     ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-
                         ordered_img_paths,
-
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
-                        tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                        tile_h=getattr(
+                            getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                        ),
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
@@ -9407,7 +9485,9 @@ class SeestarQueuedStacker:
                     final_output_weights_list,
                     kappa=self.stack_kappa_high,
                     winsor_limits=self.winsor_limits,
-                    tile_h=getattr(getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT),
+                    tile_h=getattr(
+                        getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                    ),
                     batch_id=current_batch_num,
                     use_memmap=use_memmap,
                 )
@@ -10087,7 +10167,9 @@ class SeestarQueuedStacker:
 
             # 2.2 Load coverage / weight map (or fallback)
             try:
-                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(np.float32, copy=False)
+                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                    np.float32, copy=False
+                )
                 np.nan_to_num(coverage, copy=False)
                 coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
@@ -10270,7 +10352,9 @@ class SeestarQueuedStacker:
                 wcs.pixel_shape = (w, h)
 
                 try:
-                    cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(np.float32, copy=False)
+                    cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(
+                        np.float32, copy=False
+                    )
                     np.nan_to_num(cov, copy=False)
                     cov *= make_radial_weight_map(h, w)
                 except Exception:
@@ -10394,7 +10478,9 @@ class SeestarQueuedStacker:
             self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
             return
         try:
-            cov = _fits_getdata_safe(wht_paths[0], memmap=True).astype(np.float32, copy=False)
+            cov = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                np.float32, copy=False
+            )
             np.nan_to_num(cov, copy=False)
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
@@ -10743,7 +10829,9 @@ class SeestarQueuedStacker:
                     )
 
                 if getattr(self, "batch_size", 0) == 1 and self.aligned_temp_paths:
-                    self.update_progress("   -> Streaming final stack (batch_size=1)...")
+                    self.update_progress(
+                        "   -> Streaming final stack (batch_size=1)..."
+                    )
                     try:
                         stacked_path = stack_disk_streaming(
                             self.aligned_temp_paths,
@@ -10757,7 +10845,9 @@ class SeestarQueuedStacker:
                         )
                         with _fits_open_safe(stacked_path, memmap=True) as hdul:
                             final_image_initial_raw = hdul[0].data.astype(np.float32)
-                        final_wht_map_for_postproc = np.ones(final_image_initial_raw.shape[:2], dtype=np.float32)
+                        final_wht_map_for_postproc = np.ones(
+                            final_image_initial_raw.shape[:2], dtype=np.float32
+                        )
                         os.remove(stacked_path)
                         for p in self.aligned_temp_paths:
                             try:
@@ -10768,10 +10858,14 @@ class SeestarQueuedStacker:
                         self._close_memmaps()
                         use_stream = True
                     except Exception as e_stream:
-                        self.update_progress(f"   -> Streaming stack failed: {e_stream}", "WARN")
+                        self.update_progress(
+                            f"   -> Streaming stack failed: {e_stream}", "WARN"
+                        )
                         use_stream = False
                     if not use_stream:
-                        final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
+                        final_sum = np.array(
+                            self.cumulative_sum_memmap, dtype=np.float64
+                        )
                         final_wht_map_2d_from_memmap = np.array(
                             self.cumulative_wht_memmap, dtype=np.float32
                         )
@@ -10780,7 +10874,7 @@ class SeestarQueuedStacker:
                     final_wht_map_2d_from_memmap = np.array(
                         self.cumulative_wht_memmap, dtype=np.float32
                     )
-                if 'final_sum' in locals():
+                if "final_sum" in locals():
                     self.update_progress(
                         f"    DEBUG QM: Classic Mode - final_sum (HWC, from memmap) - Shape: {final_sum.shape}, Range: [{np.nanmin(final_sum):.4g} - {np.nanmax(final_sum):.4g}]"
                     )
@@ -10794,7 +10888,7 @@ class SeestarQueuedStacker:
                         f"    DEBUG QM: Classic Mode - final_wht_map_2d_from_memmap (HW) - Shape: {final_wht_map_2d_from_memmap.shape}, Range: [{np.nanmin(final_wht_map_2d_from_memmap):.4g} - {np.nanmax(final_wht_map_2d_from_memmap):.4g}]"
                     )
 
-                if 'final_sum' in locals():
+                if "final_sum" in locals():
                     self._close_memmaps()
 
                     eps = 1e-9
@@ -11299,9 +11393,7 @@ class SeestarQueuedStacker:
             try:
                 # La documentation suggère que la suppression de la référence devrait suffire
                 # mais un appel explicite à close() existe sur certaines versions/objets
-                if (
-                    hasattr(self.cumulative_sum_memmap, "flush")
-                ):
+                if hasattr(self.cumulative_sum_memmap, "flush"):
                     self.cumulative_sum_memmap.flush()
                 if (
                     hasattr(self.cumulative_sum_memmap, "_mmap")
@@ -11326,9 +11418,7 @@ class SeestarQueuedStacker:
             and self.cumulative_wht_memmap is not None
         ):
             try:
-                if (
-                    hasattr(self.cumulative_wht_memmap, "flush")
-                ):
+                if hasattr(self.cumulative_wht_memmap, "flush"):
                     self.cumulative_wht_memmap.flush()
                 if (
                     hasattr(self.cumulative_wht_memmap, "_mmap")
@@ -12546,8 +12636,12 @@ class SeestarQueuedStacker:
         elif special_single_csv:
             self.use_batch_plan = True
             if ordered_files is None:
-                batches_from_plan = get_batches_from_stack_plan(plan_path, self.current_folder)
-                ordered_files = [os.path.abspath(fp) for batch in batches_from_plan for fp in batch]
+                batches_from_plan = get_batches_from_stack_plan(
+                    plan_path, self.current_folder
+                )
+                ordered_files = [
+                    os.path.abspath(fp) for batch in batches_from_plan for fp in batch
+                ]
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
@@ -12767,7 +12861,9 @@ class SeestarQueuedStacker:
     ###########################################################################
     #############################
 
-    def _save_aligned_temp(self, img: np.ndarray, mask: np.ndarray) -> tuple[str, str] | tuple[None, None]:
+    def _save_aligned_temp(
+        self, img: np.ndarray, mask: np.ndarray
+    ) -> tuple[str, str] | tuple[None, None]:
         """Save aligned image and mask to ``aligned_tmp`` directory.
 
         Returns
