@@ -8448,6 +8448,7 @@ class SeestarQueuedStacker:
         masks_list=None,
         batch_id=0,
         use_memmap=False,
+        quality_weights=None,
     ):
         """Combine les mini-stacks en bandes tout en limitant la RAM."""
 
@@ -8539,6 +8540,11 @@ class SeestarQueuedStacker:
             for s in range(0, total_items, group_size):
                 imgs = []
                 covs = []
+                q_slice = (
+                    quality_weights[s : s + group_size]
+                    if quality_weights is not None
+                    else None
+                )
                 if file_paths is not None:
                     for idx, (fp, cov) in enumerate(
                         zip(file_paths[s : s + group_size], weights[s : s + group_size])
@@ -8585,7 +8591,7 @@ class SeestarQueuedStacker:
                 ):
                     stacked, _ = self._stack_winsorized_sigma(
                         imgs,
-                        covs,
+                        q_slice,
                         kappa=kappa,
                         winsor_limits=winsor_limits,
                     )
@@ -8595,7 +8601,7 @@ class SeestarQueuedStacker:
                 ):
                     stacked, _ = _stack_kappa_sigma(
                         imgs,
-                        covs,
+                        q_slice,
                         sigma_low=self.stack_kappa_low,
                         sigma_high=self.stack_kappa_high,
                     )
@@ -8603,11 +8609,11 @@ class SeestarQueuedStacker:
                     mode == "linear_fit_clip"
                     or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
                 ):
-                    stacked, _ = _stack_linear_fit_clip(imgs, covs)
+                    stacked, _ = _stack_linear_fit_clip(imgs, q_slice)
                 elif mode == "median":
-                    stacked, _ = _stack_median(imgs, covs)
+                    stacked, _ = _stack_median(imgs, q_slice)
                 else:
-                    stacked, _ = _stack_mean(imgs, covs)
+                    stacked, _ = _stack_mean(imgs, q_slice)
 
                 cov_sum = np.sum(covs, axis=0)
                 if use_memmap:
@@ -8941,6 +8947,7 @@ class SeestarQueuedStacker:
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
+                        quality_weights=quality_weights,
                     )
                 else:
                     images_for_stack = [
@@ -8983,6 +8990,7 @@ class SeestarQueuedStacker:
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
+                        quality_weights=quality_weights,
                     )
                 else:
                     images_for_stack = [
@@ -9024,6 +9032,7 @@ class SeestarQueuedStacker:
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
+                        quality_weights=quality_weights,
                     )
                 else:
                     images_for_stack = [
@@ -9060,6 +9069,7 @@ class SeestarQueuedStacker:
                         masks_list=coverage_maps_list,
                         batch_id=current_batch_num,
                         use_memmap=use_memmap,
+                        quality_weights=quality_weights,
                     )
                 else:
                     images_for_stack = [
