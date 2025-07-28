@@ -42,6 +42,12 @@ from multiprocessing import get_context
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue  # Essentiel pour la classe
+
+
+class GuiEventQueue(Queue):
+    """Queue for scheduling GUI updates from worker threads."""
+
+    pass
 import csv
 
 # --- Standard Library Imports ---
@@ -731,6 +737,7 @@ class SeestarQueuedStacker:
             "progress_callback",
             "preview_callback",
             "queue",
+            "gui_event_queue",
             "folders_lock",
             "processing_thread",
             "gui",
@@ -1089,6 +1096,7 @@ class SeestarQueuedStacker:
         self.progress_callback = None
         self.preview_callback = None
         self.queue = Queue()
+        self.gui_event_queue = GuiEventQueue()
         self.folders_lock = threading.Lock()
         self.aligned_counter = 0
         self.counter_lock = threading.Lock()
@@ -1808,10 +1816,15 @@ class SeestarQueuedStacker:
                 return
         _QM_LAST_GUI_PUSH = now
 
-        # 2.b envoi protégé
+        # 2.b envoi protégé via la file dévénements GUI pour garantir le thread-safety
         if self.progress_callback:
             try:
-                self.progress_callback(message, progress)
+                if hasattr(self, "gui_event_queue") and self.gui_event_queue is not None:
+                    self.gui_event_queue.put(
+                        lambda m=message, p=progress: self.progress_callback(m, p)
+                    )
+                else:
+                    self.progress_callback(message, progress)
                 return
             except Exception as e:
                 logger.debug(f"Error in progress callback: {e}")

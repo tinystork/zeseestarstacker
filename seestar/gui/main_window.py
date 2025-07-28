@@ -32,6 +32,7 @@ import re
 from pathlib import Path
 from tkinter import font as tkFont
 from tkinter import messagebox, ttk
+from queue import Empty
 
 import numpy as np
 from astropy.io import fits
@@ -376,8 +377,18 @@ class SeestarStackerGUI:
             )
         self.logger.info("--------------------")
 
-        self.queued_stacker.set_progress_callback(self.update_progress_gui)
-        self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)
+        self.gui_event_queue = self.queued_stacker.gui_event_queue
+        self.queued_stacker.set_progress_callback(
+            lambda m, p=None: self.gui_event_queue.put(
+                lambda mm=m, pp=p: self.update_progress_gui(mm, pp)
+            )
+        )
+        self.queued_stacker.set_preview_callback(
+            lambda *a, **k: self.gui_event_queue.put(
+                lambda aa=a, kk=k: self.update_preview_from_stacker(*aa, **kk)
+            )
+        )
+        self._poll_gui_events()
         self.logger.info("DEBUG (GUI __init__): Callbacks backend connectés.")
 
         self.root.title(f"{self.tr('title')}  –  {self.app_version}")
@@ -4155,7 +4166,10 @@ class SeestarStackerGUI:
                     worker_thread = getattr(self.queued_stacker, "processing_thread", None)
                     if worker_thread and worker_thread.is_alive():
                         worker_thread.join(timeout=0.5)
-                    self.root.after(0, self._processing_finished)
+                    if hasattr(self, 'gui_event_queue'):
+                        self.gui_event_queue.put(self._processing_finished)
+                    else:
+                        self.root.after(0, self._processing_finished)
                     break
 
                 q_stacker = self.queued_stacker
@@ -4197,17 +4211,23 @@ class SeestarStackerGUI:
                     except tk.TclError:
                         pass
 
-                self.root.after(0, _gui_update)
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(_gui_update)
+                else:
+                    self.root.after(0, _gui_update)
 
                 time.sleep(0.5)
 
             except Exception as e:
                 print(f"Error in GUI progress tracker thread loop: {e}")
                 traceback.print_exc(limit=2)
-                try:
-                    self.root.after(0, self._processing_finished)
-                except tk.TclError:
-                    pass
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(self._processing_finished)
+                else:
+                    try:
+                        self.root.after(0, self._processing_finished)
+                    except tk.TclError:
+                        pass
                 break
 
         # print("DEBUG: GUI Progress Tracker Thread Exiting.") # Keep disabled
@@ -4240,70 +4260,29 @@ class SeestarStackerGUI:
     def update_additional_folders_display(self):
         """Met à jour l'affichage du nombre de dossiers supplémentaires."""
         count = 0
-        # --- AJOUT DEBUG ---
-        print("-" * 20)
-        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
-        if hasattr(self, "queued_stacker"):
-            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
-            # VÉRIFICATION CRUCIALE :
-            has_lock = hasattr(self.queued_stacker, "folders_lock")
-            print(f"  -> self.queued_stacker a l'attribut 'folders_lock'? {has_lock}")
-            if not has_lock:
-                print("  -> !!! ATTRIBUT 'folders_lock' MANQUANT SUR L'INSTANCE !!!")
-                print(f"  -> Attributs présents: {dir(self.queued_stacker)}")  # Lister ce qui est présent
-            # --- FIN AJOUT DEBUG ---
-
-        print("-" * 20)
-        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
-        if hasattr(self, "queued_stacker"):
-            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
-            print(f"  -> Attributs de self.queued_stacker: {dir(self.queued_stacker)}")  # AFFICHE TOUS LES ATTRIBUTS
-            has_is_running_method = hasattr(self.queued_stacker, "is_running")
-            print(f"  -> self.queued_stacker a l'attribut 'is_running'? {has_is_running_method}")
-            if has_is_running_method:
-                print(f"  -> Type de self.queued_stacker.is_running: {type(self.queued_stacker.is_running)}")
-
-            # Condition originale pour lire depuis le backend
-            if self.processing and self.queued_stacker.is_running():  # Ajout check is_running pour sécurité
+        qs = getattr(self, "queued_stacker", None)
+        if self.processing and qs and qs.is_running():
+            lock = getattr(qs, "folders_lock", None)
+            if lock and lock.acquire(blocking=False):
                 try:
-                    # L'accès problématique
-                    with self.queued_stacker.folders_lock:
-                        count = len(self.queued_stacker.additional_folders)
-                    print(f"  -> Lecture backend (processing): count={count}")  # Si ça passe le 'with'
-                except AttributeError as ae:
-                    print(f"  -> ERREUR ATTRIBUT DANS LE 'WITH': {ae}")  # Log spécifique si ça plante DANS le with
-                    traceback.print_exc(limit=1)  # Afficher où ça plante
-                    # Fallback pour ne pas planter l'UI
-                    count = -99  # Valeur pour indiquer une erreur
-                except Exception as e:
-                    print(f"  -> ERREUR PENDANT lecture backend: {e}")
-                    traceback.print_exc(limit=1)
-                    count = -98
+                    count = len(qs.additional_folders)
+                finally:
+                    lock.release()
             else:
-                # Lire depuis la liste GUI (traitement non actif)
-                count = len(self.additional_folders_to_process)
-                print(f"  -> Lecture GUI (non processing): count={count}")
+                return
         else:
-            print("  -> self.queued_stacker n'existe PAS.")
-            count = len(self.additional_folders_to_process)  # Fallback liste GUI
-        print("-" * 20)
+            count = len(self.additional_folders_to_process)
 
-        # Mise à jour de la variable Tkinter (inchangé)
         try:
             if count == 0:
                 self.additional_folders_var.set(self.tr("no_additional_folders"))
             elif count == 1:
                 self.additional_folders_var.set(self.tr("1 additional folder"))
-            # Gérer les comptes d'erreur négatifs pour le debug
-            elif count < 0:
-                self.additional_folders_var.set(f"ERR ({count})")
             else:
                 self.additional_folders_var.set(
                     self.tr("{count} additional folders", default="{count} add. folders").format(count=count)
                 )
         except tk.TclError:
-            pass
-        except AttributeError:
             pass
 
     # --- FIN MÉTHODE MODIFIÉE ---
@@ -4329,14 +4308,17 @@ class SeestarStackerGUI:
                     self.progress_manager.reset()
                     self.progress_manager.start_timer()
 
-            self.root.after(0, _setup_start_gui)
+            if hasattr(self, 'gui_event_queue'):
+                self.gui_event_queue.put(_setup_start_gui)
+            else:
+                self.root.after(0, _setup_start_gui)
 
             def _gui_update(progress, eta, processed):
                 try:
                     if hasattr(self, "progress_manager") and self.progress_manager:
                         self.progress_manager.update_progress(f"{progress:.1f}%", progress)
-                        if hasattr(self.progress_manager, "set_remaining"):
-                            self.progress_manager.set_remaining(eta)
+                    if hasattr(self.progress_manager, "set_remaining"):
+                        self.progress_manager.set_remaining(eta)
                     default_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
                     self.aligned_files_var.set(default_fmt.format(count=processed))
                     remaining = max(0, total_files - processed)
@@ -4481,9 +4463,19 @@ class SeestarStackerGUI:
                             processed = last_processed
                         last_pct = pct
                         last_processed = processed
-                        self.root.after(0, _gui_update, pct, eta, processed)
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda p=pct, e=eta, pr=processed: _gui_update(p, e, pr)
+                            )
+                        else:
+                            self.root.after(0, _gui_update, pct, eta, processed)
                     else:
-                        self.root.after(0, self.update_progress_gui, text, None)
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda t=text: self.update_progress_gui(t, None)
+                            )
+                        else:
+                            self.root.after(0, self.update_progress_gui, text, None)
 
                 retcode = proc.wait()
                 log_file.close()
@@ -4494,9 +4486,17 @@ class SeestarStackerGUI:
                     log_file.close()
                 except Exception:
                     pass
-                self.root.after(0, self.update_progress_gui, f"Error running boring_stack: {e}", None)
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(
+                        lambda err=e: self.update_progress_gui(f"Error running boring_stack: {err}", None)
+                    )
+                else:
+                    self.root.after(0, self.update_progress_gui, f"Error running boring_stack: {e}", None)
             finally:
-                self.root.after(0, _finish, retcode, output_lines)
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(lambda r=retcode, o=output_lines: _finish(r, o))
+                else:
+                    self.root.after(0, _finish, retcode, output_lines)
 
         threading.Thread(target=_worker, daemon=True, name="BoringStackWorker").start()
 
@@ -4686,6 +4686,24 @@ class SeestarStackerGUI:
                 pass
         try:
             self._after_id_resize = self.root.after(300, self._refresh_preview_on_resize)
+        except tk.TclError:
+            pass
+
+    def _poll_gui_events(self):
+        """Process queued GUI events from worker threads."""
+        if hasattr(self, "gui_event_queue"):
+            try:
+                while True:
+                    cb = self.gui_event_queue.get_nowait()
+                    try:
+                        if callable(cb):
+                            cb()
+                    finally:
+                        self.gui_event_queue.task_done()
+            except Empty:
+                pass
+        try:
+            self.root.after(50, self._poll_gui_events)
         except tk.TclError:
             pass
 
@@ -6214,14 +6232,157 @@ class SeestarStackerGUI:
             self._update_low_wht_mask_options_state()  # S'assurer d'appeler ceci aussi
         print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        # Heavy preparation is now performed inside the worker thread to keep the
-        # GUI responsive.
+        # Heavy work is delegated to a starter thread to keep Tk responsive.
 
-        def _backend_start_worker():
+        def _starter():
             try:
+                self.settings.update_from_ui(self)
+                validation_messages = self.settings.validate_settings()
                 special_single = self._prepare_single_batch_if_needed()
+                try:
+                    self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
+                except Exception:
+                    self.queued_stacker.align_on_disk = False
+                if validation_messages:
+                    def _apply_valid():
+                        self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
+                        for msg in validation_messages:
+                            self.update_progress_gui(f"  - {msg}", None)
+                        self.settings.apply_to_ui(self)
+                        self._update_drizzle_options_state()
+                        self._update_final_scnr_options_state()
+                        self._update_photutils_bn_options_state()
+                        self._update_feathering_options_state()
+                        self._update_low_wht_mask_options_state()
+                    if hasattr(self, "gui_event_queue"):
+                        self.gui_event_queue.put(_apply_valid)
+                    else:
+                        self.root.after(0, _apply_valid)
+                backend_kwargs = {
+                    "input_dir": self.settings.input_folder,
+                    "output_dir": self.settings.output_folder,
+                    "temp_folder": self.settings.temp_folder,
+                    "output_filename": self.settings.output_filename,
+                    "reference_path_ui": self.settings.reference_image_path,
+                    "initial_additional_folders": folders_to_pass_to_backend,
+                    "stacking_mode": self.settings.stacking_mode,
+                    "kappa": self.settings.kappa,
+                    "stack_kappa_low": self.settings.stack_kappa_low,
+                    "stack_kappa_high": self.settings.stack_kappa_high,
+                    "winsor_limits": (
+                        tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
+                        if isinstance(self.settings.stack_winsor_limits, str)
+                        else (0.05, 0.05)
+                    ),
+                    "normalize_method": self.settings.stack_norm_method,
+                    "weighting_method": self.settings.stack_weight_method,
+                    "batch_size": self.settings.batch_size,
+                    "ordered_files": getattr(self.settings, "order_file_list", None),
+                    "correct_hot_pixels": self.settings.correct_hot_pixels,
+                    "hot_pixel_threshold": self.settings.hot_pixel_threshold,
+                    "neighborhood_size": self.settings.neighborhood_size,
+                    "bayer_pattern": self.settings.bayer_pattern,
+                    "perform_cleanup": self.settings.cleanup_temp,
+                    "use_weighting": self.settings.stack_weight_method != "none",
+                    "weight_by_snr": self.settings.weight_by_snr,
+                    "weight_by_stars": self.settings.weight_by_stars,
+                    "snr_exp": self.settings.snr_exponent,
+                    "stars_exp": self.settings.stars_exponent,
+                    "min_w": self.settings.min_weight,
+                    "use_drizzle": self.settings.use_drizzle,
+                    "drizzle_scale": float(self.settings.drizzle_scale),
+                    "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
+                    "drizzle_mode": self.settings.drizzle_mode,
+                    "drizzle_kernel": self.settings.drizzle_kernel,
+                    "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+                    "apply_chroma_correction": self.settings.apply_chroma_correction,
+                    "apply_final_scnr": self.settings.apply_final_scnr,
+                    "final_scnr_target_channel": self.settings.final_scnr_target_channel,
+                    "final_scnr_amount": self.settings.final_scnr_amount,
+                    "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
+                    "bn_grid_size_str": self.settings.bn_grid_size_str,
+                    "bn_perc_low": self.settings.bn_perc_low,
+                    "bn_perc_high": self.settings.bn_perc_high,
+                    "bn_std_factor": self.settings.bn_std_factor,
+                    "bn_min_gain": self.settings.bn_min_gain,
+                    "bn_max_gain": self.settings.bn_max_gain,
+                    "cb_border_size": self.settings.cb_border_size,
+                    "cb_blur_radius": self.settings.cb_blur_radius,
+                    "cb_min_b_factor": self.settings.cb_min_b_factor,
+                    "cb_max_b_factor": self.settings.cb_max_b_factor,
+                    "apply_master_tile_crop": self.settings.apply_master_tile_crop,
+                    "master_tile_crop_percent": self.settings.master_tile_crop_percent,
+                    "final_edge_crop_percent": self.settings.final_edge_crop_percent,
+                    "apply_photutils_bn": self.settings.apply_photutils_bn,
+                    "photutils_bn_box_size": self.settings.photutils_bn_box_size,
+                    "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
+                    "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
+                    "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
+                    "apply_feathering": self.settings.apply_feathering,
+                    "feather_blur_px": self.settings.feather_blur_px,
+                    "apply_batch_feathering": self.settings.apply_batch_feathering,
+                    "apply_low_wht_mask": self.settings.apply_low_wht_mask,
+                    "low_wht_percentile": self.settings.low_wht_percentile,
+                    "low_wht_soften_px": self.settings.low_wht_soften_px,
+                    "is_mosaic_run": self.settings.mosaic_mode_active,
+                    "api_key": self.settings.astrometry_api_key,
+                    "mosaic_settings": self.settings.mosaic_settings,
+                    "astap_path": self.settings.astap_path,
+                    "astap_data_dir": self.settings.astap_data_dir,
+                    "local_ansvr_path": self.settings.local_ansvr_path,
+                    "local_solver_preference": self.settings.local_solver_preference,
+                    "astap_search_radius": self.settings.astap_search_radius,
+                    "astap_downsample": self.settings.astap_downsample,
+                    "astap_sensitivity": self.settings.astap_sensitivity,
+                    "save_as_float32": self.settings.save_final_as_float32,
+                    "preserve_linear_output": self.settings.preserve_linear_output,
+                    "reproject_between_batches": self.settings.reproject_between_batches,
+                    "reproject_coadd_final": self.settings.reproject_coadd_final,
+                }
+
+                if self.settings.batch_size == 1 and not special_single:
+                    backend_kwargs["chunk_size"] = self._get_auto_chunk_size()
+
+                def _start_backend():
+                    if special_single:
+                        self.batch_size.set(self.settings.batch_size)
+                        self.stacking_mode.set(self.settings.stacking_mode)
+                        self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+                        self.use_drizzle_var.set(self.settings.use_drizzle)
+
+                    try:
+                        started = self.queued_stacker.start_processing(**backend_kwargs)
+                    except Exception as e:
+                        started = False
+                        print(f"Backend start failed: {e}")
+
+                    self._final_stretch_set_by_processing_finished = False
+                    if started:
+                        if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                            self.stop_button.config(state=tk.NORMAL)
+                        self.thread = threading.Thread(
+                            target=self._track_processing_progress,
+                            daemon=True,
+                            name="GUI_ProgressTracker",
+                        )
+                        self.thread.start()
+                    else:
+                        if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                            self.start_button.config(state=tk.NORMAL)
+                        self.processing = False
+                        self.update_progress_gui(
+                            "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
+                            None,
+                        )
+                        self._set_parameter_widgets_state(tk.NORMAL)
+
+                if hasattr(self, "gui_event_queue"):
+                    self.gui_event_queue.put(_start_backend)
+                else:
+                    self.root.after(0, _start_backend)
+
             except FileNotFoundError as fnfe:
-                def _prep_error(fnfe=fnfe):
+                def _prep_error_inner(fnfe=fnfe):
                     messagebox.showerror(
                         self.tr("error"),
                         self.tr(
@@ -6235,144 +6396,13 @@ class SeestarStackerGUI:
                         self.stop_button.config(state=tk.DISABLED)
                     self.processing = False
                     self._set_parameter_widgets_state(tk.NORMAL)
-                self.root.after(0, _prep_error)
-                return
 
-            if special_single:
-                def _apply_single_settings():
-                    self.batch_size.set(self.settings.batch_size)
-                    self.stacking_mode.set(self.settings.stacking_mode)
-                    self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
-                    self.use_drizzle_var.set(self.settings.use_drizzle)
-                self.root.after(0, _apply_single_settings)
-
-            # Automatically enable disk-backed alignment when batching
-            try:
-                self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
-            except Exception:
-                self.queued_stacker.align_on_disk = False
-
-            # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
-            print(
-                "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings..."
-            )
-            start_proc_kwargs = {
-                "input_dir": self.settings.input_folder,
-                "output_dir": self.settings.output_folder,
-                "temp_folder": self.settings.temp_folder,
-                "output_filename": self.settings.output_filename,
-                "reference_path_ui": self.settings.reference_image_path,
-                "initial_additional_folders": folders_to_pass_to_backend,
-                "stacking_mode": self.settings.stacking_mode,
-                "kappa": self.settings.kappa,
-                "stack_kappa_low": self.settings.stack_kappa_low,
-                "stack_kappa_high": self.settings.stack_kappa_high,
-                "winsor_limits": (
-                    tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
-                    if isinstance(self.settings.stack_winsor_limits, str)
-                    else (0.05, 0.05)
-                ),
-                "normalize_method": self.settings.stack_norm_method,
-                "weighting_method": self.settings.stack_weight_method,
-                "batch_size": self.settings.batch_size,
-                "ordered_files": getattr(self.settings, "order_file_list", None),
-                "correct_hot_pixels": self.settings.correct_hot_pixels,
-                "hot_pixel_threshold": self.settings.hot_pixel_threshold,
-                "neighborhood_size": self.settings.neighborhood_size,
-                "bayer_pattern": self.settings.bayer_pattern,
-                "perform_cleanup": self.settings.cleanup_temp,
-                "use_weighting": self.settings.stack_weight_method != "none",
-                "weight_by_snr": self.settings.weight_by_snr,
-                "weight_by_stars": self.settings.weight_by_stars,
-                "snr_exp": self.settings.snr_exponent,
-                "stars_exp": self.settings.stars_exponent,
-                "min_w": self.settings.min_weight,
-                "use_drizzle": self.settings.use_drizzle,
-                "drizzle_scale": float(self.settings.drizzle_scale),
-                "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
-                "drizzle_mode": self.settings.drizzle_mode,
-                "drizzle_kernel": self.settings.drizzle_kernel,
-                "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-                "apply_chroma_correction": self.settings.apply_chroma_correction,
-                "apply_final_scnr": self.settings.apply_final_scnr,
-                "final_scnr_target_channel": self.settings.final_scnr_target_channel,
-                "final_scnr_amount": self.settings.final_scnr_amount,
-                "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
-                "bn_grid_size_str": self.settings.bn_grid_size_str,
-                "bn_perc_low": self.settings.bn_perc_low,
-                "bn_perc_high": self.settings.bn_perc_high,
-                "bn_std_factor": self.settings.bn_std_factor,
-                "bn_min_gain": self.settings.bn_min_gain,
-                "bn_max_gain": self.settings.bn_max_gain,
-                "cb_border_size": self.settings.cb_border_size,
-                "cb_blur_radius": self.settings.cb_blur_radius,
-                "cb_min_b_factor": self.settings.cb_min_b_factor,
-                "cb_max_b_factor": self.settings.cb_max_b_factor,
-                "apply_master_tile_crop": self.settings.apply_master_tile_crop,
-                "master_tile_crop_percent": self.settings.master_tile_crop_percent,
-                "final_edge_crop_percent": self.settings.final_edge_crop_percent,
-                "apply_photutils_bn": self.settings.apply_photutils_bn,
-                "photutils_bn_box_size": self.settings.photutils_bn_box_size,
-                "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
-                "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
-                "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
-                "apply_feathering": self.settings.apply_feathering,
-                "feather_blur_px": self.settings.feather_blur_px,
-                "apply_batch_feathering": self.settings.apply_batch_feathering,
-                "apply_low_wht_mask": self.settings.apply_low_wht_mask,
-                "low_wht_percentile": self.settings.low_wht_percentile,
-                "low_wht_soften_px": self.settings.low_wht_soften_px,
-                "is_mosaic_run": self.settings.mosaic_mode_active,
-                "api_key": self.settings.astrometry_api_key,
-                "mosaic_settings": self.settings.mosaic_settings,
-                "astap_path": self.settings.astap_path,
-                "astap_data_dir": self.settings.astap_data_dir,
-                "local_ansvr_path": self.settings.local_ansvr_path,
-                "local_solver_preference": self.settings.local_solver_preference,
-                "astap_search_radius": self.settings.astap_search_radius,
-                "astap_downsample": self.settings.astap_downsample,
-                "astap_sensitivity": self.settings.astap_sensitivity,
-                "save_as_float32": self.settings.save_final_as_float32,
-                "preserve_linear_output": self.settings.preserve_linear_output,
-                "reproject_between_batches": self.settings.reproject_between_batches,
-                "reproject_coadd_final": self.settings.reproject_coadd_final,
-            }
-
-            if self.settings.batch_size == 1 and not special_single:
-                start_proc_kwargs["chunk_size"] = self._get_auto_chunk_size()
-
-            processing_started = self.queued_stacker.start_processing(**start_proc_kwargs)
-
-            def _on_finish():
-                self._final_stretch_set_by_processing_finished = False
-                if processing_started:
-                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                        self.stop_button.config(state=tk.NORMAL)
-                    self.thread = threading.Thread(
-                        target=self._track_processing_progress,
-                        daemon=True,
-                        name="GUI_ProgressTracker",
-                    )
-                    self.thread.start()
+                if hasattr(self, "gui_event_queue"):
+                    self.gui_event_queue.put(_prep_error_inner)
                 else:
-                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                        self.start_button.config(state=tk.NORMAL)
-                    self.processing = False
-                    self.update_progress_gui(
-                        "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
-                        None,
-                    )
-                    self._set_parameter_widgets_state(tk.NORMAL)
-            try:
-                self.root.after(0, _on_finish)
-            except tk.TclError:
-                pass
+                    self.root.after(0, _prep_error_inner)
 
-        threading.Thread(
-            target=_backend_start_worker,
-            daemon=True,
-            name="BackendStarter",
-        ).start()
+        threading.Thread(target=_starter, daemon=True, name="BackendStarter").start()
 
 
 ##############################################################################################################################################
