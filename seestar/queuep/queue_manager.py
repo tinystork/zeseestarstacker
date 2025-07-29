@@ -10864,6 +10864,8 @@ class SeestarQueuedStacker:
                         final_wht_map_for_postproc = np.ones(
                             final_image_initial_raw.shape[:2], dtype=np.float32
                         )
+                        if self.enable_preview and self.preview_callback:
+                            self.preview_callback(final_image_initial_raw)
                         os.remove(stacked_path)
                         for p in self.aligned_temp_paths:
                             try:
