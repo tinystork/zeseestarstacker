@@ -10851,21 +10851,14 @@ class SeestarQueuedStacker:
                             mode=self.stacking_mode,
                         )
                         with _fits_open_safe(stacked_path, memmap=True) as hdul:
-                            # 1. On lit l’image résultat streaming
-                            final_image_initial_raw = np.moveaxis(
-                                hdul[0].data.astype(np.float32), 0, -1
-                            )
-                        final_wht_map_for_postproc = np.ones(
-                            final_image_initial_raw.shape[:2], dtype=np.float32
-                        )
-                        from seestar.core.image_processing import load_and_validate_fits
-
-                        data_np, header = load_and_validate_fits(stacked_path)
-                        self._combine_batch_result(
-                            data_np,
-                            header,
-                            final_wht_map_for_postproc,
-                        )
+                            final_np = hdul[0].data.astype(np.float32)
+                            final_hdr = hdul[0].header
+                        final_wht = np.ones(final_np.shape[:2], dtype=np.float32)
+                        self._combine_batch_result(final_np, final_hdr, final_wht)
+                        if hasattr(self.cumulative_sum_memmap, "flush"):
+                            self.cumulative_sum_memmap.flush()
+                            self.cumulative_wht_memmap.flush()
+                        use_stream = False
                         os.remove(stacked_path)
                         for p in self.aligned_temp_paths:
                             try:
