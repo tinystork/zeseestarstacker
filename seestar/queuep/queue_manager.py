@@ -8929,6 +8929,12 @@ class SeestarQueuedStacker:
                 # allocating the full stack in RAM.
                 use_tile_mode = True
 
+            tile_inputs = (
+                image_data_list
+                if getattr(self, "batch_size", 0) == 1
+                else list(self._current_batch_paths)
+            )
+
             if (
                 mode == "winsorized-sigma"
                 or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
@@ -8937,9 +8943,8 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        ordered_img_paths,
+                        tile_inputs,
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
                         self.winsor_limits,
@@ -8981,9 +8986,8 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        ordered_img_paths,
+                        tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -9023,9 +9027,8 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        ordered_img_paths,
+                        tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
@@ -9060,9 +9063,8 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    ordered_img_paths = list(self._current_batch_paths)
                     stacked_batch_data_np = self._combine_hq_by_tiles(
-                        ordered_img_paths,
+                        tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
                         self.winsor_limits,
