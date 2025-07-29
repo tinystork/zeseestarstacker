@@ -10858,7 +10858,9 @@ class SeestarQueuedStacker:
                             winsor_limits=self.winsor_limits,
                         )
                         with _fits_open_safe(stacked_path, memmap=True) as hdul:
-                            final_image_initial_raw = hdul[0].data.astype(np.float32)
+                            final_image_initial_raw = np.moveaxis(
+                                hdul[0].data.astype(np.float32), 0, -1
+                            )
                         final_wht_map_for_postproc = np.ones(
                             final_image_initial_raw.shape[:2], dtype=np.float32
                         )
@@ -10909,12 +10911,10 @@ class SeestarQueuedStacker:
                     final_wht_map_for_postproc = np.maximum(
                         final_wht_map_2d_from_memmap, 0.0
                     )
-                    wht_safe = np.maximum(final_wht_map_2d_from_memmap, eps)[
-                        ..., np.newaxis
-                    ]
-
                     with np.errstate(divide="ignore", invalid="ignore"):
-                        final_image_initial_raw = final_sum / wht_safe
+                        final_image_initial_raw = final_sum / np.maximum(
+                            final_wht_map_2d_from_memmap[..., None], eps
+                        )
                     final_image_initial_raw = np.nan_to_num(
                         final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0
                     )
