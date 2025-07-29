@@ -10858,7 +10858,9 @@ class SeestarQueuedStacker:
                             winsor_limits=self.winsor_limits,
                         )
                         with _fits_open_safe(stacked_path, memmap=True) as hdul:
-                            final_image_initial_raw = hdul[0].data.astype(np.float32)
+                            final_image_initial_raw = np.moveaxis(
+                                hdul[0].data.astype(np.float32), 0, -1
+                            )
                         final_wht_map_for_postproc = np.ones(
                             final_image_initial_raw.shape[:2], dtype=np.float32
                         )
