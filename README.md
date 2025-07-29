@@ -410,6 +410,11 @@ chunks of N images so incremental stacking works without a `stack_plan.csv`.
 If a `stack_plan.csv` is present, it will be ignored unless `--chunk-size` is
 omitted.
 
+When using `--batch-size 1` together with `--align-on-disk`, aligned frames are
+written to an `aligned_tmp` directory and reused when the final stack is
+assembled. These temporary files are cleaned up automatically once processing
+finishes.
+
 ### Threaded Boring Stack from the GUI
 
 Set **Batch Size** to `1` or tick the *Threaded Boring Stack* checkbox in the

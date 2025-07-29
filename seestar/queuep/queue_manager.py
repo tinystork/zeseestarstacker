@@ -6739,21 +6739,22 @@ class SeestarQueuedStacker:
 
         # Clean up any temporary aligned files used for this batch
         if getattr(self, "batch_size", 1) == 1:
-            for item in batch_items_to_stack:
-                if isinstance(item[0], str) and os.path.exists(item[0]):
-                    try:
-                        os.remove(item[0])
-                    except Exception:
-                        pass
-                if (
-                    len(item) > 4
-                    and isinstance(item[4], str)
-                    and os.path.exists(item[4])
-                ):
-                    try:
-                        os.remove(item[4])
-                    except Exception:
-                        pass
+            if not self.align_on_disk:
+                for item in batch_items_to_stack:
+                    if isinstance(item[0], str) and os.path.exists(item[0]):
+                        try:
+                            os.remove(item[0])
+                        except Exception:
+                            pass
+                    if (
+                        len(item) > 4
+                        and isinstance(item[4], str)
+                        and os.path.exists(item[4])
+                    ):
+                        try:
+                            os.remove(item[4])
+                        except Exception:
+                            pass
 
     def _flush_current_batch(
         self,
