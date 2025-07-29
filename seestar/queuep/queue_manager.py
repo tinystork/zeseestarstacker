@@ -12667,7 +12667,6 @@ class SeestarQueuedStacker:
                 self.files_in_queue += 1
                 self.all_input_filepaths.append(abs_fp)
             batch_len = len(ordered_files)
-            self.batch_size = batch_len if batch_len > 0 else 1
             self.total_batches_estimated = 1
             self.update_progress(
                 f"📋 {self.files_in_queue} fichiers initiaux ajoutés depuis stack_plan.csv"
