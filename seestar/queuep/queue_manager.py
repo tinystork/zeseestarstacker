@@ -10846,9 +10846,27 @@ class SeestarQueuedStacker:
 
                 if getattr(self, "batch_size", 0) == 1:
                     if self.aligned_temp_paths:
-                        self.update_progress(
-                            "   -> Streaming final stack skipped (batch_size=1, using memmap)"
+                        stacked_path = stack_disk_streaming(
+                            self.aligned_temp_paths,
+                            mode=self.stacking_mode,
                         )
+                        with _fits_open_safe(stacked_path, memmap=True) as hdul:
+                            # 1. On lit l’image résultat streaming
+                            final_image_initial_raw = np.moveaxis(
+                                hdul[0].data.astype(np.float32), 0, -1
+                            )
+                        final_wht_map_for_postproc = np.ones(
+                            final_image_initial_raw.shape[:2], dtype=np.float32
+                        )
+                        from seestar.core.image_processing import load_and_validate_fits
+
+                        data_np, header = load_and_validate_fits(stacked_path)
+                        self._combine_batch_result(
+                            data_np,
+                            header,
+                            final_wht_map_for_postproc,
+                        )
+                        os.remove(stacked_path)
                         for p in self.aligned_temp_paths:
                             try:
                                 os.remove(p)
