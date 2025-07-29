@@ -10842,51 +10842,21 @@ class SeestarQueuedStacker:
                         "Accumulateurs memmap SUM/WHT non disponibles pour stacking classique."
                     )
 
-                if getattr(self, "batch_size", 0) == 1 and self.aligned_temp_paths:
-                    self.update_progress(
-                        "   -> Streaming final stack (batch_size=1)..."
-                    )
-                    try:
-                        stacked_path = stack_disk_streaming(
-                            self.aligned_temp_paths,
-                            mode=self.stacking_mode,
-                            weights=[1.0] * len(self.aligned_temp_paths),
-                            chunk_rows=0,
-                            kappa=self.kappa,
-                            sigma_low=self.stack_kappa_low,
-                            sigma_high=self.stack_kappa_high,
-                            winsor_limits=self.winsor_limits,
+                if getattr(self, "batch_size", 0) == 1:
+                    if self.aligned_temp_paths:
+                        self.update_progress(
+                            "   -> Streaming final stack skipped (batch_size=1, using memmap)"
                         )
-                        with _fits_open_safe(stacked_path, memmap=True) as hdul:
-                            final_image_initial_raw = np.moveaxis(
-                                hdul[0].data.astype(np.float32), 0, -1
-                            )
-                        final_wht_map_for_postproc = np.ones(
-                            final_image_initial_raw.shape[:2], dtype=np.float32
-                        )
-                        if self.enable_preview and self.preview_callback:
-                            self.preview_callback(final_image_initial_raw)
-                        os.remove(stacked_path)
                         for p in self.aligned_temp_paths:
                             try:
                                 os.remove(p)
                             except Exception:
                                 pass
                         self.aligned_temp_paths = []
-                        self._close_memmaps()
-                        use_stream = True
-                    except Exception as e_stream:
-                        self.update_progress(
-                            f"   -> Streaming stack failed: {e_stream}", "WARN"
-                        )
-                        use_stream = False
-                    if not use_stream:
-                        final_sum = np.array(
-                            self.cumulative_sum_memmap, dtype=np.float64
-                        )
-                        final_wht_map_2d_from_memmap = np.array(
-                            self.cumulative_wht_memmap, dtype=np.float32
-                        )
+                    final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
+                    final_wht_map_2d_from_memmap = np.array(
+                        self.cumulative_wht_memmap, dtype=np.float32
+                    )
                 else:
                     final_sum = np.array(self.cumulative_sum_memmap, dtype=np.float64)
                     final_wht_map_2d_from_memmap = np.array(
