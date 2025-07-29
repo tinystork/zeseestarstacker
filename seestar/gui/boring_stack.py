@@ -251,6 +251,19 @@ def main() -> int:
         logger.error("CSV is empty")
         return 1
 
+    # Auto-enable disk-backed alignment when processing extremely large
+    # batches so memory usage stays bounded.  This mirrors the behaviour of
+    # the GUI which suggests enabling the option for huge lists.
+    if (
+        args.batch_size == 1
+        and not args.align_on_disk
+        and len(rows) > 50
+    ):
+        logger.warning(
+            "Large batch detected (>50 images) - enabling align_on_disk"
+        )
+        args.align_on_disk = True
+
     ordered_files = [r["path"] for r in rows]
     file_list = ordered_files
     out_path = os.path.join(args.out, "final.fits")

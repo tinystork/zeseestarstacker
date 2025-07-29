@@ -390,7 +390,9 @@ rotation drifts are eliminated.
 The aligner normally keeps intermediate arrays in memory. For very large
 images you can reduce memory usage by performing alignment on disk-backed
 ``.npy`` files. Pass ``align_on_disk=True`` when using ``SeestarQueuedStacker``
-from Python or add ``--align-on-disk`` to ``boring_stack.py``.
+from Python or add ``--align-on-disk`` to ``boring_stack.py``. When more than
+50 images are queued and this flag is omitted, ``boring_stack.py`` now
+automatically enables disk-backed alignment to avoid running out of memory.
 
 ### Command-Line Stacking
 
