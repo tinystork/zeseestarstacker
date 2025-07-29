@@ -8594,6 +8594,7 @@ class SeestarQueuedStacker:
                         q_slice,
                         kappa=kappa,
                         winsor_limits=winsor_limits,
+                        max_mem_bytes=max_bytes,
                     )
                 elif (
                     mode == "kappa-sigma"
@@ -8959,6 +8960,7 @@ class SeestarQueuedStacker:
                         quality_weights,
                         kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                         winsor_limits=self.winsor_limits,
+                        max_mem_bytes=self.max_hq_mem,
                     )
                     gc.collect()  # FIX MEMLEAK
                 batch_coverage_map_2d = coverage_sum.astype(np.float32)
@@ -9508,6 +9510,7 @@ class SeestarQueuedStacker:
                         w_cube,
                         kappa=self.stack_kappa_high,
                         winsor_limits=self.winsor_limits,
+                        max_mem_bytes=self.max_hq_mem,
                     )
                     gc.collect()  # FIX MEMLEAK
                 elif self.stack_final_combine == "median":

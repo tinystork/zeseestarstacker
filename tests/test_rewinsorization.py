@@ -62,7 +62,7 @@ def test_stack_batch_calls_winsor(monkeypatch, tmp_path):
 
     calls = {"n": 0}
 
-    def fake_winsor(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True):
+    def fake_winsor(self, images, weights, kappa=3.0, winsor_limits=(0.05, 0.05), apply_rewinsor=True, **kwargs):
         calls["n"] += 1
         return np.zeros_like(images[0]), 0.0
 
