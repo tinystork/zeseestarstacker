@@ -80,7 +80,7 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 *   **Python:** 3.8 or higher recommended.
 *   **Required Packages:** Listed in `requirements.txt`. Install them using pip:
     ```bash
-    pip install numpy opencv-python astropy astroquery astroalign tqdm matplotlib Pillow scikit-image
+    pip install numpy scipy astropy opencv-python scikit-image matplotlib Pillow colour-demosaicing astroalign drizzle acstools 
     ```
     *   *(Optional)* `psutil` can be installed to enable memory usage logging and automatic batch size estimation. If you plan to run the unit tests that exercise this feature, install it (included in `requirements-test.txt`).
 
