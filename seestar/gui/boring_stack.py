@@ -222,6 +222,7 @@ def parse_args():
     p.add_argument("--no-solver", dest="use_solver", action="store_false")
     p.add_argument("--cleanup-temp-files", dest="cleanup_temp_files", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--align-on-disk", action="store_true", help="Use memmap files during alignment")
+    p.add_argument("--show-progress", action="store_true", help="Display a minimal progress GUI")
     p.set_defaults(use_solver=True)
     return p.parse_args()
 
@@ -230,22 +231,8 @@ def parse_args():
 # Main processing logic
 # -----------------------------------------------------------------------------
 
-def main() -> int:
-    args = parse_args()
-    os.makedirs(args.out, exist_ok=True)
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(
-                os.path.join(args.out, "boring_stack.log"),
-                mode="w",
-                encoding="utf-8",
-            ),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-
+def _run_stack(args, progress_cb) -> int:
+    """Execute the stacking process using ``progress_cb`` for updates."""
     rows = read_rows(args.csv)
     if not rows:
         logger.error("CSV is empty")
@@ -280,19 +267,9 @@ def main() -> int:
     # via ``SEESTAR_TILE_H`` to aid debugging memory usage.
     os.environ["SEESTAR_TILE_H"] = str(args.tile)
 
-    def log_progress(message: str, progress: object | None = None) -> None:
-        """Simple progress callback that tolerates non-numeric ``progress``."""
-        if progress is None:
-            logger.info(message)
-        elif isinstance(progress, (int, float)):
-            logger.info("[%d%%] %s", int(progress), message)
-        else:
-            logger.info("%s (%s)", message, progress)
-        _log_mem(f"progress:{message}")
-
     stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk)
     try:
-        stacker.progress_callback = log_progress
+        stacker.progress_callback = progress_cb
         _log_mem("before_start")  # DEBUG: baseline RAM
         ok = stacker.start_processing(
             input_dir=input_dir,
@@ -345,6 +322,78 @@ def main() -> int:
     finally:
         _cleanup_stacker(stacker)
         _log_mem("after_cleanup")  # DEBUG: final RAM state
+
+
+def main() -> int:
+    args = parse_args()
+    os.makedirs(args.out, exist_ok=True)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(
+                os.path.join(args.out, "boring_stack.log"),
+                mode="w",
+                encoding="utf-8",
+            ),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+    def log_progress(message: str, progress: object | None = None) -> None:
+        """Simple progress callback that tolerates non-numeric ``progress``."""
+        if progress is None:
+            logger.info(message)
+        elif isinstance(progress, (int, float)):
+            logger.info("[%d%%] %s", int(progress), message)
+        else:
+            logger.info("%s (%s)", message, progress)
+        _log_mem(f"progress:{message}")
+
+    if args.show_progress and args.batch_size == 1:
+        import threading
+        import tkinter as tk
+        from tkinter import ttk
+        from .progress import ProgressManager
+
+        root = tk.Tk()
+        root.title("Boring Stack Progress")
+
+        pb = ttk.Progressbar(root, mode="determinate", maximum=100)
+        pb.pack(fill="x", padx=10, pady=5)
+
+        status = tk.Text(root, height=8, state=tk.DISABLED)
+        status.pack(fill="both", expand=True, padx=10, pady=5)
+
+        rem_var = tk.StringVar(value="--:--:--")
+        el_var = tk.StringVar(value="00:00:00")
+        ttk.Label(root, text="Remaining:").pack(anchor="w", padx=10)
+        ttk.Label(root, textvariable=rem_var).pack(anchor="w", padx=10)
+        ttk.Label(root, text="Elapsed:").pack(anchor="w", padx=10)
+        ttk.Label(root, textvariable=el_var).pack(anchor="w", padx=10)
+
+        pm = ProgressManager(pb, status, rem_var, el_var)
+        pm.reset()
+        pm.start_timer()
+
+        exit_code = 0
+
+        def cb(msg, prog=None):
+            pm.update_progress(msg, prog)
+
+        def worker():
+            nonlocal exit_code
+            exit_code = _run_stack(args, cb)
+            root.after(0, root.quit)
+
+        threading.Thread(target=worker, daemon=True).start()
+        root.mainloop()
+        return exit_code
+
+    if args.show_progress and args.batch_size != 1:
+        logger.warning("--show-progress is only supported when batch_size=1")
+
+    return _run_stack(args, log_progress)
 
 
 if __name__ == "__main__":
