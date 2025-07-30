@@ -4443,11 +4443,16 @@ class SeestarStackerGUI:
                     output_lines.append(text)
                     pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
                     aligned_match = re.search(r"Aligned:\s*(\d+)", text)
-                    if pct_match:
-                        try:
-                            pct = float(next(filter(None, pct_match.groups())))
-                        except (ValueError, StopIteration):
-                            continue
+                    if pct_match or aligned_match:
+                        if pct_match:
+                            try:
+                                pct = float(next(filter(None, pct_match.groups())))
+                            except (ValueError, StopIteration):
+                                continue
+                        else:
+                            processed = int(aligned_match.group(1))
+                            pct = processed / total_files * 100 if total_files else 0
+
                         if pct < last_pct:
                             pct = last_pct
                         elapsed = time.monotonic() - start_time
