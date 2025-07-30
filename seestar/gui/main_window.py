@@ -4290,6 +4290,13 @@ class SeestarStackerGUI:
     def _run_boring_stack_process(self, cmd, csv_path, out_dir):
         """Execute ``boring_stack.py`` without blocking the GUI."""
 
+        if hasattr(self, "output_path"):
+            # Ensure the GUI knows the output directory so the summary dialog can
+            # immediately enable the "Open Output" button once processing
+            # finishes.  Always update the variable so it reflects the actual
+            # path used by boring_stack.py.
+            self.output_path.set(out_dir)
+
         def _worker():
             total_files = 0
             try:
@@ -4341,13 +4348,6 @@ class SeestarStackerGUI:
                                 self.tr("stacking_finished", default="Stacking finished"),
                                 100,
                             )
-                            try:
-                                messagebox.showinfo(
-                                    "Stack complete",
-                                    f"Output written to {final_path}",
-                                )
-                            except tk.TclError:
-                                pass
                     else:
                         tail = "\n".join(output_lines[-10:])
                         err_msg = (
@@ -4399,16 +4399,17 @@ class SeestarStackerGUI:
                         )
                     full_summary = "\n".join(summary_lines)
                     if hasattr(self, "output_path"):
+                        # Ensure the variable points to the folder used during
+                        # processing so the button opens the correct location.
+                        self.output_path.set(out_dir)
                         try:
                             can_open_output = bool(
-                                self.output_path.get()
-                                and os.path.isdir(self.output_path.get())
-                                and (retcode == 0)
+                                out_dir and os.path.isdir(out_dir) and retcode == 0
                             )
                         except Exception:
                             can_open_output = False
                     else:
-                        can_open_output = False
+                        can_open_output = bool(out_dir and os.path.isdir(out_dir) and retcode == 0)
 
                     if (
                         hasattr(self, "_show_summary_dialog")
