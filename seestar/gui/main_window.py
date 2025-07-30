@@ -4442,6 +4442,7 @@ class SeestarStackerGUI:
                     log_file.flush()
                     output_lines.append(text)
                     pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
+                    aligned_match = re.search(r"Aligned:\s*(\d+)", text)
                     if pct_match:
                         try:
                             pct = float(next(filter(None, pct_match.groups())))
@@ -4458,7 +4459,10 @@ class SeestarStackerGUI:
                         else:
                             eta = self.tr("eta_calculating", default="Calculating...")
 
-                        processed = int(round((pct / 100.0) * total_files))
+                        if aligned_match:
+                            processed = int(aligned_match.group(1))
+                        else:
+                            processed = int(round((pct / 100.0) * total_files))
                         if processed < last_processed:
                             processed = last_processed
                         last_pct = pct
