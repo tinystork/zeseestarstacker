@@ -4420,8 +4420,7 @@ class SeestarStackerGUI:
             start_time = time.monotonic()
             output_lines = []
             log_path = os.path.join(out_dir, "boring_stack.log")
-            last_pct = 0.0
-            last_processed = 0
+            aligned_files = 0
             try:
                 log_file = open(log_path, "w", encoding="utf-8")
                 proc = subprocess.Popen(
@@ -4442,44 +4441,56 @@ class SeestarStackerGUI:
                     log_file.flush()
                     output_lines.append(text)
 
-                    pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
                     aligned_match = re.search(r"Aligned:\s*(\d+)", text)
+                    pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
 
-                    if pct_match or aligned_match:
-                        if aligned_match:
-                            processed = int(aligned_match.group(1))
-                        elif pct_match:
-                            try:
-                                pct_val = float(next(filter(None, pct_match.groups())))
-                            except (ValueError, StopIteration):
-                                continue
-                            processed = int(round((pct_val / 100.0) * total_files))
-                        else:
-                            continue
-
-                        if processed < last_processed:
-                            processed = last_processed
-                        pct = processed / total_files * 100 if total_files else 0
+                    if aligned_match:
+                        try:
+                            new_aligned = int(aligned_match.group(1))
+                        except ValueError:
+                            new_aligned = aligned_files
+                        if new_aligned > aligned_files:
+                            aligned_files = new_aligned
+                        progress_pct = aligned_files / total_files * 100 if total_files else 0
 
                         elapsed = time.monotonic() - start_time
-                        if processed > 0:
-                            remaining_files = max(0, total_files - processed)
-                            eta_sec = remaining_files * (elapsed / processed)
+                        if aligned_files > 0:
+                            remaining_files = max(0, total_files - aligned_files)
+                            eta_sec = remaining_files * (elapsed / aligned_files)
                             h, r = divmod(int(eta_sec), 3600)
                             m, s = divmod(r, 60)
                             eta = f"{h:02}:{m:02}:{s:02}"
                         else:
                             eta = self.tr("eta_calculating", default="Calculating...")
 
-                        last_pct = pct
-                        last_processed = processed
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda p=progress_pct, e=eta, pr=aligned_files: _gui_update(p, e, pr)
+                            )
+                        else:
+                            self.root.after(0, _gui_update, progress_pct, eta, aligned_files)
+                    elif pct_match:
+                        try:
+                            progress_pct = float(next(filter(None, pct_match.groups())))
+                        except (ValueError, StopIteration):
+                            continue
+
+                        elapsed = time.monotonic() - start_time
+                        if aligned_files > 0:
+                            remaining_files = max(0, total_files - aligned_files)
+                            eta_sec = remaining_files * (elapsed / aligned_files)
+                            h, r = divmod(int(eta_sec), 3600)
+                            m, s = divmod(r, 60)
+                            eta = f"{h:02}:{m:02}:{s:02}"
+                        else:
+                            eta = self.tr("eta_calculating", default="Calculating...")
 
                         if hasattr(self, 'gui_event_queue'):
                             self.gui_event_queue.put(
-                                lambda p=pct, e=eta, pr=processed: _gui_update(p, e, pr)
+                                lambda p=progress_pct, e=eta, pr=aligned_files: _gui_update(p, e, pr)
                             )
                         else:
-                            self.root.after(0, _gui_update, pct, eta, processed)
+                            self.root.after(0, _gui_update, progress_pct, eta, aligned_files)
                     else:
                         if hasattr(self, 'gui_event_queue'):
                             self.gui_event_queue.put(
