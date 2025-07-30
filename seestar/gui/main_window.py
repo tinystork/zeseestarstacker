@@ -4291,6 +4291,10 @@ class SeestarStackerGUI:
         """Execute ``boring_stack.py`` without blocking the GUI."""
 
         if hasattr(self, "output_path") and not self.output_path.get():
+
+            # Record path early so the summary dialog can enable
+            # the "Open Output" button when the stack completes.
+
             self.output_path.set(out_dir)
 
         def _worker():
