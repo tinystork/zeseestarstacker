@@ -59,7 +59,8 @@ def test_single_batch_csv(tmp_path):
 
     activated = SeestarStackerGUI._prepare_single_batch_if_needed(gui)
     assert activated
-    assert gui.settings.stacking_mode == "winsorized-sigma"
+    assert gui.settings.stacking_mode == "kappa-sigma"
+    assert gui.settings.stack_final_combine == "mean"
     assert gui.settings.batch_size == 1
     assert gui.settings.order_csv_path == str(csv_path)
 

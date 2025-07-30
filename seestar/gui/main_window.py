@@ -6016,17 +6016,17 @@ class SeestarStackerGUI:
         if missing:
             raise FileNotFoundError(missing[0])
 
-        if self.settings.stacking_mode != "winsorized-sigma":
-            self.logger.info("stacking_mode -> winsorized-sigma")
-        self.settings.stacking_mode = "winsorized-sigma"
-
-        if getattr(self.settings, "reproject_between_batches", False):
-            self.logger.info("reproject_between_batches -> False")
-        self.settings.reproject_between_batches = False
-
-        if getattr(self.settings, "use_drizzle", False):
-            self.logger.info("use_drizzle -> False")
-        self.settings.use_drizzle = False
+        if getattr(self.settings, "stack_final_combine", "mean") != "mean":
+            self.logger.info("stack_final_combine -> mean")
+        setattr(self.settings, "stack_final_combine", "mean")
+        if hasattr(self, "stack_final_combine_var"):
+            try:
+                self.stack_final_combine_var.set("mean")
+                if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
+                    label = self.final_key_to_label.get("mean", "mean")
+                    self.stack_final_display_var.set(label)
+            except Exception:
+                pass
 
         batch_len = len(ordered_files)
         if batch_len <= 0:
@@ -6393,6 +6393,14 @@ class SeestarStackerGUI:
                         self.stacking_mode.set(self.settings.stacking_mode)
                         self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
                         self.use_drizzle_var.set(self.settings.use_drizzle)
+                        if hasattr(self, "stack_final_combine_var"):
+                            try:
+                                self.stack_final_combine_var.set(self.settings.stack_final_combine)
+                                if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
+                                    label = self.final_key_to_label.get(self.settings.stack_final_combine, self.settings.stack_final_combine)
+                                    self.stack_final_display_var.set(label)
+                            except Exception:
+                                pass
 
                     self._final_stretch_set_by_processing_finished = False
                     if started:
