@@ -4523,6 +4523,7 @@ class SeestarStackerGUI:
 
         threading.Thread(target=_worker, daemon=True, name="BoringStackWorker").start()
 
+
     def stop_processing(self):
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
             self.update_progress_gui(self.tr("stacking_stopping"), None)
