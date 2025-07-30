@@ -8134,12 +8134,15 @@ class SeestarQueuedStacker:
                 batch_wht = batch_wht.reshape(self.memmap_shape[:2])
 
             mask = batch_wht > 0
-            self.cumulative_sum_memmap[mask] += batch_sum.astype(self.memmap_dtype_sum)[
-                mask
-            ]
-            self.cumulative_wht_memmap[mask] += batch_wht.astype(self.memmap_dtype_wht)[
-                mask
-            ]
+            # Direct multiplication avoids advanced-indexing copies which can
+            # silently drop updates when using memmaps.  Broadcast the mask
+            # across colour channels for SUM.
+            self.cumulative_sum_memmap += (
+                batch_sum.astype(self.memmap_dtype_sum) * mask[..., None]
+            )
+            self.cumulative_wht_memmap += (
+                batch_wht.astype(self.memmap_dtype_wht) * mask
+            )
             if hasattr(self.cumulative_sum_memmap, "flush"):
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
