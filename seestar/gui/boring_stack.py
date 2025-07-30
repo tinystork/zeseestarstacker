@@ -350,7 +350,7 @@ def main() -> int:
             logger.info("%s (%s)", message, progress)
         _log_mem(f"progress:{message}")
 
-    if args.show_progress:
+    if args.show_progress and args.batch_size == 1:
         import threading
         import tkinter as tk
         from tkinter import ttk
@@ -389,6 +389,10 @@ def main() -> int:
         threading.Thread(target=worker, daemon=True).start()
         root.mainloop()
         return exit_code
+
+    if args.show_progress and args.batch_size != 1:
+        logger.warning("--show-progress is only supported when batch_size=1")
+
     return _run_stack(args, log_progress)
 
 
