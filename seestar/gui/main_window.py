@@ -4441,37 +4441,39 @@ class SeestarStackerGUI:
                     log_file.write(text + "\n")
                     log_file.flush()
                     output_lines.append(text)
+
                     pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
                     aligned_match = re.search(r"Aligned:\s*(\d+)", text)
+
                     if pct_match or aligned_match:
-                        if pct_match:
+                        if aligned_match:
+                            processed = int(aligned_match.group(1))
+                        elif pct_match:
                             try:
-                                pct = float(next(filter(None, pct_match.groups())))
+                                pct_val = float(next(filter(None, pct_match.groups())))
                             except (ValueError, StopIteration):
                                 continue
+                            processed = int(round((pct_val / 100.0) * total_files))
                         else:
-                            processed = int(aligned_match.group(1))
-                            pct = processed / total_files * 100 if total_files else 0
+                            continue
 
-                        if pct < last_pct:
-                            pct = last_pct
+                        if processed < last_processed:
+                            processed = last_processed
+                        pct = processed / total_files * 100 if total_files else 0
+
                         elapsed = time.monotonic() - start_time
-                        if pct > 0:
-                            rem_sec = elapsed * (100 - pct) / pct
-                            h, r = divmod(int(rem_sec), 3600)
+                        if processed > 0:
+                            remaining_files = max(0, total_files - processed)
+                            eta_sec = remaining_files * (elapsed / processed)
+                            h, r = divmod(int(eta_sec), 3600)
                             m, s = divmod(r, 60)
                             eta = f"{h:02}:{m:02}:{s:02}"
                         else:
                             eta = self.tr("eta_calculating", default="Calculating...")
 
-                        if aligned_match:
-                            processed = int(aligned_match.group(1))
-                        else:
-                            processed = int(round((pct / 100.0) * total_files))
-                        if processed < last_processed:
-                            processed = last_processed
                         last_pct = pct
                         last_processed = processed
+
                         if hasattr(self, 'gui_event_queue'):
                             self.gui_event_queue.put(
                                 lambda p=pct, e=eta, pr=processed: _gui_update(p, e, pr)
