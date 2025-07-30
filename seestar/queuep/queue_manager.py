@@ -8889,11 +8889,19 @@ class SeestarQueuedStacker:
                     num_valid_images_for_processing, dtype=np.float32
                 )
 
-            # Apply normalization
-            if self.normalize_method == "linear_fit":
-                image_data_list = _normalize_images_linear_fit(image_data_list, 0)
-            elif self.normalize_method == "sky_mean":
-                image_data_list = _normalize_images_sky_mean(image_data_list, 0)
+            # Apply normalization only when multiple images are present
+            if (
+                num_valid_images_for_processing > 1
+                and self.normalize_method != "none"
+            ):
+                if self.normalize_method == "linear_fit":
+                    image_data_list = _normalize_images_linear_fit(
+                        image_data_list, 0
+                    )
+                elif self.normalize_method == "sky_mean":
+                    image_data_list = _normalize_images_sky_mean(
+                        image_data_list, 0
+                    )
 
             extra_w = None
             if self.weighting_method == "variance":
