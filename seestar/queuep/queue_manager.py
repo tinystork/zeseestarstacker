@@ -8808,6 +8808,34 @@ class SeestarQueuedStacker:
             )
             return None, None, None
 
+        # Optimization for batch_size == 1 and mean stacking: if only one image
+        # is present, simply return that image and its mask as the stacked
+        # result.  This avoids issues observed where the regular stacking path
+        # could yield an empty stack when running with batch size of one.
+        if (
+            num_valid_images_for_processing == 1
+            and getattr(self, "stacking_mode", "mean") == "mean"
+        ):
+            single_img = valid_images_for_ccdproc[0].astype(np.float32)
+            batch_coverage_map_2d = valid_pixel_masks_for_coverage[0].astype(np.float32)
+            if getattr(self, "apply_batch_feathering", True):
+                h, w = batch_coverage_map_2d.shape
+                if not hasattr(self, "_radial_w_base") or self._radial_w_base.shape != (h, w):
+                    self._radial_w_base = make_radial_weight_map(h, w)
+                batch_coverage_map_2d *= self._radial_w_base
+
+            stack_info_header = valid_headers_for_ccdproc[0].copy()
+            stack_info_header["NIMAGES"] = (1, "Images in this batch stack")
+            stack_info_header["STK_NOTE"] = "single image"
+            stack_info_header["NEXP_SUM"] = (1, "Number of exposures summed")
+            try:
+                tot_exp = float(stack_info_header.get("EXPTIME", stack_info_header.get("EXPOSURE", 0.0)))
+            except Exception:
+                tot_exp = 0.0
+            stack_info_header["TOTEXP"] = (round(tot_exp, 2), "[s] Total exposure for this batch")
+            _log_mem("after_stack")
+            return single_img, stack_info_header, batch_coverage_map_2d
+
         # --- Vérification WCS seulement si nécessaire ---
         if self.reproject_between_batches and (
             self.drizzle_active_session or self.is_mosaic_run
