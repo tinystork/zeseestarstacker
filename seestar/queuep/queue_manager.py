@@ -12679,6 +12679,10 @@ class SeestarQueuedStacker:
                 )
             self.queue_prepared = False
         elif special_single_csv:
+            # Single-batch CSV mode: mimic the "batch size 0" workflow but
+            # accumulate everything into one batch.  We disable the automatic
+            # per-image flushing by using a very large ``batch_size`` so that
+            # ``_worker`` only flushes at the end, just like batch size 0.
             self.use_batch_plan = True
             if ordered_files is None:
                 batches_from_plan = get_batches_from_stack_plan(
@@ -12687,6 +12691,8 @@ class SeestarQueuedStacker:
                 ordered_files = [
                     os.path.abspath(fp) for batch in batches_from_plan for fp in batch
                 ]
+
+            self.batch_size = 999999999
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
@@ -12697,6 +12703,7 @@ class SeestarQueuedStacker:
                 self.processed_files.add(abs_fp)
                 self.files_in_queue += 1
                 self.all_input_filepaths.append(abs_fp)
+
             batch_len = len(ordered_files)
             self.total_batches_estimated = 1
             self.update_progress(
