@@ -8919,7 +8919,7 @@ class SeestarQueuedStacker:
             use_memmap = False
             try:
                 batch_sz = getattr(self.settings, "batch_size", self.batch_size)
-                if int(batch_sz) == 1:
+                if int(batch_sz) == 1 and num_valid_images_for_processing > 1:
                     use_memmap = True
             except Exception:
                 pass
