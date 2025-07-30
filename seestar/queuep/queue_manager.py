@@ -10853,6 +10853,13 @@ class SeestarQueuedStacker:
                         with _fits_open_safe(stacked_path, memmap=True) as hdul:
                             final_np = hdul[0].data.astype(np.float32)
                             final_hdr = hdul[0].header
+                        if (
+                            final_np.ndim == 3
+                            and final_np.shape[0] in (1, 3, 4)
+                            and final_np.shape[1] > 4
+                            and final_np.shape[2] > 4
+                        ):
+                            final_np = np.moveaxis(final_np, 0, -1)
                         final_wht = np.ones(final_np.shape[:2], dtype=np.float32)
                         self._combine_batch_result(final_np, final_hdr, final_wht)
                         if hasattr(self.cumulative_sum_memmap, "flush"):
