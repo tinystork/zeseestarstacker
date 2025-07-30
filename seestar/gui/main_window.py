@@ -4290,11 +4290,11 @@ class SeestarStackerGUI:
     def _run_boring_stack_process(self, cmd, csv_path, out_dir):
         """Execute ``boring_stack.py`` without blocking the GUI."""
 
-        if hasattr(self, "output_path") and not self.output_path.get():
-
-            # Record path early so the summary dialog can enable
-            # the "Open Output" button when the stack completes.
-
+        if hasattr(self, "output_path"):
+            # Ensure the GUI knows the output directory so the summary dialog can
+            # immediately enable the "Open Output" button once processing
+            # finishes.  Always update the variable so it reflects the actual
+            # path used by boring_stack.py.
             self.output_path.set(out_dir)
 
         def _worker():
@@ -4399,16 +4399,17 @@ class SeestarStackerGUI:
                         )
                     full_summary = "\n".join(summary_lines)
                     if hasattr(self, "output_path"):
+                        # Ensure the variable points to the folder used during
+                        # processing so the button opens the correct location.
+                        self.output_path.set(out_dir)
                         try:
                             can_open_output = bool(
-                                self.output_path.get()
-                                and os.path.isdir(self.output_path.get())
-                                and (retcode == 0)
+                                out_dir and os.path.isdir(out_dir) and retcode == 0
                             )
                         except Exception:
                             can_open_output = False
                     else:
-                        can_open_output = False
+                        can_open_output = bool(out_dir and os.path.isdir(out_dir) and retcode == 0)
 
                     if (
                         hasattr(self, "_show_summary_dialog")
@@ -4521,6 +4522,7 @@ class SeestarStackerGUI:
                     self.root.after(0, _finish, retcode, output_lines)
 
         threading.Thread(target=_worker, daemon=True, name="BoringStackWorker").start()
+
 
     def stop_processing(self):
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
