@@ -4290,6 +4290,9 @@ class SeestarStackerGUI:
     def _run_boring_stack_process(self, cmd, csv_path, out_dir):
         """Execute ``boring_stack.py`` without blocking the GUI."""
 
+        if hasattr(self, "output_path") and not self.output_path.get():
+            self.output_path.set(out_dir)
+
         def _worker():
             total_files = 0
             try:
@@ -4341,13 +4344,6 @@ class SeestarStackerGUI:
                                 self.tr("stacking_finished", default="Stacking finished"),
                                 100,
                             )
-                            try:
-                                messagebox.showinfo(
-                                    "Stack complete",
-                                    f"Output written to {final_path}",
-                                )
-                            except tk.TclError:
-                                pass
                     else:
                         tail = "\n".join(output_lines[-10:])
                         err_msg = (
