@@ -1896,10 +1896,12 @@ class SeestarQueuedStacker:
         with self.counter_lock:
             self.aligned_counter += 1
             current_aligned = self.aligned_counter
-        total = getattr(self, "files_in_queue", 1) or 1
-        self.update_progress(
-            f"Aligned: {current_aligned}", current_aligned / total * 100
-        )
+
+        files_in_queue = getattr(self, "files_in_queue", 0) or 0
+        total = max(files_in_queue, current_aligned) or 1
+        current_pct = current_aligned / total * 100
+
+        self.update_progress(f"Aligned: {current_aligned}", current_pct)
 
     ########################################################################################################################################################
 
