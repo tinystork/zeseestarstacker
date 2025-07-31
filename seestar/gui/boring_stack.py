@@ -192,7 +192,12 @@ def parse_args():
     p.add_argument("--tile", type=int, default=512, help="Tile height (ignored)")
     p.add_argument("--kappa", type=float, default=3.0, help="Kappa value")
     p.add_argument("--winsor", type=float, default=0.05, help="Winsor limit")
-    p.add_argument("--max-mem", type=float, default=None, help="(unused)")
+    p.add_argument(
+        "--max-mem",
+        type=float,
+        default=None,
+        help="Maximum HQ memory in GB (overrides SEESTAR_MAX_MEM)",
+    )
     p.add_argument("--api-key", default=None, help="Astrometry.net API key")
     p.add_argument("--batch-size", type=int, default=1, help="Batch size")
     p.add_argument(
@@ -267,8 +272,21 @@ def _run_stack(args, progress_cb) -> int:
     # via ``SEESTAR_TILE_H`` to aid debugging memory usage.
     os.environ["SEESTAR_TILE_H"] = str(args.tile)
 
+    bytes_limit = None
+    if args.max_mem is not None:
+        try:
+            bytes_limit = int(float(args.max_mem) * 1024**3)
+            os.environ["SEESTAR_MAX_MEM"] = str(bytes_limit)
+        except (ValueError, TypeError):
+            bytes_limit = None
+
     stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk)
     try:
+        if bytes_limit is not None:
+            try:
+                stacker.max_hq_mem = bytes_limit
+            except Exception:
+                pass
         stacker.progress_callback = progress_cb
         _log_mem("before_start")  # DEBUG: baseline RAM
         ok = stacker.start_processing(
