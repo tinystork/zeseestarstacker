@@ -397,7 +397,9 @@ automatically enables disk-backed alignment to avoid running out of memory.
 ### Command-Line Stacking
 
 Use `seestar/gui/boring_stack.py` for headless single-batch processing. Set
-`--chunk-size` to periodically flush intermediate stacks:
+`--chunk-size` to periodically flush intermediate stacks. When the GUI launches
+`boring_stack.py` with **Batch Size** set to `1`, this option is automatically
+added based on available system RAM:
 
 ```bash
 python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
@@ -406,9 +408,8 @@ python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
 
 
 When `--chunk-size` is used with `--batch-size 1`, results are combined in
-chunks of N images so incremental stacking works without a `stack_plan.csv`.
-If a `stack_plan.csv` is present, it will be ignored unless `--chunk-size` is
-omitted.
+chunks of N images. Any `stack_plan.csv` present is honoured so files are
+grouped by `batch_id` before chunking.
 
 When using `--batch-size 1` together with `--align-on-disk`, aligned frames are
 written to an `aligned_tmp` directory and reused when the final stack is
@@ -418,10 +419,11 @@ finishes.
 ### Threaded Boring Stack from the GUI
 
 Set **Batch Size** to `1` or tick the *Threaded Boring Stack* checkbox in the
-Stacking tab. The GUI will launch `boring_stack.py` in a background thread using
-your `stack_plan.csv` and display progress as it runs.
-When a `stack_plan.csv` is present, the entire list is stacked as one batch and
-the chunk size parameter is ignored.
+Stacking tab. The GUI launches `boring_stack.py` in a background thread using
+your `stack_plan.csv` and displays progress as it runs. A chunk size is
+automatically calculated and passed to the script so memory usage stays
+bounded. When calling `boring_stack.py` directly, specifying `--chunk-size`
+honours any grouping defined in `stack_plan.csv`.
 
 
 ---

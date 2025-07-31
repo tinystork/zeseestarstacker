@@ -12644,12 +12644,19 @@ class SeestarQueuedStacker:
                         )
 
         plan_path = os.path.join(self.current_folder, "stack_plan.csv")
-        use_plan = requested_batch_size <= 0 and os.path.isfile(plan_path)
+        plan_exists = os.path.isfile(plan_path)
+        use_plan = requested_batch_size <= 0 and plan_exists
 
         special_single_csv = (
             requested_batch_size == 1
-            and os.path.isfile(plan_path)
+            and plan_exists
             and chunk_size is None
+        )
+
+        plan_with_chunk = (
+            requested_batch_size == 1
+            and plan_exists
+            and chunk_size is not None
         )
 
         if getattr(self, "queue_prepared", False):
@@ -12710,6 +12717,31 @@ class SeestarQueuedStacker:
             self.total_batches_estimated = 1
             self.update_progress(
                 f"📋 {self.files_in_queue} fichiers initiaux ajoutés depuis stack_plan.csv"
+            )
+        elif plan_with_chunk:
+            self.use_batch_plan = True
+            batches_from_plan = get_batches_from_stack_plan(
+                plan_path, self.current_folder
+            )
+            logger.debug(
+                "Batching: using stacking plan from stack_plan.csv with chunking"
+            )
+            self.batch_size = 1
+            self.queue = Queue()
+            self.files_in_queue = 0
+            self.all_input_filepaths = []
+            for b_idx, batch in enumerate(batches_from_plan):
+                for fp in batch:
+                    abs_fp = os.path.abspath(fp)
+                    self.queue.put(abs_fp)
+                    self.processed_files.add(abs_fp)
+                    self.files_in_queue += 1
+                    self.all_input_filepaths.append(abs_fp)
+                if b_idx < len(batches_from_plan) - 1:
+                    self.queue.put(_BATCH_BREAK_TOKEN)
+            self.total_batches_estimated = len(batches_from_plan)
+            self.update_progress(
+                f"📋 {self.files_in_queue} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated}"
             )
         elif use_plan:
             self.use_batch_plan = True

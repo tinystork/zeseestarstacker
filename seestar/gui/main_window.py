@@ -6236,6 +6236,8 @@ class SeestarStackerGUI:
                 "1",
                 "--max-mem",
                 str(getattr(self.settings, "max_hq_mem_gb", 8)),
+                "--chunk-size",
+                str(self._get_auto_chunk_size()),
             ]
             self._run_boring_stack_process(cmd, csv_path, self.settings.output_folder)
             return
