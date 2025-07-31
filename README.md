@@ -408,9 +408,8 @@ python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
 
 
 When `--chunk-size` is used with `--batch-size 1`, results are combined in
-chunks of N images so incremental stacking works without a `stack_plan.csv`.
-If a `stack_plan.csv` is present, it will be ignored unless `--chunk-size` is
-omitted.
+chunks of N images. Any `stack_plan.csv` present is honoured so files are
+grouped by `batch_id` before chunking.
 
 When using `--batch-size 1` together with `--align-on-disk`, aligned frames are
 written to an `aligned_tmp` directory and reused when the final stack is
@@ -424,7 +423,9 @@ Stacking tab. The GUI launches `boring_stack.py` in a background thread using
 your `stack_plan.csv` and displays progress as it runs. A chunk size is
 automatically calculated and passed to the script so memory usage stays
 bounded. When calling `boring_stack.py` directly, specifying `--chunk-size`
-will override any grouping defined in `stack_plan.csv`.
+
+honours any grouping defined in `stack_plan.csv`.
+
 
 
 ---
