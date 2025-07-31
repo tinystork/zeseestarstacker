@@ -423,7 +423,9 @@ Stacking tab. The GUI launches `boring_stack.py` in a background thread using
 your `stack_plan.csv` and displays progress as it runs. A chunk size is
 automatically calculated and passed to the script so memory usage stays
 bounded. When calling `boring_stack.py` directly, specifying `--chunk-size`
+
 honours any grouping defined in `stack_plan.csv`.
+
 
 
 ---
