@@ -122,9 +122,15 @@ def stack_disk_streaming(
     if not file_list:
         raise ValueError("file_list is empty")
 
-    with fits.open(file_list[0], memmap=True) as hdul0:
-        shape = tuple(hdul0[0].data.shape)
-        dtype = hdul0[0].data.dtype
+    first_path = file_list[0]
+    if first_path.lower().endswith(".npy"):
+        arr0 = np.load(first_path, mmap_mode="r")
+        shape = arr0.shape
+        dtype = arr0.dtype
+    else:
+        with fits.open(first_path, memmap=True) as hdul0:
+            shape = tuple(hdul0[0].data.shape)
+            dtype = hdul0[0].data.dtype
     H, W = shape[:2]
     C = 1 if len(shape) == 2 else shape[2]
 
@@ -157,10 +163,14 @@ def stack_disk_streaming(
             if parallel_io:
                 def _read_chunk(path, row_start=row_start, row_end=row_end):
                     try:
-                        with fits.open(path, memmap=True) as hdul:
-                            return hdul[0].data[row_start:row_end].astype(
-                                np.float32, copy=False
-                            )
+                        if path.lower().endswith(".npy"):
+                            arr = np.load(path, mmap_mode="r")[row_start:row_end]
+                            return arr.astype(np.float32, copy=False)
+                        else:
+                            with fits.open(path, memmap=True) as hdul:
+                                return hdul[0].data[row_start:row_end].astype(
+                                    np.float32, copy=False
+                                )
                     except Exception as e:
                         logger.warning(f"Failed to read chunk from {path}: {e}")
                         return None
@@ -173,9 +183,13 @@ def stack_disk_streaming(
             else:
                 chunk_slices = []
                 for path in file_list:
-                    with fits.open(path, memmap=True) as hdul:
-                        sl = hdul[0].data[row_start:row_end]
+                    if path.lower().endswith(".npy"):
+                        sl = np.load(path, mmap_mode="r")[row_start:row_end]
                         chunk_slices.append(sl.astype(np.float32, copy=False))
+                    else:
+                        with fits.open(path, memmap=True) as hdul:
+                            sl = hdul[0].data[row_start:row_end]
+                            chunk_slices.append(sl.astype(np.float32, copy=False))
                 arr = np.stack(chunk_slices, axis=0)
                 del chunk_slices
 
