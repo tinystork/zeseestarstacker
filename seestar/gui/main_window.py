@@ -3790,10 +3790,16 @@ class SeestarStackerGUI:
 
         try:
             def _worker(data_copy, params_copy):
-                pil_img, hist_data = self.preview_manager.process_image(data_copy, params_copy)
+                pil_img, hist_data = self.preview_manager.update_preview(
+                    data_copy,
+                    params_copy,
+                    stack_count=self.preview_img_count,
+                    total_images=self.preview_total_imgs,
+                    current_batch=self.preview_current_batch,
+                    total_batches=self.preview_total_batches,
+                )
 
                 def _apply():
-                    self.preview_manager.display_processed_image(pil_img)
                     if recalculate_histogram and self.histogram_widget:
                         self.histogram_widget.update_histogram(hist_data)
                         try:
