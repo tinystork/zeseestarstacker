@@ -8,9 +8,23 @@ import shutil
 import tempfile
 import gc
 import psutil
+import signal
 import numpy as np
 
 _PROC = psutil.Process(os.getpid())  # Track process RAM for DEBUG logs
+
+# Global reference to the running stacker for signal handlers
+_GLOBAL_STACKER = None
+
+
+def _handle_signal(signum, frame):
+    """Gracefully stop the stacker when a termination signal is received."""
+    global _GLOBAL_STACKER
+    try:
+        if _GLOBAL_STACKER is not None and _GLOBAL_STACKER.is_running():
+            _GLOBAL_STACKER.stop()
+    except Exception:
+        pass
 
 def _log_mem(tag: str) -> None:
     """Log RSS memory to help locate leaks."""
@@ -371,6 +385,8 @@ def _run_stack(args, progress_cb) -> int:
             bytes_limit = None
 
     stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk)
+    global _GLOBAL_STACKER
+    _GLOBAL_STACKER = stacker
     try:
         if bytes_limit is not None:
             try:
@@ -430,11 +446,20 @@ def _run_stack(args, progress_cb) -> int:
     finally:
         _cleanup_stacker(stacker)
         _log_mem("after_cleanup")  # DEBUG: final RAM state
+        _GLOBAL_STACKER = None
 
 
 def main() -> int:
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
+
+    # Register signal handlers so that external termination requests
+    # stop the stacker cleanly.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

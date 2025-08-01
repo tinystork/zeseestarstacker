@@ -4296,6 +4296,9 @@ class SeestarStackerGUI:
     def _run_boring_stack_process(self, cmd, csv_path, out_dir):
         """Execute ``boring_stack.py`` without blocking the GUI."""
 
+        # Reset any previous process handle
+        self.boring_proc = None
+
         if hasattr(self, "output_path"):
             # Ensure the GUI knows the output directory so the summary dialog can
             # immediately enable the "Open Output" button once processing
@@ -4368,6 +4371,7 @@ class SeestarStackerGUI:
                     if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
                         self.stop_button.config(state=tk.DISABLED)
                     self._set_parameter_widgets_state(tk.NORMAL)
+                    self.boring_proc = None
 
                     # --- Nouveau: afficher le resume apres un boring stack ---
                     elapsed = time.monotonic() - start_time
@@ -4430,7 +4434,7 @@ class SeestarStackerGUI:
             aligned_files = 0
             try:
                 log_file = open(log_path, "w", encoding="utf-8")
-                proc = subprocess.Popen(
+                self.boring_proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -4440,7 +4444,7 @@ class SeestarStackerGUI:
                     bufsize=1,
                 )
 
-                for line in proc.stdout:
+                for line in self.boring_proc.stdout:
                     if not line:
                         continue
                     text = line.strip()
@@ -4506,7 +4510,7 @@ class SeestarStackerGUI:
                         else:
                             self.root.after(0, self.update_progress_gui, text, None)
 
-                retcode = proc.wait()
+                retcode = self.boring_proc.wait()
                 log_file.close()
             except Exception as e:
                 retcode = -1
@@ -4534,6 +4538,14 @@ class SeestarStackerGUI:
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
             self.update_progress_gui(self.tr("stacking_stopping"), None)
             self.queued_stacker.stop()
+            if hasattr(self, "stop_button"):
+                self.stop_button.config(state=tk.DISABLED)
+        elif self.processing and getattr(self, "boring_proc", None):
+            self.update_progress_gui(self.tr("stacking_stopping"), None)
+            try:
+                self.boring_proc.terminate()
+            except Exception:
+                pass
             if hasattr(self, "stop_button"):
                 self.stop_button.config(state=tk.DISABLED)
         elif self.processing:
