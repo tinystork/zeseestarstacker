@@ -11,7 +11,8 @@ import psutil
 import signal
 import numpy as np
 
-from seestar.gui.settings import SettingsManager
+
+
 
 _PROC = psutil.Process(os.getpid())  # Track process RAM for DEBUG logs
 
@@ -120,6 +121,8 @@ except Exception:
 # When executed directly from source, make project root importable
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from seestar.gui.settings import SettingsManager
 
 import numpy.lib.format as _np_format
 _np_format.open_memmap = _safe_open_memmap
