@@ -4045,7 +4045,7 @@ class SeestarQueuedStacker:
                                     getattr(self, "chunk_size", None)
                                     if self.batch_size == 1
                                     and getattr(self, "chunk_size", None)
-                                    else self.batch_size
+                                    else max(1, self.batch_size)
                                 )
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
@@ -4263,7 +4263,7 @@ class SeestarQueuedStacker:
                                     getattr(self, "chunk_size", None)
                                     if self.batch_size == 1
                                     and getattr(self, "chunk_size", None)
-                                    else self.batch_size
+                                    else max(1, self.batch_size)
                                 )
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
