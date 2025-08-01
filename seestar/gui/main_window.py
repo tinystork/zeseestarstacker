@@ -3600,7 +3600,8 @@ class SeestarStackerGUI:
                 self.current_preview_hist_data = preview_hist.copy()
                 self.current_stack_header = stack_header.copy() if stack_header else None
                 self.preview_img_count = img_count
-                self.preview_total_imgs = total_imgs
+                if getattr(self, "preview_total_imgs", 0) == 0:
+                    self.preview_total_imgs = total_imgs
                 self.preview_current_batch = current_batch
                 self.preview_total_batches = total_batches
                 self.refresh_preview(recalculate_histogram=True)
@@ -3616,7 +3617,8 @@ class SeestarStackerGUI:
         self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
-        self.preview_total_imgs = total_imgs
+        if getattr(self, "preview_total_imgs", 0) == 0:
+            self.preview_total_imgs = total_imgs
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
 
@@ -4185,7 +4187,14 @@ class SeestarStackerGUI:
 
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
-                    self.time_per_image = elapsed / processed
+                    current_tpi = elapsed / processed
+                    if self.time_per_image == 0:
+                        self.time_per_image = current_tpi
+                    else:
+                        alpha = 0.1
+                        self.time_per_image = (
+                            alpha * current_tpi + (1 - alpha) * self.time_per_image
+                        )
                     remaining_estimated = max(0, total_queued - processed)
                     if self.time_per_image > 1e-6 and remaining_estimated > 0:
                         eta_seconds = remaining_estimated * self.time_per_image
@@ -4432,6 +4441,7 @@ class SeestarStackerGUI:
             output_lines = []
             log_path = os.path.join(out_dir, "boring_stack.log")
             aligned_files = 0
+            time_per_image = 0.0
             try:
                 log_file = open(log_path, "w", encoding="utf-8")
                 self.boring_proc = subprocess.Popen(
@@ -4466,8 +4476,16 @@ class SeestarStackerGUI:
 
                         elapsed = time.monotonic() - start_time
                         if aligned_files > 0:
+                            current_tpi = elapsed / aligned_files
+                            if time_per_image == 0:
+                                time_per_image = current_tpi
+                            else:
+                                alpha = 0.1
+                                time_per_image = (
+                                    alpha * current_tpi + (1 - alpha) * time_per_image
+                                )
                             remaining_files = max(0, total_files - aligned_files)
-                            eta_sec = remaining_files * (elapsed / aligned_files)
+                            eta_sec = remaining_files * time_per_image
                             h, r = divmod(int(eta_sec), 3600)
                             m, s = divmod(r, 60)
                             eta = f"{h:02}:{m:02}:{s:02}"
@@ -4488,8 +4506,16 @@ class SeestarStackerGUI:
 
                         elapsed = time.monotonic() - start_time
                         if aligned_files > 0:
+                            current_tpi = elapsed / aligned_files
+                            if time_per_image == 0:
+                                time_per_image = current_tpi
+                            else:
+                                alpha = 0.1
+                                time_per_image = (
+                                    alpha * current_tpi + (1 - alpha) * time_per_image
+                                )
                             remaining_files = max(0, total_files - aligned_files)
-                            eta_sec = remaining_files * (elapsed / aligned_files)
+                            eta_sec = remaining_files * time_per_image
                             h, r = divmod(int(eta_sec), 3600)
                             m, s = divmod(r, 60)
                             eta = f"{h:02}:{m:02}:{s:02}"
