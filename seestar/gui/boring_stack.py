@@ -181,6 +181,66 @@ def read_paths(csv_path):
 
 
 # -----------------------------------------------------------------------------
+# Global normalization helpers
+# -----------------------------------------------------------------------------
+
+def _calculate_global_linear_fit(reference_path, paths, low=25.0, high=90.0):
+    """Return per-image slope/intercept using a common reference image."""
+    ref_data, _ = load_and_validate_fits(reference_path)
+    if ref_data is None:
+        return [(1.0, 0.0) for _ in paths]
+    ref = ref_data.astype(np.float32, copy=False)
+    is_color = ref.ndim == 3 and ref.shape[-1] == 3
+    ref_low = np.nanpercentile(ref, low, axis=(0, 1) if is_color else None)
+    ref_high = np.nanpercentile(ref, high, axis=(0, 1) if is_color else None)
+    delta_ref = ref_high - ref_low
+    coeffs = []
+    for p in paths:
+        data, _ = load_and_validate_fits(p)
+        if data is None:
+            coeffs.append((1.0, 0.0))
+            continue
+        img = data.astype(np.float32, copy=False)
+        low_p = np.nanpercentile(img, low, axis=(0, 1) if is_color else None)
+        high_p = np.nanpercentile(img, high, axis=(0, 1) if is_color else None)
+        delta_src = high_p - low_p
+        a = np.where(delta_src > 1e-5, delta_ref / np.maximum(delta_src, 1e-9), 1.0)
+        b = ref_low - a * low_p
+        coeffs.append((a, b))
+    return coeffs
+
+
+def _calculate_global_sky_mean(paths, sky_percentile=25.0):
+    """Return the average sky value from all images."""
+    vals = []
+    for p in paths:
+        data, _ = load_and_validate_fits(p)
+        if data is None:
+            continue
+        if data.ndim == 3 and data.shape[-1] == 3:
+            lum = 0.299 * data[..., 0] + 0.587 * data[..., 1] + 0.114 * data[..., 2]
+        else:
+            lum = data
+        vals.append(np.nanpercentile(lum, sky_percentile))
+    if not vals:
+        return 0.0
+    return float(np.nanmean(vals))
+
+
+def _apply_linear_fit(data, slope, intercept):
+    return slope * data + intercept
+
+
+def _apply_sky_mean(data, target_sky, sky_percentile=25.0):
+    if data.ndim == 3 and data.shape[-1] == 3:
+        lum = 0.299 * data[..., 0] + 0.587 * data[..., 1] + 0.114 * data[..., 2]
+    else:
+        lum = data
+    curr = np.nanpercentile(lum, sky_percentile)
+    return data + (target_sky - curr)
+
+
+# -----------------------------------------------------------------------------
 # CLI parsing
 # -----------------------------------------------------------------------------
 
@@ -257,6 +317,36 @@ def _run_stack(args, progress_cb) -> int:
         args.align_on_disk = True
 
     ordered_files = [r["path"] for r in rows]
+
+    is_plan = os.path.basename(args.csv).lower() == "stack_plan.csv"
+    if (
+        args.batch_size == 1
+        and is_plan
+        and args.norm in {"linear_fit", "sky_mean"}
+    ):
+        norm_dir = os.path.join(args.out, "normalized_inputs")
+        os.makedirs(norm_dir, exist_ok=True)
+        if args.norm == "linear_fit":
+            coeffs = _calculate_global_linear_fit(ordered_files[0], ordered_files)
+        else:
+            target_sky = _calculate_global_sky_mean(ordered_files)
+        normalized_rows = []
+        for idx, (row, path) in enumerate(zip(rows, ordered_files)):
+            data, hdr = load_and_validate_fits(path)
+            if data is None:
+                continue
+            if args.norm == "linear_fit":
+                slope, inter = coeffs[idx]
+                data = _apply_linear_fit(data, slope, inter)
+            else:
+                data = _apply_sky_mean(data, target_sky)
+            out_fp = os.path.join(norm_dir, f"{idx:04d}.fits")
+            save_fits_image(data, out_fp, hdr)
+            normalized_rows.append({"path": out_fp, "weight": row.get("weight", "")})
+        rows = normalized_rows
+        ordered_files = [r["path"] for r in rows]
+        args.norm = "none"
+
     file_list = ordered_files
     out_path = os.path.join(args.out, "final.fits")
     hdr_ref = load_and_validate_fits(file_list[0])[1]
