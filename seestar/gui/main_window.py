@@ -4416,7 +4416,15 @@ class SeestarStackerGUI:
                         f"{tr('Files Attempted', default='Files Attempted')}: {total_files}",
                     ]
                     final_path = os.path.join(out_dir, "final.fits")
-                    if retcode == 0 and os.path.exists(final_path):
+                    images_stacked = total_files
+                    total_exposure = 0.0
+                    if os.path.exists(final_path):
+                        try:
+                            hdr = fits.getheader(final_path)
+                            images_stacked = int(hdr.get("NIMAGES", images_stacked))
+                            total_exposure = float(hdr.get("TOTEXP", 0.0))
+                        except Exception:
+                            pass
                         summary_lines.append(
                             f"{tr('Final Stack File', default='Final Stack File')}:\n  {final_path}"
                         )
@@ -4424,6 +4432,20 @@ class SeestarStackerGUI:
                         summary_lines.append(
                             f"{tr('Final Stack File', default='Final Stack File')}: {final_path} ({tr('Not Found!', default='Not Found!')})"
                         )
+                    summary_lines.append(
+                        f"{tr('Images in Final Stack', default='Images in Final Stack')}: {images_stacked}"
+                    )
+                    if (
+                        hasattr(self, "_format_duration")
+                        and hasattr(self, "tr")
+                        and hasattr(self, "localization")
+                    ):
+                        exposure_str = self._format_duration(total_exposure)
+                    else:
+                        exposure_str = f"{int(round(total_exposure))} s"
+                    summary_lines.append(
+                        f"{tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {exposure_str}"
+                    )
                     full_summary = "\n".join(summary_lines)
                     if hasattr(self, "output_path"):
                         # Ensure the variable points to the folder used during
@@ -4444,6 +4466,10 @@ class SeestarStackerGUI:
                         and hasattr(self.root, "tk")
                     ):
                         self._show_summary_dialog(summary_title, full_summary, can_open_output)
+                    if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists():
+                        self.open_output_button.config(
+                            state=tk.NORMAL if can_open_output else tk.DISABLED
+                        )
 
             start_time = time.monotonic()
             output_lines = []
