@@ -425,8 +425,30 @@ def _run_stack(args, progress_cb) -> int:
             logger.error("start_processing failed")
             return 1
 
+        start_time = time.monotonic()
+        last_aligned = 0
+        total_images = len(file_list)
+
         while stacker.is_running():
             time.sleep(1)
+
+            current_aligned = getattr(stacker, "aligned_counter", 0)
+            if progress_cb and current_aligned != last_aligned:
+                last_aligned = current_aligned
+                pct = current_aligned / max(total_images, 1) * 100
+                elapsed = time.monotonic() - start_time
+                if current_aligned > 0:
+                    tpi = elapsed / current_aligned
+                    remaining = max(total_images - current_aligned, 0)
+                    eta_sec = remaining * tpi
+                    h, r = divmod(int(eta_sec), 3600)
+                    m, s = divmod(r, 60)
+                    eta = f"{h:02}:{m:02}:{s:02}"
+                else:
+                    eta = "Calculating..."
+                progress_cb(f"Aligned: {current_aligned}", pct)
+                progress_cb(f"ETA_UPDATE:{eta}", None)
+
             getattr(stacker, "_indices_cache", {}).clear()
             gc.collect()
             _log_mem("loop")  # DEBUG: track RAM during run
