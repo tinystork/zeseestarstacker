@@ -11,6 +11,7 @@ import psutil
 import signal
 import numpy as np
 
+
 _PROC = psutil.Process(os.getpid())  # Track process RAM for DEBUG logs
 
 # Global reference to the running stacker for signal handlers
@@ -118,6 +119,8 @@ except Exception:
 # When executed directly from source, make project root importable
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from seestar.gui.settings import SettingsManager
 
 import numpy.lib.format as _np_format
 _np_format.open_memmap = _safe_open_memmap
@@ -384,7 +387,14 @@ def _run_stack(args, progress_cb) -> int:
         except (ValueError, TypeError):
             bytes_limit = None
 
-    stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk)
+    # Load user settings so final combine preferences are honoured
+    settings = SettingsManager()
+    try:
+        settings.load_settings()
+    except Exception:
+        settings.reset_to_defaults()
+
+    stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk, settings=settings)
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
     try:
@@ -416,7 +426,8 @@ def _run_stack(args, progress_cb) -> int:
             stars_exp=args.stars_exp,
             min_w=args.min_weight,
             use_drizzle=False,
-            reproject_between_batches=False,
+            reproject_between_batches=settings.reproject_between_batches,
+            reproject_coadd_final=settings.reproject_coadd_final,
             api_key=args.api_key,
             perform_cleanup=args.cleanup_temp_files,
         )
