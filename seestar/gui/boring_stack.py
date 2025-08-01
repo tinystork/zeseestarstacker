@@ -12,6 +12,8 @@ import signal
 import numpy as np
 
 
+
+
 _PROC = psutil.Process(os.getpid())  # Track process RAM for DEBUG logs
 
 # Global reference to the running stacker for signal handlers
