@@ -4344,10 +4344,18 @@ class SeestarStackerGUI:
                         self.progress_manager.update_progress(f"{progress:.1f}%", progress)
                     if hasattr(self.progress_manager, "set_remaining"):
                         self.progress_manager.set_remaining(eta)
+
+                    # Update ETA-related counters for Threaded Boring Stack mode
+                    self.preview_img_count = processed
+                    self.preview_total_imgs = total_files
+
                     default_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
                     self.aligned_files_var.set(default_fmt.format(count=processed))
                     remaining = max(0, total_files - processed)
                     self.remaining_files_var.set(f"{remaining}/{total_files}")
+
+                    # Explicitly refresh progress GUI so ETA updates correctly
+                    self.update_progress_gui(f"{progress:.1f}% completed", progress)
                 except tk.TclError:
                     pass
 
