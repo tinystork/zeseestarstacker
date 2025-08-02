@@ -519,16 +519,40 @@ def _run_stack(args, progress_cb) -> int:
         if use_astrometric and args.batch_size == 1 and args.use_solver:
             for idx, src in enumerate(file_list):
                 base = os.path.basename(src)
-                if progress_cb:
-                    progress_cb(f"WCS solving source: {base}", None)
                 try:
-                    stacker._run_astap_and_update_header(src)
+                    hdr = fits.getheader(src)
                 except Exception:
-                    logger.exception("Astrometric solver failed for %s", src)
+                    hdr = fits.Header()
+
+                has_wcs = False
                 try:
-                    solved_headers.append(fits.getheader(src))
+                    WCS(hdr)
+                    has_wcs = True
                 except Exception:
-                    solved_headers.append(fits.Header())
+                    has_wcs = False
+
+                if has_wcs:
+                    logger.info("WCS already present for %s", base)
+                else:
+                    if progress_cb:
+                        progress_cb(f"WCS solving source: {base}", None)
+                    try:
+                        stacker._run_astap_and_update_header(src)
+                        hdr = fits.getheader(src)
+                    except Exception:
+                        logger.exception("Astrometric solver failed for %s", src)
+                        hdr = fits.Header()
+
+                sanitize_header_for_wcs(hdr)
+                try:
+                    with fits.open(src, mode="update") as hdul:
+                        hdul[0].header = hdr
+                        hdul.flush()
+                    logger.info("Header sanitized for %s", base)
+                except Exception:
+                    logger.exception("Failed to write sanitized header for %s", src)
+
+                solved_headers.append(hdr)
         else:
             solved_headers = [fits.Header() for _ in file_list]
 
@@ -584,7 +608,12 @@ def _run_stack(args, progress_cb) -> int:
                     idx = int(idx_str)
                 except ValueError:
                     idx = -1
-                hdr = solved_headers[idx] if 0 <= idx < len(solved_headers) else fits.Header()
+                hdr = (
+                    solved_headers[idx].copy()
+                    if 0 <= idx < len(solved_headers)
+                    else fits.Header()
+                )
+                sanitize_header_for_wcs(hdr)
                 try:
                     wcs_json = fp.replace(".npy", ".wcs.json")
                     with open(wcs_json, "w", encoding="utf-8") as jf:
@@ -602,6 +631,11 @@ def _run_stack(args, progress_cb) -> int:
                             fits_path, overwrite=True
                         )
                         stacker.intermediate_classic_batch_files.append((fits_path, []))
+                        if progress_cb:
+                            progress_cb(
+                                f"Intermediary FITS created: {os.path.basename(fits_path)}",
+                                None,
+                            )
                     except Exception:
                         if progress_cb:
                             progress_cb(f"FITS export failure: {base}", None)
