@@ -443,6 +443,20 @@ def _run_stack(args, progress_cb) -> int:
     except Exception:
         settings.reset_to_defaults()
 
+    # When using Reproject+Coadd with single-image batches we must retain
+    # each aligned FITS on disk so that an external astrometric solver can
+    # update its WCS.  Force ``align_on_disk`` if the user hasn't enabled it.
+    use_astrometric = (
+        settings.reproject_coadd_final
+        and args.batch_size == 1
+        and getattr(settings, "local_solver_preference", "none") != "none"
+    )
+    if use_astrometric and not args.align_on_disk:
+        logger.info(
+            "Reproject+Coadd avec résolution WCS requis --align-on-disk; activation automatique"
+        )
+        args.align_on_disk = True
+
     stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk, settings=settings)
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
@@ -488,9 +502,50 @@ def _run_stack(args, progress_cb) -> int:
         start_time = time.monotonic()
         last_aligned = 0
         total_images = len(file_list)
+        processed_temp_idx = 0
+
+        def _process_new_aligned() -> None:
+            """Solve WCS for any newly aligned temp files."""
+            nonlocal processed_temp_idx
+            if not use_astrometric:
+                return
+            new_paths = stacker.aligned_temp_paths[processed_temp_idx:]
+            if not new_paths:
+                return
+            for fp in new_paths:
+                base = os.path.basename(fp)
+                if progress_cb:
+                    progress_cb(f"WCS solving: {base}", None)
+                solved_ok = False
+                try:
+                    solved_ok = stacker._run_astap_and_update_header(fp)
+                    if solved_ok:
+                        try:
+                            with fits.open(fp) as hdul:
+                                w = WCS(hdul[0].header, naxis=2)
+                                solved_ok = w.has_celestial
+                        except Exception:
+                            solved_ok = False
+                except Exception as e:
+                    logger.exception("Astrometric solver failed for %s", fp)
+                    solved_ok = False
+                if solved_ok:
+                    stacker.intermediate_classic_batch_files.append((fp, []))
+                    if progress_cb:
+                        progress_cb(f"WCS solved: {base}", None)
+                else:
+                    if progress_cb:
+                        progress_cb(f"WCS failure: {base}", None)
+                    try:
+                        stacker._move_to_unaligned(fp)
+                    except Exception:
+                        pass
+            processed_temp_idx += len(new_paths)
 
         while stacker.is_running():
             time.sleep(1)
+
+            _process_new_aligned()
 
             current_aligned = getattr(stacker, "aligned_counter", 0)
             if progress_cb and current_aligned != last_aligned:
@@ -512,6 +567,8 @@ def _run_stack(args, progress_cb) -> int:
             getattr(stacker, "_indices_cache", {}).clear()
             gc.collect()
             _log_mem("loop")  # DEBUG: track RAM during run
+
+        _process_new_aligned()  # catch any remaining files
 
         final_path = getattr(stacker, "final_stacked_path", None)
 
