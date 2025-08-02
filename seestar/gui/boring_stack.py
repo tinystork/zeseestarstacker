@@ -514,7 +514,27 @@ def _run_stack(args, progress_cb) -> int:
             _log_mem("loop")  # DEBUG: track RAM during run
 
         final_path = getattr(stacker, "final_stacked_path", None)
-        if not final_path and settings.reproject_coadd_final and args.batch_size == 1:
+
+        # Explicitly handle the "Reproject and coadd" final combine mode when
+        # running in single-image batches.  ``stack_final_combine`` stores the
+        # key selected in the GUI, so check that value directly instead of
+        # relying solely on the boolean ``reproject_coadd_final`` flag.
+        if (
+            settings.stack_final_combine in {"reproject_coadd", "Reproject and coadd", "Reproject & Coadd"}
+            and args.batch_size == 1
+        ):
+            aligned_files = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
+            out_fp = os.path.join(args.out, "final.fits")
+            success = _finalize_reproject_and_coadd(aligned_files, out_fp)
+
+            if success:
+                final_path = out_fp
+                logger.info("Final image created with reproject_and_coadd.")
+            else:
+                logger.error(
+                    "Reproject_and_coadd failed or no aligned files were available."
+                )
+        elif not final_path and settings.reproject_coadd_final and args.batch_size == 1:
             aligned = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
             out_fp = os.path.join(args.out, "final.fits")
             if _finalize_reproject_and_coadd(aligned, out_fp):
