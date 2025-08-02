@@ -145,13 +145,20 @@ logger = logging.getLogger(__name__)
 # ASTAP WCS helpers
 # -----------------------------------------------------------------------------
 
-def _sanitize_astap_wcs(fits_path: str) -> None:
-    """Ensure CONTINUE card values in ASTAP .wcs sidecars are strings."""
-    wcs_path = os.path.splitext(fits_path)[0] + ".wcs"
+
+def _sanitize_astap_wcs(path: str) -> None:
+    """Ensure CONTINUE card values in ASTAP ``.wcs`` sidecars are strings.
+
+    ``path`` may point either to the original FITS file or directly to the
+    ``.wcs`` sidecar produced by ASTAP.
+    """
+    wcs_path = path if path.lower().endswith(".wcs") else os.path.splitext(path)[0] + ".wcs"
     if not os.path.exists(wcs_path):
         return
     try:
-        with fits.open(wcs_path, mode="update") as hdul:
+        # Primary attempt: treat the sidecar as a minimal FITS file
+        with fits.open(wcs_path, mode="update") as hdul:  # pragma: no cover - best effort
+
             hdr = hdul[0].header
             modified = False
             for card in hdr.cards:
@@ -160,7 +167,23 @@ def _sanitize_astap_wcs(fits_path: str) -> None:
                     modified = True
             if modified:
                 hdul.flush()
-    except Exception:  # pragma: no cover - best effort
+
+            return
+    except Exception:
+        pass
+    # Fallback: some ASTAP ``.wcs`` files are plain text headers
+    try:  # pragma: no cover - best effort
+        header = fits.Header.fromfile(wcs_path, sep="\n")
+        modified = False
+        for card in header.cards:
+            if card.keyword == "CONTINUE" and not isinstance(card.value, str):
+                card.value = str(card.value)
+                modified = True
+        if modified:
+            with open(wcs_path, "w", newline="\n") as f:
+                f.write(header.tostring(sep="\n"))
+    except Exception:
+
         logger.debug("Échec de la correction CONTINUE pour %s", wcs_path, exc_info=True)
 
 
@@ -501,16 +524,15 @@ def _run_stack(args, progress_cb) -> int:
                 pass
         stacker.progress_callback = progress_cb
 
-        if args.batch_size == 1:
-            _orig_run_astap = stacker._run_astap_and_update_header
+        if args.batch_size == 1 and stacker.astrometry_solver:
+            _orig_parse_wcs = stacker.astrometry_solver._parse_wcs_file_content
 
-            def _patched_run_astap_and_update_header(fpath, _orig=_orig_run_astap):
-                ok = _orig(fpath)
-                if ok:
-                    _sanitize_astap_wcs(fpath)
-                return ok
+            def _patched_parse_wcs_file_content(wcs_path, img_shape_hw, _orig=_orig_parse_wcs):
+                _sanitize_astap_wcs(wcs_path)
+                return _orig(wcs_path, img_shape_hw)
 
-            stacker._run_astap_and_update_header = _patched_run_astap_and_update_header
+            stacker.astrometry_solver._parse_wcs_file_content = _patched_parse_wcs_file_content
+
 
         # ------------------------------------------------------------------
         # Pré-plate-solving des fichiers FITS sources (batch_size=1 uniquement)
