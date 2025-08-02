@@ -516,43 +516,9 @@ def _run_stack(args, progress_cb) -> int:
         final_path = getattr(stacker, "final_stacked_path", None)
 
         # Explicitly handle the "Reproject and coadd" final combine mode when
-        # running in single-image batches.  ``stack_final_combine`` stores the
-        # key selected in the GUI, so check that value directly instead of
-        # relying solely on the boolean ``reproject_coadd_final`` flag.
-        if (
-            settings.stack_final_combine in {"reproject_coadd", "Reproject and coadd", "Reproject & Coadd"}
-            and args.batch_size == 1
-        ):
-            aligned_files = [
-                p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
-            ]
-            logger.info(
-                "Fichiers alignés initialement détectés : %s", aligned_files
-            )
-            aligned_files_existants = [f for f in aligned_files if os.path.isfile(f)]
-            logger.info(
-                "Fichiers alignés existants : %s", aligned_files_existants
-            )
-            if aligned_files_existants:
-                out_fp = os.path.join(args.out, "final.fits")
-                success = _finalize_reproject_and_coadd(
-                    aligned_files_existants, out_fp
-                )
-
-                if success:
-                    final_path = out_fp
-                    logger.info(
-                        "Image finale créée avec succès via reproject_and_coadd."
-                    )
-                else:
-                    logger.error(
-                        "Échec de _finalize_reproject_and_coadd malgré l'existence des fichiers alignés."
-                    )
-            else:
-                logger.error(
-                    "Aucun fichier aligné valide trouvé pour la reprojection finale."
-                )
-        elif not final_path and settings.reproject_coadd_final and args.batch_size == 1:
+        # running in single-image batches. All intermediate aligned files are
+        # combined using :func:`reproject_and_coadd` to produce the final image.
+        if settings.reproject_coadd_final and args.batch_size == 1:
             aligned = [
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
             ]
@@ -565,7 +531,8 @@ def _run_stack(args, progress_cb) -> int:
             )
             if aligned_existing:
                 out_fp = os.path.join(args.out, "final.fits")
-                if _finalize_reproject_and_coadd(aligned_existing, out_fp):
+                success = _finalize_reproject_and_coadd(aligned_existing, out_fp)
+                if success:
                     final_path = out_fp
                     logger.info(
                         "Image finale créée avec succès via reproject_and_coadd."
