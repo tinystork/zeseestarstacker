@@ -145,6 +145,7 @@ logger = logging.getLogger(__name__)
 # ASTAP WCS helpers
 # -----------------------------------------------------------------------------
 
+
 def _sanitize_astap_wcs(path: str) -> None:
     """Ensure CONTINUE card values in ASTAP ``.wcs`` sidecars are strings.
 
@@ -157,6 +158,7 @@ def _sanitize_astap_wcs(path: str) -> None:
     try:
         # Primary attempt: treat the sidecar as a minimal FITS file
         with fits.open(wcs_path, mode="update") as hdul:  # pragma: no cover - best effort
+
             hdr = hdul[0].header
             modified = False
             for card in hdr.cards:
@@ -165,6 +167,7 @@ def _sanitize_astap_wcs(path: str) -> None:
                     modified = True
             if modified:
                 hdul.flush()
+
             return
     except Exception:
         pass
@@ -180,6 +183,7 @@ def _sanitize_astap_wcs(path: str) -> None:
             with open(wcs_path, "w", newline="\n") as f:
                 f.write(header.tostring(sep="\n"))
     except Exception:
+
         logger.debug("Échec de la correction CONTINUE pour %s", wcs_path, exc_info=True)
 
 
@@ -528,6 +532,7 @@ def _run_stack(args, progress_cb) -> int:
                 return _orig(wcs_path, img_shape_hw)
 
             stacker.astrometry_solver._parse_wcs_file_content = _patched_parse_wcs_file_content
+
 
         # ------------------------------------------------------------------
         # Pré-plate-solving des fichiers FITS sources (batch_size=1 uniquement)
