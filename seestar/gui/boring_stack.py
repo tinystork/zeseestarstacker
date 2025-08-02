@@ -133,7 +133,11 @@ from seestar.queuep.queue_manager import SeestarQueuedStacker
 # script can be executed directly without Python considering it a package
 # relative module.  When ``__package__`` is ``None`` the project root is added
 # to ``sys.path`` above, allowing this import to succeed.
-from seestar.core.image_processing import load_and_validate_fits, save_fits_image
+from seestar.core.image_processing import (
+    load_and_validate_fits,
+    save_fits_image,
+    sanitize_header_for_wcs,
+)
 from seestar.enhancement.reproject_utils import reproject_and_coadd
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -264,6 +268,7 @@ def _finalize_reproject_and_coadd(aligned_files, output_path):
             with fits.open(fp, memmap=False) as hdul:
                 data = hdul[0].data.astype(np.float32)
                 hdr = hdul[0].header
+                sanitize_header_for_wcs(hdr)
         except Exception:
             continue
         if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[0] != data.shape[-1]:
@@ -432,35 +437,6 @@ def _run_stack(args, progress_cb) -> int:
         args.align_on_disk = True
 
     ordered_files = [r["path"] for r in rows]
-
-    is_plan = os.path.basename(args.csv).lower() == "stack_plan.csv"
-    if (
-        args.batch_size == 1
-        and is_plan
-        and args.norm in {"linear_fit", "sky_mean"}
-    ):
-        norm_dir = os.path.join(args.out, "normalized_inputs")
-        os.makedirs(norm_dir, exist_ok=True)
-        if args.norm == "linear_fit":
-            coeffs = _calculate_global_linear_fit(ordered_files[0], ordered_files)
-        else:
-            target_sky = _calculate_global_sky_mean(ordered_files)
-        normalized_rows = []
-        for idx, (row, path) in enumerate(zip(rows, ordered_files)):
-            data, hdr = load_and_validate_fits(path)
-            if data is None:
-                continue
-            if args.norm == "linear_fit":
-                slope, inter = coeffs[idx]
-                data = _apply_linear_fit(data, slope, inter)
-            else:
-                data = _apply_sky_mean(data, target_sky)
-            out_fp = os.path.join(norm_dir, f"{idx:04d}.fits")
-            save_fits_image(data, out_fp, hdr)
-            normalized_rows.append({"path": out_fp, "weight": row.get("weight", "")})
-        rows = normalized_rows
-        ordered_files = [r["path"] for r in rows]
-        args.norm = "none"
 
     file_list = ordered_files
     out_path = os.path.join(args.out, "final.fits")
