@@ -142,6 +142,29 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
+# ASTAP WCS helpers
+# -----------------------------------------------------------------------------
+
+def _sanitize_astap_wcs(fits_path: str) -> None:
+    """Ensure CONTINUE card values in ASTAP .wcs sidecars are strings."""
+    wcs_path = os.path.splitext(fits_path)[0] + ".wcs"
+    if not os.path.exists(wcs_path):
+        return
+    try:
+        with fits.open(wcs_path, mode="update") as hdul:
+            hdr = hdul[0].header
+            modified = False
+            for card in hdr.cards:
+                if card.keyword == "CONTINUE" and not isinstance(card.value, str):
+                    card.value = str(card.value)
+                    modified = True
+            if modified:
+                hdul.flush()
+    except Exception:  # pragma: no cover - best effort
+        logger.debug("Échec de la correction CONTINUE pour %s", wcs_path, exc_info=True)
+
+
+# -----------------------------------------------------------------------------
 # CSV helpers (reused by GUI)
 # -----------------------------------------------------------------------------
 
@@ -477,6 +500,17 @@ def _run_stack(args, progress_cb) -> int:
             except Exception:
                 pass
         stacker.progress_callback = progress_cb
+
+        if args.batch_size == 1:
+            _orig_run_astap = stacker._run_astap_and_update_header
+
+            def _patched_run_astap_and_update_header(fpath, _orig=_orig_run_astap):
+                ok = _orig(fpath)
+                if ok:
+                    _sanitize_astap_wcs(fpath)
+                return ok
+
+            stacker._run_astap_and_update_header = _patched_run_astap_and_update_header
 
         # ------------------------------------------------------------------
         # Pré-plate-solving des fichiers FITS sources (batch_size=1 uniquement)
