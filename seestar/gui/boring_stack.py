@@ -457,7 +457,16 @@ def _run_stack(args, progress_cb) -> int:
         )
         args.align_on_disk = True
 
-    stacker = SeestarQueuedStacker(align_on_disk=args.align_on_disk, settings=settings)
+    stacker = SeestarQueuedStacker(
+        align_on_disk=args.align_on_disk,
+        settings=settings,
+        local_solver_preference=settings.local_solver_preference,
+        astap_path=settings.astap_path,
+        astap_data_dir=settings.astap_data_dir,
+        astap_search_radius=settings.astap_search_radius,
+        astap_downsample=settings.astap_downsample,
+        astap_sensitivity=settings.astap_sensitivity,
+    )
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
     try:
