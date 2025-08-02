@@ -6055,6 +6055,7 @@ class SeestarQueuedStacker:
         valid_pixel_mask_2d = None
         matrice_M_calculee = None
         align_method_log_msg = "Unknown"
+        tmp_align_in_path = None
 
         try:
             logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
@@ -6168,7 +6169,6 @@ class SeestarQueuedStacker:
                 f"     - (e) is_drizzle_or_mosaic_mode: {is_drizzle_or_mosaic_mode}"
             )
 
-            tmp_align_in_path = None
             if align_on_disk:
                 tmp_align_in_path = tempfile.mktemp(suffix=".npy")
                 mm_in = np.lib.format.open_memmap(
