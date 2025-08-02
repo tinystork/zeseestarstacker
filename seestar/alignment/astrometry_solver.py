@@ -14,6 +14,10 @@ import gc
 import logging
 import platform
 from zemosaic import zemosaic_config
+try:  # Allow running as a standalone module in tests
+    from ..core.image_processing import sanitize_header_for_wcs
+except ImportError:  # pragma: no cover
+    from seestar.core.image_processing import sanitize_header_for_wcs
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -1118,12 +1122,24 @@ class AstrometrySolver:
             
             # Créer un header FITS à partir de ce texte
             # S'assurer que les fins de ligne sont gérées (Unix vs Windows)
-            wcs_header_from_text = fits.Header.fromstring(wcs_text_content.replace('\r\n', '\n').replace('\r', '\n'), sep='\n')
-            
+            wcs_header_from_text = fits.Header.fromstring(
+                wcs_text_content.replace('\r\n', '\n').replace('\r', '\n'), sep='\n'
+            )
+            sanitize_header_for_wcs(wcs_header_from_text)
+
             # Créer l'objet WCS
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", FITSFixedWarning)
-                wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)  # relax=True pour accepter les mots-clés non standards
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FITSFixedWarning)
+                    wcs_obj = WCS(
+                        wcs_header_from_text, naxis=2, relax=True
+                    )  # relax=True pour accepter les mots-clés non standards
+            except Exception as e:
+                self._log(f"WCS parse failed: {e}", "ERROR")
+                sanitize_header_for_wcs(wcs_header_from_text)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FITSFixedWarning)
+                    wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)
 
             if wcs_obj:
                 # Vérifier la présence des mots-clés essentiels et compléter si nécessaire

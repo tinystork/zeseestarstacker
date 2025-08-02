@@ -13,6 +13,16 @@ from astropy.io import fits
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
+def sanitize_header_for_wcs(header: fits.Header) -> None:
+    """Remove non-string CONTINUE cards that break ``astropy.wcs.WCS``.
+
+    The function edits the header in-place, keeping only string-valued
+    ``CONTINUE`` cards to avoid parsing errors when creating a WCS object.
+    """
+    for key in list(header.keys()):
+        if key == "CONTINUE" and not isinstance(header[key], str):
+            del header[key]
+
 
 def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
     """
@@ -74,6 +84,7 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
 
             data_raw = hdu_img.data
             header = hdu_img.header.copy() # Toujours prendre une copie
+            sanitize_header_for_wcs(header)
             header_for_fallback = header.copy() # Mettre à jour le fallback avec le header trouvé
             
             print(f"  DEBUG IP (load_and_validate_fits V2.1): Données image trouvées dans HDU {img_hdu_idx} pour '{filename}'. Shape brute: {data_raw.shape if data_raw is not None else 'None'}, Dtype brut: {data_raw.dtype if data_raw is not None else 'None'}")
