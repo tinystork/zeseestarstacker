@@ -3428,6 +3428,7 @@ class SeestarQueuedStacker:
                 self.drizzle_active_session
                 or self.is_mosaic_run
                 or self.reproject_between_batches
+                or self.reproject_coadd_final
             ):
                 self.update_progress(
                     "DEBUG WORKER: Section 1.A - Plate-solving de la référence..."
@@ -3606,6 +3607,7 @@ class SeestarQueuedStacker:
                 self.drizzle_active_session
                 or use_astrometry_per_panel_mosaic
                 or self.reproject_between_batches
+                or self.reproject_coadd_final
             ):  # `use_astrometry_per_panel_mosaic` est True si mode mosaique="astrometry_per_panel"
                 self.update_progress(
                     "DEBUG WORKER: Branche Drizzle Std / AstroMosaic / ReprojectBatches pour référence globale..."
@@ -6421,7 +6423,7 @@ class SeestarQueuedStacker:
                     data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
 
                     if (
-                        self.reproject_between_batches
+                        (self.reproject_between_batches or self.reproject_coadd_final)
                         and self.reference_wcs_object is not None
                     ):
                         # Attach the reference WCS so batches can be reprojected
@@ -10110,10 +10112,7 @@ class SeestarQueuedStacker:
                     self._last_classic_batch_solved = False
                     return None, None
         else:
-            if (
-                self.reference_header_for_wcs is not None
-                and not self.reproject_coadd_final
-            ):
+            if self.reference_header_for_wcs is not None:
                 if (
                     input_wcs is not None
                     and self.reference_wcs_object is not None
