@@ -173,7 +173,9 @@ def _sanitize_astap_wcs(path: str) -> None:
         pass
     # Fallback: some ASTAP ``.wcs`` files are plain text headers
     try:  # pragma: no cover - best effort
-        header = fits.Header.fromfile(wcs_path, sep="\n")
+        header = fits.Header.fromfile(
+            wcs_path, sep="\n", padding=False, endcard=False
+        )
         modified = False
         for card in header.cards:
             if card.keyword == "CONTINUE" and not isinstance(card.value, str):
