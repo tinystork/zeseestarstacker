@@ -133,6 +133,9 @@ from seestar.queuep.queue_manager import SeestarQueuedStacker
 # relative module.  When ``__package__`` is ``None`` the project root is added
 # to ``sys.path`` above, allowing this import to succeed.
 from seestar.core.image_processing import load_and_validate_fits, save_fits_image
+from seestar.enhancement.reproject_utils import reproject_and_coadd
+from astropy.io import fits
+from astropy.wcs import WCS
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +200,50 @@ def read_rows(csv_path):
 
 def read_paths(csv_path):
     return [r["path"] for r in read_rows(csv_path)]
+
+
+# -----------------------------------------------------------------------------
+# Reproject+Coadd helper
+# -----------------------------------------------------------------------------
+
+def _finalize_reproject_and_coadd(aligned_files, output_path):
+    """Combine ``aligned_files`` using :func:`reproject_and_coadd`."""
+
+    input_pairs = []
+    for fp in aligned_files:
+        try:
+            with fits.open(fp, memmap=False) as hdul:
+                data = hdul[0].data.astype(np.float32)
+                hdr = hdul[0].header
+        except Exception:
+            continue
+        if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[0] != data.shape[-1]:
+            data = np.moveaxis(data, 0, -1)
+        wcs = WCS(hdr, naxis=2)
+        if wcs.pixel_shape is None:
+            h, w = data.shape[:2]
+            wcs.pixel_shape = (w, h)
+        input_pairs.append((data, wcs))
+
+    if not input_pairs:
+        return False
+
+    output_projection = input_pairs[0][1]
+    shape_out = input_pairs[0][0].shape[:2]
+
+    stacked, _ = reproject_and_coadd(
+        input_pairs,
+        output_projection=output_projection,
+        shape_out=shape_out,
+        combine_function="mean",
+        match_background=True,
+    )
+
+    fits.PrimaryHDU(
+        data=np.moveaxis(stacked, -1, 0),
+        header=output_projection.to_header(relax=True),
+    ).writeto(output_path, overwrite=True)
+    return True
 
 
 # -----------------------------------------------------------------------------
@@ -467,9 +514,15 @@ def _run_stack(args, progress_cb) -> int:
             _log_mem("loop")  # DEBUG: track RAM during run
 
         final_path = getattr(stacker, "final_stacked_path", None)
+        if not final_path and settings.reproject_coadd_final and args.batch_size == 1:
+            aligned = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
+            out_fp = os.path.join(args.out, "final.fits")
+            if _finalize_reproject_and_coadd(aligned, out_fp):
+                final_path = out_fp
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
-            shutil.copy2(final_path, dest)
+            if os.path.abspath(final_path) != os.path.abspath(dest):
+                shutil.copy2(final_path, dest)
             logger.info("Final FITS copied to %s", dest)
         preview = os.path.splitext(final_path)[0] + ".png" if final_path else None
         if preview and os.path.isfile(preview):
