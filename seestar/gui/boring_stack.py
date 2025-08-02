@@ -523,22 +523,61 @@ def _run_stack(args, progress_cb) -> int:
             settings.stack_final_combine in {"reproject_coadd", "Reproject and coadd", "Reproject & Coadd"}
             and args.batch_size == 1
         ):
-            aligned_files = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
-            out_fp = os.path.join(args.out, "final.fits")
-            success = _finalize_reproject_and_coadd(aligned_files, out_fp)
+            aligned_files = [
+                p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
+            ]
+            logger.info(
+                "Fichiers alignés initialement détectés : %s", aligned_files
+            )
+            aligned_files_existants = [f for f in aligned_files if os.path.isfile(f)]
+            logger.info(
+                "Fichiers alignés existants : %s", aligned_files_existants
+            )
+            if aligned_files_existants:
+                out_fp = os.path.join(args.out, "final.fits")
+                success = _finalize_reproject_and_coadd(
+                    aligned_files_existants, out_fp
+                )
 
-            if success:
-                final_path = out_fp
-                logger.info("Final image created with reproject_and_coadd.")
+                if success:
+                    final_path = out_fp
+                    logger.info(
+                        "Image finale créée avec succès via reproject_and_coadd."
+                    )
+                else:
+                    logger.error(
+                        "Échec de _finalize_reproject_and_coadd malgré l'existence des fichiers alignés."
+                    )
             else:
                 logger.error(
-                    "Reproject_and_coadd failed or no aligned files were available."
+                    "Aucun fichier aligné valide trouvé pour la reprojection finale."
                 )
         elif not final_path and settings.reproject_coadd_final and args.batch_size == 1:
-            aligned = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
-            out_fp = os.path.join(args.out, "final.fits")
-            if _finalize_reproject_and_coadd(aligned, out_fp):
-                final_path = out_fp
+            aligned = [
+                p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
+            ]
+            logger.info(
+                "Fichiers alignés initialement détectés : %s", aligned
+            )
+            aligned_existing = [f for f in aligned if os.path.isfile(f)]
+            logger.info(
+                "Fichiers alignés existants : %s", aligned_existing
+            )
+            if aligned_existing:
+                out_fp = os.path.join(args.out, "final.fits")
+                if _finalize_reproject_and_coadd(aligned_existing, out_fp):
+                    final_path = out_fp
+                    logger.info(
+                        "Image finale créée avec succès via reproject_and_coadd."
+                    )
+                else:
+                    logger.error(
+                        "Échec de _finalize_reproject_and_coadd malgré l'existence des fichiers alignés."
+                    )
+            else:
+                logger.error(
+                    "Aucun fichier aligné valide trouvé pour la reprojection finale."
+                )
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
             if os.path.abspath(final_path) != os.path.abspath(dest):
