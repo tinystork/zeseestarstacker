@@ -10,6 +10,7 @@ import gc
 import psutil
 import signal
 import numpy as np
+import json
 
 
 
@@ -476,6 +477,27 @@ def _run_stack(args, progress_cb) -> int:
             except Exception:
                 pass
         stacker.progress_callback = progress_cb
+
+        # ------------------------------------------------------------------
+        # Pré-plate-solving des fichiers FITS sources (batch_size=1 uniquement)
+        # ------------------------------------------------------------------
+        solved_headers: list[fits.Header] = []
+        if use_astrometric and args.batch_size == 1 and args.use_solver:
+            for idx, src in enumerate(file_list):
+                base = os.path.basename(src)
+                if progress_cb:
+                    progress_cb(f"WCS solving source: {base}", None)
+                try:
+                    stacker._run_astap_and_update_header(src)
+                except Exception:
+                    logger.exception("Astrometric solver failed for %s", src)
+                try:
+                    solved_headers.append(fits.getheader(src))
+                except Exception:
+                    solved_headers.append(fits.Header())
+        else:
+            solved_headers = [fits.Header() for _ in file_list]
+
         _log_mem("before_start")  # DEBUG: baseline RAM
         ok = stacker.start_processing(
             input_dir=input_dir,
@@ -514,7 +536,7 @@ def _run_stack(args, progress_cb) -> int:
         processed_temp_idx = 0
 
         def _process_new_aligned() -> None:
-            """Solve WCS for any newly aligned temp files."""
+            """Attach solved WCS headers to aligned ``.npy`` files."""
             nonlocal processed_temp_idx
             if not use_astrometric:
                 return
@@ -523,32 +545,32 @@ def _run_stack(args, progress_cb) -> int:
                 return
             for fp in new_paths:
                 base = os.path.basename(fp)
-                if progress_cb:
-                    progress_cb(f"WCS solving: {base}", None)
-                solved_ok = False
+                idx_str = os.path.splitext(base)[0].split("_")[-1]
                 try:
-                    solved_ok = stacker._run_astap_and_update_header(fp)
-                    if solved_ok:
-                        try:
-                            with fits.open(fp) as hdul:
-                                w = WCS(hdul[0].header, naxis=2)
-                                solved_ok = w.has_celestial
-                        except Exception:
-                            solved_ok = False
-                except Exception as e:
-                    logger.exception("Astrometric solver failed for %s", fp)
-                    solved_ok = False
-                if solved_ok:
-                    stacker.intermediate_classic_batch_files.append((fp, []))
+                    idx = int(idx_str)
+                except ValueError:
+                    idx = -1
+                hdr = solved_headers[idx] if 0 <= idx < len(solved_headers) else fits.Header()
+                try:
+                    wcs_json = fp.replace(".npy", ".wcs.json")
+                    with open(wcs_json, "w", encoding="utf-8") as jf:
+                        json.dump({k: str(v) for k, v in hdr.items()}, jf, indent=2)
                     if progress_cb:
-                        progress_cb(f"WCS solved: {base}", None)
-                else:
+                        progress_cb(f"WCS stored: {base}", None)
+                except Exception:
                     if progress_cb:
-                        progress_cb(f"WCS failure: {base}", None)
+                        progress_cb(f"WCS store failure: {base}", None)
+                if settings.reproject_coadd_final:
                     try:
-                        stacker._move_to_unaligned(fp)
+                        data = np.load(fp)
+                        fits_path = fp.replace(".npy", ".fits")
+                        fits.PrimaryHDU(data=data, header=hdr).writeto(
+                            fits_path, overwrite=True
+                        )
+                        stacker.intermediate_classic_batch_files.append((fits_path, []))
                     except Exception:
-                        pass
+                        if progress_cb:
+                            progress_cb(f"FITS export failure: {base}", None)
             processed_temp_idx += len(new_paths)
 
         while stacker.is_running():
