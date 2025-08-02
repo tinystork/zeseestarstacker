@@ -1150,7 +1150,18 @@ class SeestarQueuedStacker:
         self.drizzle_batch_output_dir = None
         self.classic_batch_output_dir = None
         self.final_stacked_path = None
-        self.api_key = None
+
+        # Plate-solver configuration so early WCS solves have the required
+        # attributes even if ``start_processing`` has not been called yet.
+        self.local_solver_preference = str(kwargs.get("local_solver_preference", "none"))
+        self.astap_path = str(kwargs.get("astap_path", ""))
+        self.astap_data_dir = str(kwargs.get("astap_data_dir", ""))
+        self.astap_search_radius = float(kwargs.get("astap_search_radius", 3.0))
+        self.astap_downsample = int(kwargs.get("astap_downsample", 1))
+        self.astap_sensitivity = int(kwargs.get("astap_sensitivity", 100))
+        self.local_ansvr_path = str(kwargs.get("local_ansvr_path", ""))
+        self.api_key = kwargs.get("api_key")
+
         self.reference_wcs_object = None
         self.reference_header_for_wcs = None
         self.ref_wcs_header = None
@@ -9617,14 +9628,14 @@ class SeestarQueuedStacker:
             return False
 
         solver_settings = {
-            "local_solver_preference": self.local_solver_preference,
-            "api_key": self.api_key,
-            "astap_path": self.astap_path,
-            "astap_data_dir": self.astap_data_dir,
-            "astap_search_radius": self.astap_search_radius,
-            "astap_downsample": self.astap_downsample,
-            "astap_sensitivity": self.astap_sensitivity,
-            "local_ansvr_path": self.local_ansvr_path,
+            "local_solver_preference": getattr(self, "local_solver_preference", "none"),
+            "api_key": getattr(self, "api_key", ""),
+            "astap_path": getattr(self, "astap_path", ""),
+            "astap_data_dir": getattr(self, "astap_data_dir", ""),
+            "astap_search_radius": getattr(self, "astap_search_radius", 3.0),
+            "astap_downsample": getattr(self, "astap_downsample", 1),
+            "astap_sensitivity": getattr(self, "astap_sensitivity", 100),
+            "local_ansvr_path": getattr(self, "local_ansvr_path", ""),
             "scale_est_arcsec_per_pix": getattr(
                 self, "reference_pixel_scale_arcsec", None
             ),
