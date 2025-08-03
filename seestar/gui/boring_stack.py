@@ -650,11 +650,34 @@ def _run_stack(args, progress_cb) -> int:
                 if settings.reproject_coadd_final:
                     try:
                         data = np.load(fp)
-                        fits_path = fp.replace(".npy", ".fits")
-                        fits.PrimaryHDU(data=data, header=hdr).writeto(
-                            fits_path, overwrite=True
+                        logger.debug(
+                            "DEBUG BS: Chargé %s - shape=%s dtype=%s",
+                            os.path.basename(fp),
+                            data.shape,
+                            data.dtype,
                         )
-                        logger.info("FITS aligné exporté: %s", os.path.basename(fits_path))
+                        fits_path = fp.replace(".npy", ".fits")
+
+                        expected_h = hdr.get("NAXIS2")
+                        expected_w = hdr.get("NAXIS1")
+                        if (
+                            data.ndim != 3
+                            or data.shape[2] != 3
+                            or (expected_h and expected_w and data.shape != (expected_h, expected_w, 3))
+                        ):
+                            logger.error(
+                                "Shape mismatch for %s: expected (%s,%s,3) got %s",
+                                base,
+                                expected_h,
+                                expected_w,
+                                data.shape,
+                            )
+                            continue
+
+                        save_fits_image(data, fits_path, header=hdr, overwrite=True)
+                        logger.info(
+                            "FITS aligné exporté: %s", os.path.basename(fits_path)
+                        )
                         # Validate header after write
                         try:
                             check_hdr = fits.getheader(fits_path)
