@@ -4224,6 +4224,16 @@ class SeestarQueuedStacker:
                                                 aligned_data, valid_mask_val
                                             )
                                             if img_p and mask_p:
+                                                try:
+                                                    hdr_path = img_p.replace(".npy", ".hdr")
+                                                    with open(hdr_path, "w", encoding="utf-8") as hf:
+                                                        hf.write(header_orig.tostring(sep="\n"))
+                                                except Exception as e_hdr:
+                                                    logger.error(
+                                                        "Échec sauvegarde header WCS pour %s: %s",
+                                                        img_p,
+                                                        e_hdr,
+                                                    )
                                                 classic_stack_item = (
                                                     img_p,
                                                     header_orig,
