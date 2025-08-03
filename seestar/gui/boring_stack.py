@@ -596,6 +596,21 @@ def _run_stack(args, progress_cb) -> int:
         def _process_new_aligned() -> None:
             """Attach solved WCS headers to aligned ``.npy`` files."""
             nonlocal processed_temp_idx
+
+            def _has_essential_wcs(header: fits.Header) -> bool:
+                required = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"}
+                has_scale = (
+                    "CDELT1" in header
+                    and "CDELT2" in header
+                    or (
+                        "CD1_1" in header
+                        and "CD1_2" in header
+                        and "CD2_1" in header
+                        and "CD2_2" in header
+                    )
+                )
+                return required.issubset(header.keys()) and has_scale
+
             if not use_astrometric:
                 return
             new_paths = stacker.aligned_temp_paths[processed_temp_idx:]
@@ -603,17 +618,18 @@ def _run_stack(args, progress_cb) -> int:
                 return
             for fp in new_paths:
                 base = os.path.basename(fp)
-                idx_str = os.path.splitext(base)[0].split("_")[-1]
+                hdr_path = fp.replace(".npy", ".hdr")
+                hdr = fits.Header()
                 try:
-                    idx = int(idx_str)
-                except ValueError:
-                    idx = -1
-                hdr = (
-                    solved_headers[idx].copy()
-                    if 0 <= idx < len(solved_headers)
-                    else fits.Header()
-                )
+                    with open(hdr_path, "r", encoding="utf-8") as hf:
+                        hdr = fits.Header.fromstring(hf.read(), sep="\n")
+                except Exception as e_hdr:
+                    logger.error("Header WCS introuvable pour %s: %s", base, e_hdr)
+                    continue
                 sanitize_header_for_wcs(hdr)
+                if not _has_essential_wcs(hdr):
+                    logger.error("Header WCS invalide pour %s", base)
+                    continue
                 try:
                     wcs_json = fp.replace(".npy", ".wcs.json")
                     with open(wcs_json, "w", encoding="utf-8") as jf:
@@ -630,12 +646,25 @@ def _run_stack(args, progress_cb) -> int:
                         fits.PrimaryHDU(data=data, header=hdr).writeto(
                             fits_path, overwrite=True
                         )
-                        stacker.intermediate_classic_batch_files.append((fits_path, []))
-                        if progress_cb:
-                            progress_cb(
-                                f"Intermediary FITS created: {os.path.basename(fits_path)}",
-                                None,
+                        # Validate header after write
+                        try:
+                            check_hdr = fits.getheader(fits_path)
+                            if not _has_essential_wcs(check_hdr):
+                                raise ValueError("missing essential WCS keys")
+                            stacker.intermediate_classic_batch_files.append((fits_path, []))
+                            if progress_cb:
+                                progress_cb(
+                                    f"Intermediary FITS created: {os.path.basename(fits_path)}",
+                                    None,
+                                )
+                        except Exception as e_chk:
+                            logger.error(
+                                "Validation WCS échouée pour %s: %s", base, e_chk
                             )
+                            try:
+                                os.remove(fits_path)
+                            except Exception:
+                                pass
                     except Exception:
                         if progress_cb:
                             progress_cb(f"FITS export failure: {base}", None)
