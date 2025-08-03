@@ -581,7 +581,15 @@ def _run_stack(args, progress_cb) -> int:
             reproject_between_batches=settings.reproject_between_batches,
             reproject_coadd_final=settings.reproject_coadd_final,
             api_key=args.api_key,
-            perform_cleanup=args.cleanup_temp_files,
+            # When using ``reproject_and_coadd`` with ``batch_size=1`` we must
+            # keep the aligned files on disk for the final reprojection step.
+            # Delay cleanup until the very end so external solvers (ASTAP)
+            # can update the WCS headers of the aligned FITS files.
+            perform_cleanup=(
+                False
+                if settings.reproject_coadd_final and args.batch_size == 1
+                else args.cleanup_temp_files
+            ),
         )
         _log_mem("after_start")  # DEBUG: after stacker launch
         if not ok:
@@ -646,12 +654,17 @@ def _run_stack(args, progress_cb) -> int:
                         fits.PrimaryHDU(data=data, header=hdr).writeto(
                             fits_path, overwrite=True
                         )
+                        logger.info("FITS aligné exporté: %s", os.path.basename(fits_path))
                         # Validate header after write
                         try:
                             check_hdr = fits.getheader(fits_path)
                             if not _has_essential_wcs(check_hdr):
                                 raise ValueError("missing essential WCS keys")
                             stacker.intermediate_classic_batch_files.append((fits_path, []))
+                            logger.info(
+                                "FITS aligné conservé pour reprojection finale: %s",
+                                os.path.basename(fits_path),
+                            )
                             if progress_cb:
                                 progress_cb(
                                     f"Intermediary FITS created: {os.path.basename(fits_path)}",
@@ -699,6 +712,7 @@ def _run_stack(args, progress_cb) -> int:
         _process_new_aligned()  # catch any remaining files
 
         final_path = getattr(stacker, "final_stacked_path", None)
+        final_reproject_success = False
 
         # Explicitly handle the "Reproject and coadd" final combine mode when
         # running in single-image batches. All intermediate aligned files are
@@ -719,6 +733,7 @@ def _run_stack(args, progress_cb) -> int:
                 success = _finalize_reproject_and_coadd(aligned_existing, out_fp)
                 if success:
                     final_path = out_fp
+                    final_reproject_success = True
                     logger.info(
                         "Image finale créée avec succès via reproject_and_coadd."
                     )
@@ -741,8 +756,34 @@ def _run_stack(args, progress_cb) -> int:
 
         _log_mem("after_copy")  # DEBUG: after writing results
 
+        # ------------------------------------------------------------------
+        # Cleanup of aligned temporary files after successful reprojection
+        # ------------------------------------------------------------------
+        if (
+            final_reproject_success
+            and args.cleanup_temp_files
+            and settings.reproject_coadd_final
+            and args.batch_size == 1
+        ):
+            for npy_path in getattr(stacker, "aligned_temp_paths", []):
+                for ext in (".npy", ".hdr", ".wcs.json", ".fits"):
+                    tmp = npy_path.replace(".npy", ext)
+                    if os.path.isfile(tmp):
+                        try:
+                            os.remove(tmp)
+                            logger.info(
+                                "Suppression post-reprojection du fichier aligné %s", tmp
+                            )
+                        except Exception:
+                            logger.debug("Échec de suppression pour %s", tmp, exc_info=True)
+
         return 0
     finally:
+        # Restore user's cleanup preference for stacker internals
+        try:
+            stacker.perform_cleanup = args.cleanup_temp_files
+        except Exception:
+            pass
         _cleanup_stacker(stacker)
         _log_mem("after_cleanup")  # DEBUG: final RAM state
         _GLOBAL_STACKER = None
