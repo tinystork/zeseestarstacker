@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import importlib
+import logging
 import numpy as np
 from astropy.wcs import WCS
 from astropy.io import fits
@@ -22,7 +23,7 @@ def make_wcs(shape=(10, 10)):
     return w
 
 
-def test_auto_background_reference(monkeypatch, tmp_path):
+def test_auto_background_reference(monkeypatch, tmp_path, caplog):
     wcs = make_wcs()
     data0 = np.zeros((10, 10), dtype=np.float32)
     data1 = np.zeros((10, 10), dtype=np.float32) + 100
@@ -33,23 +34,14 @@ def test_auto_background_reference(monkeypatch, tmp_path):
         fits.writeto(path, data, overwrite=True)
         paths.append((str(path), wcs))
 
-    captured = {}
+    monkeypatch.setattr(mosaic_utils, "reproject_interp", lambda input_tuple, output_projection, shape_out, **kwargs: (input_tuple[0], np.ones(shape_out, dtype=np.float32)))
+    monkeypatch.setattr(mosaic_utils, "detect_stars", lambda img: np.zeros_like(img, dtype=bool))
 
-    def dummy_reproject_and_coadd(input_pairs, output_projection, shape_out, match_background=True, background_reference=None, **kwargs):
-        meds = [np.median(img) for img, _ in input_pairs]
-        ref = meds[background_reference] if background_reference is not None else np.median(meds)
-        offsets = [ref - m for m in meds]
-        captured["reference"] = background_reference
-        captured["offsets"] = offsets
-        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
-
-    def dummy_wrapper(*args, **kwargs):
-        return dummy_reproject_and_coadd(list(zip(kwargs["data_list"], kwargs["wcs_list"])), kwargs.get("output_projection"), kwargs.get("shape_out"), match_background=kwargs.get("match_background", True), background_reference=kwargs.get("background_reference"))
-
-    monkeypatch.setattr(mosaic_utils, "reproject_and_coadd", dummy_reproject_and_coadd)
-    monkeypatch.setattr(mosaic_utils.zemosaic_utils, "reproject_and_coadd_wrapper", dummy_wrapper)
-
+    caplog.set_level(logging.DEBUG, logger=mosaic_utils.logger.name)
     mosaic_utils.assemble_final_mosaic_with_reproject_coadd(paths, wcs, (10, 10), match_bg=True)
 
-    assert captured["reference"] == 1
-    assert np.allclose(captured["offsets"], [100, 0, -100])
+    assert any("Selected background reference index: 1" in rec.getMessage() for rec in caplog.records)
+    offsets = [rec.getMessage() for rec in caplog.records if rec.getMessage().startswith("BG_OFFSET idx")]
+    assert "[100.0]" in offsets[0]
+    assert "[0.0]" in offsets[1]
+    assert "[-100.0]" in offsets[2]

@@ -1,7 +1,5 @@
 import logging
 import os
-import shutil
-import inspect
 from typing import Tuple
 
 import numpy as np
@@ -10,9 +8,7 @@ from astropy.wcs import WCS
 
 from scipy.ndimage import binary_dilation
 
-from .reproject_utils import reproject_and_coadd, reproject_interp
-
-from zemosaic import zemosaic_utils
+from .reproject_utils import reproject_interp
 
 logger = logging.getLogger(__name__)
 
@@ -199,132 +195,160 @@ def assemble_final_mosaic_with_reproject_coadd(
         wcs_list.append(wcs)
 
 
-    mosaic_channels = []
-    coverage = None
-    n_ch = data_all[0].shape[2] if data_all else 0
-
     header = final_output_wcs.to_header(relax=True)
 
-    if use_memmap:
-        if memmap_dir is None:
-            memmap_dir = os.path.join(os.getcwd(), "reproject_memmap")
-        os.makedirs(memmap_dir, exist_ok=True)
+    # Determine channel count from first image
+    first_path, _ = master_tile_fits_with_wcs_list[0]
+    with fits.open(first_path, memmap=False) as hdul:
+        first = hdul[0].data.astype(np.float32)
+    if first.ndim == 3 and first.shape[0] in (1, 3) and first.shape[-1] != first.shape[0]:
+        first = np.moveaxis(first, 0, -1)
+    if first.ndim == 2:
+        first = first[..., np.newaxis]
+    n_ch = first.shape[-1]
+    del first
 
-    best_ref = None
-    if auto_bg_reference and match_bg:
-        footprints = []
-        for arr, wcs in zip(data_all, wcs_list):
-            try:
-                _, fp = reproject_interp(
-                    (arr[..., 0], wcs),
-                    output_projection=header,
-                    shape_out=final_output_shape_hw,
-                )
-            except Exception:
-                fp = np.zeros(final_output_shape_hw, dtype=float)
-            footprints.append(fp)
-        footprints = np.stack(footprints, axis=0)
+    import tempfile, psutil, gc
+    _PROC = psutil.Process(os.getpid())
 
-        metrics = []
-        for i, arr in enumerate(data_all):
-            img_ch = arr[..., 1] if arr.shape[-1] > 1 else arr[..., 0]
-            try:
-                star_mask = detect_stars(img_ch)
-            except Exception as exc:  # pragma: no cover - photutils missing
-                logger.debug("Star detection failed: %s", exc)
-                star_mask = np.zeros_like(img_ch, dtype=bool)
-            med, noise, grad = _background_metrics(img_ch, star_mask)
-            cover = coverage_fraction(i, footprints)
-            metrics.append((med, noise, grad, cover))
-
-        global_median = float(np.median([m[0] for m in metrics])) if metrics else 0.0
-        scores = []
-        for i, (med, noise, grad, cover) in enumerate(metrics):
-            score = abs(med - global_median) + noise + 2.0 * grad - 0.5 * cover
-            scores.append(score)
-        if scores:
-            best_ref = int(np.argmin(scores))
-
-        if force_reference_index is not None and 0 <= force_reference_index < len(data_all):
-            best_ref = int(force_reference_index)
-
-        for i, (met, sc) in enumerate(zip(metrics, scores)):
-            flag = " <-- REF" if best_ref is not None and i == best_ref else ""
-            logger.debug(
-                "BG_METRICS idx=%d med=%.3f noise=%.3f grad=%.3f cover=%.3f score=%.3f%s",
-                i,
-                met[0],
-                met[1],
-                met[2],
-                met[3],
-                sc,
-                flag,
-            )
-        if best_ref is not None:
-            logger.debug("Selected background reference index: %d", best_ref)
-
-    for ch in range(n_ch):
+    def _log_ram(prefix: str = ""):
         try:
-
-            kwargs = {}
-            try:
-                sig = inspect.signature(reproject_and_coadd)
-                if "match_background" in sig.parameters:
-                    kwargs["match_background"] = match_bg
-                elif "match_bg" in sig.parameters:
-                    kwargs["match_bg"] = match_bg
-            except Exception:
-                kwargs["match_background"] = match_bg
-
-            data_list = [arr[..., ch] for arr in data_all]
-
-            kwargs_local = dict(kwargs)
-            if weight_arrays is not None:
-                kwargs_local["input_weights"] = weight_arrays
-            try:
-                sig = inspect.signature(reproject_and_coadd)
-                if use_memmap:
-                    if "use_memmap" in sig.parameters:
-                        kwargs_local["use_memmap"] = True
-                    elif "intermediate_memmap" in sig.parameters:
-                        kwargs_local["intermediate_memmap"] = True
-                    if "memmap_dir" in sig.parameters:
-                        kwargs_local["memmap_dir"] = memmap_dir
-                    if "cleanup_memmap" in sig.parameters:
-                        kwargs_local["cleanup_memmap"] = False
-                if auto_bg_reference and match_bg and best_ref is not None:
-                    if "background_reference" in sig.parameters:
-                        kwargs_local["background_reference"] = best_ref
-            except Exception:
-                if use_memmap and "memmap_dir" not in kwargs_local:
-                    kwargs_local["memmap_dir"] = memmap_dir
-                if auto_bg_reference and match_bg and best_ref is not None:
-                    kwargs_local["background_reference"] = best_ref
-
-            sci, cov = zemosaic_utils.reproject_and_coadd_wrapper(
-                data_list=data_list,
-                wcs_list=wcs_list,
-                shape_out=final_output_shape_hw,
-
-                output_projection=header,
-
-                use_gpu=False,
-                cpu_func=reproject_and_coadd,
-                reproject_function=reproject_interp,
-                combine_function="mean",
-
-                **kwargs_local,
-            )
-        except Exception:
-            return None, None
-        mosaic_channels.append(sci.astype(np.float32))
-        if coverage is None:
-            coverage = cov.astype(np.float32)
-
-    mosaic = np.stack(mosaic_channels, axis=-1)
-    if use_memmap and cleanup_memmap and memmap_dir:
-        try:
-            shutil.rmtree(memmap_dir)
+            ram = _PROC.memory_info().rss / (1024 ** 3)
+            logger.info("%sRAM utilisée : %.2f Go", prefix, ram)
         except Exception:
             pass
-    return mosaic, coverage
+
+    # Pass 1: coverage count
+    coverage_count = np.zeros(final_output_shape_hw, dtype=np.uint16)
+    for path, wcs in master_tile_fits_with_wcs_list:
+        try:
+            with fits.open(path, memmap=False) as hdul:
+                arr = hdul[0].data.astype(np.float32)
+        except Exception:
+            continue
+        if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[-1] != arr.shape[0]:
+            arr = np.moveaxis(arr, 0, -1)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        try:
+            _, fp = reproject_interp((arr[..., 0], wcs), output_projection=header, shape_out=final_output_shape_hw)
+        except Exception:
+            fp = np.zeros(final_output_shape_hw, dtype=np.float32)
+        coverage_count += (fp > 0).astype(np.uint16)
+        del arr, fp
+        gc.collect()
+
+    # Pass 2: metrics and coverage fraction
+    metrics = []
+    medians = []
+    for path, wcs in master_tile_fits_with_wcs_list:
+        try:
+            with fits.open(path, memmap=False) as hdul:
+                arr = hdul[0].data.astype(np.float32)
+        except Exception:
+            continue
+        if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[-1] != arr.shape[0]:
+            arr = np.moveaxis(arr, 0, -1)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+
+        img_ch = arr[..., 1] if arr.shape[-1] > 1 else arr[..., 0]
+        try:
+            star_mask = detect_stars(img_ch)
+        except Exception as exc:
+            logger.debug("Star detection failed: %s", exc)
+            star_mask = np.zeros_like(img_ch, dtype=bool)
+        med, noise, grad = _background_metrics(img_ch, star_mask)
+        try:
+            _, fp = reproject_interp((arr[..., 0], wcs), output_projection=header, shape_out=final_output_shape_hw)
+        except Exception:
+            fp = np.zeros(final_output_shape_hw, dtype=np.float32)
+        fpb = fp > 0
+        cover = float(np.count_nonzero(fpb & (coverage_count >= 2))) / float(np.count_nonzero(fpb)) if np.count_nonzero(fpb) else 0.0
+        metrics.append((med, noise, grad, cover))
+        medians.append([float(np.median(arr[..., ch])) for ch in range(arr.shape[-1])])
+        del arr, img_ch, star_mask, fp
+        gc.collect()
+
+    scores = []
+    best_ref = None
+    if auto_bg_reference and match_bg:
+        global_med = float(np.median([m[0] for m in metrics])) if metrics else 0.0
+        for m in metrics:
+            scores.append(abs(m[0] - global_med) + m[1] + 2.0 * m[2] - 0.5 * m[3])
+        if scores:
+            best_ref = int(np.argmin(scores))
+    if force_reference_index is not None and 0 <= force_reference_index < len(metrics):
+        best_ref = int(force_reference_index)
+    for i, (m, s) in enumerate(zip(metrics, scores if scores else [0]*len(metrics))):
+        flag = " <-- REF" if best_ref is not None and i == best_ref else ""
+        logger.debug("BG_METRICS idx=%d med=%.3f noise=%.3f grad=%.3f cover=%.3f score=%.3f%s", i, m[0], m[1], m[2], m[3], s, flag)
+    if best_ref is not None:
+        logger.debug("Selected background reference index: %d", best_ref)
+
+    offsets = [[0.0] * n_ch for _ in metrics]
+    if match_bg and best_ref is not None and medians:
+        ref_med = medians[best_ref]
+        for i in range(len(metrics)):
+            offsets[i] = [ref_med[ch] - medians[i][ch] for ch in range(n_ch)]
+            logger.debug("BG_OFFSET idx=%d %s", i, offsets[i])
+
+    # Create memmaps for accumulation
+    sum_path = tempfile.mktemp(prefix="final_sum_", suffix=".dat", dir=memmap_dir)
+    wht_path = tempfile.mktemp(prefix="final_wht_", suffix=".dat", dir=memmap_dir)
+    sum_mmap = np.memmap(sum_path, dtype=np.float32, mode="w+", shape=(h, w, n_ch))
+    wht_mmap = np.memmap(wht_path, dtype=np.float32, mode="w+", shape=(h, w, n_ch))
+    logger.info("Création du memmap %s, shape=%s", os.path.basename(sum_path), sum_mmap.shape)
+    logger.info("Création du memmap %s, shape=%s", os.path.basename(wht_path), wht_mmap.shape)
+
+    # Pass 3: reproject and accumulate
+    for idx, (path, wcs) in enumerate(master_tile_fits_with_wcs_list):
+        try:
+            with fits.open(path, memmap=False) as hdul:
+                arr = hdul[0].data.astype(np.float32)
+        except Exception:
+            continue
+        if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[-1] != arr.shape[0]:
+            arr = np.moveaxis(arr, 0, -1)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        for ch in range(n_ch):
+            img_ch = arr[..., ch] + offsets[idx][ch]
+            try:
+                proj, fp = reproject_interp((img_ch, wcs), output_projection=header, shape_out=final_output_shape_hw)
+            except Exception:
+                proj = np.zeros(final_output_shape_hw, dtype=np.float32)
+                fp = np.zeros(final_output_shape_hw, dtype=np.float32)
+            weight = fp
+            if weight_arrays is not None:
+                try:
+                    w_arr = weight_arrays[idx]
+                    if w_arr.ndim == 3 and w_arr.shape[0] in (1, 3) and w_arr.shape[-1] != w_arr.shape[0]:
+                        w_arr = np.moveaxis(w_arr, 0, -1)
+                    if w_arr.ndim == 3:
+                        w_arr = w_arr[..., min(ch, w_arr.shape[-1] - 1)]
+                    w_proj, w_fp = reproject_interp((w_arr, wcs), output_projection=header, shape_out=final_output_shape_hw)
+                    weight = w_proj * w_fp
+                except Exception:
+                    weight = np.zeros(final_output_shape_hw, dtype=np.float32)
+            sum_mmap[..., ch] += proj * weight
+            wht_mmap[..., ch] += weight
+        logger.info("Image %d/%d reprojetée et accumulée.", idx + 1, len(master_tile_fits_with_wcs_list))
+        _log_ram(f"Après image {idx + 1} : ")
+        del arr, proj, fp, weight
+        gc.collect()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        final = sum_mmap / np.clip(wht_mmap, 1e-8, None)
+    coverage = wht_mmap[..., 0].copy()
+
+    del sum_mmap, wht_mmap
+    gc.collect()
+    try:
+        os.remove(sum_path)
+        os.remove(wht_path)
+    except Exception:
+        pass
+    logger.info("Suppression memmaps temporaires.")
+
+    return final.astype(np.float32), coverage.astype(np.float32)
