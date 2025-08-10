@@ -50,6 +50,17 @@ from .boring_stack import read_paths
 
 logger = logging.getLogger(__name__)
 
+
+def _to_slug(gui_value: str) -> str:
+    m = {
+        "Reproject and coadd": "reproject_coadd",
+        "Reproject": "reproject",
+        "Mean": "mean",
+        "Reject": "reject",
+        "None": "none",
+    }
+    return m.get(gui_value, gui_value.strip().lower())
+
 logger.debug("-" * 20)
 logger.debug("Tentative d'importation de SeestarQueuedStacker...")
 try:
@@ -6317,6 +6328,8 @@ class SeestarStackerGUI:
                 "--chunk-size",
                 str(self._get_auto_chunk_size()),
             ]
+            final_combine_slug = _to_slug(self.stack_final_combine_var.get())
+            cmd += ["--final-combine", final_combine_slug]
             self._run_boring_stack_process(cmd, csv_path, self.settings.output_folder)
             return
 

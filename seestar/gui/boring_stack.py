@@ -11,6 +11,7 @@ import psutil
 import signal
 import numpy as np
 import json
+from typing import Optional
 
 
 
@@ -484,8 +485,49 @@ def parse_args():
     p.add_argument("--cleanup-temp-files", dest="cleanup_temp_files", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--align-on-disk", action="store_true", help="Use memmap files during alignment")
     p.add_argument("--show-progress", action="store_true", help="Display a minimal progress GUI")
+    p.add_argument(
+        "--final-combine",
+        choices=["none", "mean", "reject", "reproject", "reproject_coadd"],
+        help="Override final combine strategy (CLI has priority over settings).",
+    )
     p.set_defaults(use_solver=True)
     return p.parse_args()
+
+
+def _resolve_final_combine(cli_value: Optional[str], settings) -> str:
+    alias_map = {
+        "reproject and coadd": "reproject_coadd",
+        "reproject_and_coadd": "reproject_coadd",
+        "reproject-coadd": "reproject_coadd",
+        "reproject": "reproject",
+        "mean": "mean",
+        "reject": "reject",
+        "none": "none",
+        None: None,
+        "": None,
+    }
+
+    def norm(v):
+        if v is None:
+            return None
+        v = str(v).strip().lower()
+        return alias_map.get(v, v)
+
+    final_from_cli = norm(cli_value)
+    final_from_settings = norm(getattr(settings, "stack_final_combine", None))
+
+    if final_from_cli:
+        source = "CLI"
+        resolved = final_from_cli
+    elif final_from_settings:
+        source = "settings"
+        resolved = final_from_settings
+    else:
+        source = "default"
+        resolved = "mean"
+
+    logging.info(f"[final-combine] resolved='{resolved}' (source={source})")
+    return resolved
 
 
 # -----------------------------------------------------------------------------
@@ -629,14 +671,17 @@ def _run_stack(args, progress_cb) -> int:
         settings.load_settings()
     except Exception:
         settings.reset_to_defaults()
-    if getattr(settings, "stack_final_combine", "") == "reproject_coadd":
-        settings.reproject_coadd_final = True
+
+    final_combine = _resolve_final_combine(getattr(args, "final_combine", None), settings)
+    reproject_coadd_final = final_combine == "reproject_coadd"
+    settings.stack_final_combine = final_combine
+    settings.reproject_coadd_final = reproject_coadd_final
 
     # When using Reproject+Coadd with single-image batches we must retain
     # each aligned FITS on disk so that an external astrometric solver can
     # update its WCS.  Force ``align_on_disk`` if the user hasn't enabled it.
     use_astrometric = (
-        settings.reproject_coadd_final
+        reproject_coadd_final
         and args.batch_size == 1
         and getattr(settings, "local_solver_preference", "none") != "none"
     )
@@ -743,7 +788,7 @@ def _run_stack(args, progress_cb) -> int:
             min_w=args.min_weight,
             use_drizzle=False,
             reproject_between_batches=settings.reproject_between_batches,
-            reproject_coadd_final=settings.reproject_coadd_final,
+            reproject_coadd_final=reproject_coadd_final,
             api_key=args.api_key,
             # When performing a final reproject/coadd with ``batch_size=1`` we
             # must keep the aligned files on disk for the last reprojection
@@ -753,8 +798,7 @@ def _run_stack(args, progress_cb) -> int:
                 False
                 if (
                     args.batch_size == 1
-                    and getattr(settings, "stack_final_combine", "")
-                    in ("reproject", "reproject_coadd")
+                    and final_combine in ("reproject", "reproject_coadd")
                 )
                 else args.cleanup_temp_files
             ),
@@ -910,8 +954,7 @@ def _run_stack(args, progress_cb) -> int:
         # grille de l'image de référence.
         if (
             args.batch_size == 1
-            and getattr(settings, "stack_final_combine", "")
-            in ("reproject", "reproject_coadd")
+            and final_combine in ("reproject", "reproject_coadd")
         ):
             aligned = [
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
@@ -920,7 +963,7 @@ def _run_stack(args, progress_cb) -> int:
             try:
                 logger.debug(
                     "DEBUG: Reproject and coadd requested (mode: %s)",
-                    settings.stack_final_combine,
+                    final_combine,
                 )
                 if aligned_existing:
                     reference_path = (
