@@ -751,7 +751,11 @@ def _run_stack(args, progress_cb) -> int:
             # (ASTAP) can update the WCS headers of the aligned FITS files.
             perform_cleanup=(
                 False
-                if settings.reproject_coadd_final and args.batch_size == 1
+                if (
+                    args.batch_size == 1
+                    and getattr(settings, "stack_final_combine", "")
+                    in ("reproject", "reproject_coadd")
+                )
                 else args.cleanup_temp_files
             ),
         )
@@ -901,37 +905,55 @@ def _run_stack(args, progress_cb) -> int:
         final_path = getattr(stacker, "final_stacked_path", None)
         final_reproject_success = False
 
-        # Lorsque ``batch_size`` vaut 1 et que l'utilisateur a demandé un
-        # "Reproject & Coadd" final, reprojeter toutes les images alignées
-        # sur la grille de l'image de référence.
-        if args.batch_size == 1 and settings.reproject_coadd_final:
+        # Lorsque ``batch_size`` vaut 1 et que l'utilisateur a demandé une
+        # reprojection finale, reprojeter toutes les images alignées sur la
+        # grille de l'image de référence.
+        if (
+            args.batch_size == 1
+            and getattr(settings, "stack_final_combine", "")
+            in ("reproject", "reproject_coadd")
+        ):
             aligned = [
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
             ]
             aligned_existing = [f for f in aligned if os.path.isfile(f)]
-            logger.info("Reproject & Coadd activé en mode boring stack")
-            if aligned_existing:
-                reference_path = getattr(
-                    getattr(stacker, "aligner", None), "reference_image_path", None
+            try:
+                logger.debug(
+                    "DEBUG: Reproject and coadd requested (mode: %s)",
+                    settings.stack_final_combine,
                 )
-                out_fp = os.path.join(args.out, "final.fits")
-                logger.info("Lancement de la reprojection globale sur %d fichiers", len(aligned_existing))
-                t0 = time.monotonic()
-                success = _finalize_reproject_and_coadd(
-                    aligned_existing, reference_path, out_fp
-                )
-                duration = time.monotonic() - t0
-                logger.info("Reprojection globale terminée en %.2f s", duration)
-                if success:
-                    final_path = out_fp
-                    final_reproject_success = True
-                else:
-                    logger.error(
-                        "Échec de _finalize_reproject_and_coadd malgré l'existence des fichiers alignés."
+                if aligned_existing:
+                    reference_path = (
+                        getattr(settings, "reference_image_path", "")
+                        or aligned_existing[0]
                     )
-            else:
-                logger.error(
-                    "Aucun fichier aligné valide trouvé pour la reprojection finale."
+                    out_fp = os.path.join(args.out, "final.fits")
+                    logger.info(
+                        "Lancement de la reprojection globale sur %d fichiers",
+                        len(aligned_existing),
+                    )
+                    t0 = time.monotonic()
+                    success = _finalize_reproject_and_coadd(
+                        aligned_existing, reference_path, out_fp
+                    )
+                    duration = time.monotonic() - t0
+                    logger.info("Reprojection globale terminée en %.2f s", duration)
+                    if success:
+                        logger.debug(
+                            "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)"
+                        )
+                        final_path = out_fp
+                        final_reproject_success = True
+                    else:
+                        logger.error(
+                            "ERROR: Reproject and coadd failed in boring stack (batch_size=1)"
+                        )
+                else:
+                    logger.warning("No aligned files found for reproject+coadd step.")
+            except Exception as e:
+                logger.exception(
+                    "Exception during reproject+coadd in boring stack (batch_size=1): %s",
+                    e,
                 )
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
