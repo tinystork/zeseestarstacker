@@ -129,6 +129,13 @@ import numpy.lib.format as _np_format
 _np_format.open_memmap = _safe_open_memmap
 
 from seestar.queuep.queue_manager import SeestarQueuedStacker
+from seestar.core.alignment import SeestarAligner
+from seestar.core.normalization import (
+    _normalize_images_linear_fit,
+    _normalize_images_sky_mean,
+)
+from seestar.core.streaming_stack import stack_disk_streaming
+from seestar.queuep.queue_manager import _quality_metrics_worker
 # Import helpers from the core package.  Use an absolute import so that this
 # script can be executed directly without Python considering it a package
 # relative module.  When ``__package__`` is ``None`` the project root is added
@@ -369,6 +376,60 @@ def _apply_sky_mean(data, target_sky, sky_percentile=25.0):
 
 
 # -----------------------------------------------------------------------------
+# batch_size=1 helpers
+# -----------------------------------------------------------------------------
+
+
+def _apply_normalization_and_weight(
+    aligned_img: np.ndarray,
+    ref_img: np.ndarray,
+    norm_method: str,
+    weight_method: str,
+    snr_exp: float,
+    stars_exp: float,
+) -> tuple[np.ndarray, float]:
+    """Normalize ``aligned_img`` against ``ref_img`` and compute a raw weight.
+
+    The returned weight is *not* normalized across images; callers should
+    renormalize the collection of weights once all images have been processed.
+    """
+
+    img = aligned_img.astype(np.float32, copy=False)
+    ref = ref_img.astype(np.float32, copy=False)
+
+    if norm_method == "linear_fit":
+        img = _normalize_images_linear_fit([ref, img], reference_index=0)[1]
+    elif norm_method == "sky_mean":
+        img = _normalize_images_sky_mean([ref, img], reference_index=0)[1]
+
+    scores, _, _ = _quality_metrics_worker(img)
+    weight = 1.0
+    if weight_method == "snr":
+        weight = max(scores.get("snr", 0.0), 0.0) ** snr_exp
+    elif weight_method == "stars":
+        weight = max(scores.get("stars", 0.0), 0.0) ** stars_exp
+    return img, max(weight, 1e-9)
+
+
+def _normalize_weights(weights: list[float], min_weight: float) -> list[float]:
+    arr = np.asarray(weights, dtype=np.float32)
+    if arr.size == 0:
+        return []
+    sum_w = float(arr.sum())
+    if sum_w > 1e-9:
+        arr *= arr.size / sum_w
+    else:
+        arr[:] = 1.0
+    arr = np.maximum(arr, float(min_weight))
+    sum_w2 = float(arr.sum())
+    if sum_w2 > 1e-9:
+        arr *= arr.size / sum_w2
+    else:
+        arr[:] = 1.0
+    return arr.tolist()
+
+
+# -----------------------------------------------------------------------------
 # CLI parsing
 # -----------------------------------------------------------------------------
 
@@ -430,6 +491,92 @@ def _run_stack(args, progress_cb) -> int:
     if not rows:
         logger.error("CSV is empty")
         return 1
+
+    if args.batch_size == 1:
+        logger.info("=== MODE BORING STACK (batch_size=1) ===")
+        all_paths = [r["path"] for r in rows]
+        ref_path = getattr(args, "reference_image_path", "") or all_paths[0]
+        ref_data, _ = load_and_validate_fits(ref_path)
+        if ref_data is None:
+            logger.error("Failed to load reference image %s", ref_path)
+            return 1
+        logger.info("Référence utilisée: %s", ref_path)
+
+        aligned_dir = os.path.join(tempfile.gettempdir(), "aligned_tmp")
+        os.makedirs(aligned_dir, exist_ok=True)
+
+        aligner = SeestarAligner()
+        aligned_paths: list[str] = []
+        raw_weights: list[float] = []
+
+        total = len(rows)
+        for idx, row in enumerate(rows):
+            img_path = row["path"]
+            img_data, _ = load_and_validate_fits(img_path)
+            if img_data is None:
+                logger.warning("Failed to load %s", img_path)
+                continue
+            aligned_img, success = aligner._align_image(
+                img_data,
+                ref_data,
+                os.path.basename(img_path),
+                force_same_shape_as_ref=True,
+                use_disk=args.align_on_disk,
+            )
+            if not success or aligned_img is None:
+                logger.warning("Alignment failed for %s", img_path)
+                continue
+
+            norm_img, raw_w = _apply_normalization_and_weight(
+                aligned_img,
+                ref_data,
+                args.norm,
+                args.weight if args.use_weighting else "none",
+                args.snr_exp,
+                args.stars_exp,
+            )
+            raw_weights.append(raw_w)
+
+            npy_path = os.path.join(aligned_dir, f"aligned_{idx:05d}.npy")
+            if norm_img.ndim == 3 and norm_img.shape[2] == 1:
+                to_save = norm_img[:, :, 0]
+            else:
+                to_save = norm_img
+            np.save(npy_path, to_save.astype(np.float32))
+            aligned_paths.append(npy_path)
+
+            if progress_cb:
+                progress_cb(f"Aligned: {idx + 1}", (idx + 1) / max(total, 1) * 100)
+
+        weights = (
+            _normalize_weights(raw_weights, args.min_weight)
+            if args.use_weighting
+            else None
+        )
+
+        mode_map = {
+            "kappa_sigma": "kappa-sigma",
+            "winsorized_sigma": "winsorized-sigma",
+            "none": "mean",
+        }
+        stack_mode = mode_map.get(args.reject, "winsorized-sigma")
+
+        final_path = stack_disk_streaming(
+            aligned_paths,
+            mode=stack_mode,
+            weights=weights,
+            chunk_rows=args.chunk_size or 0,
+            kappa=args.kappa,
+            sigma_low=args.kappa,
+            sigma_high=args.kappa,
+            winsor_limits=(args.winsor, args.winsor),
+            parallel_io=True,
+        )
+
+        dest = os.path.join(args.out, "final.fits")
+        shutil.move(final_path, dest)
+        logger.info("Empilement final terminé: %s", dest)
+        return 0
 
     # Auto-enable disk-backed alignment when processing extremely large
     # batches so memory usage stays bounded.  This mirrors the behaviour of
