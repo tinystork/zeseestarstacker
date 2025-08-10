@@ -655,7 +655,7 @@ def _run_stack(args, progress_cb) -> int:
                 except Exception:
                     if progress_cb:
                         progress_cb(f"WCS store failure: {base}", None)
-                if settings.reproject_coadd_final:
+                if args.batch_size == 1:
                     try:
                         data = np.load(fp)
                         logger.debug(
@@ -745,11 +745,12 @@ def _run_stack(args, progress_cb) -> int:
         final_path = getattr(stacker, "final_stacked_path", None)
         final_reproject_success = False
 
-        # Explicitly handle the "Reproject and coadd" final combine mode when
-        # running in single-image batches. All intermediate aligned files are
-        # combined using :func:`assemble_final_mosaic_with_reproject_coadd` to
-        # produce the final image.
-        if settings.reproject_coadd_final and args.batch_size == 1:
+        # Lorsque ``batch_size`` vaut 1, reprojeter globalement toutes les
+        # images alignées afin que l'empilement final partage la même
+        # registration qu'un « Reproject & Coadd » classique.
+        # ``assemble_final_mosaic_with_reproject_coadd`` travaille en mode
+        # memmap, respectant les contraintes mémoire du boring stack.
+        if args.batch_size == 1:
             aligned = [
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
             ]
@@ -791,12 +792,7 @@ def _run_stack(args, progress_cb) -> int:
         # ------------------------------------------------------------------
         # Cleanup of aligned temporary files after successful reprojection
         # ------------------------------------------------------------------
-        if (
-            final_reproject_success
-            and args.cleanup_temp_files
-            and settings.reproject_coadd_final
-            and args.batch_size == 1
-        ):
+        if final_reproject_success and args.cleanup_temp_files and args.batch_size == 1:
             for npy_path in getattr(stacker, "aligned_temp_paths", []):
                 for ext in (".npy", ".hdr", ".wcs.json", ".fits"):
                     tmp = npy_path.replace(".npy", ext)
