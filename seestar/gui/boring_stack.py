@@ -145,9 +145,6 @@ from seestar.core.image_processing import (
     save_fits_image,
     sanitize_header_for_wcs,
 )
-from seestar.enhancement.mosaic_utils import (
-    assemble_final_mosaic_with_reproject_coadd,
-)
 from astropy.io import fits
 from astropy.wcs import WCS
 
@@ -268,13 +265,16 @@ def read_paths(csv_path):
 # Reproject+Coadd helper
 # -----------------------------------------------------------------------------
 
-def _finalize_reproject_and_coadd(aligned_files, output_path):
-    """Combine ``aligned_files`` using memmap-aware reprojection."""
+def _finalize_reproject_and_coadd(aligned_files, reference_path, output_path):
+    """Reproject ``aligned_files`` onto the reference grid and combine."""
+
+    from seestar import reproject_utils
 
     input_pairs = []
     for fp in aligned_files:
         try:
-            with fits.open(fp, memmap=False) as hdul:
+            with fits.open(fp, memmap=True) as hdul:
+                data = hdul[0].data.astype(np.float32)
                 hdr = hdul[0].header
                 sanitize_header_for_wcs(hdr)
                 wcs = WCS(hdr, naxis=2)
@@ -282,34 +282,41 @@ def _finalize_reproject_and_coadd(aligned_files, output_path):
                     h = int(hdr.get("NAXIS2", 0))
                     w = int(hdr.get("NAXIS1", 0))
                     wcs.pixel_shape = (w, h)
+                if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
+                    data = np.moveaxis(data, 0, -1)
         except Exception:
             continue
-        input_pairs.append((fp, wcs))
+        input_pairs.append((data, wcs))
 
     if not input_pairs:
         return False
 
-    ref_wcs = input_pairs[0][1]
-    with fits.open(input_pairs[0][0], memmap=True) as hdul:
-        hdu0 = hdul[0]
-        shape = tuple(map(int, hdu0.shape[-2:]))
+    try:
+        ref_hdr = fits.getheader(reference_path, memmap=False)
+    except Exception:
+        ref_hdr = fits.Header()
+    sanitize_header_for_wcs(ref_hdr)
+    ref_wcs = WCS(ref_hdr, naxis=2)
+    if ref_wcs.pixel_shape is None and input_pairs:
+        h, w = input_pairs[0][0].shape[:2]
+        ref_wcs.pixel_shape = (w, h)
 
-    stacked, _ = assemble_final_mosaic_with_reproject_coadd(
-        input_pairs,
-        final_output_wcs=ref_wcs,
-        final_output_shape_hw=shape,
-        match_bg=True,
-        use_memmap=True,
-        memmap_dir=None,
-        cleanup_memmap=True,
-        auto_bg_reference=True,
-    )
+    out_shape = input_pairs[0][0].shape[:2]
 
-    if stacked is None:
+    try:
+        result, _ = reproject_utils.reproject_and_coadd(
+            input_pairs,
+            output_projection=ref_wcs,
+            shape_out=out_shape,
+            reproject_function=reproject_utils.reproject_interp,
+            match_background=True,
+        )
+    except Exception:
+        logger.exception("reproject_and_coadd failed")
         return False
 
     fits.PrimaryHDU(
-        data=np.moveaxis(stacked, -1, 0),
+        data=np.moveaxis(result, -1, 0) if result.ndim == 3 else result,
         header=ref_wcs.to_header(relax=True),
     ).writeto(output_path, overwrite=True)
     return True
@@ -892,31 +899,30 @@ def _run_stack(args, progress_cb) -> int:
         final_path = getattr(stacker, "final_stacked_path", None)
         final_reproject_success = False
 
-        # Lorsque ``batch_size`` vaut 1, reprojeter globalement toutes les
-        # images alignées afin que l'empilement final partage la même
-        # registration qu'un « Reproject & Coadd » classique.
-        # ``assemble_final_mosaic_with_reproject_coadd`` travaille en mode
-        # memmap, respectant les contraintes mémoire du boring stack.
-        if args.batch_size == 1:
+        # Lorsque ``batch_size`` vaut 1 et que l'utilisateur a demandé un
+        # "Reproject & Coadd" final, reprojeter toutes les images alignées
+        # sur la grille de l'image de référence.
+        if args.batch_size == 1 and settings.reproject_coadd_final:
             aligned = [
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
             ]
-            logger.info(
-                "Fichiers alignés initialement détectés : %s", aligned
-            )
             aligned_existing = [f for f in aligned if os.path.isfile(f)]
-            logger.info(
-                "Fichiers alignés existants : %s", aligned_existing
-            )
+            logger.info("Reproject & Coadd activé en mode boring stack")
             if aligned_existing:
+                reference_path = getattr(
+                    getattr(stacker, "aligner", None), "reference_image_path", None
+                )
                 out_fp = os.path.join(args.out, "final.fits")
-                success = _finalize_reproject_and_coadd(aligned_existing, out_fp)
+                logger.info("Lancement de la reprojection globale sur %d fichiers", len(aligned_existing))
+                t0 = time.monotonic()
+                success = _finalize_reproject_and_coadd(
+                    aligned_existing, reference_path, out_fp
+                )
+                duration = time.monotonic() - t0
+                logger.info("Reprojection globale terminée en %.2f s", duration)
                 if success:
                     final_path = out_fp
                     final_reproject_success = True
-                    logger.info(
-                        "Image finale créée avec succès via assemble_final_mosaic_with_reproject_coadd."
-                    )
                 else:
                     logger.error(
                         "Échec de _finalize_reproject_and_coadd malgré l'existence des fichiers alignés."
