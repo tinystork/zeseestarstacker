@@ -1257,7 +1257,10 @@ class SeestarQueuedStacker:
                 self.freeze_reference_wcs = self.reproject_between_batches
                 self.reproject_coadd_final = bool(
                     getattr(settings, "reproject_coadd_final", False)
+                    or getattr(settings, "stack_final_combine", "") == "reproject_coadd"
                 )
+                if self.reproject_coadd_final:
+                    self.stack_final_combine = "reproject_coadd"
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
                 )

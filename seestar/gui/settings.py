@@ -170,7 +170,7 @@ class SettingsManager:
                     gui_instance,
                     "stack_final_combine_var",
                     tk.StringVar(
-                        value=default_values_from_code.get("stack_final_combine", "reproject_coadd")
+                        value=default_values_from_code.get("stack_final_combine", "mean")
                     ),
                 ).get()
             self.stack_method = getattr(
@@ -715,6 +715,8 @@ class SettingsManager:
                     )
                 ),
             ).get()
+            if self.stack_final_combine == "reproject_coadd":
+                self.reproject_coadd_final = True
 
             # In classic stacking mode this option defaults to disabled unless
             # the user explicitly checked the box in the Local Solver window.
@@ -821,6 +823,8 @@ class SettingsManager:
             getattr(gui_instance, "stacking_winsor_limits_str_var", tk.StringVar()).set(
                 self.stack_winsor_limits
             )
+            if getattr(self, "reproject_coadd_final", False):
+                self.stack_final_combine = "reproject_coadd"
             getattr(gui_instance, "stack_final_combine_var", tk.StringVar()).set(
                 self.stack_final_combine
             )
@@ -1255,8 +1259,8 @@ class SettingsManager:
         defaults_dict["stack_kappa_low"] = 3.0
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
-        # Default to Reproject & Coadd for final combine
-        defaults_dict["stack_final_combine"] = "reproject_coadd"
+        # Default final combination method
+        defaults_dict["stack_final_combine"] = "mean"
         defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
@@ -1368,8 +1372,8 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
-        # Default to "Reproject & Coadd" for the final combine option
-        defaults_dict["reproject_coadd_final"] = True
+        # Enable final reproject+coadd only when explicitly requested
+        defaults_dict["reproject_coadd_final"] = False
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {

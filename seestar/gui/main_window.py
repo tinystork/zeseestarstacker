@@ -491,8 +491,8 @@ class SeestarStackerGUI:
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
         self.stack_reject_algo_var = tk.StringVar(value="kappa_sigma")
-        # Default final combine to "Reproject & Coadd"
-        self.stack_final_combine_var = tk.StringVar(value="reproject_coadd")
+        # Default final combine method
+        self.stack_final_combine_var = tk.StringVar(value="mean")
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
@@ -599,8 +599,8 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
-        # Default final combine selection is "Reproject & Coadd"
-        self.reproject_coadd_var = tk.BooleanVar(value=True)
+        # Separate toggle for final reproject+coadd
+        self.reproject_coadd_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")

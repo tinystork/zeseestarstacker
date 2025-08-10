@@ -629,6 +629,8 @@ def _run_stack(args, progress_cb) -> int:
         settings.load_settings()
     except Exception:
         settings.reset_to_defaults()
+    if getattr(settings, "stack_final_combine", "") == "reproject_coadd":
+        settings.reproject_coadd_final = True
 
     # When using Reproject+Coadd with single-image batches we must retain
     # each aligned FITS on disk so that an external astrometric solver can
