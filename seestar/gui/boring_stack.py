@@ -270,45 +270,16 @@ def _finalize_reproject_and_coadd(aligned_files, reference_path, output_path):
     """Reproject ``aligned_files`` onto the reference grid and combine."""
 
     from seestar import reproject_utils
-
-    input_pairs = []
-    for fp in aligned_files:
-        try:
-            with fits.open(fp, memmap=True) as hdul:
-                data = hdul[0].data.astype(np.float32)
-                hdr = hdul[0].header
-                sanitize_header_for_wcs(hdr)
-                wcs = WCS(hdr, naxis=2)
-                if wcs.pixel_shape is None:
-                    h = int(hdr.get("NAXIS2", 0))
-                    w = int(hdr.get("NAXIS1", 0))
-                    wcs.pixel_shape = (w, h)
-                if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
-                    data = np.moveaxis(data, 0, -1)
-        except Exception:
-            continue
-        input_pairs.append((data, wcs))
-
-    if not input_pairs:
-        return False
-
     try:
         ref_hdr = fits.getheader(reference_path, memmap=False)
     except Exception:
         ref_hdr = fits.Header()
     sanitize_header_for_wcs(ref_hdr)
     ref_wcs = WCS(ref_hdr, naxis=2)
-    if ref_wcs.pixel_shape is None and input_pairs:
-        h, w = input_pairs[0][0].shape[:2]
-        ref_wcs.pixel_shape = (w, h)
-
-    out_shape = input_pairs[0][0].shape[:2]
-
     try:
-        result, _ = reproject_utils.reproject_and_coadd(
-            input_pairs,
+        result, _ = reproject_utils.reproject_and_coadd_from_paths(
+            aligned_files,
             output_projection=ref_wcs,
-            shape_out=out_shape,
             reproject_function=reproject_utils.reproject_interp,
             match_background=True,
         )
@@ -488,6 +459,7 @@ def parse_args():
     p.add_argument(
         "--final-combine",
         choices=["none", "mean", "reject", "reproject", "reproject_coadd"],
+        default=None,
         help="Override final combine strategy (CLI has priority over settings).",
     )
     p.set_defaults(use_solver=True)
@@ -541,8 +513,26 @@ def _run_stack(args, progress_cb) -> int:
         logger.error("CSV is empty")
         return 1
 
-    if args.batch_size == 1:
-        logger.info("=== MODE BORING STACK (batch_size=1) ===")
+    # Load user settings early to resolve final combine strategy
+    settings = SettingsManager()
+    try:
+        settings.load_settings()
+    except Exception:
+        settings.reset_to_defaults()
+
+    final_combine = _resolve_final_combine(getattr(args, "final_combine", None), settings)
+    reproject_coadd_final = final_combine == "reproject_coadd"
+    settings.stack_final_combine = final_combine
+    settings.reproject_coadd_final = reproject_coadd_final
+    logger.info(
+        "Parsed final_combine=%s, batch_size=%s", final_combine, args.batch_size
+    )
+
+    if args.batch_size == 1 and final_combine not in ("reproject", "reproject_coadd"):
+        logger.info(
+            "=== MODE BORING STACK (batch_size=1, final_combine=%s) ===",
+            final_combine,
+        )
         all_paths = [r["path"] for r in rows]
         ref_path = getattr(args, "reference_image_path", "") or all_paths[0]
         ref_data, _ = load_and_validate_fits(ref_path)
@@ -664,18 +654,6 @@ def _run_stack(args, progress_cb) -> int:
             os.environ["SEESTAR_MAX_MEM"] = str(bytes_limit)
         except (ValueError, TypeError):
             bytes_limit = None
-
-    # Load user settings so final combine preferences are honoured
-    settings = SettingsManager()
-    try:
-        settings.load_settings()
-    except Exception:
-        settings.reset_to_defaults()
-
-    final_combine = _resolve_final_combine(getattr(args, "final_combine", None), settings)
-    reproject_coadd_final = final_combine == "reproject_coadd"
-    settings.stack_final_combine = final_combine
-    settings.reproject_coadd_final = reproject_coadd_final
 
     # When using Reproject+Coadd with single-image batches we must retain
     # each aligned FITS on disk so that an external astrometric solver can
@@ -960,44 +938,33 @@ def _run_stack(args, progress_cb) -> int:
                 p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
             ]
             aligned_existing = [f for f in aligned if os.path.isfile(f)]
-            try:
-                logger.debug(
-                    "DEBUG: Reproject and coadd requested (mode: %s)",
-                    final_combine,
+            if not aligned_existing:
+                raise RuntimeError(
+                    "Reproject requested but no aligned FITS were produced."
                 )
-                if aligned_existing:
-                    reference_path = (
-                        getattr(settings, "reference_image_path", "")
-                        or aligned_existing[0]
-                    )
-                    out_fp = os.path.join(args.out, "final.fits")
-                    logger.info(
-                        "Lancement de la reprojection globale sur %d fichiers",
-                        len(aligned_existing),
-                    )
-                    t0 = time.monotonic()
-                    success = _finalize_reproject_and_coadd(
-                        aligned_existing, reference_path, out_fp
-                    )
-                    duration = time.monotonic() - t0
-                    logger.info("Reprojection globale terminée en %.2f s", duration)
-                    if success:
-                        logger.debug(
-                            "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)"
-                        )
-                        final_path = out_fp
-                        final_reproject_success = True
-                    else:
-                        logger.error(
-                            "ERROR: Reproject and coadd failed in boring stack (batch_size=1)"
-                        )
-                else:
-                    logger.warning("No aligned files found for reproject+coadd step.")
-            except Exception as e:
-                logger.exception(
-                    "Exception during reproject+coadd in boring stack (batch_size=1): %s",
-                    e,
-                )
+            reference_path = (
+                getattr(settings, "reference_image_path", "") or aligned_existing[0]
+            )
+            out_fp = os.path.join(args.out, "final.fits")
+            logger.info(
+                "Lancement de la reprojection globale sur %d fichiers",
+                len(aligned_existing),
+            )
+            logger.debug("First aligned FITS: %s", aligned_existing[0])
+            logger.debug("Last aligned FITS: %s", aligned_existing[-1])
+            t0 = time.monotonic()
+            success = _finalize_reproject_and_coadd(
+                aligned_existing, reference_path, out_fp
+            )
+            duration = time.monotonic() - t0
+            logger.info("Reprojection globale terminée en %.2f s", duration)
+            if not success:
+                raise RuntimeError("Reproject and coadd failed.")
+            logger.debug(
+                "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)"
+            )
+            final_path = out_fp
+            final_reproject_success = True
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
             if os.path.abspath(final_path) != os.path.abspath(dest):

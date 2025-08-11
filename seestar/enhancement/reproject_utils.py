@@ -18,8 +18,11 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
     _astropy_reproject_and_coadd = None
 
 from astropy.wcs import WCS
+from astropy.io import fits
 import logging
 import os
+
+from seestar.core.image_processing import sanitize_header_for_wcs
 
 logger = logging.getLogger(__name__)
 import numpy as np
@@ -144,6 +147,56 @@ def reproject_and_coadd(
     return final.astype(np.float32), cov_image.astype(np.float32)
 
 
+def reproject_and_coadd_from_paths(
+    paths,
+    output_projection=None,
+    shape_out=None,
+    **kwargs,
+):
+    """Load FITS files from ``paths`` then call :func:`reproject_and_coadd`.
+
+    Parameters
+    ----------
+    paths : iterable of str
+        FITS file paths containing valid WCS information.
+    output_projection : astropy.wcs.WCS or FITS header, optional
+        Target projection. When ``None`` the WCS of the first file is used.
+    shape_out : tuple, optional
+        Output shape ``(H, W)``. When ``None`` it is derived from the first
+        image.
+    **kwargs : dict
+        Forwarded to :func:`reproject_and_coadd`.
+    """
+
+    pairs = []
+    for fp in paths:
+        try:
+            with fits.open(fp, memmap=True) as hdul:
+                data = hdul[0].data.astype(np.float32)
+                hdr = hdul[0].header
+        except Exception:
+            logger.warning("Skipping invalid FITS '%s' for reprojection", fp, exc_info=True)
+            continue
+        sanitize_header_for_wcs(hdr)
+        wcs = WCS(hdr, naxis=2)
+        if wcs.pixel_shape is None:
+            h, w = data.shape[:2]
+            wcs.pixel_shape = (w, h)
+        if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
+            data = np.moveaxis(data, 0, -1)
+        pairs.append((data, wcs))
+
+    if not pairs:
+        raise RuntimeError("Reproject requested but no aligned FITS were produced.")
+
+    if output_projection is None:
+        output_projection = pairs[0][1]
+    if shape_out is None:
+        shape_out = pairs[0][0].shape[:2]
+
+    return reproject_and_coadd(pairs, output_projection, shape_out, **kwargs)
+
+
 reproject_interp = _reproject_interp
 
-__all__ = ["reproject_and_coadd", "reproject_interp"]
+__all__ = ["reproject_and_coadd", "reproject_interp", "reproject_and_coadd_from_paths"]

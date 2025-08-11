@@ -6330,6 +6330,10 @@ class SeestarStackerGUI:
             ]
             final_combine_slug = _to_slug(self.stack_final_combine_var.get())
             cmd += ["--final-combine", final_combine_slug]
+            self.logger.info(
+                "Launching boring_stack with final_combine=%s, batch_size=1",
+                final_combine_slug,
+            )
             self._run_boring_stack_process(cmd, csv_path, self.settings.output_folder)
             return
 
