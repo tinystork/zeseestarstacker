@@ -1275,7 +1275,8 @@ class SeestarQueuedStacker:
         self.stack_kappa_low = 2.5
         self.stack_kappa_high = 2.5
         self.winsor_limits = (0.05, 0.05)
-        self.stack_final_combine = "mean"
+        if not getattr(self, "stack_final_combine", None):
+            self.stack_final_combine = "mean"
         self.stack_reject_algo = "none"
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5

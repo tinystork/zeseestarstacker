@@ -161,18 +161,17 @@ class SettingsManager:
                     )
                 ),
             ).get()
-            if getattr(gui_instance, "reproject_between_batches_var", tk.BooleanVar()).get():
-                self.stack_final_combine = "reproject"
-            elif getattr(gui_instance, "reproject_coadd_var", tk.BooleanVar()).get():
-                self.stack_final_combine = "reproject_coadd"
-            else:
-                self.stack_final_combine = getattr(
-                    gui_instance,
-                    "stack_final_combine_var",
-                    tk.StringVar(
-                        value=default_values_from_code.get("stack_final_combine", "mean")
-                    ),
-                ).get()
+            self.stack_final_combine = getattr(
+                gui_instance,
+                "stack_final_combine_var",
+                tk.StringVar(
+                    value=default_values_from_code.get("stack_final_combine", "mean")
+                ),
+            ).get()
+            self.reproject_between_batches = self.stack_final_combine == "reproject"
+            self.reproject_coadd_final = (
+                self.stack_final_combine == "reproject_coadd"
+            )
             self.stack_method = getattr(
                 gui_instance,
                 "stack_method_var",
@@ -695,28 +694,6 @@ class SettingsManager:
                 "astrometry_solve_field_dir",
                 default_values_from_code.get("astrometry_solve_field_dir", ""),
             )
-
-            self.reproject_between_batches = getattr(
-                gui_instance,
-                "reproject_between_batches_var",
-                tk.BooleanVar(
-                    value=default_values_from_code.get(
-                        "reproject_between_batches", False
-                    )
-                ),
-            ).get()
-
-            self.reproject_coadd_final = getattr(
-                gui_instance,
-                "reproject_coadd_var",
-                tk.BooleanVar(
-                    value=default_values_from_code.get(
-                        "reproject_coadd_final", False
-                    )
-                ),
-            ).get()
-            if self.stack_final_combine == "reproject_coadd":
-                self.reproject_coadd_final = True
 
             # In classic stacking mode this option defaults to disabled unless
             # the user explicitly checked the box in the Local Solver window.
