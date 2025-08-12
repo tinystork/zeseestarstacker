@@ -13,6 +13,27 @@ import numpy as np
 import json
 from typing import Optional
 
+from logging.handlers import RotatingFileHandler
+
+
+def _setup_logging(log_dir: str, log_name: str, level: int) -> str:
+    """Configure root logging for both CLI and GUI launches."""
+    os.makedirs(log_dir, exist_ok=True)
+    log_fp = os.path.join(log_dir, log_name)
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    fh = RotatingFileHandler(log_fp, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    root.setLevel(level)
+    logging.getLogger(__name__).propagate = True
+    return log_fp
+
 
 
 
@@ -437,6 +458,7 @@ def parse_args():
     # Weight options mirror the GUI: snr, stars, noise variance and noise+FWHM
     p.add_argument("--csv", required=True, help="CSV with file list")
     p.add_argument("--out", required=True, help="Output directory")
+    p.add_argument("--log-dir", default=None, help="Directory for log file")
     p.add_argument("--tile", type=int, default=512, help="Tile height (ignored)")
     p.add_argument("--kappa", type=float, default=3.0, help="Kappa value")
     p.add_argument("--winsor", type=float, default=0.05, help="Winsor limit")
@@ -476,6 +498,10 @@ def parse_args():
     p.add_argument("--cleanup-temp-files", dest="cleanup_temp_files", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--align-on-disk", action="store_true", help="Use memmap files during alignment")
     p.add_argument("--show-progress", action="store_true", help="Display a minimal progress GUI")
+    p.add_argument("--tile-size", type=int, default=1024, help="Tile size for streaming reprojection")
+    p.add_argument("--dtype-out", default="float32", choices=["float32", "float64"], help="Output dtype for streaming reprojection")
+    p.add_argument("--memmap-dir", default=None, help="Directory for temporary memmap files")
+    p.add_argument("--keep-intermediates", action="store_true", help="Keep temporary memmap files")
     p.add_argument(
         "--final-combine",
         choices=["none", "mean", "reject", "reproject", "reproject_coadd"],
@@ -1023,9 +1049,24 @@ def _run_stack(args, progress_cb) -> int:
                 logger.debug("First aligned FITS: %s", valid_paths[0])
                 logger.debug("Last aligned FITS: %s", valid_paths[-1])
                 t0 = time.monotonic()
-                success = _finalize_reproject_and_coadd(
-                    valid_paths, reference_path, out_fp
-                )
+                if args.batch_size == 1 and final_combine == "reproject_coadd":
+                    from seestar import reproject_utils
+
+                    dtype = np.float32 if args.dtype_out == "float32" else np.float64
+                    success = reproject_utils.streaming_reproject_and_coadd(
+                        valid_paths,
+                        reference_path=reference_path,
+                        output_path=out_fp,
+                        tile_size=args.tile_size,
+                        dtype_out=dtype,
+                        memmap_dir=args.memmap_dir,
+                        keep_intermediates=args.keep_intermediates,
+                        match_background=True,
+                    )
+                else:
+                    success = _finalize_reproject_and_coadd(
+                        valid_paths, reference_path, out_fp
+                    )
                 duration = time.monotonic() - t0
                 logger.info("Reprojection globale terminée en %.2f s", duration)
                 if not success:
@@ -1082,6 +1123,8 @@ def _run_stack(args, progress_cb) -> int:
 def main() -> int:
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
+    log_dir = args.log_dir or os.path.join(args.out, "logs")
+    _setup_logging(log_dir, "seestar.log", logging.DEBUG)
 
     # Register signal handlers so that external termination requests
     # stop the stacker cleanly.
@@ -1090,18 +1133,6 @@ def main() -> int:
             signal.signal(sig, _handle_signal)
         except Exception:
             pass
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(
-                os.path.join(args.out, "boring_stack.log"),
-                mode="w",
-                encoding="utf-8",
-            ),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
 
     def log_progress(message: str, progress: object | None = None) -> None:
         """Simple progress callback that tolerates non-numeric ``progress``."""
