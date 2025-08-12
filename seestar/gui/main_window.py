@@ -6327,6 +6327,8 @@ class SeestarStackerGUI:
                 str(getattr(self.settings, "max_hq_mem_gb", 8)),
                 "--chunk-size",
                 str(self._get_auto_chunk_size()),
+                "--log-dir",
+                os.path.join(self.settings.output_folder, "logs"),
             ]
             final_combine_slug = _to_slug(self.stack_final_combine_var.get())
             cmd += ["--final-combine", final_combine_slug]
