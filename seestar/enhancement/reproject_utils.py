@@ -171,8 +171,8 @@ def reproject_and_coadd_from_paths(
     pairs = []
     for fp in paths:
         try:
-            with fits.open(fp, memmap=True) as hdul:
-                data = hdul[0].data.astype(np.float32)
+            with fits.open(fp, memmap=False) as hdul:
+                data = np.asarray(hdul[0].data, dtype=np.float32)
                 hdr = hdul[0].header
         except Exception:
             logger.warning("Skipping invalid FITS '%s' for reprojection", fp, exc_info=True)
