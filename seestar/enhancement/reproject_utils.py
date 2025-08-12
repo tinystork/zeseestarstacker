@@ -121,6 +121,7 @@ def reproject_and_coadd(
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
 
+
     weights_iter = input_weights if input_weights is not None else [None] * len(input_data)
     filtered_pairs = []
     filtered_weights = []
@@ -182,10 +183,17 @@ def reproject_and_coadd(
 
         weight_proj = footprint
         if weight is not None:
-            w_reproj, w_fp = reproject_function(
-                (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
-            )
-            weight_proj = w_reproj * w_fp
+            # [B1-COADD-FIX] accept scalar or 2D weights only
+            if np.isscalar(weight):
+                weight_proj = footprint * float(weight)
+            else:
+                weight = np.asarray(weight)
+                if weight.shape != img.shape[:2]:
+                    raise ValueError("weight shape mismatch")
+                w_reproj, w_fp = reproject_function(
+                    (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+                )
+                weight_proj = w_reproj * w_fp
 
         sum_image += proj_img * weight_proj
         cov_image += weight_proj
@@ -219,6 +227,8 @@ def reproject_and_coadd_from_paths(
     """
 
     pairs = []
+    headers = []
+    # [B1-COADD-FIX] collect meta information for global grid computation
     for fp in paths:
         try:
             with fits.open(fp, memmap=False) as hdul:
@@ -235,14 +245,49 @@ def reproject_and_coadd_from_paths(
         if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
             data = np.moveaxis(data, 0, -1)
         pairs.append((data, wcs))
+        headers.append(hdr)
+        logger.debug(
+            "[B1-COADD-FIX] input=%s ndim=%d shape=%s", fp, data.ndim, data.shape
+        )
 
     if not pairs:
         raise RuntimeError("Reproject requested but no aligned FITS were produced.")
 
-    if output_projection is None:
-        output_projection = pairs[0][1]
-    if shape_out is None:
-        shape_out = pairs[0][0].shape[:2]
+    if output_projection is None or shape_out is None:
+        try:  # pragma: no cover - depends on reproject availability
+            from reproject.mosaicking import find_optimal_celestial_wcs
+
+            out_wcs, out_shape = find_optimal_celestial_wcs(headers)
+            logger.info("[B1-COADD-FIX] shape_out_global=%s", out_shape)
+        except Exception:  # fall back to first image
+            out_wcs = pairs[0][1]
+            out_shape = pairs[0][0].shape[:2]
+        if output_projection is None:
+            output_projection = out_wcs
+        if shape_out is None:
+            shape_out = out_shape
+
+    shape_out = tuple(int(round(x)) for x in shape_out)
+    # [B1-COADD-FIX] sanity check on the final grid size
+    if shape_out[0] < 100 or shape_out[1] < 100:
+        raise ValueError(f"shape_out too small: {shape_out}")
+
+    # Reproject per channel to avoid passing 3D arrays to reproject
+    first = pairs[0][0]
+    if first.ndim == 3:
+        channels = []
+        cov_out = None
+        C = first.shape[-1]
+        for c in range(C):
+            ch_pairs = [(img[:, :, c], wcs) for img, wcs in pairs]
+            sci, cov = reproject_and_coadd(
+                ch_pairs, output_projection, shape_out, **kwargs
+            )
+            channels.append(sci)
+            if cov_out is None:
+                cov_out = cov
+        result = np.stack(channels, axis=-1)
+        return result, cov_out
 
     return reproject_and_coadd(pairs, output_projection, shape_out, **kwargs)
 
