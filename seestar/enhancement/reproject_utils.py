@@ -30,6 +30,38 @@ logger = logging.getLogger(__name__)
 import numpy as np
 
 
+def _open_fits_safely(path):
+    """Open a FITS file avoiding memmap scaling issues.
+
+    The file is first inspected with ``memmap=True``. If scaling keywords
+    (``BZERO``, ``BSCALE`` or ``BLANK``) are present the file is reopened with
+    ``memmap=False`` and ``do_not_scale_image_data=False`` so that astropy can
+    safely apply the required scaling. Otherwise a memory-mapped array is
+    returned.
+    """
+
+    with fits.open(path, memmap=True, do_not_scale_image_data=True) as hdul:
+        hdr = hdul[0].header.copy()
+        needs_scaling = any(k in hdr for k in ("BZERO", "BSCALE", "BLANK"))
+        if not needs_scaling:
+            return hdul[0].data, hdr
+
+    with fits.open(path, memmap=False, do_not_scale_image_data=False) as hdul:
+        data = hdul[0].data
+        hdr = hdul[0].header.copy()
+    return data, hdr
+
+
+def _ensure_2d(img: np.ndarray) -> np.ndarray:
+    """Force ``img`` to 2D, averaging the last axis when 3D."""
+
+    if img.ndim == 2:
+        return img
+    if img.ndim == 3:
+        return img.mean(axis=-1)
+    raise ValueError(f"Expected 2D image for reprojection, got shape {img.shape}")
+
+
 def _to_chw(data: np.ndarray) -> np.ndarray:
     """Normalize ``data`` to ``(C, H, W)`` form.
 
@@ -258,22 +290,24 @@ def streaming_reproject_and_coadd(
 
     ref_fp = reference_path or paths[0]
     try:
-        with fits.open(ref_fp, memmap=True) as hdul:
-            ref_data = hdul[0].data
-            ref_hdr = hdul[0].header.copy()
+        ref_data, ref_hdr = _open_fits_safely(ref_fp)
+        ref_data = _ensure_2d(ref_data)
+        shape_out = ref_data.shape[:2]
     except Exception:
         ref_data = None
         ref_hdr = fits.Header()
+        shape_out = None
+
     sanitize_header_for_wcs(ref_hdr)
     ref_wcs = WCS(ref_hdr, naxis=2)
 
-    if ref_data is not None:
-        shape_out = ref_data.shape[:2]
-    elif ref_wcs.pixel_shape is not None and ref_wcs.array_shape is not None:
-        shape_out = tuple(ref_wcs.array_shape)
-    else:
-        with fits.open(ref_fp, memmap=True) as hdul:
-            shape_out = hdul[0].data.shape[:2]
+    if shape_out is None:
+        if ref_wcs.pixel_shape is not None and ref_wcs.array_shape is not None:
+            shape_out = tuple(ref_wcs.array_shape)
+        else:
+            img_tmp, _ = _open_fits_safely(ref_fp)
+            img_tmp = _ensure_2d(img_tmp)
+            shape_out = img_tmp.shape[:2]
 
     if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
@@ -305,9 +339,8 @@ def streaming_reproject_and_coadd(
             sub_wcs = ref_wcs.slice((slice(y0, y1), slice(x0, x1)))
             for fp in paths:
                 try:
-                    with fits.open(fp, memmap=True) as hdul:
-                        data = hdul[0].data
-                        hdr = hdul[0].header
+                    data, hdr = _open_fits_safely(fp)
+                    data = _ensure_2d(data)
                 except Exception:
                     logger.warning("Skipping invalid FITS '%s' for streaming reprojection", fp)
                     continue
