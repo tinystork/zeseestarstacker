@@ -148,6 +148,7 @@ from seestar.core.image_processing import (
 )
 from astropy.io import fits
 from astropy.wcs import WCS
+from seestar.alignment.astrometry_solver import AstrometrySolver
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,18 @@ def _sanitize_astap_wcs(path: str) -> None:
     except Exception:
 
         logger.debug("Échec de la correction CONTINUE pour %s", wcs_path, exc_info=True)
+
+
+def _has_wcs(hdr: fits.Header) -> bool:
+    return (
+        "CRVAL1" in hdr
+        and "CRVAL2" in hdr
+        and (
+            ("CD1_1" in hdr and "CD2_2" in hdr)
+            or "PC1_1" in hdr
+            or "CDELT1" in hdr
+        )
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -669,6 +682,17 @@ def _run_stack(args, progress_cb) -> int:
         )
         args.align_on_disk = True
 
+    solver_settings = {
+        "local_solver_preference": settings.local_solver_preference,
+        "api_key": args.api_key or getattr(settings, "astrometry_api_key", ""),
+        "astap_path": settings.astap_path,
+        "astap_data_dir": settings.astap_data_dir,
+        "astap_search_radius": settings.astap_search_radius,
+        "astap_downsample": settings.astap_downsample,
+        "astap_sensitivity": settings.astap_sensitivity,
+        "local_ansvr_path": getattr(settings, "local_ansvr_path", ""),
+    }
+
     stacker = SeestarQueuedStacker(
         align_on_disk=args.align_on_disk,
         settings=settings,
@@ -679,6 +703,8 @@ def _run_stack(args, progress_cb) -> int:
         astap_downsample=settings.astap_downsample,
         astap_sensitivity=settings.astap_sensitivity,
     )
+    stacker.api_key = solver_settings["api_key"]
+    solver = AstrometrySolver(progress_callback=progress_cb) if args.batch_size == 1 else None
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
     try:
@@ -934,9 +960,8 @@ def _run_stack(args, progress_cb) -> int:
             args.batch_size == 1
             and final_combine in ("reproject", "reproject_coadd")
         ):
-            aligned = [
-                p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])
-            ]
+
+            aligned = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
             aligned_existing = [f for f in aligned if os.path.isfile(f)]
             if not aligned_existing:
                 raise RuntimeError(
@@ -946,25 +971,68 @@ def _run_stack(args, progress_cb) -> int:
                 getattr(settings, "reference_image_path", "") or aligned_existing[0]
             )
             out_fp = os.path.join(args.out, "final.fits")
+            valid_paths: list[str] = []
+            skipped_no_wcs: list[str] = []
+            for fp in aligned_existing:
+                try:
+                    with fits.open(fp, memmap=False) as hdul:
+                        hdr = hdul[0].header
+                    sanitize_header_for_wcs(hdr)
+                    if not _has_wcs(hdr):
+                        if solver is None:
+                            skipped_no_wcs.append(fp)
+                            logger.warning("Skip (no solver available): %s", fp)
+                            continue
+                        try:
+                            wcs_obj = solver.solve(
+                                fp,
+                                hdr,
+                                solver_settings,
+                                update_header_with_solution=True,
+                            )
+                        except Exception as e:
+                            logger.warning("Skip (solve failed): %s (%s)", fp, e)
+                            skipped_no_wcs.append(fp)
+                            continue
+                        if wcs_obj is None:
+                            logger.warning("Skip (no WCS after solve): %s", fp)
+                            skipped_no_wcs.append(fp)
+                            continue
+                    valid_paths.append(fp)
+                except Exception as e:
+                    logger.warning("Skip (open failed): %s (%s)", fp, e)
+
             logger.info(
-                "Lancement de la reprojection globale sur %d fichiers",
+                "Reprojection candidates: %d, skipped: %d, valid: %d",
                 len(aligned_existing),
+                len(skipped_no_wcs),
+                len(valid_paths),
             )
-            logger.debug("First aligned FITS: %s", aligned_existing[0])
-            logger.debug("Last aligned FITS: %s", aligned_existing[-1])
-            t0 = time.monotonic()
-            success = _finalize_reproject_and_coadd(
-                aligned_existing, reference_path, out_fp
-            )
-            duration = time.monotonic() - t0
-            logger.info("Reprojection globale terminée en %.2f s", duration)
-            if not success:
-                raise RuntimeError("Reproject and coadd failed.")
-            logger.debug(
-                "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)"
-            )
-            final_path = out_fp
-            final_reproject_success = True
+            if len(valid_paths) >= 2:
+                logger.info(
+                    "Lancement de la reprojection globale sur %d fichiers",
+                    len(valid_paths),
+                )
+                logger.debug("First aligned FITS: %s", valid_paths[0])
+                logger.debug("Last aligned FITS: %s", valid_paths[-1])
+                t0 = time.monotonic()
+                success = _finalize_reproject_and_coadd(
+                    valid_paths, reference_path, out_fp
+                )
+                duration = time.monotonic() - t0
+                logger.info("Reprojection globale terminée en %.2f s", duration)
+                if not success:
+                    raise RuntimeError("Reproject and coadd failed.")
+                logger.debug(
+                    "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)",
+                )
+                final_path = out_fp
+                final_reproject_success = True
+            else:
+                logger.warning(
+                    "Reprojection skipped: not enough valid inputs (%d)",
+                    len(valid_paths),
+                )
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
             if os.path.abspath(final_path) != os.path.abspath(dest):
