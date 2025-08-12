@@ -30,6 +30,22 @@ logger = logging.getLogger(__name__)
 import numpy as np
 
 
+def _to_chw(data: np.ndarray) -> np.ndarray:
+    """Normalize ``data`` to ``(C, H, W)`` form.
+
+    Handles grayscale ``(H, W)``, ``(C, H, W)`` and ``(H, W, C)`` inputs.
+    Unknown layouts fall back to a single-channel view.
+    """
+
+    if data.ndim == 2:
+        return data[None, ...]
+    if data.shape[0] in (3, 4):
+        return data
+    if data.shape[-1] in (3, 4):
+        return np.transpose(data, (2, 0, 1))
+    return data[None, ...]
+
+
 def reproject_and_coadd(
     input_data,
     output_projection,
@@ -242,27 +258,41 @@ def streaming_reproject_and_coadd(
 
     ref_fp = reference_path or paths[0]
     try:
-        ref_hdr = fits.getheader(ref_fp, memmap=False)
+        with fits.open(ref_fp, memmap=True) as hdul:
+            ref_data = hdul[0].data
+            ref_hdr = hdul[0].header.copy()
     except Exception:
+        ref_data = None
         ref_hdr = fits.Header()
     sanitize_header_for_wcs(ref_hdr)
     ref_wcs = WCS(ref_hdr, naxis=2)
 
-    if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
+    if ref_data is not None:
+        shape_out = ref_data.shape[:2]
+    elif ref_wcs.pixel_shape is not None and ref_wcs.array_shape is not None:
+        shape_out = tuple(ref_wcs.array_shape)
+    else:
         with fits.open(ref_fp, memmap=True) as hdul:
             shape_out = hdul[0].data.shape[:2]
+
+    if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
         ref_wcs.array_shape = shape_out
-    else:
-        shape_out = tuple(ref_wcs.array_shape)
+
+    chw = _to_chw(ref_data) if ref_data is not None else None
+    C_out = chw.shape[0] if chw is not None else 1
 
     if memmap_dir is None:
         memmap_dir = tempfile.mkdtemp(prefix="stream_reproject_")
     os.makedirs(memmap_dir, exist_ok=True)
     sum_path = os.path.join(memmap_dir, "sum_map.memmap")
     wht_path = os.path.join(memmap_dir, "wht_map.memmap")
-    sum_map = np.memmap(sum_path, dtype=np.float64, mode="w+", shape=shape_out)
-    wht_map = np.memmap(wht_path, dtype=np.float32, mode="w+", shape=shape_out)
+    if C_out == 1:
+        sum_map = np.memmap(sum_path, dtype=np.float64, mode="w+", shape=shape_out)
+        wht_map = np.memmap(wht_path, dtype=np.float32, mode="w+", shape=shape_out)
+    else:
+        sum_map = np.memmap(sum_path, dtype=np.float64, mode="w+", shape=(C_out, *shape_out))
+        wht_map = np.memmap(wht_path, dtype=np.float32, mode="w+", shape=(C_out, *shape_out))
     sum_map[:] = 0.0
     wht_map[:] = 0.0
 
@@ -283,35 +313,68 @@ def streaming_reproject_and_coadd(
                     continue
                 sanitize_header_for_wcs(hdr)
                 in_wcs = WCS(hdr, naxis=2)
-                try:
-                    arr, footprint = reproject_function(
-                        (data, in_wcs),
-                        output_projection=sub_wcs,
-                        shape_out=(y1 - y0, x1 - x0),
-                        return_footprint=True,
-                    )
-                except Exception:
-                    logger.warning("Reprojection failed for '%s'", fp, exc_info=True)
+                chw_in = _to_chw(data)
+                if chw_in.shape[0] != C_out:
+                    logger.warning("Channel mismatch for '%s'", fp)
                     continue
-                arr = arr.astype(dtype_out, copy=False)
-                footprint = footprint.astype(np.float32, copy=False)
-                sum_map[y0:y1, x0:x1] += arr * footprint
-                wht_map[y0:y1, x0:x1] += footprint
-                del arr, footprint
+                for c in range(C_out):
+                    try:
+                        arr, footprint = reproject_function(
+                            (chw_in[c], in_wcs),
+                            output_projection=sub_wcs,
+                            shape_out=(y1 - y0, x1 - x0),
+                            return_footprint=True,
+                        )
+                    except Exception:
+                        logger.warning("Reprojection failed for '%s' (channel %d)", fp, c, exc_info=True)
+                        continue
+                    arr = arr.astype(dtype_out, copy=False)
+                    footprint = footprint.astype(np.float32, copy=False)
+                    if C_out == 1:
+                        sum_map[y0:y1, x0:x1] += arr * footprint
+                        wht_map[y0:y1, x0:x1] += footprint
+                    else:
+                        sum_map[c, y0:y1, x0:x1] += arr * footprint
+                        wht_map[c, y0:y1, x0:x1] += footprint
+                    del arr, footprint
                 gc.collect()
 
     final_path = os.path.join(memmap_dir, "final.memmap")
-    final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=shape_out)
+    if C_out == 1:
+        final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=shape_out)
+    else:
+        final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=(C_out, *shape_out))
     eps = np.finfo(np.float32).eps
-    for y0 in range(0, shape_out[0], tile_h):
-        y1 = min(y0 + tile_h, shape_out[0])
-        for x0 in range(0, shape_out[1], tile_w):
-            s = sum_map[y0:y1, x0:x1]
-            w = wht_map[y0:y1, x0:x1]
-            final_map[y0:y1, x0:x1] = np.where(w > 0, s / np.maximum(w, eps), np.nan)
+    if C_out == 1:
+        for y0 in range(0, shape_out[0], tile_h):
+            y1 = min(y0 + tile_h, shape_out[0])
+            for x0 in range(0, shape_out[1], tile_w):
+                s = sum_map[y0:y1, x0:x1]
+                w = wht_map[y0:y1, x0:x1]
+                final_map[y0:y1, x0:x1] = np.where(w > 0, s / np.maximum(w, eps), np.nan)
+    else:
+        for c in range(C_out):
+            for y0 in range(0, shape_out[0], tile_h):
+                y1 = min(y0 + tile_h, shape_out[0])
+                for x0 in range(0, shape_out[1], tile_w):
+                    s = sum_map[c, y0:y1, x0:x1]
+                    w = wht_map[c, y0:y1, x0:x1]
+                    final_map[c, y0:y1, x0:x1] = np.where(
+                        w > 0, s / np.maximum(w, eps), np.nan
+                    )
 
     if output_path is not None:
-        fits.PrimaryHDU(data=final_map, header=ref_wcs.to_header(relax=True)).writeto(
+        hdr_out = ref_wcs.to_header(relax=True)
+        for key in ("BSCALE", "BZERO"):
+            if key in ref_hdr:
+                hdr_out[key] = ref_hdr[key]
+        if C_out > 1:
+            hdr_out["NAXIS"] = 3
+            hdr_out["NAXIS1"] = shape_out[1]
+            hdr_out["NAXIS2"] = shape_out[0]
+            hdr_out["NAXIS3"] = C_out
+            hdr_out["CTYPE3"] = hdr_out.get("CTYPE3", "RGB")
+        fits.PrimaryHDU(data=final_map, header=hdr_out).writeto(
             output_path, overwrite=True
         )
 

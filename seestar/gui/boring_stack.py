@@ -772,7 +772,7 @@ def _run_stack(args, progress_cb) -> int:
 
                 has_wcs = False
                 try:
-                    WCS(hdr)
+                    WCS(hdr, naxis=2)
                     has_wcs = True
                 except Exception:
                     has_wcs = False
@@ -826,7 +826,7 @@ def _run_stack(args, progress_cb) -> int:
             use_drizzle=False,
             reproject_between_batches=settings.reproject_between_batches,
             reproject_coadd_final=reproject_coadd_final,
-            api_key=args.api_key,
+            **solver_settings,
             # When performing a final reproject/coadd with ``batch_size=1`` we
             # must keep the aligned files on disk for the last reprojection
             # step. Delay cleanup until the very end so external solvers
