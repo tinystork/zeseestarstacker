@@ -242,6 +242,7 @@ def read_rows(csv_path):
             if "weight" in header:
                 weight_idx = header.index("weight")
     base_dir = os.path.dirname(csv_path)
+    missing_count = 0
     for row in data_rows:
         if not row:
             continue
@@ -264,10 +265,16 @@ def read_rows(csv_path):
             continue
         if not os.path.isabs(cell):
             cell = os.path.join(base_dir, cell)
+        if not os.path.isfile(cell):
+            missing_count += 1
+            logger.warning("Stack plan path not found: %s", cell)
+            continue
         weight = ""
         if weight_idx is not None and len(row) > weight_idx:
             weight = row[weight_idx].strip()
         rows_out.append({"path": cell, "weight": weight})
+    if missing_count:
+        logger.warning("Skipped %d stack plan entries with missing files", missing_count)
     return rows_out
 
 
@@ -523,7 +530,7 @@ def _run_stack(args, progress_cb) -> int:
     """Execute the stacking process using ``progress_cb`` for updates."""
     rows = read_rows(args.csv)
     if not rows:
-        logger.error("CSV is empty")
+        logger.error("No valid file paths found in CSV")
         return 1
 
     # Load user settings early to resolve final combine strategy
