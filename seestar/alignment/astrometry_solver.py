@@ -345,7 +345,17 @@ class AstrometrySolver:
         self.logger.log(log_level, full_msg)
 
 
-    def solve(self, image_path, fits_header, settings, update_header_with_solution=True, is_boring_stack_disk_mode=False):
+    def solve(
+        self,
+        image_path,
+        fits_header,
+        settings,
+        update_header_with_solution=True,
+        is_boring_stack_disk_mode=False,
+        *,
+        batch_size=None,
+        final_combine=None,
+    ):
         """
         Tente de résoudre le WCS d'une image en utilisant la stratégie configurée.
 
@@ -367,7 +377,23 @@ class AstrometrySolver:
         Returns:
             astropy.wcs.WCS or None: Objet WCS si succès, None si échec.
         """
-        self._log(f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')", "INFO")
+        if (
+            batch_size == 1
+            and str(final_combine).lower()
+            in {"reproject_and_coadd", "reproject", "coadd"}
+        ):
+            norm = image_path.replace("\\", "/").lower()
+            if "/aligned_tmp/" in norm or "/classic_batch_outputs/" in norm:
+                logger.info(
+                    "[AstrometrySolver] Skip solving intermediate aligned/batch in BS=1+Reproject mode: %s",
+                    image_path,
+                )
+                return None
+
+        self._log(
+            f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')",
+            "INFO",
+        )
         wcs_solution = None
 
         
@@ -1308,6 +1334,9 @@ def solve_image_wcs(
     settings,
     update_header_with_solution=True,
     is_boring_stack_disk_mode=False,
+    *,
+    batch_size=None,
+    final_combine=None,
 ):
     """Convenience wrapper for :class:`AstrometrySolver`.
 
@@ -1339,6 +1368,8 @@ def solve_image_wcs(
             settings,
             update_header_with_solution,
             is_boring_stack_disk_mode=is_boring_stack_disk_mode,
+            batch_size=batch_size,
+            final_combine=final_combine,
         )
     except Exception:
         return None

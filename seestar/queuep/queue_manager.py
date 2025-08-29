@@ -57,6 +57,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
+from seestar.utils.wcs_utils import write_wcs_to_fits_inplace
 
 from ..tools.file_ops import move_to_stacked
 
@@ -9674,6 +9675,8 @@ class SeestarQueuedStacker:
                 header,
                 solver_settings,
                 update_header_with_solution=True,
+                batch_size=getattr(self, "batch_size", None),
+                final_combine=getattr(self, "stack_final_combine", None),
             )
         else:
             wcs = solve_image_wcs(
@@ -9681,6 +9684,8 @@ class SeestarQueuedStacker:
                 header,
                 solver_settings,
                 update_header_with_solution=True,
+                batch_size=getattr(self, "batch_size", None),
+                final_combine=getattr(self, "stack_final_combine", None),
             )
         if wcs is None:
             self.update_progress("   [Solver] Échec résolution", "WARN")
@@ -12986,27 +12991,23 @@ class SeestarQueuedStacker:
         os.makedirs(self.aligned_temp_dir, exist_ok=True)
 
         idx = self.aligned_files_count
-        img_path = os.path.join(self.aligned_temp_dir, f"aligned_{idx:05d}.npy")
+        img_path = os.path.join(self.aligned_temp_dir, f"aligned_{idx:05d}.fits")
         mask_path = os.path.join(self.aligned_temp_dir, f"mask_{idx:05d}.npy")
 
         try:
             _log_mem("before_save")
-            if isinstance(img, np.memmap):
-                out_mm = np.lib.format.open_memmap(
-                    img_path,
-                    mode="w+",
-                    dtype=np.float32,
-                    shape=img.shape,
-                )
-                out_mm[:] = img
-                out_mm.flush()
-                if hasattr(out_mm, "_mmap") and out_mm._mmap is not None:
-                    out_mm._mmap.close()
-                del out_mm
-                gc.collect()
-            else:
-                np.save(img_path, img.astype(np.float32))
+            data = img.astype(np.float32, copy=False)
+            if data.ndim == 3 and data.shape[2] in (3, 4):
+                data = np.moveaxis(data, -1, 0)
+            fits.PrimaryHDU(data=data).writeto(
+                img_path, overwrite=True, output_verify="ignore"
+            )
             np.save(mask_path, mask.astype(np.uint8))
+            if getattr(self, "reference_wcs_object", None) is not None:
+                try:
+                    write_wcs_to_fits_inplace(img_path, self.reference_wcs_object)
+                except Exception:
+                    pass
             _log_mem("after_save")
             return img_path, mask_path
         except Exception as e:
