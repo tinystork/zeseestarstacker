@@ -524,9 +524,14 @@ def streaming_reproject_and_coadd(
 
     if output_path is not None:
         hdr_out = ref_wcs.to_header(relax=True)
-        for key in ("BSCALE", "BZERO"):
-            if key in ref_hdr:
-                hdr_out[key] = ref_hdr[key]
+        if np.issubdtype(final_map.dtype, np.floating):
+            for key in ("BSCALE", "BZERO"):
+                if key in hdr_out:
+                    del hdr_out[key]
+        else:
+            for key in ("BSCALE", "BZERO"):
+                if key in ref_hdr:
+                    hdr_out[key] = ref_hdr[key]
         if C_out > 1:
             hdr_out["NAXIS"] = 3
             hdr_out["NAXIS1"] = shape_out[1]
