@@ -19,7 +19,8 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
 
 from astropy.wcs import WCS
 from astropy.io import fits
-import logging
+from typing import Tuple, Optional  # [B1-COADD-FIX]
+import logging  # [B1-COADD-FIX]
 import os
 import gc
 import tempfile
@@ -28,6 +29,33 @@ from seestar.core.image_processing import sanitize_header_for_wcs
 
 logger = logging.getLogger(__name__)
 import numpy as np
+
+
+# [B1-COADD-FIX] Garantir une image 2D pour la reprojection
+def _ensure_2d(img: np.ndarray) -> np.ndarray:  # [B1-COADD-FIX]
+    """
+    Force une image 2D. Si HWC (RGB), lever si cette fonction est appelée
+    au mauvais endroit (la séparation par canal doit être faite en amont),
+    ou retourner le premier canal si la logique l'exige.
+    """  # [B1-COADD-FIX]
+    if img is None:  # [B1-COADD-FIX]
+        raise ValueError("[B1-COADD-FIX] img is None")  # [B1-COADD-FIX]
+    arr = np.asarray(img)  # [B1-COADD-FIX]
+    if arr.ndim == 2:  # [B1-COADD-FIX]
+        return arr  # [B1-COADD-FIX]
+    if arr.ndim == 3:  # [B1-COADD-FIX]
+        # Ici on protège la reprojection : la voie batch=1 doit appeler cette
+        # fonction avec des 2D par canal. On ne recombine pas ici.
+        # On prend par défaut le canal 0 pour éviter une chute brutale,
+        # mais on loggue pour détecter les appels incorrects.
+        logger.warning(
+            "[B1-COADD-FIX] 3D array given to reproject; taking channel 0 only. shape=%s",
+            arr.shape,
+        )  # [B1-COADD-FIX]
+        return arr[..., 0]  # [B1-COADD-FIX]
+    raise ValueError(
+        f"[B1-COADD-FIX] Unsupported ndim={arr.ndim} for reprojection input."
+    )  # [B1-COADD-FIX]
 
 
 def _open_fits_safely(path):
@@ -50,16 +78,6 @@ def _open_fits_safely(path):
         data = hdul[0].data
         hdr = hdul[0].header.copy()
     return data, hdr
-
-
-def _ensure_2d(img: np.ndarray) -> np.ndarray:
-    """Force ``img`` to 2D, averaging the last axis when 3D."""
-
-    if img.ndim == 2:
-        return img
-    if img.ndim == 3:
-        return img.mean(axis=-1)
-    raise ValueError(f"Expected 2D image for reprojection, got shape {img.shape}")
 
 
 def _to_chw(data: np.ndarray) -> np.ndarray:
@@ -118,6 +136,9 @@ def reproject_and_coadd(
         # reproject not available
         _reproject_interp()
 
+    kwargs = dict(kwargs)  # [B1-COADD-FIX]
+    kwargs.setdefault("return_footprint", True)  # [B1-COADD-FIX]
+
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
 
@@ -172,37 +193,60 @@ def reproject_and_coadd(
             if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
                 raise
 
-    sum_image = np.zeros(shape_out, dtype=np.float64)
-    cov_image = np.zeros(shape_out, dtype=np.float64)
+    sum_image = np.zeros(shape_out, dtype=np.float64)  # [B1-COADD-FIX]
+    cov_image = np.zeros(shape_out, dtype=np.float64)  # [B1-COADD-FIX]
 
+    kept = 0  # [B1-COADD-FIX]
+    total = 0  # [B1-COADD-FIX]
 
     for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
+        total += 1  # [B1-COADD-FIX]
+        img2d = _ensure_2d(np.asarray(img))  # [B1-COADD-FIX]
+
         proj_img, footprint = reproject_function(
-            (img, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+            (img2d, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+        )  # [B1-COADD-FIX]
+
+        if weight is None:  # [B1-COADD-FIX]
+            weight_proj = footprint  # [B1-COADD-FIX]
+        elif np.isscalar(weight):  # [B1-COADD-FIX]
+            weight_proj = footprint * float(weight)  # [B1-COADD-FIX]
+        else:
+            weight = np.asarray(weight)  # [B1-COADD-FIX]
+            if weight.shape != img2d.shape:  # [B1-COADD-FIX]
+                raise ValueError("[B1-COADD-FIX] weight shape mismatch")  # [B1-COADD-FIX]
+            w_reproj, w_fp = reproject_function(
+                (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+            )  # [B1-COADD-FIX]
+            weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
+
+        if np.any(footprint > 0):  # [B1-COADD-FIX]
+            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
+            cov_image += weight_proj  # [B1-COADD-FIX]
+            kept += 1  # [B1-COADD-FIX]
+        else:
+            logger.debug("[B1-COADD-FIX] Skipped entry (zero footprint).")  # [B1-COADD-FIX]
+
+        del proj_img, footprint, weight_proj  # [B1-COADD-FIX]
+
+    out = np.zeros_like(sum_image, dtype=np.float32)  # [B1-COADD-FIX]
+    valid = cov_image > 0  # [B1-COADD-FIX]
+    out[valid] = (sum_image[valid] / cov_image[valid]).astype(np.float32)  # [B1-COADD-FIX]
+
+    try:
+        logger.info(
+            "[B1-COADD-FIX] coadd stats: kept=%d/%d, cov>0=%d, cov_sum=%.3f, sum_min=%.3g, sum_max=%.3g",
+            kept,
+            total,
+            int(np.count_nonzero(valid)),
+            float(cov_image.sum()),
+            float(np.nanmin(sum_image)),
+            float(np.nanmax(sum_image)),
         )
+    except Exception:  # [B1-COADD-FIX]
+        pass  # [B1-COADD-FIX]
 
-        weight_proj = footprint
-        if weight is not None:
-            # [B1-COADD-FIX] accept scalar or 2D weights only
-            if np.isscalar(weight):
-                weight_proj = footprint * float(weight)
-            else:
-                weight = np.asarray(weight)
-                if weight.shape != img.shape[:2]:
-                    raise ValueError("weight shape mismatch")
-                w_reproj, w_fp = reproject_function(
-                    (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
-                )
-                weight_proj = w_reproj * w_fp
-
-        sum_image += proj_img * weight_proj
-        cov_image += weight_proj
-
-    final = np.full(shape_out, np.nan, dtype=np.float64)
-    valid = cov_image > 0
-    final[valid] = sum_image[valid] / cov_image[valid]
-
-    return final.astype(np.float32), cov_image.astype(np.float32)
+    return out, cov_image.astype(np.float32)  # [B1-COADD-FIX]
 
 
 def reproject_and_coadd_from_paths(
@@ -225,6 +269,9 @@ def reproject_and_coadd_from_paths(
     **kwargs : dict
         Forwarded to :func:`reproject_and_coadd`.
     """
+
+    kwargs = dict(kwargs)  # [B1-COADD-FIX]
+    kwargs.setdefault("return_footprint", True)  # [B1-COADD-FIX]
 
     pairs = []
     headers = []
