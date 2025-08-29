@@ -14,14 +14,24 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 def sanitize_header_for_wcs(header: fits.Header) -> None:
-    """Remove non-string CONTINUE cards that break ``astropy.wcs.WCS``.
+    """Remove non-string ``CONTINUE`` cards that break ``astropy.wcs.WCS``.
 
-    The function edits the header in-place, keeping only string-valued
-    ``CONTINUE`` cards to avoid parsing errors when creating a WCS object.
+    Astropy requires each ``CONTINUE`` card to carry a string value.  Some
+    external programs (e.g. ASTAP) may write numeric values in ``CONTINUE``
+    cards, which triggers ``astropy.io.fits.verify.VerifyError`` when a WCS
+    object is created.  This helper scans all header cards and drops any
+    ``CONTINUE`` entries whose value is not a string.  The header is modified
+    in-place and valid ``CONTINUE`` cards are preserved.
     """
-    for key in list(header.keys()):
-        if key == "CONTINUE" and not isinstance(header[key], str):
-            del header[key]
+
+    # ``Header`` may contain multiple ``CONTINUE`` cards; iterate over them
+    # explicitly so we can remove only the invalid ones.  Deleting indices in
+    # reverse order avoids offsetting subsequent positions.
+    to_delete = [idx for idx, card in enumerate(header.cards)
+                 if card.keyword == "CONTINUE" and not isinstance(card.value, str)]
+
+    for idx in reversed(to_delete):
+        del header[idx]
 
 
 def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
