@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+import types
+sys.modules.setdefault("cv2", types.ModuleType("cv2"))
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -166,3 +169,89 @@ def test_memory_threshold_forces_fallback(monkeypatch):
     assert np.allclose(result, 1)
     assert np.allclose(cov, 1)
     assert called["n"] == 0
+
+
+def test_no_duplicate_return_footprint(monkeypatch):
+    module = reproject_utils
+
+    def fake_astropy(input_data, output_projection=None, shape_out=None, **kwargs):
+        reproj_fn = kwargs["reproject_function"]
+        return reproj_fn(
+            input_data[0],
+            output_projection=output_projection,
+            shape_out=shape_out,
+            return_footprint=True,
+        )
+
+    monkeypatch.setattr(module, "_astropy_reproject_and_coadd", fake_astropy)
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, return_footprint=False, **kwargs):
+        data, _ = data_wcs
+        assert return_footprint is True
+        return data[: shape_out[0], : shape_out[1]], np.ones(shape_out, dtype=float)
+
+    from astropy.wcs import WCS
+    import numpy as np
+
+    wcs = WCS(naxis=2)
+    wcs.pixel_shape = (1, 1)
+
+    result, cov = module.reproject_and_coadd(
+        [(np.ones((1, 1), dtype=np.float32), wcs)],
+        output_projection=wcs,
+        shape_out=(1, 1),
+        reproject_function=dummy_reproj,
+    )
+
+    assert np.allclose(result, 1)
+    assert np.allclose(cov, 1)
+
+
+def test_streaming_accepts_mixed_channels(tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    mono = tmp_path / "mono.fits"
+    fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(mono)
+    rgb = tmp_path / "rgb.fits"
+    fits.PrimaryHDU(np.ones((3, 4, 4), dtype=np.float32), hdr).writeto(rgb)
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, return_footprint=True, **kwargs):
+        data, _ = data_wcs
+        arr = np.asarray(data, dtype=np.float32)
+        footprint = np.ones_like(arr, dtype=np.float32)
+        return arr, footprint
+
+    out = tmp_path / "out.fits"
+    ok = module.streaming_reproject_and_coadd(
+        [str(mono), str(rgb)],
+        output_path=str(out),
+        reproject_function=dummy_reproj,
+    )
+    assert ok
+    with fits.open(out) as hdul:
+        assert hdul[0].data.shape == (3, 4, 4)
+
+
+def test_streaming_raises_when_no_contribution(tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    mono = tmp_path / "mono.fits"
+    fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(mono)
+
+    def failing_reproj(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="Aucune contribution reçue"):
+        module.streaming_reproject_and_coadd(
+            [str(mono)],
+            output_path=str(tmp_path / "out.fits"),
+            reproject_function=failing_reproj,
+        )

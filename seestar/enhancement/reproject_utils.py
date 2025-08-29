@@ -137,7 +137,7 @@ def reproject_and_coadd(
         _reproject_interp()
 
     kwargs = dict(kwargs)  # [B1-COADD-FIX]
-    kwargs.setdefault("return_footprint", True)  # [B1-COADD-FIX]
+    kwargs.pop("return_footprint", None)  # [B1-COADD-FIX]
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
@@ -204,7 +204,11 @@ def reproject_and_coadd(
         img2d = _ensure_2d(np.asarray(img))  # [B1-COADD-FIX]
 
         proj_img, footprint = reproject_function(
-            (img2d, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+            (img2d, wcs_in),
+            output_projection=ref_wcs,
+            shape_out=shape_out,
+            return_footprint=True,
+            **kwargs,
         )  # [B1-COADD-FIX]
 
         if weight is None:  # [B1-COADD-FIX]
@@ -216,7 +220,11 @@ def reproject_and_coadd(
             if weight.shape != img2d.shape:  # [B1-COADD-FIX]
                 raise ValueError("[B1-COADD-FIX] weight shape mismatch")  # [B1-COADD-FIX]
             w_reproj, w_fp = reproject_function(
-                (weight, wcs_in), output_projection=ref_wcs, shape_out=shape_out, **kwargs
+                (weight, wcs_in),
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                return_footprint=True,
+                **kwargs,
             )  # [B1-COADD-FIX]
             weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
 
@@ -271,7 +279,7 @@ def reproject_and_coadd_from_paths(
     """
 
     kwargs = dict(kwargs)  # [B1-COADD-FIX]
-    kwargs.setdefault("return_footprint", True)  # [B1-COADD-FIX]
+    kwargs.pop("return_footprint", None)  # [B1-COADD-FIX]
 
     pairs = []
     headers = []
@@ -380,11 +388,20 @@ def streaming_reproject_and_coadd(
     if not paths:
         return False
 
+    paths_for_channels = list(paths)
+    if reference_path and reference_path not in paths_for_channels:
+        paths_for_channels.append(reference_path)
+    C_out = 1
+    for fp in paths_for_channels:
+        try:
+            data_tmp, _ = _open_fits_safely(fp)
+        except Exception:
+            continue
+        C_out = max(C_out, _to_chw(data_tmp).shape[0])
+
     ref_fp = reference_path or paths[0]
     try:
-        # Read raw reference data to preserve channels for C_out
         ref_data_raw, ref_hdr = _open_fits_safely(ref_fp)
-        # Determine output 2D shape only (do not collapse channels for C_out)
         shape_out = _ensure_2d(ref_data_raw).shape[:2]
     except Exception:
         ref_data_raw = None
@@ -405,10 +422,6 @@ def streaming_reproject_and_coadd(
     if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
         ref_wcs.array_shape = shape_out
-
-    # Compute C_out from raw reference data (correctly handles RGB vs mono)
-    chw = _to_chw(ref_data_raw) if ref_data_raw is not None else None
-    C_out = chw.shape[0] if chw is not None else 1
 
     if memmap_dir is None:
         memmap_dir = tempfile.mkdtemp(prefix="stream_reproject_")
@@ -445,6 +458,9 @@ def streaming_reproject_and_coadd(
                     if chw_in.shape[0] == 1 and C_out > 1:
                         # broadcast grayscale -> RGB-like
                         chw_in = np.repeat(chw_in, C_out, axis=0)
+                    elif chw_in.shape[0] > 1 and C_out == 1:
+                        # collapse RGB -> mono by averaging
+                        chw_in = np.mean(chw_in, axis=0, keepdims=True)
                     else:
                         logger.warning("Channel mismatch for '%s'", fp)
                         continue
@@ -493,6 +509,18 @@ def streaming_reproject_and_coadd(
                     final_map[c, y0:y1, x0:x1] = np.where(
                         w > 0, s / np.maximum(w, eps), np.nan
                     )
+
+    if float(np.nanmax(wht_map)) == 0:
+        sum_map.flush(); wht_map.flush(); final_map.flush()
+        if not keep_intermediates:
+            try:
+                os.remove(sum_path)
+                os.remove(wht_path)
+                os.remove(final_path)
+                os.rmdir(memmap_dir)
+            except Exception:
+                pass
+        raise RuntimeError("Aucune contribution reçue (mismatch de canaux)")
 
     if output_path is not None:
         hdr_out = ref_wcs.to_header(relax=True)
