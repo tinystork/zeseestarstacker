@@ -177,6 +177,8 @@ from seestar.core.image_processing import (
 from astropy.io import fits
 from astropy.wcs import WCS
 from seestar.alignment.astrometry_solver import AstrometrySolver
+from seestar.utils.wcs_utils import _sanitize_continue_as_string
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -311,53 +313,44 @@ def read_paths(csv_path):
 
 
 # -----------------------------------------------------------------------------
-# Reproject+Coadd helper
+# Reproject+Coadd helpers
 # -----------------------------------------------------------------------------
 
-def _finalize_reproject_and_coadd(aligned_files, reference_path, output_path):
-    """Reproject ``aligned_files`` onto the reference grid and combine."""
 
+def _load_wcs_header_only(fp: str) -> WCS:
+    """Load a WCS from a FITS file without touching the data."""
+    with fits.open(fp, memmap=True) as hdul:
+        hdr = hdul[0].header.copy()
+    _sanitize_continue_as_string(hdr)
+    return WCS(hdr, naxis=2, relax=True)
+
+
+def _finalize_reproject_and_coadd(aligned_dir: str, out_fp: str) -> bool:
+    """Reproject aligned FITS in ``aligned_dir`` using only header WCS."""
     from seestar import reproject_utils
-    try:
-        ref_hdr = fits.getheader(reference_path, memmap=False)
-    except Exception:
-        ref_hdr = fits.Header()
-    sanitize_header_for_wcs(ref_hdr)
-    ref_wcs = WCS(ref_hdr, naxis=2)
-    try:
-        result, _ = reproject_utils.reproject_and_coadd_from_paths(
-            aligned_files,
-            output_projection=ref_wcs,
-            reproject_function=reproject_utils.reproject_interp,
-            match_background=True,
-        )
-    except Exception:
-        logger.exception("reproject_and_coadd failed")
-        return False
 
-    hdr_out = ref_wcs.to_header(relax=True)
-    data_out = np.moveaxis(result, -1, 0) if result.ndim == 3 else result
-
-    if np.issubdtype(data_out.dtype, np.floating):
-        for key in ("BSCALE", "BZERO"):
-            if key in hdr_out:
-                del hdr_out[key]
-    else:
-        for key in ("BSCALE", "BZERO"):
-            if key in ref_hdr:
-                hdr_out[key] = ref_hdr[key]
-
-    try:
-        logger.info(
-            "boring_stack coadd stats: shape=%s min=%.3g max=%.3g", data_out.shape, float(np.nanmin(data_out)), float(np.nanmax(data_out))
-        )
-    except Exception:  # pragma: no cover - stats best effort
-        pass
-
-    fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
-        output_path, overwrite=True
+    files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+    candidates = []
+    ok = 0
+    skipped = 0
+    for f in files:
+        try:
+            w = _load_wcs_header_only(f)
+            candidates.append((f, w))
+            ok += 1
+        except Exception as e:
+            logger.warning("Header-WCS failed for %s -> skip (%s)", f, e)
+            skipped += 1
+    logger.info(
+        "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",
+        len(files),
+        ok,
+        skipped,
     )
-    return True
+    if ok == 0:
+        logger.error("No valid WCS candidates -> abort to avoid empty mosaic.")
+        return False
+    return reproject_utils.reproject_and_coadd_from_list(candidates, out_fp)
 
 
 # -----------------------------------------------------------------------------
@@ -1019,88 +1012,39 @@ def _run_stack(args, progress_cb) -> int:
             and final_combine in ("reproject", "reproject_coadd")
         ):
 
-            aligned = [p[0] for p in getattr(stacker, "intermediate_classic_batch_files", [])]
-            aligned_existing = [f for f in aligned if os.path.isfile(f)]
-            if not aligned_existing:
+            aligned_dir = getattr(stacker, "aligned_temp_dir", "")
+            files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+            if not files:
                 raise RuntimeError(
                     "Reproject requested but no aligned FITS were produced."
                 )
-            reference_path = (
-                getattr(settings, "reference_image_path", "") or aligned_existing[0]
-            )
             out_fp = os.path.join(args.out, "final.fits")
-            valid_paths: list[str] = []
-            skipped_no_wcs: list[str] = []
-            for fp in aligned_existing:
-                try:
-                    with fits.open(fp, memmap=False) as hdul:
-                        hdr = hdul[0].header
-                    sanitize_header_for_wcs(hdr)
-                    has_valid_wcs = False
+            if final_combine == "reproject_coadd":
+                candidates: list[tuple[str, WCS]] = []
+                ok = 0
+                skipped = 0
+                for fp in files:
                     try:
-                        _wcs = WCS(hdr, naxis=2)
-                        has_valid_wcs = getattr(_wcs, "has_celestial", False)
-                    except Exception as e_wcs:
-                        logger.debug("Invalid header WCS for %s: %s", fp, e_wcs)
-
-                    if not has_valid_wcs:
-                        logger.debug("Solve with ASTAP for %s", fp)
-                        if solver is None:
-                            skipped_no_wcs.append(fp)
-                            logger.warning("Skip (no solver available): %s", fp)
-                            continue
-                        try:
-                            solver.solve(
-                                fp,
-                                hdr,
-                                solver_settings,
-                                update_header_with_solution=True,
-                            )
-                        except Exception as e:
-                            logger.warning("Skip (solve failed): %s (%s)", fp, e)
-                            skipped_no_wcs.append(fp)
-                            continue
-                        try:
-                            _sanitize_astap_wcs(fp)
-                        except Exception:
-                            pass
-                        try:
-                            hdr = fits.getheader(fp, memmap=False)
-                            sanitize_header_for_wcs(hdr)
-                            _wcs = WCS(hdr, naxis=2)
-                            if not getattr(_wcs, "has_celestial", False):
-                                raise ValueError("WCS not celestial")
-                        except Exception as e_val:
-                            logger.warning("Skip (no valid WCS after solve): %s (%s)", fp, e_val)
-                            skipped_no_wcs.append(fp)
-                            continue
-                    else:
-                        logger.debug("Use header WCS for %s", fp)
-                    valid_paths.append(fp)
-                except Exception as e:
-                    logger.warning("Skip (open failed): %s (%s)", fp, e)
-
-            logger.info(
-                "Reprojection candidates: %d, skipped: %d, valid: %d",
-                len(aligned_existing),
-                len(skipped_no_wcs),
-                len(valid_paths),
-            )
-            if len(valid_paths) >= 2:
+                        w = _load_wcs_header_only(fp)
+                        candidates.append((fp, w))
+                        ok += 1
+                    except Exception as e:
+                        logger.warning("Header-WCS failed for %s -> skip (%s)", fp, e)
+                        skipped += 1
                 logger.info(
-                    "Lancement de la reprojection globale sur %d fichiers",
-                    len(valid_paths),
+                    "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",
+                    len(files),
+                    ok,
+                    skipped,
                 )
-                logger.debug("First aligned FITS: %s", valid_paths[0])
-                logger.debug("Last aligned FITS: %s", valid_paths[-1])
-                t0 = time.monotonic()
-                if args.batch_size == 1 and final_combine == "reproject_coadd":
+                if ok >= 2:
                     from seestar import reproject_utils
 
                     dtype = np.float32 if args.dtype_out == "float32" else np.float64
+                    t0 = time.monotonic()
                     success = reproject_utils.streaming_reproject_and_coadd(
-                        valid_paths,
-                        reference_path=reference_path,
+                        [fp for fp, _ in candidates],
+                        reference_path=candidates[0][0],
                         output_path=out_fp,
                         tile_size=args.tile_size,
                         dtype_out=dtype,
@@ -1108,10 +1052,23 @@ def _run_stack(args, progress_cb) -> int:
                         keep_intermediates=args.keep_intermediates,
                         match_background=True,
                     )
-                else:
-                    success = _finalize_reproject_and_coadd(
-                        valid_paths, reference_path, out_fp
+                    duration = time.monotonic() - t0
+                    logger.info("Reprojection globale terminée en %.2f s", duration)
+                    if not success:
+                        raise RuntimeError("Reproject and coadd failed.")
+                    logger.debug(
+                        "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)",
                     )
+                    final_path = out_fp
+                    final_reproject_success = True
+                else:
+                    logger.warning(
+                        "Reprojection skipped: not enough valid inputs (%d)",
+                        ok,
+                    )
+            else:
+                t0 = time.monotonic()
+                success = _finalize_reproject_and_coadd(aligned_dir, out_fp)
                 duration = time.monotonic() - t0
                 logger.info("Reprojection globale terminée en %.2f s", duration)
                 if not success:
@@ -1121,11 +1078,6 @@ def _run_stack(args, progress_cb) -> int:
                 )
                 final_path = out_fp
                 final_reproject_success = True
-            else:
-                logger.warning(
-                    "Reprojection skipped: not enough valid inputs (%d)",
-                    len(valid_paths),
-                )
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
             if os.path.abspath(final_path) != os.path.abspath(dest):
@@ -1141,9 +1093,10 @@ def _run_stack(args, progress_cb) -> int:
         # Cleanup of aligned temporary files after successful reprojection
         # ------------------------------------------------------------------
         if final_reproject_success and args.cleanup_temp_files and args.batch_size == 1:
-            for npy_path in getattr(stacker, "aligned_temp_paths", []):
-                for ext in (".npy", ".hdr", ".wcs.json", ".fits"):
-                    tmp = npy_path.replace(".npy", ext)
+            for img_path in getattr(stacker, "aligned_temp_paths", []):
+                base = os.path.splitext(img_path)[0]
+                for ext in (".fits", ".hdr", ".wcs.json", ".npy"):
+                    tmp = base + ext
                     if os.path.isfile(tmp):
                         try:
                             os.remove(tmp)
