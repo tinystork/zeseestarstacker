@@ -524,11 +524,14 @@ def streaming_reproject_and_coadd(
 
     if output_path is not None:
         hdr_out = ref_wcs.to_header(relax=True)
+
+        # ⚠️ NE PAS laisser BSCALE/BZERO si on écrit des floats
         if np.issubdtype(final_map.dtype, np.floating):
             for key in ("BSCALE", "BZERO"):
                 if key in hdr_out:
                     del hdr_out[key]
         else:
+            # Pour une sortie entière (int16), recopier BSCALE/BZERO de la référence
             for key in ("BSCALE", "BZERO"):
                 if key in ref_hdr:
                     hdr_out[key] = ref_hdr[key]
