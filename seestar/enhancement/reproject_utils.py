@@ -423,6 +423,13 @@ def streaming_reproject_and_coadd(
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
         ref_wcs.array_shape = shape_out
 
+    try:  # [B1-COADD-FIX]
+        logger.info(
+            "[B1-COADD-FIX] streaming grid shape=%s C_out=%d", shape_out, C_out
+        )
+    except Exception:  # pragma: no cover - logging should not fail
+        pass
+
     if memmap_dir is None:
         memmap_dir = tempfile.mkdtemp(prefix="stream_reproject_")
     os.makedirs(memmap_dir, exist_ok=True)
@@ -510,7 +517,25 @@ def streaming_reproject_and_coadd(
                         w > 0, s / np.maximum(w, eps), np.nan
                     )
 
-    if float(np.nanmax(wht_map)) == 0:
+    try:  # [B1-COADD-FIX] log statistics for debugging
+        sum_min, sum_max = float(np.nanmin(sum_map)), float(np.nanmax(sum_map))
+        wht_min, wht_max = float(np.nanmin(wht_map)), float(np.nanmax(wht_map))
+        fin_min, fin_max = float(np.nanmin(final_map)), float(np.nanmax(final_map))
+        logger.info(
+            "[B1-COADD-FIX] stats: shape=%s C_out=%d sum=[%.3g, %.3g] wht=[%.3g, %.3g] final=[%.3g, %.3g]",
+            shape_out,
+            C_out,
+            sum_min,
+            sum_max,
+            wht_min,
+            wht_max,
+            fin_min,
+            fin_max,
+        )
+    except Exception:  # pragma: no cover - stats are best effort
+        wht_max = float(np.nanmax(wht_map))
+
+    if float(wht_max) == 0:
         sum_map.flush(); wht_map.flush(); final_map.flush()
         if not keep_intermediates:
             try:

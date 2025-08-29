@@ -335,10 +335,28 @@ def _finalize_reproject_and_coadd(aligned_files, reference_path, output_path):
         logger.exception("reproject_and_coadd failed")
         return False
 
-    fits.PrimaryHDU(
-        data=np.moveaxis(result, -1, 0) if result.ndim == 3 else result,
-        header=ref_wcs.to_header(relax=True),
-    ).writeto(output_path, overwrite=True)
+    hdr_out = ref_wcs.to_header(relax=True)
+    data_out = np.moveaxis(result, -1, 0) if result.ndim == 3 else result
+
+    if np.issubdtype(data_out.dtype, np.floating):
+        for key in ("BSCALE", "BZERO"):
+            if key in hdr_out:
+                del hdr_out[key]
+    else:
+        for key in ("BSCALE", "BZERO"):
+            if key in ref_hdr:
+                hdr_out[key] = ref_hdr[key]
+
+    try:
+        logger.info(
+            "boring_stack coadd stats: shape=%s min=%.3g max=%.3g", data_out.shape, float(np.nanmin(data_out)), float(np.nanmax(data_out))
+        )
+    except Exception:  # pragma: no cover - stats best effort
+        pass
+
+    fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
+        output_path, overwrite=True
+    )
     return True
 
 

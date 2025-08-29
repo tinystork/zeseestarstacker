@@ -255,3 +255,132 @@ def test_streaming_raises_when_no_contribution(tmp_path):
             output_path=str(tmp_path / "out.fits"),
             reproject_function=failing_reproj,
         )
+
+
+def test_streaming_removes_bscale_bzero(tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    paths = []
+    base = np.arange(16, dtype=np.float32).reshape(4, 4)
+    for i in range(3):
+        data = base + i
+        fp = tmp_path / f"in_{i}.fits"
+        fits.PrimaryHDU(data, hdr).writeto(fp)
+        paths.append(str(fp))
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, return_footprint=True, **kwargs):
+        data, _ = data_wcs
+        arr = np.asarray(data, dtype=np.float32)
+        footprint = np.ones_like(arr, dtype=np.float32)
+        return arr, footprint
+
+    out = tmp_path / "out.fits"
+    module.streaming_reproject_and_coadd(
+        paths,
+        output_path=str(out),
+        reproject_function=dummy_reproj,
+    )
+    with fits.open(out) as hdul:
+        hdr_out = hdul[0].header
+        assert "BSCALE" not in hdr_out and "BZERO" not in hdr_out
+        data = hdul[0].data
+        assert float(np.nanmin(data)) < float(np.nanmax(data))
+
+
+def test_streaming_sets_shape_when_wcs_missing(tmp_path, monkeypatch):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS as _WCS
+    import numpy as np
+
+    class WCSNoShape(_WCS):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.pixel_shape = None
+            self.array_shape = None
+
+    monkeypatch.setattr(module, "WCS", WCSNoShape)
+
+    hdr = _WCS(naxis=2).to_header()
+    fp = tmp_path / "ref.fits"
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    fits.PrimaryHDU(data, hdr).writeto(fp)
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, return_footprint=True, **kwargs):
+        arr = np.ones(shape_out, dtype=np.float32)
+        footprint = np.ones(shape_out, dtype=np.float32)
+        return arr, footprint
+
+    out = tmp_path / "out.fits"
+    module.streaming_reproject_and_coadd(
+        [str(fp)],
+        reference_path=str(fp),
+        output_path=str(out),
+        reproject_function=dummy_reproj,
+    )
+    with fits.open(out) as hdul:
+        assert hdul[0].data.shape == (4, 4)
+
+
+def test_streaming_mixed_channels_wht_map(tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    mono = tmp_path / "mono.fits"
+    fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(mono)
+    rgb = tmp_path / "rgb.fits"
+    fits.PrimaryHDU(np.ones((3, 4, 4), dtype=np.float32), hdr).writeto(rgb)
+
+    def dummy_reproj(data_wcs, output_projection=None, shape_out=None, return_footprint=True, **kwargs):
+        data, _ = data_wcs
+        arr = np.asarray(data, dtype=np.float32)
+        footprint = np.ones_like(arr, dtype=np.float32)
+        return arr, footprint
+
+    out = tmp_path / "out.fits"
+    memdir = tmp_path / "mm"
+    memdir.mkdir()
+    ok = module.streaming_reproject_and_coadd(
+        [str(mono), str(rgb)],
+        output_path=str(out),
+        memmap_dir=str(memdir),
+        keep_intermediates=True,
+        reproject_function=dummy_reproj,
+    )
+    assert ok
+    wht = np.memmap(memdir / "wht_map.memmap", dtype=np.float32, mode="r")
+    assert float(np.nanmax(wht)) > 0
+
+
+def test_finalize_coadd_removes_bscale(tmp_path, monkeypatch):
+    from seestar.gui import boring_stack
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    ref = tmp_path / "ref.fits"
+    fits.PrimaryHDU(np.zeros((4, 4), dtype=np.float32), hdr).writeto(ref)
+    other = tmp_path / "o.fits"
+    fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(other)
+
+    def fake_reproj(paths, output_projection=None, reproject_function=None, match_background=True):
+        return np.arange(16, dtype=np.float32).reshape(4, 4), None
+
+    monkeypatch.setattr(boring_stack.reproject_utils, "reproject_and_coadd_from_paths", fake_reproj)
+
+    out = tmp_path / "out.fits"
+    ok = boring_stack._finalize_reproject_and_coadd([str(other)], str(ref), str(out))
+    assert ok
+    with fits.open(out) as hdul:
+        hdr_out = hdul[0].header
+        assert "BSCALE" not in hdr_out and "BZERO" not in hdr_out
+        data = hdul[0].data
+        assert float(np.nanmin(data)) < float(np.nanmax(data))
