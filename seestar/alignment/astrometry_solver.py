@@ -1237,7 +1237,21 @@ class AstrometrySolver:
             # pourraient être présentes dans certains fichiers ASTAP
             with open(wcs_file_path, 'r', errors='replace') as f:
                 wcs_text_content = f.read()
-            
+
+            # Certaines versions d'ASTAP peuvent écrire des lignes CONTINUE sans
+            # valeur de chaîne entre apostrophes, ce qui n'est pas conforme au
+            # standard FITS et provoque "CONTINUE cards must have string values".
+            # On nettoie ces lignes en les supprimant simplement (il s'agit
+            # généralement d'informations de commentaire sans impact sur la
+            # solution WCS).
+            wcs_lines = []
+            for line in wcs_text_content.splitlines():
+                if line.lstrip().startswith('CONTINUE') and "'" not in line:
+                    # Ignorer la ligne CONTINUE non conforme
+                    continue
+                wcs_lines.append(line)
+            wcs_text_content = "\n".join(wcs_lines)
+
             # Créer un header FITS à partir de ce texte
             # S'assurer que les fins de ligne sont gérées (Unix vs Windows)
             wcs_header_from_text = fits.Header.fromstring(
