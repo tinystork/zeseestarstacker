@@ -1190,6 +1190,7 @@ class SeestarQueuedStacker:
         self.cumulative_wht_memmap = open_memmap(
             self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
         )
+        self.cumulative_wht_path = self.cumulative_wht_memmap.filename
         self.cumulative_wht_memmap[:] = 0.0
 
         # Options pour déplacement et sauvegarde partiels
