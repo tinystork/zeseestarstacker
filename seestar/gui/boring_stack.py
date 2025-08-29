@@ -121,8 +121,15 @@ def _safe_open_memmap(filename, *args, **kwargs):
     try:
         mm = _orig_open_memmap(filename, *args, **kwargs)
     except OSError:
-        tmp_path = os.path.join(tempfile.gettempdir(), os.path.basename(str(filename)))
-        mm = _orig_open_memmap(tmp_path, *args, **kwargs)
+        base = os.path.basename(str(filename))
+        fd, tmp_path = tempfile.mkstemp(prefix=base + "_", suffix=".npy")
+        os.close(fd)
+        try:
+            mm = _orig_open_memmap(tmp_path, *args, **kwargs)
+        except OSError as e:
+            raise OSError(
+                f"Unable to create memmap at '{filename}' or fallback '{tmp_path}'"
+            ) from e
     finally:
         gc.collect()
         _log_mem(f"memmap_open:{os.path.basename(str(filename))}")
