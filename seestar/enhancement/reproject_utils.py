@@ -335,11 +335,12 @@ def streaming_reproject_and_coadd(
 
     ref_fp = reference_path or paths[0]
     try:
-        ref_data, ref_hdr = _open_fits_safely(ref_fp)
-        ref_data = _ensure_2d(ref_data)
-        shape_out = ref_data.shape[:2]
+        # Read raw reference data to preserve channels for C_out
+        ref_data_raw, ref_hdr = _open_fits_safely(ref_fp)
+        # Determine output 2D shape only (do not collapse channels for C_out)
+        shape_out = _ensure_2d(ref_data_raw).shape[:2]
     except Exception:
-        ref_data = None
+        ref_data_raw = None
         ref_hdr = fits.Header()
         shape_out = None
 
@@ -358,7 +359,8 @@ def streaming_reproject_and_coadd(
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
         ref_wcs.array_shape = shape_out
 
-    chw = _to_chw(ref_data) if ref_data is not None else None
+    # Compute C_out from raw reference data (correctly handles RGB vs mono)
+    chw = _to_chw(ref_data_raw) if ref_data_raw is not None else None
     C_out = chw.shape[0] if chw is not None else 1
 
     if memmap_dir is None:
@@ -385,7 +387,7 @@ def streaming_reproject_and_coadd(
             for fp in paths:
                 try:
                     data, hdr = _open_fits_safely(fp)
-                    data = _ensure_2d(data)
+                    # Keep raw dimensionality; _to_chw will normalize to (C, H, W)
                 except Exception:
                     logger.warning("Skipping invalid FITS '%s' for streaming reprojection", fp)
                     continue
@@ -393,8 +395,12 @@ def streaming_reproject_and_coadd(
                 in_wcs = WCS(hdr, naxis=2)
                 chw_in = _to_chw(data)
                 if chw_in.shape[0] != C_out:
-                    logger.warning("Channel mismatch for '%s'", fp)
-                    continue
+                    if chw_in.shape[0] == 1 and C_out > 1:
+                        # broadcast grayscale -> RGB-like
+                        chw_in = np.repeat(chw_in, C_out, axis=0)
+                    else:
+                        logger.warning("Channel mismatch for '%s'", fp)
+                        continue
                 for c in range(C_out):
                     try:
                         arr, footprint = reproject_function(
