@@ -3,6 +3,7 @@ Module pour gérer l'interaction avec les solveurs astrométriques,
 y compris Astrometry.net (web service), ASTAP (local), et ansvr (Astrometry.net local).
 """
 import os
+import re
 import numpy as np
 import warnings
 import time
@@ -77,6 +78,15 @@ except ImportError:
         "ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
 
 
+_CONTINUE_RE = re.compile(r"^(CONTINUE)\s+(?!')(.*)$", re.M)
+
+
+def _sanitize_astap_wcs_text(text: str) -> str:
+    def repl(m):
+        val = m.group(2).replace("'", "''")
+        return f"{m.group(1)}  '{val}'"
+
+    return _CONTINUE_RE.sub(repl, text)
 
 
 def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default_focal_mm=250.0, solver_instance=None):
@@ -869,92 +879,48 @@ class AstrometrySolver:
 
                 if os.path.exists(expected_wcs_file) and os.path.getsize(expected_wcs_file) > 0:
                     self._log(f"ASTAP: Résolution réussie. Fichier '{expected_wcs_file}' trouvé.", "INFO")
-                    if is_boring_stack_disk_mode:
-                        self._log("[ASTAP WCS] Sanitizing CONTINUE cards (batch_size=1 path)", "DEBUG")
+                    wcs_object = self._parse_wcs_file_content(
+                        expected_wcs_file, img_shape_hw_for_wcs
+                    )
+
+                    if not (wcs_object and wcs_object.is_celestial) and is_boring_stack_disk_mode:
+                        self._log(
+                            "[ASTAP WCS] Using FITS header fallback (batch_size=1 path)",
+                            "DEBUG",
+                        )
                         try:
-                            hdr_tmp = fits.Header.fromfile(
-                                expected_wcs_file, sep="\n", padding=False, endcard=False
-                            )
-                            modified = False
-                            for card in hdr_tmp.cards:
+                            with fits.open(image_path, memmap=False) as hdul:
+                                hdr_fits = hdul[0].header.copy()
+                            for card in hdr_fits.cards:
                                 if card.keyword == "CONTINUE" and not isinstance(card.value, str):
                                     card.value = str(card.value)
-                                    modified = True
-                            if modified:
-                                with open(expected_wcs_file, "w", newline="\n") as f_wcs:
-                                    f_wcs.write(hdr_tmp.tostring(sep="\n"))
-                        except Exception as sanitize_err:
-                            self._log(
-                                f"[ASTAP WCS] Sanitizing CONTINUE cards failed: {sanitize_err}",
-                                "DEBUG",
-                            )
-
-                        try:
-                            hdr_wcs = fits.Header.fromfile(
-                                expected_wcs_file, sep="\n", padding=False, endcard=False
-                            )
-                            sanitize_header_for_wcs(hdr_wcs)
-                            wcs_object = WCS(hdr_wcs, naxis=2, relax=True)
+                            sanitize_header_for_wcs(hdr_fits)
+                            wcs_object = WCS(hdr_fits, naxis=2, relax=True)
                             assert wcs_object.is_celestial
-                        except Exception as e_wcs:
+                        except Exception as e_hdr:
                             self._log(
-                                f"WCS parse failed from .wcs (batch_size=1 path): {e_wcs}",
-                                "ERROR",
-                            )
-                            self._log(
-                                "[ASTAP WCS] Using FITS header fallback (batch_size=1 path)",
-                                "DEBUG",
-                            )
-                            try:
-                                with fits.open(image_path, memmap=False) as hdul:
-                                    hdr_fits = hdul[0].header.copy()
-                                for card in hdr_fits.cards:
-                                    if card.keyword == "CONTINUE" and not isinstance(card.value, str):
-                                        card.value = str(card.value)
-                                sanitize_header_for_wcs(hdr_fits)
-                                wcs_object = WCS(hdr_fits, naxis=2, relax=True)
-                                assert wcs_object.is_celestial
-                            except Exception as e_hdr:
-                                self._log(
-                                    f"WCS parse failed from FITS header fallback: {e_hdr}",
-                                    "ERROR",
-                                )
-                                wcs_object = None
-
-                        if wcs_object and wcs_object.is_celestial:
-                            wcs_object.pixel_shape = (img_shape_hw_for_wcs[1], img_shape_hw_for_wcs[0])
-                            try:
-                                wcs_object._naxis1 = img_shape_hw_for_wcs[1]
-                                wcs_object._naxis2 = img_shape_hw_for_wcs[0]
-                            except AttributeError:
-                                pass
-                            if update_header_with_solution and fits_header is not None:
-                                self._update_fits_header_with_wcs(
-                                    fits_header, wcs_object, solver_name="ASTAP"
-                                )
-                        else:
-                            self._log(
-                                "ASTAP: Échec création objet WCS ou WCS non céleste.",
+                                f"WCS parse failed from FITS header fallback: {e_hdr}",
                                 "ERROR",
                             )
                             wcs_object = None
+
+                    if wcs_object and wcs_object.is_celestial:
+                        wcs_object.pixel_shape = (img_shape_hw_for_wcs[1], img_shape_hw_for_wcs[0])
+                        try:
+                            wcs_object._naxis1 = img_shape_hw_for_wcs[1]
+                            wcs_object._naxis2 = img_shape_hw_for_wcs[0]
+                        except AttributeError:
+                            pass
+                        if update_header_with_solution and fits_header is not None:
+                            self._update_fits_header_with_wcs(
+                                fits_header, wcs_object, solver_name="ASTAP"
+                            )
                     else:
-                        wcs_object = self._parse_wcs_file_content(
-                            expected_wcs_file, img_shape_hw_for_wcs
+                        self._log(
+                            "ASTAP: Échec création objet WCS ou WCS non céleste.",
+                            "ERROR",
                         )
-
-                        if wcs_object and wcs_object.is_celestial:
-                            self._log("ASTAP: Objet WCS créé avec succès.", "INFO")
-                            if update_header_with_solution and fits_header is not None:
-                                self._update_fits_header_with_wcs(
-                                    fits_header, wcs_object, solver_name="ASTAP"
-                                )
-                        else:
-                            self._log(
-                                "ASTAP: Échec création objet WCS ou WCS non céleste.",
-                                "ERROR",
-                            )
-                            wcs_object = None
+                        wcs_object = None
                 else:
                     if is_boring_stack_disk_mode:
                         self._log(
@@ -1238,19 +1204,8 @@ class AstrometrySolver:
             with open(wcs_file_path, 'r', errors='replace') as f:
                 wcs_text_content = f.read()
 
-            # Certaines versions d'ASTAP peuvent écrire des lignes CONTINUE sans
-            # valeur de chaîne entre apostrophes, ce qui n'est pas conforme au
-            # standard FITS et provoque "CONTINUE cards must have string values".
-            # On nettoie ces lignes en les supprimant simplement (il s'agit
-            # généralement d'informations de commentaire sans impact sur la
-            # solution WCS).
-            wcs_lines = []
-            for line in wcs_text_content.splitlines():
-                if line.lstrip().startswith('CONTINUE') and "'" not in line:
-                    # Ignorer la ligne CONTINUE non conforme
-                    continue
-                wcs_lines.append(line)
-            wcs_text_content = "\n".join(wcs_lines)
+            # Corriger les cartes CONTINUE non conformes (ASTAP)
+            wcs_text_content = _sanitize_astap_wcs_text(wcs_text_content)
 
             # Créer un header FITS à partir de ce texte
             # S'assurer que les fins de ligne sont gérées (Unix vs Windows)

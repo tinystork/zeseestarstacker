@@ -1036,13 +1036,21 @@ def _run_stack(args, progress_cb) -> int:
                     with fits.open(fp, memmap=False) as hdul:
                         hdr = hdul[0].header
                     sanitize_header_for_wcs(hdr)
-                    if not _has_wcs(hdr):
+                    has_valid_wcs = False
+                    try:
+                        _wcs = WCS(hdr, naxis=2)
+                        has_valid_wcs = getattr(_wcs, "has_celestial", False)
+                    except Exception as e_wcs:
+                        logger.debug("Invalid header WCS for %s: %s", fp, e_wcs)
+
+                    if not has_valid_wcs:
+                        logger.debug("Solve with ASTAP for %s", fp)
                         if solver is None:
                             skipped_no_wcs.append(fp)
                             logger.warning("Skip (no solver available): %s", fp)
                             continue
                         try:
-                            wcs_obj = solver.solve(
+                            solver.solve(
                                 fp,
                                 hdr,
                                 solver_settings,
@@ -1052,10 +1060,22 @@ def _run_stack(args, progress_cb) -> int:
                             logger.warning("Skip (solve failed): %s (%s)", fp, e)
                             skipped_no_wcs.append(fp)
                             continue
-                        if wcs_obj is None:
-                            logger.warning("Skip (no WCS after solve): %s", fp)
+                        try:
+                            _sanitize_astap_wcs(fp)
+                        except Exception:
+                            pass
+                        try:
+                            hdr = fits.getheader(fp, memmap=False)
+                            sanitize_header_for_wcs(hdr)
+                            _wcs = WCS(hdr, naxis=2)
+                            if not getattr(_wcs, "has_celestial", False):
+                                raise ValueError("WCS not celestial")
+                        except Exception as e_val:
+                            logger.warning("Skip (no valid WCS after solve): %s (%s)", fp, e_val)
                             skipped_no_wcs.append(fp)
                             continue
+                    else:
+                        logger.debug("Use header WCS for %s", fp)
                     valid_paths.append(fp)
                 except Exception as e:
                     logger.warning("Skip (open failed): %s (%s)", fp, e)
