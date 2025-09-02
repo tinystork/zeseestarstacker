@@ -188,7 +188,6 @@ from seestar.queuep.queue_manager import _quality_metrics_worker
 from seestar.core.image_processing import (
     load_and_validate_fits,
     save_fits_image,
-    sanitize_header_for_wcs,
 )
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -859,7 +858,7 @@ def _run_stack(args, progress_cb) -> int:
                         logger.exception("Astrometric solver failed for %s", src)
                         hdr = fits.Header()
 
-                sanitize_header_for_wcs(hdr)
+                hdr = reproject_utils.sanitize_header_for_wcs(hdr)
                 try:
                     with fits.open(src, mode="update") as hdul:
                         hdul[0].header = hdr
@@ -954,7 +953,7 @@ def _run_stack(args, progress_cb) -> int:
                 except Exception as e_hdr:
                     logger.error("Header WCS introuvable pour %s: %s", base, e_hdr)
                     continue
-                sanitize_header_for_wcs(hdr)
+                reproject_utils.sanitize_header_for_wcs(hdr)
                 if not _has_essential_wcs(hdr):
                     logger.error("Header WCS invalide pour %s", base)
                     continue
@@ -1095,19 +1094,15 @@ def _run_stack(args, progress_cb) -> int:
             out_fp = os.path.join(args.out, "final.fits")
             if final_combine == "reproject_coadd":
 
-                from seestar.enhancement.reproject_utils import (
-                    compute_final_output_grid,
-                    sanitize_header_for_wcs,
-                    reproject_and_coadd_from_paths,
-                )
-
                 aligned_paths = files
                 headers = []
                 paths_ok = []
                 for fp in aligned_paths:
                     try:
                         hdr = fits.getheader(fp)
-                        hdr = sanitize_header_for_wcs(hdr)
+
+                        hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+
                         _ = WCS(hdr, naxis=2)
                         headers.append(hdr)
                         paths_ok.append(fp)
@@ -1122,10 +1117,13 @@ def _run_stack(args, progress_cb) -> int:
                     logger.error("No aligned FITS with valid WCS. Abort coadd.")
                     return 1
 
-                out_wcs, shape_out = compute_final_output_grid(headers, auto_rotate=True)
+                out_wcs, shape_out = reproject_utils.compute_final_output_grid(
+                    headers, auto_rotate=True
+                )
                 logger.info("Global output grid: shape_out=%s", shape_out)
 
-                result_img, result_wht = reproject_and_coadd_from_paths(
+                result_img, result_wht = reproject_utils.reproject_and_coadd_from_paths(
+
                     paths_ok,
                     output_projection=out_wcs,
                     shape_out=shape_out,
