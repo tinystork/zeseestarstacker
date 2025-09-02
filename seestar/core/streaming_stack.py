@@ -261,3 +261,44 @@ def stack_disk_streaming(
         len(file_list),
     )
     return out_path
+
+
+# -----------------------------------------------------------------------------
+# Reprojection streaming wrapper
+# -----------------------------------------------------------------------------
+
+from astropy.stats import sigma_clip
+from astropy.wcs import WCS
+
+
+def _subtract_sky_median(image, nsig: float = 3.0, maxiters: int = 5):
+    """Subtract a robust sky median from ``image`` without mask warnings."""
+
+    clipped = sigma_clip(image, sigma=nsig, maxiters=maxiters)
+    med = np.nanmedian(clipped.filled(np.nan))
+    med_val = 0.0 if not np.isfinite(med) else float(med)
+    return image - med_val
+
+
+def streaming_reproject_and_coadd(
+    aligned_paths: Sequence[str],
+    output_wcs: WCS | None = None,
+    shape_out: tuple[int, int] | None = None,
+    subtract_sky_median: bool = True,
+    **kwargs,
+):
+    """Proxy to enhancement.streaming_reproject_and_coadd.
+
+    This thin wrapper lives in ``core`` to avoid circular imports while
+    offering a stable entry point for higher level modules.
+    """
+
+    from ..enhancement.reproject_utils import streaming_reproject_and_coadd as _impl
+
+    return _impl(
+        aligned_paths,
+        output_wcs=output_wcs,
+        shape_out=shape_out,
+        subtract_sky_median=subtract_sky_median,
+        **kwargs,
+    )
