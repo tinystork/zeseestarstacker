@@ -945,7 +945,8 @@ def _run_stack(args, progress_cb) -> int:
                 return
             for fp in new_paths:
                 base = os.path.basename(fp)
-                hdr_path = fp.replace(".npy", ".hdr")
+                root, ext = os.path.splitext(fp)
+                hdr_path = root + ".hdr"
                 hdr = fits.Header()
                 try:
                     with open(hdr_path, "r", encoding="utf-8") as hf:
@@ -958,7 +959,7 @@ def _run_stack(args, progress_cb) -> int:
                     logger.error("Header WCS invalide pour %s", base)
                     continue
                 try:
-                    wcs_json = fp.replace(".npy", ".wcs.json")
+                    wcs_json = root + ".wcs.json"
                     with open(wcs_json, "w", encoding="utf-8") as jf:
                         json.dump({k: str(v) for k, v in hdr.items()}, jf, indent=2)
                     if progress_cb:
@@ -968,14 +969,24 @@ def _run_stack(args, progress_cb) -> int:
                         progress_cb(f"WCS store failure: {base}", None)
                 if args.batch_size == 1:
                     try:
-                        data = np.load(fp)
+                        if ext.lower() == ".npy":
+                            data = np.load(fp)
+                        elif ext.lower() == ".fits":
+                            data = fits.getdata(fp, memmap=False)
+                            if data.ndim == 2:
+                                data = np.dstack([data] * 3)
+                            elif data.ndim == 3 and data.shape[0] in (3, 4):
+                                data = np.moveaxis(data, 0, -1)
+                        else:
+                            logger.error("Unsupported temp file type: %s", fp)
+                            continue
                         logger.debug(
                             "DEBUG BS: Chargé %s - shape=%s dtype=%s",
                             os.path.basename(fp),
                             data.shape,
                             data.dtype,
                         )
-                        fits_path = fp.replace(".npy", ".fits")
+                        fits_path = root + ".fits" if ext.lower() == ".npy" else fp
 
                         expected_h = hdr.get("NAXIS2")
                         expected_w = hdr.get("NAXIS1")
@@ -993,11 +1004,13 @@ def _run_stack(args, progress_cb) -> int:
                             )
                             continue
 
-                        save_fits_image(data, fits_path, header=hdr, overwrite=True)
-                        logger.info(
-                            "FITS aligné exporté: %s", os.path.basename(fits_path)
-                        )
-                        # Validate header after write
+        
+                        if ext.lower() == ".npy":
+                            save_fits_image(data, fits_path, header=hdr, overwrite=True)
+                            logger.info(
+                                "FITS aligné exporté: %s", os.path.basename(fits_path)
+                            )
+                        # Validate header after write or on existing FITS
                         try:
                             check_hdr = fits.getheader(fits_path)
                             if not _has_essential_wcs(check_hdr):
