@@ -1113,28 +1113,21 @@ def _run_stack(args, progress_cb) -> int:
                     len(headers),
                     len(aligned_paths),
                 )
-                if not headers:
+                if not paths_ok:
                     logger.error("No aligned FITS with valid WCS. Abort coadd.")
                     return 1
 
-                out_wcs, shape_out = reproject_utils.compute_final_output_grid(
-                    headers, auto_rotate=True
-                )
-                logger.info("Global output grid: shape_out=%s", shape_out)
-
-                result_img, result_wht = reproject_utils.reproject_and_coadd_from_paths(
-
+                result = reproject_utils.reproject_and_coadd_from_paths(
                     paths_ok,
-                    output_projection=out_wcs,
-                    shape_out=shape_out,
-                    match_background=True,
+                    prefer_streaming_fallback=True,
                     tile_size=getattr(args, "tile", None),
                 )
 
-                hdu = fits.PrimaryHDU(result_img, header=out_wcs.to_header())
-                hdul = fits.HDUList([hdu])
-                hdul.writeto(out_fp, overwrite=True)
-                logger.info("Final written: %s  (H, W)=%s", out_fp, result_img.shape)
+                hdu = fits.PrimaryHDU(result.image, header=result.wcs.to_header())
+                fits.HDUList([hdu]).writeto(out_fp, overwrite=True)
+                logger.info(
+                    "Final written: %s  (H, W)=%s", out_fp, result.image.shape
+                )
                 final_path = out_fp
                 final_reproject_success = True
             else:

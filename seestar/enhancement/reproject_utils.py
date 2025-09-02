@@ -18,16 +18,22 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
     _astropy_reproject_and_coadd = None
 
 from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
 from astropy.stats import sigma_clip
-from typing import Tuple, Optional  # [B1-COADD-FIX]
-import logging  # [B1-COADD-FIX]
+from typing import Tuple, Optional
+import logging
 import os
 import gc
 import tempfile
 
 logger = logging.getLogger(__name__)
 import numpy as np
+
+try:  # optional core helper
+    from seestar.core.reprojection_utils import collect_headers as _collect_headers
+except Exception:  # pragma: no cover
+    _collect_headers = None  # type: ignore
 
 
 def sanitize_header_for_wcs(hdr):
@@ -49,9 +55,51 @@ def ensure_wcs_pixel_shape(wcs_obj, height, width):
     return wcs_obj
 
 
-def compute_final_output_grid(headers, auto_rotate=True):
-    from reproject.mosaicking import find_optimal_celestial_wcs
+def is_valid_celestial_wcs(wcs: WCS) -> bool:
+    try:
+        if not wcs.has_celestial:
+            return False
+        scales = proj_plane_pixel_scales(wcs.celestial)
+        if not np.isfinite(scales).all():
+            return False
+        arcsec = scales * 3600.0
+        if np.any(arcsec < 0.05) or np.any(arcsec > 20000.0):
+            return False
+        _ = wcs.to_header(relax=True)
+        return True
+    except Exception:
+        return False
 
+
+try:  # pragma: no cover - allow missing reproject during import
+    from reproject.mosaicking import find_optimal_celestial_wcs
+except Exception:  # pragma: no cover
+    find_optimal_celestial_wcs = None
+
+
+def compute_final_output_grid_from_wcs(wcs_list, shape_list, auto_rotate=True):
+    if find_optimal_celestial_wcs is None:
+        raise ImportError(
+            "The 'reproject' package is required for this functionality. "
+            "Please install it with 'pip install reproject'."
+        )
+
+    valid = [
+        (w, s)
+        for (w, s) in zip(wcs_list, shape_list)
+        if is_valid_celestial_wcs(w)
+    ]
+    if not valid:
+        raise RuntimeError("No valid WCS available to build the global grid.")
+    w_ok, s_ok = zip(*valid)
+    inputs = [(s, w) for (w, s) in zip(w_ok, s_ok)]
+    out_wcs, shape_out = find_optimal_celestial_wcs(
+        inputs, auto_rotate=auto_rotate
+    )
+    return out_wcs, shape_out, len(wcs_list) - len(valid)
+
+
+def compute_final_output_grid(headers, auto_rotate=True):
     wcs_list = []
     shapes = []
     for hdr in headers:
@@ -64,27 +112,8 @@ def compute_final_output_grid(headers, auto_rotate=True):
             shapes.append((h, w_pix))
         except Exception:
             continue
-
-    if not wcs_list:
-        raise RuntimeError("No valid WCS headers to build output grid.")
-
-    # ``find_optimal_celestial_wcs`` from ``reproject`` expects each item in
-    # ``input_data`` to be provided as ``(shape, wcs)`` or ``(array, wcs)``.
-    #
-    # The previous implementation accidentally reversed this order and
-    # supplied ``(wcs, shape)``, which ``reproject`` then attempted to
-    # interpret as an array/WCS pair, ultimately raising a ``TypeError`` in
-    # ``parse_input_shape``.  This manifested as the stack trace reported in
-    # issue where ``input_shape should either be an HDU object or a tuple of
-    # (array-or-shape, WCS) or (array-or-shape, Header)``.
-    #
-    # Here we construct the list in the correct order to satisfy the
-    # ``reproject`` API and avoid the runtime crash.
-    inputs = [((h, w_pix), w) for w, (h, w_pix) in zip(wcs_list, shapes)]
-
-    out_wcs, shape_out = find_optimal_celestial_wcs(
-        inputs,
-        auto_rotate=auto_rotate,
+    out_wcs, shape_out, _ = compute_final_output_grid_from_wcs(
+        wcs_list, shapes, auto_rotate=auto_rotate
     )
     return out_wcs, shape_out
 
@@ -93,6 +122,29 @@ def subtract_sigma_clipped_median(img):
     clipped = sigma_clip(img, sigma=3.0, maxiters=5, masked=False)
     med = np.median(clipped)
     return img - med, float(med)
+
+
+def _subtract_sky_median(image, nsig=3.0, maxiters=5):
+    clipped = sigma_clip(image, sigma=nsig, maxiters=maxiters)
+    med = np.nanmedian(clipped)
+    return image - (0.0 if not np.isfinite(med) else float(med))
+
+
+class ReprojectCoaddResult:
+    def __init__(self, image, weight, wcs):
+        self.image = image
+        self.weight = weight
+        self.wcs = wcs
+
+    def __iter__(self):
+        yield self.image
+        yield self.weight
+
+
+def _estimate_mem_gb(shape_out, n_maps=2):
+    h, w = int(shape_out[0]), int(shape_out[1])
+    bytes_total = h * w * 4 * n_maps
+    return bytes_total / (1024**3)
 
 
 # [B1-COADD-FIX] Garantir une image 2D pour la reprojection
@@ -329,6 +381,8 @@ def reproject_and_coadd_from_paths(
     shape_out=None,
     match_background=True,
     tile_size=None,
+    prefer_streaming_fallback=False,
+    subtract_sky_median=True,
     **kwargs,
 ):
     """Load FITS files from ``paths`` then call :func:`reproject_and_coadd`.
@@ -338,19 +392,84 @@ def reproject_and_coadd_from_paths(
     paths : iterable of str
         FITS file paths containing valid WCS information.
     output_projection : astropy.wcs.WCS or FITS header, optional
-        Target projection. When ``None`` the WCS of the first file is used.
+        Target projection. When ``None`` the WCS of all files are combined.
     shape_out : tuple, optional
-        Output shape ``(H, W)``. When ``None`` it is derived from the first
-        image.
+        Output shape ``(H, W)``. When ``None`` it is derived from the input
+        headers.
+    match_background : bool, optional
+        Deprecated alias for ``subtract_sky_median``.
+    prefer_streaming_fallback : bool, optional
+        If ``True`` and the required memory exceeds the threshold, fall back to
+        :func:`streaming_reproject_and_coadd`.
+    subtract_sky_median : bool, optional
+        If ``True`` subtract a sigma-clipped median from each image prior to
+        reprojection.
+    tile_size : int, optional
+        Forwarded to :func:`streaming_reproject_and_coadd` when used.
     **kwargs : dict
         Forwarded to :func:`reproject_and_coadd`.
     """
 
-    kwargs = dict(kwargs)  # [B1-COADD-FIX]
-    kwargs.pop("return_footprint", None)  # [B1-COADD-FIX]
+    kwargs = dict(kwargs)
+    kwargs.pop("return_footprint", None)
+
+    if match_background is not None:
+        subtract_sky_median = match_background
+
+    if shape_out is not None:
+        mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+        mem_gb = _estimate_mem_gb(shape_out, n_maps=2)
+        if mem_gb > mem_threshold and not prefer_streaming_fallback:
+            raise MemoryError(
+                f"Requested output grid {shape_out} requires {mem_gb:.1f} GiB (> {mem_threshold:.1f} GiB)."
+            )
+
+    if output_projection is None or shape_out is None:
+        if _collect_headers is not None:
+            infos = _collect_headers(paths)
+            shape_list = [sh for sh, _ in infos]
+            wcs_list = [w for _, w in infos]
+        else:  # pragma: no cover - fallback when core utils missing
+            wcs_list = []
+            shape_list = []
+            for fp in paths:
+                try:
+                    hdr = fits.getheader(fp, memmap=False)
+                    w = WCS(hdr, naxis=2)
+                    shape_list.append((int(hdr.get("NAXIS2")), int(hdr.get("NAXIS1"))))
+                    wcs_list.append(w)
+                except Exception:
+                    continue
+        out_wcs, shape_out, dropped = compute_final_output_grid_from_wcs(
+            wcs_list, shape_list, auto_rotate=True
+        )
+    else:
+        out_wcs = output_projection if isinstance(output_projection, WCS) else WCS(output_projection)
+        dropped = 0
+
+    shape_out = tuple(int(round(x)) for x in shape_out)
+    if shape_out[0] <= 0 or shape_out[1] <= 0:
+        raise ValueError(f"invalid shape_out: {shape_out}")
+
+    mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+    mem_gb = _estimate_mem_gb(shape_out, n_maps=2)
+    logger.info(
+        f"[Reproject] Global grid {shape_out}, est. mem ~{mem_gb:.2f} GiB; dropped_wcs={dropped}"
+    )
+
+    if prefer_streaming_fallback and mem_gb > mem_threshold:
+        logger.warning(
+            f"[Reproject] Grid exceeds {mem_threshold} GiB → fallback to streaming."
+        )
+        return streaming_reproject_and_coadd(
+            paths,
+            output_wcs=out_wcs,
+            shape_out=shape_out,
+            subtract_sky_median=subtract_sky_median,
+            tile_size=tile_size or 1024,
+        )
 
     pairs = []
-    headers = []
     for fp in paths:
         try:
             with fits.open(fp, memmap=False) as hdul:
@@ -365,43 +484,18 @@ def reproject_and_coadd_from_paths(
         ensure_wcs_pixel_shape(wcs, h, w)
         if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
             data = np.moveaxis(data, 0, -1)
-        if match_background:
+        if subtract_sky_median:
             if data.ndim == 2:
                 data, _ = subtract_sigma_clipped_median(data)
             elif data.ndim == 3:
                 for c in range(data.shape[-1]):
                     data[..., c], _ = subtract_sigma_clipped_median(data[..., c])
         pairs.append((data, wcs))
-        headers.append(hdr)
         logger.debug("[B1-COADD-FIX] input=%s ndim=%d shape=%s", fp, data.ndim, data.shape)
 
     if not pairs:
         raise RuntimeError("Reproject requested but no aligned FITS were produced.")
 
-    if output_projection is None or shape_out is None:
-        out_wcs, out_shape = compute_final_output_grid(headers)
-        if output_projection is None:
-            output_projection = out_wcs
-        if shape_out is None:
-            shape_out = out_shape
-
-    shape_out = tuple(int(round(x)) for x in shape_out)
-    # [B1-COADD-FIX] sanity check on the final grid size
-    if shape_out[0] < 100 or shape_out[1] < 100:
-        raise ValueError(f"shape_out too small: {shape_out}")
-
-    # Guard against unreasonable memory usage [B1-COADD-FIX]
-    mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
-    # Two float64 arrays (sum and weight) are allocated in reproject_and_coadd
-    mem_required = np.prod(shape_out) * 2 * 8 / 1024**3
-    if mem_required > mem_threshold:
-        raise MemoryError(
-            f"Requested output grid {shape_out} requires "
-            f"{mem_required:.1f} GiB (> {mem_threshold:.1f} GiB). "
-            "Check WCS headers or use streaming_reproject_and_coadd."
-        )
-
-    # Reproject per channel to avoid passing 3D arrays to reproject
     first = pairs[0][0]
     if first.ndim == 3:
         channels = []
@@ -410,15 +504,16 @@ def reproject_and_coadd_from_paths(
         for c in range(C):
             ch_pairs = [(img[:, :, c], wcs) for img, wcs in pairs]
             sci, cov = reproject_and_coadd(
-                ch_pairs, output_projection, shape_out, **kwargs
+                ch_pairs, out_wcs, shape_out, **kwargs
             )
             channels.append(sci)
             if cov_out is None:
                 cov_out = cov
         result = np.stack(channels, axis=-1)
-        return result, cov_out
+        return ReprojectCoaddResult(result, cov_out, out_wcs)
 
-    return reproject_and_coadd(pairs, output_projection, shape_out, **kwargs)
+    sci, cov = reproject_and_coadd(pairs, out_wcs, shape_out, **kwargs)
+    return ReprojectCoaddResult(sci, cov, out_wcs)
 
 
 def streaming_reproject_and_coadd(
@@ -429,11 +524,12 @@ def streaming_reproject_and_coadd(
     dtype_out=np.float32,
     memmap_dir=None,
     keep_intermediates=False,
-    match_background=True,
+    subtract_sky_median=True,
     reproject_function=None,
     output_wcs=None,
     shape_out=None,
     crop_to_footprint=True,
+    match_background=None,
 ):
     """Streamingly reproject ``paths`` and coadd them on disk.
 
@@ -467,11 +563,14 @@ def streaming_reproject_and_coadd(
         non-zero before writing to ``output_path``.
     """
 
+    if match_background is not None:
+        subtract_sky_median = match_background
+
     if reproject_function is None:
         reproject_function = _reproject_interp
 
     if not paths:
-        return False
+        return ReprojectCoaddResult(np.array([]), np.array([]), None)
 
     paths_for_channels = list(paths)
     if reference_path and reference_path not in paths_for_channels:
@@ -523,15 +622,17 @@ def streaming_reproject_and_coadd(
         pass
 
     bg_medians = {}
-    if match_background:
+    if subtract_sky_median:
         for fp in paths:
             try:
                 data_bg, _ = _open_fits_safely(fp)
                 chw_bg = _to_chw(data_bg)
-                step_y = max(1, chw_bg.shape[1] // 32)
-                step_x = max(1, chw_bg.shape[2] // 32)
-                sample = chw_bg[:, ::step_y, ::step_x]
-                bg_medians[fp] = np.nanmedian(sample, axis=(1, 2), keepdims=True)
+                meds = []
+                for c in range(chw_bg.shape[0]):
+                    clipped = sigma_clip(chw_bg[c], sigma=3.0, maxiters=5)
+                    med = np.nanmedian(clipped)
+                    meds.append(0.0 if not np.isfinite(med) else float(med))
+                bg_medians[fp] = np.asarray(meds)[:, None, None]
             except Exception:
                 logger.warning(
                     "Background estimation failed for '%s'", fp, exc_info=False
@@ -568,7 +669,7 @@ def streaming_reproject_and_coadd(
                 sanitize_header_for_wcs(hdr)
                 in_wcs = WCS(hdr, naxis=2)
                 chw_in = _to_chw(data)
-                if match_background and fp in bg_medians:
+                if subtract_sky_median and fp in bg_medians:
                     bg = bg_medians[fp]
                     if bg.shape[0] != chw_in.shape[0]:
                         if bg.shape[0] == 1 and chw_in.shape[0] > 1:
@@ -738,6 +839,8 @@ def streaming_reproject_and_coadd(
         )
 
     sum_map.flush(); wht_map.flush(); final_raw.flush()
+    result_arr = np.asarray(final_map)
+    wht_arr = np.asarray(wht_map)
     if not keep_intermediates:
         try:
             os.remove(sum_path)
@@ -746,7 +849,7 @@ def streaming_reproject_and_coadd(
             os.rmdir(memmap_dir)
         except Exception:
             pass
-    return True
+    return ReprojectCoaddResult(result_arr, wht_arr, out_wcs)
 
 
 reproject_interp = _reproject_interp
