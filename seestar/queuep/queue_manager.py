@@ -57,7 +57,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
-from seestar.utils.wcs_utils import write_wcs_to_fits_inplace
+from seestar.utils.wcs_utils import inject_sanitized_wcs, write_wcs_to_fits_inplace
 
 from ..tools.file_ops import move_to_stacked
 
@@ -6519,6 +6519,70 @@ class SeestarQueuedStacker:
                         f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
                     )
 
+            # --- Background equalization for batch_size == 1 -------------------
+            if self.batch_size == 1 and valid_pixel_mask_2d is not None:
+                try:
+                    from astropy.stats import sigma_clip
+
+                    luminance = (
+                        0.299 * data_final_pour_retour[..., 0]
+                        + 0.587 * data_final_pour_retour[..., 1]
+                        + 0.114 * data_final_pour_retour[..., 2]
+                    )
+                    sky_mask = valid_pixel_mask_2d & (
+                        luminance < np.median(luminance[valid_pixel_mask_2d])
+                    )
+                    sky_pixels = int(np.sum(sky_mask))
+                    offsets = [0.0, 0.0, 0.0]
+                    scales = [1.0, 1.0, 1.0]
+                    if sky_pixels > 0:
+                        for c in range(min(3, data_final_pour_retour.shape[-1])):
+                            clipped = sigma_clip(
+                                data_final_pour_retour[..., c][sky_mask],
+                                sigma=3.0,
+                                maxiters=5,
+                            )
+                            off = float(np.median(clipped))
+                            offsets[c] = off
+                            data_final_pour_retour[..., c] -= off
+                        np.clip(data_final_pour_retour, 0.0, 1.0, out=data_final_pour_retour)
+                        if (
+                            reference_image_data_for_alignment is not None
+                            and reference_image_data_for_alignment.shape[-1]
+                            >= 3
+                        ):
+                            for c in range(3):
+                                ref_clip = sigma_clip(
+                                    reference_image_data_for_alignment[..., c][sky_mask],
+                                    sigma=3.0,
+                                    maxiters=5,
+                                )
+                                img_clip = sigma_clip(
+                                    data_final_pour_retour[..., c][sky_mask],
+                                    sigma=3.0,
+                                    maxiters=5,
+                                )
+                                m_ref = float(np.median(ref_clip))
+                                m_img = float(np.median(img_clip))
+                                scale = m_ref / m_img if m_img > 1e-6 else 1.0
+                                data_final_pour_retour[..., c] *= scale
+                                scales[c] = scale
+                            np.clip(
+                                data_final_pour_retour, 0.0, 1.0, out=data_final_pour_retour
+                            )
+                    logger.debug(
+                        "Sky mask pixels: %d, sky_offset_R=%.6f G=%.6f B=%.6f, scale_R=%.6f G=%.6f B=%.6f",
+                        sky_pixels,
+                        offsets[0],
+                        offsets[1],
+                        offsets[2],
+                        scales[0],
+                        scales[1],
+                        scales[2],
+                    )
+                except Exception as e_eq:
+                    logger.debug(f"Sky background equalization skipped: {e_eq}")
+
             logger.debug(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting:
                 quality_scores = self._calculate_quality_metrics(
@@ -10362,11 +10426,37 @@ class SeestarQueuedStacker:
             if final_cov is None:
                 final_cov = cov.astype(np.float32)
 
-        # --- 6. Store results on the instance -----------------------------------
-        self.current_stack = np.stack(final_channels, axis=-1)
-        self.current_coverage = final_cov
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
+        data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(data_hwc, cov_hw, out_wcs)
+        self.current_stack = data_hwc
+        self.current_coverage = cov_hw
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
 
         # Caller will take care of saving the FITS file / updating GUI, etc.
+
+    def _crop_to_wht_bbox(self, img_hwc, cov_hw, wcs_obj):
+        """Crop to the bounding box where ``cov_hw`` > 0 and update WCS."""
+        if cov_hw is None or not np.any(cov_hw > 0):
+            return img_hwc, cov_hw, wcs_obj
+        ys, xs = np.nonzero(cov_hw > 0)
+        y0, y1 = ys.min(), ys.max() + 1
+        x0, x1 = xs.min(), xs.max() + 1
+        cropped_img = img_hwc[y0:y1, x0:x1]
+        cropped_cov = cov_hw[y0:y1, x0:x1]
+        new_wcs = wcs_obj.deepcopy()
+        try:
+            new_wcs.wcs.crpix -= [x0, y0]
+        except Exception:
+            pass
+        new_wcs.pixel_shape = (x1 - x0, y1 - y0)
+        try:
+            new_wcs._naxis1 = x1 - x0
+            new_wcs._naxis2 = y1 - y0
+        except Exception:
+            pass
+        return cropped_img, cropped_cov, new_wcs
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
@@ -10552,6 +10642,9 @@ class SeestarQueuedStacker:
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
 
+        data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(
+            data_hwc, cov_hw, out_wcs
+        )
         data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
             data_hwc, cov_hw, out_wcs
         )
@@ -13085,15 +13178,24 @@ class SeestarQueuedStacker:
             data = img.astype(np.float32, copy=False)
             if data.ndim == 3 and data.shape[2] in (3, 4):
                 data = np.moveaxis(data, -1, 0)
-            fits.PrimaryHDU(data=data).writeto(
-                img_path, overwrite=True, output_verify="ignore"
-            )
-            np.save(mask_path, mask.astype(np.uint8))
+            hdu = fits.PrimaryHDU(data=data)
+            wcs_written = 0
             if getattr(self, "reference_wcs_object", None) is not None:
                 try:
-                    write_wcs_to_fits_inplace(img_path, self.reference_wcs_object)
-                except Exception:
-                    pass
+                    wcs_written = inject_sanitized_wcs(
+                        hdu.header, self.reference_wcs_object
+                    )
+                except Exception as e_wcs:
+                    self.update_progress(
+                        f"⚠️ Échec écriture WCS temp: {e_wcs}", "WARN"
+                    )
+            hdu.writeto(img_path, overwrite=True, output_verify="ignore")
+            np.save(mask_path, mask.astype(np.uint8))
+            if wcs_written == 0:
+                self.update_progress(
+                    f"⚠️ header-WCS OK == 0 pour {os.path.basename(img_path)}",
+                    "WARN",
+                )
             _log_mem("after_save")
             return img_path, mask_path
         except Exception as e:
