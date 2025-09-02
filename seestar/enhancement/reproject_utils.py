@@ -117,15 +117,21 @@ def compute_final_output_grid(headers, auto_rotate=True):
     return out_wcs, shape_out
 
 
-def subtract_sigma_clipped_median(img):
-    clipped = sigma_clip(img, sigma=3.0, maxiters=5)
+def subtract_sigma_clipped_median(img, min_valid: int = 1024):
+    mask = np.isfinite(img)
+    if int(np.count_nonzero(mask)) < int(min_valid):
+        return img, 0.0
+    clipped = sigma_clip(img[mask], sigma=3.0, maxiters=5)
     med = np.nanmedian(clipped.filled(np.nan))
-    return img - med, float(med)
+    med_val = 0.0 if not np.isfinite(med) else float(med)
+    return img - med_val, med_val
 
 
-def _subtract_sky_median(image, nsig=3.0, maxiters=5):
-    clipped = sigma_clip(image, sigma=nsig, maxiters=maxiters)
-
+def _subtract_sky_median(image, nsig=3.0, maxiters=5, min_valid: int = 1024):
+    mask = np.isfinite(image)
+    if int(np.count_nonzero(mask)) < int(min_valid):
+        return image
+    clipped = sigma_clip(image[mask], sigma=nsig, maxiters=maxiters)
     med = np.nanmedian(clipped.filled(np.nan))
     med_val = 0.0 if not np.isfinite(med) else float(med)
     return image - med_val
@@ -360,6 +366,12 @@ def reproject_and_coadd(
         )  # [B1-COADD-FIX]
 
         if np.any(footprint > 0):  # [B1-COADD-FIX]
+            proj_img = np.nan_to_num(
+                proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+            )
+            weight_proj = np.nan_to_num(
+                weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+            )
             sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
             cov_image += weight_proj  # [B1-COADD-FIX]
             kept += 1  # [B1-COADD-FIX]
@@ -517,10 +529,12 @@ def reproject_and_coadd_from_paths(
             data = np.moveaxis(data, 0, -1)
         if subtract_sky_median:
             if data.ndim == 2:
-                data, _ = subtract_sigma_clipped_median(data)
+                data, _ = subtract_sigma_clipped_median(data, min_valid=1024)
             elif data.ndim == 3:
                 for c in range(data.shape[-1]):
-                    data[..., c], _ = subtract_sigma_clipped_median(data[..., c])
+                    data[..., c], _ = subtract_sigma_clipped_median(
+                        data[..., c], min_valid=1024
+                    )
         pairs.append((data, wcs))
         logger.debug("[B1-COADD-FIX] input=%s ndim=%d shape=%s", fp, data.ndim, data.shape)
 
@@ -660,11 +674,15 @@ def streaming_reproject_and_coadd(
                 chw_bg = _to_chw(data_bg)
                 meds = []
                 for c in range(chw_bg.shape[0]):
-                    clipped = sigma_clip(chw_bg[c], sigma=3.0, maxiters=5)
-
-                    med = np.nanmedian(clipped.filled(np.nan))
-
-                    meds.append(0.0 if not np.isfinite(med) else float(med))
+                    arr_c = chw_bg[c]
+                    mask_c = np.isfinite(arr_c)
+                    if np.count_nonzero(mask_c) >= 1024:
+                        clipped = sigma_clip(arr_c[mask_c], sigma=3.0, maxiters=5)
+                        med = np.nanmedian(clipped.filled(np.nan))
+                        med_val = 0.0 if not np.isfinite(med) else float(med)
+                    else:
+                        med_val = 0.0
+                    meds.append(med_val)
                 bg_medians[fp] = np.asarray(meds)[:, None, None]
             except Exception:
                 logger.warning(
@@ -764,9 +782,17 @@ def streaming_reproject_and_coadd(
                         pass
 
                     if C_out == 1:
+                        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                        footprint = np.nan_to_num(
+                            footprint, nan=0.0, posinf=0.0, neginf=0.0
+                        )
                         sum_map[y0:y1, x0:x1] += arr
                         wht_map[y0:y1, x0:x1] += footprint
                     else:
+                        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                        footprint = np.nan_to_num(
+                            footprint, nan=0.0, posinf=0.0, neginf=0.0
+                        )
                         sum_map[c, y0:y1, x0:x1] += arr
                         wht_map[c, y0:y1, x0:x1] += footprint
                     del arr, footprint
@@ -859,49 +885,39 @@ def streaming_reproject_and_coadd(
                 pass
             shape_out = (y1 - y0, x1 - x0)
 
+    try:
+        if C_out == 1:
+            logger.info(
+                "Channel stats: sum[min=%.3g,max=%.3g] wht[min=%.3g,max=%.3g] final[min=%.3g,max=%.3g]",
+                float(np.nanmin(sum_map)),
+                float(np.nanmax(sum_map)),
+                float(np.nanmin(wht_map)),
+                float(np.nanmax(wht_map)),
+                float(np.nanmin(final_map)),
+                float(np.nanmax(final_map)),
+            )
+        else:
+            for c in range(C_out):
+                logger.info(
+                    "Channel %d stats: sum[min=%.3g,max=%.3g] wht[min=%.3g,max=%.3g] final[min=%.3g,max=%.3g]",
+                    c,
+                    float(np.nanmin(sum_map[c])),
+                    float(np.nanmax(sum_map[c])),
+                    float(np.nanmin(wht_map[c])),
+                    float(np.nanmax(wht_map[c])),
+                    float(np.nanmin(final_map[c])),
+                    float(np.nanmax(final_map[c])),
+                )
+    except Exception:
+        pass
+
     if output_path is not None:
         hdr_out = out_wcs.to_header(relax=True)
-
-        # Nettoyage des cartes structurelles qui seront recréées par Astropy
-        for k in list(hdr_out.keys()):
-            if k == "SIMPLE" or k.startswith("NAXIS") or k in (
-                "BITPIX",
-                "EXTEND",
-                "PCOUNT",
-                "GCOUNT",
-                "XTENSION",
-            ):
-                del hdr_out[k]
-
-        # Passage en CxHxW si couleur (HWC -> CHW)
-        if (
-            final_map.ndim == 3
-            and final_map.shape[-1] in (3, 4)
-            and final_map.shape[0] not in (1, 3, 4)
-        ):
-            data_out = np.moveaxis(final_map, -1, 0)
-        else:
-            data_out = final_map  # mono / déjà CHW
-
-        # BSCALE/BZERO: retirer si float (sinon laisser cohérent avec ref)
-        if np.issubdtype(data_out.dtype, np.floating):
-            for k in ("BSCALE", "BZERO"):
-                if k in hdr_out:
-                    del hdr_out[k]
-        else:
-            for k in ("BSCALE", "BZERO"):
-                if k in ref_hdr:
-                    hdr_out[k] = ref_hdr[k]
-
-        import warnings
-        from astropy.io.fits.verify import VerifyWarning
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=VerifyWarning)
-            fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
-                output_path, overwrite=True
-            )
-
+        data_out = final_map
+        if data_out.ndim == 3 and data_out.shape[-1] in (3, 4) and data_out.shape[0] not in (1, 3, 4):
+            data_out = np.moveaxis(data_out, -1, 0)
+        hdu = fits.PrimaryHDU(data=data_out.astype(np.float32), header=hdr_out)
+        fits.HDUList([hdu]).writeto(output_path, overwrite=True)
         logger.info(
             "Streaming coadd written: shape=%s dtype=%s",
             getattr(data_out, "shape", None),
