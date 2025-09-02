@@ -4816,7 +4816,9 @@ class SeestarQueuedStacker:
                         self.final_stacked_path = None
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
-                    if self.intermediate_classic_batch_files:
+                    if getattr(self, "batch_size", 1) == 1:
+                        self._final_reproject_coadd_batch1(match_background=False)
+                    elif self.intermediate_classic_batch_files:
                         if len(self.intermediate_classic_batch_files) == 1:
                             self._finalize_single_classic_batch(
                                 self.intermediate_classic_batch_files[0]
@@ -10435,6 +10437,65 @@ class SeestarQueuedStacker:
         self.current_stack_header.update(out_wcs.to_header(relax=True))
 
         # Caller will take care of saving the FITS file / updating GUI, etc.
+
+    def _final_reproject_coadd_batch1(self, match_background=False):
+        from seestar.enhancement import reproject_utils as ru
+
+        paths = [p for p, _ in getattr(self, "intermediate_classic_batch_files", [])]
+        if not paths:
+            self.update_progress(
+                "   Aucune batch sauvegardé pour reproject&coadd.",
+                "WARN",
+            )
+            self.final_stacked_path = None
+            return
+
+        headers = []
+        valid_paths = []
+        for fp in paths:
+            try:
+                hdr = fits.getheader(fp, memmap=False)
+                hdr = ru.sanitize_header_for_wcs(hdr)
+                WCS(hdr, naxis=2)
+                headers.append(hdr)
+                valid_paths.append(fp)
+            except Exception:
+                logger.warning("Header-WCS invalid -> skip: %s", fp)
+
+        valid_wcs_count = len(headers)
+        self.update_progress(
+            f"Aligned WCS headers: {valid_wcs_count} valid / {len(paths)}",
+            None,
+        )
+
+        if valid_wcs_count > 0:
+            out_wcs, shape_out = ru.compute_final_output_grid(headers, auto_rotate=True)
+            logger.info("Using global WCS (no fallback)")
+            result = ru.reproject_and_coadd_from_paths(
+                valid_paths,
+                output_projection=out_wcs,
+                shape_out=shape_out,
+                match_background=match_background,
+                crop_to_footprint=True,
+                prefer_streaming_fallback=False,
+            )
+        else:
+            result = ru.reproject_and_coadd_from_paths(
+                paths,
+                match_background=match_background,
+                crop_to_footprint=True,
+                prefer_streaming_fallback=True,
+            )
+
+        final_chw, wht_map, out_wcs = result
+        img_hwc = np.transpose(final_chw, (1, 2, 0))
+        cov_hw = wht_map if wht_map.ndim == 2 else wht_map[0]
+        self.current_stack = img_hwc.astype(np.float32)
+        self.current_coverage = cov_hw.astype(np.float32)
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        # Caller will save via _save_final_stack
 
     def _crop_to_wht_bbox(self, img_hwc, cov_hw, wcs_obj):
         """Crop to the bounding box where ``cov_hw`` > 0 and update WCS."""
