@@ -390,6 +390,17 @@ def reproject_and_coadd_from_paths(
     if shape_out[0] < 100 or shape_out[1] < 100:
         raise ValueError(f"shape_out too small: {shape_out}")
 
+    # Guard against unreasonable memory usage [B1-COADD-FIX]
+    mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+    # Two float64 arrays (sum and weight) are allocated in reproject_and_coadd
+    mem_required = np.prod(shape_out) * 2 * 8 / 1024**3
+    if mem_required > mem_threshold:
+        raise MemoryError(
+            f"Requested output grid {shape_out} requires "
+            f"{mem_required:.1f} GiB (> {mem_threshold:.1f} GiB). "
+            "Check WCS headers or use streaming_reproject_and_coadd."
+        )
+
     # Reproject per channel to avoid passing 3D arrays to reproject
     first = pairs[0][0]
     if first.ndim == 3:

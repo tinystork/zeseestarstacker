@@ -69,6 +69,23 @@ def test_fallback_on_wcs_mismatch(monkeypatch):
     assert np.allclose(cov, 1)
 
 
+def test_reproject_and_coadd_from_paths_memory_guard(tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    w = WCS(naxis=2)
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    hdr = w.to_header()
+    fp = tmp_path / "in.fits"
+    fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(fp)
+
+    # shape_out deliberately huge to trigger guard
+    with pytest.raises(MemoryError):
+        module.reproject_and_coadd_from_paths([str(fp)], shape_out=(100000, 100000))
+
+
 def test_fallback_on_generic_error(monkeypatch):
     module = reproject_utils
 
