@@ -4231,7 +4231,7 @@ class SeestarQueuedStacker:
                                             )
                                             if img_p and mask_p:
                                                 try:
-                                                    hdr_path = img_p.replace(".npy", ".hdr")
+                                                    hdr_path = os.path.splitext(img_p)[0] + ".hdr"
                                                     with open(hdr_path, "w", encoding="utf-8") as hf:
                                                         hf.write(header_orig.tostring(sep="\n"))
                                                 except Exception as e_hdr:
