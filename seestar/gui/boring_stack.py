@@ -319,7 +319,10 @@ def read_paths(csv_path):
 
 def _load_wcs_header_only(fp: str) -> WCS:
     """Load a WCS from a FITS file without touching the data."""
-    with fits.open(fp, memmap=True) as hdul:
+    # ``ignore_missing_simple`` avoids ``VerifyError`` when the FITS file lacks
+    # a ``SIMPLE`` card (observed with batch_size=1 on some ASTAP outputs).
+    # The ``memmap=True`` flag keeps the disk-based workflow unchanged.
+    with fits.open(fp, memmap=True, ignore_missing_simple=True) as hdul:
         hdr = hdul[0].header.copy()
     _sanitize_continue_as_string(hdr)
     return WCS(hdr, naxis=2, relax=True)
