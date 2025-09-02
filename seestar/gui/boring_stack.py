@@ -1094,8 +1094,7 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
             if final_combine == "reproject_coadd":
-                from astropy.io import fits
-                from astropy.wcs import WCS
+
                 from seestar.enhancement.reproject_utils import (
                     compute_final_output_grid,
                     sanitize_header_for_wcs,
