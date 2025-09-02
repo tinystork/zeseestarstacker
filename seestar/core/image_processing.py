@@ -8,9 +8,12 @@ import cv2
 import warnings
 from astropy.io.fits.verify import VerifyWarning
 from PIL import Image
-import traceback # Pour un meilleur débogage des erreurs de lecture FITS
+import traceback  # Pour un meilleur débogage des erreurs de lecture FITS
 from astropy.io import fits
+import logging
+
 warnings.filterwarnings("ignore", category=FutureWarning)
+logger = logging.getLogger(__name__)
 
 
 def sanitize_header_for_wcs(header: fits.Header) -> None:
@@ -224,99 +227,60 @@ def debayer_image(img, bayer_pattern="GRBG"):
     # Convert back to float32 (0-1 range)
     return color_img_rgb_uint16.astype(np.float32) / 65535.0
 
-
 def save_fits_image(image, output_path, header=None, overwrite=True):
-    """
-    Enregistre une image (normalisée 0-1 float32) au format FITS (uint16).
-    Suppresses specific FITS standard VerifyWarnings about keyword length.
+    """Save ``image`` to ``output_path`` as a FITS file.
 
-    Parameters:
-        image (numpy.ndarray): Image 2D (HxW) ou 3D (HxWx3) à enregistrer (float32, 0-1).
-        output_path (str): Chemin du fichier de sortie.
-        header (astropy.io.fits.Header, optional): En-tête FITS.
-        overwrite (bool): Écrase le fichier existant si True.
+    The data are written as signed ``int16`` with ``BZERO`` offset so they can
+    be interpreted like unsigned 16-bit images. Only non-structural header
+    keywords are preserved.
     """
-    # --- (Input validation remains the same) ---
     if image is None:
-        print(f"Error: Cannot save None image to {output_path}")
-        return
+        logger.error("Cannot save None image to %s", output_path)
+        return False
     if not isinstance(image, np.ndarray):
-        print(f"Error: Input for save_fits_image must be a numpy array, got {type(image)}")
-        return
-
-    # --- (Header creation/copying logic remains the same) ---
-    final_header = fits.Header()
+        logger.error("Input for save_fits_image must be a numpy array, got %s", type(image))
+        return False
+    extra_header = fits.Header()
     if header is not None and isinstance(header, fits.Header):
-         keywords_to_remove = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3',
-                              'EXTEND', 'BSCALE', 'BZERO']
-         temp_header = header.copy()
-         for key in keywords_to_remove:
-              if key in temp_header: del temp_header[key]
-         final_header.update(temp_header)
+        structural = {"SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "EXTEND", "BSCALE", "BZERO"}
+        for k, v in header.items():
+            if k not in structural:
+                extra_header[k] = v
     elif header is not None:
-         print("Warning: Provided header is not valid astropy.io.fits.Header. Creating new one.")
-
-
-    # --- (Data preparation logic remains the same) ---
+        logger.warning("Provided header is not a fits.Header: %s", type(header))
     is_color = image.ndim == 3 and image.shape[-1] == 3
-    image_float32 = image.astype(np.float32)
-    image_clipped = np.clip(image_float32, 0.0, 1.0)
-    image_uint16 = (image_clipped * 65535.0).astype(np.uint16)
-    image_int16_shifted = (image_uint16.astype(np.int32) - 32768).astype(np.int16)
-
-    if is_color:
-        image_to_save = np.moveaxis(image_int16_shifted, -1, 0)
-        final_header['NAXIS'] = 3; final_header['NAXIS1'] = image.shape[1]
-        final_header['NAXIS2'] = image.shape[0]; final_header['NAXIS3'] = 3
-        if 'CTYPE3' not in final_header: final_header['CTYPE3'] = ('RGB', 'Color Format')
-    else: # Grayscale
-        image_to_save = image_int16_shifted
-        final_header['NAXIS'] = 2; final_header['NAXIS1'] = image.shape[1]
-        final_header['NAXIS2'] = image.shape[0]
-        if 'NAXIS3' in final_header: del final_header['NAXIS3']
-        if 'CTYPE3' in final_header: del final_header['CTYPE3']
-
-    final_header['BITPIX'] = 16; final_header['BSCALE'] = 1; final_header['BZERO'] = 32768
-
-    # --- Write the FITS file WITH warning suppression ---
-    
+    img_f32 = image.astype(np.float32, copy=False)
+    img_clip = np.clip(img_f32, 0.0, 1.0)
+    img_u16 = (img_clip * 65535.0).astype(np.uint16)
+    img_i16 = (img_u16.astype(np.int32) - 32768).astype(np.int16)
+    img_save = np.moveaxis(img_i16, -1, 0) if is_color else img_i16
+    hdu = fits.PrimaryHDU(data=img_save)
+    hdu.header.update(extra_header)
     try:
-        hdu = fits.PrimaryHDU(data=image_to_save, header=final_header)
-        hdul = fits.HDUList([hdu])
-
-        # --- Start of the fix ---
         with warnings.catch_warnings():
-            # Filter settings *inside* the 'with' block
-            warnings.filterwarnings(
-                'ignore',
-                category=VerifyWarning,
-                message="Keyword name.*is greater than 8 characters.*"
-            )
-            warnings.filterwarnings(
-                'ignore',
-                category=VerifyWarning,
-                message="Keyword name.*contains characters not allowed.*"
-            )
-
-            # The actual saving function call is *inside* the 'with' block
-            hdul.writeto(output_path, overwrite=overwrite, checksum=True)
-            if final_header.get('BITPIX') == 16:
-                with fits.open(output_path, mode="update", memmap=False) as hdul_fix:
-                    hd0 = hdul_fix[0]
-                    hd0.header["BSCALE"] = 1
-                    hd0.header["BZERO"] = 32768
-                    hdul_fix.flush()
-        
-    except Exception as e:
-        print(f"Error saving FITS file to {output_path}: {e}")
-        # Optional: Add traceback print here if needed for debugging save errors
-        # import traceback
-        # traceback.print_exc(limit=2)
-        # raise # Re-raise if you want saving errors to stop the process
-
-
-
-
+            warnings.filterwarnings("ignore", category=VerifyWarning)
+            hdu.writeto(output_path, overwrite=overwrite, checksum=True)
+    except Exception:
+        logger.exception("Error saving FITS file to %s", output_path)
+        return False
+    if img_save.dtype == np.int16:
+        try:
+            with fits.open(output_path, mode="update", memmap=False) as hdul_fix:
+                hd0 = hdul_fix[0]
+                hd0.header["BSCALE"] = 1
+                hd0.header["BZERO"] = 32768
+                hdul_fix.flush()
+        except Exception:
+            logger.exception("Failed to set BSCALE/BZERO for %s", output_path)
+            return False
+    try:
+        hdr_check = fits.getheader(output_path, ignore_missing_simple=True, memmap=False)
+        if "SIMPLE" not in hdr_check:
+            fits.writeto(output_path, img_save, hdu.header, overwrite=True, checksum=True, output_verify="silentfix")
+    except Exception:
+        logger.exception("Post-write verification failed for %s", output_path)
+        return False
+    return True
 # --- DANS seestar/core/image_processing.py ---
 
 def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced_stretch=False):

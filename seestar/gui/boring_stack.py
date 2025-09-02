@@ -177,7 +177,9 @@ from seestar.core.image_processing import (
 from astropy.io import fits
 from astropy.wcs import WCS
 from seestar.alignment.astrometry_solver import AstrometrySolver
-from seestar.utils.wcs_utils import _sanitize_continue_as_string
+from seestar.utils.wcs_utils import write_wcs_to_fits_inplace
+from .reprojection_utils import load_wcs_header_only
+from seestar import reproject_utils
 import glob
 
 logger = logging.getLogger(__name__)
@@ -317,29 +319,36 @@ def read_paths(csv_path):
 # -----------------------------------------------------------------------------
 
 
-def _load_wcs_header_only(fp: str) -> WCS:
-    """Load a WCS from a FITS file without touching the data."""
-    with fits.open(fp, memmap=True) as hdul:
-        hdr = hdul[0].header.copy()
-    _sanitize_continue_as_string(hdr)
-    return WCS(hdr, naxis=2, relax=True)
+def _finalize_reproject_and_coadd(aligned, ref_fp, out_fp: str | None = None) -> bool:
+    """Reproject aligned FITS using only header WCS.
 
-
-def _finalize_reproject_and_coadd(aligned_dir: str, out_fp: str) -> bool:
-    """Reproject aligned FITS in ``aligned_dir`` using only header WCS."""
+    ``aligned`` may be a directory containing ``aligned_*.fits`` files or a
+    list of file paths. ``ref_fp`` is kept for backward compatibility and is
+    ignored when ``aligned`` is a list.
+    """
     from seestar import reproject_utils
 
-    files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+    if out_fp is None:
+        aligned_dir = aligned
+        out_fp = ref_fp
+        files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+    else:
+        files = list(aligned)
+
     candidates = []
     ok = 0
     skipped = 0
     for f in files:
         try:
-            w = _load_wcs_header_only(f)
+            w = load_wcs_header_only(f)
             candidates.append((f, w))
             ok += 1
         except Exception as e:
-            logger.warning("Header-WCS failed for %s -> skip (%s)", f, e)
+            logger.warning(
+                "aligned_%s.fits corrompu (taille/HEADER): %s",
+                os.path.basename(f),
+                e,
+            )
             skipped += 1
     logger.info(
         "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",
@@ -350,7 +359,15 @@ def _finalize_reproject_and_coadd(aligned_dir: str, out_fp: str) -> bool:
     if ok == 0:
         logger.error("No valid WCS candidates -> abort to avoid empty mosaic.")
         return False
-    return reproject_utils.reproject_and_coadd_from_list(candidates, out_fp)
+    res, _ = reproject_utils.reproject_and_coadd_from_paths([p for p, _ in candidates])
+    fits.PrimaryHDU(res).writeto(out_fp, overwrite=True)
+    with fits.open(out_fp, mode="update", memmap=False) as hdul:
+        hdr = hdul[0].header
+        for key in ("BSCALE", "BZERO"):
+            if key in hdr:
+                del hdr[key]
+        hdul.flush()
+    return True
 
 
 # -----------------------------------------------------------------------------
@@ -941,36 +958,43 @@ def _run_stack(args, progress_cb) -> int:
                             )
                             continue
 
-                        save_fits_image(data, fits_path, header=hdr, overwrite=True)
+                        try:
+                            if not save_fits_image(data, fits_path, overwrite=True):
+                                raise RuntimeError("save_fits_image returned False")
+                        except Exception:
+                            logger.exception("FITS export failure for %s", base)
+                            continue
+
                         logger.info(
                             "FITS aligné exporté: %s", os.path.basename(fits_path)
                         )
-                        # Validate header after write
+
                         try:
-                            check_hdr = fits.getheader(fits_path)
+                            w = WCS(hdr)
+                            write_wcs_to_fits_inplace(fits_path, w, memmap=False)
+                        except Exception:
+                            logger.exception("WCS injection failed for %s", base)
+
+                        try:
+                            check_hdr = fits.getheader(fits_path, memmap=False)
                             if not _has_essential_wcs(check_hdr):
-                                raise ValueError("missing essential WCS keys")
-                            stacker.intermediate_classic_batch_files.append((fits_path, []))
-                            logger.info(
-                                "FITS aligné conservé pour reprojection finale: %s",
-                                os.path.basename(fits_path),
-                            )
-                            if progress_cb:
-                                progress_cb(
-                                    f"Intermediary FITS created: {os.path.basename(fits_path)}",
-                                    None,
+                                logger.warning("WCS absent pour %s", base)
+                            else:
+                                logger.info(
+                                    "FITS aligné conservé pour reprojection finale: %s",
+                                    os.path.basename(fits_path),
                                 )
-                        except Exception as e_chk:
-                            logger.error(
-                                "Validation WCS échouée pour %s: %s", base, e_chk
-                            )
-                            try:
-                                os.remove(fits_path)
-                            except Exception:
-                                pass
+                                if progress_cb:
+                                    progress_cb(
+                                        f"Intermediary FITS created: {os.path.basename(fits_path)}",
+                                        None,
+                                    )
+                        except Exception:
+                            logger.exception("WCS validation failure for %s", base)
+
+                        stacker.intermediate_classic_batch_files.append((fits_path, []))
                     except Exception:
-                        if progress_cb:
-                            progress_cb(f"FITS export failure: {base}", None)
+                        logger.exception("FITS export failure for %s", base)
             processed_temp_idx += len(new_paths)
 
         while stacker.is_running():
@@ -1025,11 +1049,15 @@ def _run_stack(args, progress_cb) -> int:
                 skipped = 0
                 for fp in files:
                     try:
-                        w = _load_wcs_header_only(fp)
+                        w = load_wcs_header_only(fp)
                         candidates.append((fp, w))
                         ok += 1
                     except Exception as e:
-                        logger.warning("Header-WCS failed for %s -> skip (%s)", fp, e)
+                        logger.warning(
+                            "aligned_%s.fits corrompu (taille/HEADER): %s",
+                            os.path.basename(fp),
+                            e,
+                        )
                         skipped += 1
                 logger.info(
                     "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",

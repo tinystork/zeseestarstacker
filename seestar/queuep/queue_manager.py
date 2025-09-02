@@ -13041,10 +13041,28 @@ class SeestarQueuedStacker:
             fits.PrimaryHDU(data=data).writeto(
                 img_path, overwrite=True, output_verify="ignore"
             )
+            size = os.path.getsize(img_path)
+            logger.debug("Temp aligned saved: %s (%d bytes)", img_path, size)
+            if size < 2880:
+                logger.warning("Temp aligned too small: %s (%d bytes) -> retry", img_path, size)
+                fits.PrimaryHDU(data=data).writeto(
+                    img_path, overwrite=True, output_verify="ignore"
+                )
+                size = os.path.getsize(img_path)
+                logger.debug("Temp aligned retry size: %d bytes", size)
+                if size < 2880:
+                    logger.error(
+                        "Temp aligned still corrupt after retry: %s (%d bytes)",
+                        img_path,
+                        size,
+                    )
+                    return None, None
             np.save(mask_path, mask.astype(np.uint8))
             if getattr(self, "reference_wcs_object", None) is not None:
                 try:
-                    write_wcs_to_fits_inplace(img_path, self.reference_wcs_object)
+                    write_wcs_to_fits_inplace(
+                        img_path, self.reference_wcs_object, memmap=False
+                    )
                 except Exception:
                     pass
             _log_mem("after_save")

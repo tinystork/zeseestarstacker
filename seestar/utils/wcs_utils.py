@@ -29,13 +29,20 @@ def _sanitize_continue_as_string(header: fits.Header) -> None:
         if k == "CONTINUE":
             header[k] = str(v)
 
-def write_wcs_to_fits_inplace(fits_path: str, wcs_obj: WCS) -> None:
+def write_wcs_to_fits_inplace(fits_path: str, wcs_obj: WCS, *, memmap: bool = True) -> None:
     """Persist ``wcs_obj`` into ``fits_path`` updating header only.
 
-    The FITS file is opened with ``memmap=True`` and data are left untouched.
-    Any previous WCS cards are removed before injecting the new solution.
+    Parameters
+    ----------
+    fits_path : str
+        Path to an existing FITS file.
+    wcs_obj : :class:`astropy.wcs.WCS`
+        WCS solution to write.
+    memmap : bool, optional
+        Passed to :func:`astropy.io.fits.open`. ``False`` avoids file locking on
+        Windows. Defaults to ``True`` for backward compatibility.
     """
-    with fits.open(fits_path, mode="update", memmap=True) as hdul:
+    with fits.open(fits_path, mode="update", memmap=memmap) as hdul:
         h = hdul[0].header
         _strip_wcs_cards(h)
         h_wcs = wcs_obj.to_header(relax=True)
