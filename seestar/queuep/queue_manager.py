@@ -10970,6 +10970,16 @@ class SeestarQueuedStacker:
                             and final_np.shape[2] > 4
                         ):
                             final_np = np.moveaxis(final_np, 0, -1)
+                        ref_shape = getattr(self, "reference_shape", None)
+                        if (
+                            ref_shape
+                            and tuple(ref_shape[:2]) != final_np.shape[:2]
+                            and final_np.shape[:2] == tuple(ref_shape[:2][::-1])
+                        ):
+                            final_np = final_np.transpose(1, 0, 2)
+                            logger.debug(
+                                "DEBUG QM [_save_final_stack]: transposed final_np to match reference_shape"
+                            )
                         final_wht = np.ones(final_np.shape[:2], dtype=np.float32)
                         self._combine_batch_result(final_np, final_hdr, final_wht)
                         if hasattr(self.cumulative_sum_memmap, "flush"):
