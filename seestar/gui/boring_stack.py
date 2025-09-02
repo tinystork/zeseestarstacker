@@ -15,6 +15,12 @@ from typing import Optional
 
 from logging.handlers import RotatingFileHandler
 
+
+# Ensure the project root is on sys.path when executed directly
+if __package__ in (None, ""):
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+
 from seestar import reproject_utils
 
 
