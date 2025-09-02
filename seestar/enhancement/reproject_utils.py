@@ -550,24 +550,50 @@ def streaming_reproject_and_coadd(
     if output_path is not None:
         hdr_out = ref_wcs.to_header(relax=True)
 
-        # ⚠️ NE PAS laisser BSCALE/BZERO si on écrit des floats
-        if np.issubdtype(final_map.dtype, np.floating):
-            for key in ("BSCALE", "BZERO"):
-                if key in hdr_out:
-                    del hdr_out[key]
+        # Nettoyage des cartes structurelles qui seront recréées par Astropy
+        for k in list(hdr_out.keys()):
+            if k == "SIMPLE" or k.startswith("NAXIS") or k in (
+                "BITPIX",
+                "EXTEND",
+                "PCOUNT",
+                "GCOUNT",
+                "XTENSION",
+            ):
+                del hdr_out[k]
+
+        # Passage en CxHxW si couleur (HWC -> CHW)
+        if (
+            final_map.ndim == 3
+            and final_map.shape[-1] in (3, 4)
+            and final_map.shape[0] not in (1, 3, 4)
+        ):
+            data_out = np.moveaxis(final_map, -1, 0)
         else:
-            # Pour une sortie entière (int16), recopier BSCALE/BZERO de la référence
-            for key in ("BSCALE", "BZERO"):
-                if key in ref_hdr:
-                    hdr_out[key] = ref_hdr[key]
-        if C_out > 1:
-            hdr_out["NAXIS"] = 3
-            hdr_out["NAXIS1"] = shape_out[1]
-            hdr_out["NAXIS2"] = shape_out[0]
-            hdr_out["NAXIS3"] = C_out
-            hdr_out["CTYPE3"] = hdr_out.get("CTYPE3", "RGB")
-        fits.PrimaryHDU(data=final_map, header=hdr_out).writeto(
-            output_path, overwrite=True
+            data_out = final_map  # mono / déjà CHW
+
+        # BSCALE/BZERO: retirer si float (sinon laisser cohérent avec ref)
+        if np.issubdtype(data_out.dtype, np.floating):
+            for k in ("BSCALE", "BZERO"):
+                if k in hdr_out:
+                    del hdr_out[k]
+        else:
+            for k in ("BSCALE", "BZERO"):
+                if k in ref_hdr:
+                    hdr_out[k] = ref_hdr[k]
+
+        import warnings
+        from astropy.io.fits.verify import VerifyWarning
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=VerifyWarning)
+            fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
+                output_path, overwrite=True
+            )
+
+        logger.info(
+            "Streaming coadd written: shape=%s dtype=%s",
+            getattr(data_out, "shape", None),
+            data_out.dtype,
         )
 
     sum_map.flush(); wht_map.flush(); final_map.flush()

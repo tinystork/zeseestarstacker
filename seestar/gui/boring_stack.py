@@ -15,6 +15,13 @@ from typing import Optional
 
 from logging.handlers import RotatingFileHandler
 
+# Ensure the project root is on sys.path when executed directly
+if __package__ in (None, ""):
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from seestar import reproject_utils
+
 
 def _setup_logging(log_dir: str, log_name: str, level: int) -> str:
     """Configure root logging for both CLI and GUI launches."""
@@ -179,6 +186,8 @@ from astropy.wcs import WCS
 from seestar.alignment.astrometry_solver import AstrometrySolver
 from seestar.utils.wcs_utils import _sanitize_continue_as_string
 import glob
+from astropy.io.fits.verify import VerifyWarning
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -328,32 +337,63 @@ def _load_wcs_header_only(fp: str) -> WCS:
     return WCS(hdr, naxis=2, relax=True)
 
 
-def _finalize_reproject_and_coadd(aligned_dir: str, out_fp: str) -> bool:
-    """Reproject aligned FITS in ``aligned_dir`` using only header WCS."""
-    from seestar import reproject_utils
+def _finalize_reproject_and_coadd(arg1, arg2, arg3=None) -> bool:
+    """Finalize a reprojection + coadd operation.
 
-    files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
-    candidates = []
-    ok = 0
-    skipped = 0
-    for f in files:
-        try:
-            w = _load_wcs_header_only(f)
-            candidates.append((f, w))
-            ok += 1
-        except Exception as e:
-            logger.warning("Header-WCS failed for %s -> skip (%s)", f, e)
-            skipped += 1
-    logger.info(
-        "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",
-        len(files),
-        ok,
-        skipped,
-    )
-    if ok == 0:
-        logger.error("No valid WCS candidates -> abort to avoid empty mosaic.")
-        return False
-    return reproject_utils.reproject_and_coadd_from_list(candidates, out_fp)
+    Two calling conventions are supported for backward compatibility:
+
+    1. ``_finalize_reproject_and_coadd(aligned_dir, out_fp)``
+       where ``aligned_dir`` contains ``aligned_*.fits`` files.
+    2. ``_finalize_reproject_and_coadd(paths, reference_path, out_fp)``
+       where ``paths`` is an iterable of FITS files to reproject and coadd.
+    """
+
+    if arg3 is None:
+        aligned_dir, out_fp = arg1, arg2
+        files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+        if not files:
+            logger.error("No valid WCS candidates -> abort to avoid empty mosaic.")
+            return False
+        paths = files
+        ref_fp = files[0]
+    else:
+        paths, ref_fp, out_fp = arg1, arg2, arg3
+        paths = [ref_fp] + list(paths)
+
+    result, _ = reproject_utils.reproject_and_coadd_from_paths(paths)
+    hdr = fits.getheader(ref_fp)
+    hdr_out = WCS(hdr, naxis=2).to_header(relax=True)
+
+    for k in list(hdr_out.keys()):
+        if k == "SIMPLE" or k.startswith("NAXIS") or k in (
+            "BITPIX",
+            "EXTEND",
+            "PCOUNT",
+            "GCOUNT",
+            "XTENSION",
+        ):
+            del hdr_out[k]
+
+    if (
+        result.ndim == 3
+        and result.shape[-1] in (3, 4)
+        and result.shape[0] not in (1, 3, 4)
+    ):
+        data_out = np.moveaxis(result, -1, 0)
+    else:
+        data_out = result
+
+    if np.issubdtype(data_out.dtype, np.floating):
+        for k in ("BSCALE", "BZERO"):
+            if k in hdr_out:
+                del hdr_out[k]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=VerifyWarning)
+        fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
+            out_fp, overwrite=True
+        )
+    return True
 
 
 # -----------------------------------------------------------------------------

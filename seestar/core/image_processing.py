@@ -230,10 +230,23 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
         raise ValueError(f"Invalid image for FITS save: {type(image)}")
 
     # Prépare les données (0–1 -> uint16 -> int16 décalé)
-    is_color = image.ndim == 3 and image.shape[-1] == 3
-    image_uint16 = (np.clip(image.astype(np.float32), 0.0, 1.0) * 65535.0).astype(np.uint16)
+    is_color_last = image.ndim == 3 and image.shape[-1] in (3, 4)
+    is_color_first = (
+        image.ndim == 3
+        and image.shape[0] in (1, 3, 4)
+        and image.shape[1] > 4
+        and image.shape[2] > 4
+    )
+    image_uint16 = (
+        np.clip(image.astype(np.float32), 0.0, 1.0) * 65535.0
+    ).astype(np.uint16)
     image_int16 = (image_uint16.astype(np.int32) - 32768).astype(np.int16)
-    data_to_save = np.moveaxis(image_int16, -1, 0) if is_color else image_int16
+    if is_color_last:
+        data_to_save = np.moveaxis(image_int16, -1, 0)  # HWC -> CHW
+    elif is_color_first:
+        data_to_save = image_int16  # déjà CHW
+    else:
+        data_to_save = image_int16  # mono
 
     # Filtrer le header fourni: retirer les cartes structurelles (Astropy s’en charge)
     filtered = fits.Header()
