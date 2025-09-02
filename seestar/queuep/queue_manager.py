@@ -11423,15 +11423,33 @@ class SeestarQueuedStacker:
             final_header["BSCALE"] = 1
             final_header["BZERO"] = 32768
 
-        if (
-            data_for_primary_hdu_save.ndim == 3
-            and data_for_primary_hdu_save.shape[2] == 3
-        ):
-            data_for_primary_hdu_save_cxhxw = np.moveaxis(
-                data_for_primary_hdu_save, -1, 0
+        if getattr(self, "batch_size", 0) == 1:
+            arr = data_for_primary_hdu_save
+            if arr.ndim == 3:
+                if arr.shape[-1] in (3, 4):
+                    arr = np.moveaxis(arr, -1, 0)
+                elif arr.shape[0] in (1, 3, 4):
+                    pass
+                else:
+                    raise ValueError(
+                        f"Unexpected 3D shape for final stack (BS=1): {arr.shape}"
+                    )
+                data_for_primary_hdu_save = arr
+            logger.debug(
+                "DEBUG QM [SaveFinalStack BS=1]: will write CHW shape=%s",
+                getattr(data_for_primary_hdu_save, "shape", None),
             )
-        else:
             data_for_primary_hdu_save_cxhxw = data_for_primary_hdu_save
+        else:
+            if (
+                data_for_primary_hdu_save.ndim == 3
+                and data_for_primary_hdu_save.shape[2] == 3
+            ):
+                data_for_primary_hdu_save_cxhxw = np.moveaxis(
+                    data_for_primary_hdu_save, -1, 0
+                )
+            else:
+                data_for_primary_hdu_save_cxhxw = data_for_primary_hdu_save
         self.update_progress(
             f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})"
         )
