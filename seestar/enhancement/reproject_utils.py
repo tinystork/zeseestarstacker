@@ -44,15 +44,17 @@ def _ensure_2d(img: np.ndarray) -> np.ndarray:  # [B1-COADD-FIX]
     if arr.ndim == 2:  # [B1-COADD-FIX]
         return arr  # [B1-COADD-FIX]
     if arr.ndim == 3:  # [B1-COADD-FIX]
-        # Ici on protège la reprojection : la voie batch=1 doit appeler cette
-        # fonction avec des 2D par canal. On ne recombine pas ici.
-        # On prend par défaut le canal 0 pour éviter une chute brutale,
-        # mais on loggue pour détecter les appels incorrects.
-        logger.warning(
-            "[B1-COADD-FIX] 3D array given to reproject; taking channel 0 only. shape=%s",
-            arr.shape,
-        )  # [B1-COADD-FIX]
-        return arr[..., 0]  # [B1-COADD-FIX]
+        chw_like = (arr.shape[0] in (1, 3, 4)) and (arr.shape[-1] not in (1, 3, 4))
+        if chw_like:
+            logger.warning(
+                "[B1-COADD-FIX] 3D CHW array; taking channel 0. shape=%s", arr.shape
+            )
+            return arr[0, ...]
+        else:
+            logger.warning(
+                "[B1-COADD-FIX] 3D HWC array; taking channel 0. shape=%s", arr.shape
+            )
+            return arr[..., 0]
     raise ValueError(
         f"[B1-COADD-FIX] Unsupported ndim={arr.ndim} for reprojection input."
     )  # [B1-COADD-FIX]
@@ -402,7 +404,8 @@ def streaming_reproject_and_coadd(
     ref_fp = reference_path or paths[0]
     try:
         ref_data_raw, ref_hdr = _open_fits_safely(ref_fp)
-        shape_out = _ensure_2d(ref_data_raw).shape[:2]
+        ref_chw = _to_chw(ref_data_raw)
+        shape_out = ref_chw.shape[1:]  # (H, W)
     except Exception:
         ref_data_raw = None
         ref_hdr = fits.Header()
@@ -416,8 +419,7 @@ def streaming_reproject_and_coadd(
             shape_out = tuple(ref_wcs.array_shape)
         else:
             img_tmp, _ = _open_fits_safely(ref_fp)
-            img_tmp = _ensure_2d(img_tmp)
-            shape_out = img_tmp.shape[:2]
+            shape_out = _to_chw(img_tmp).shape[1:]
 
     if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
         ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
