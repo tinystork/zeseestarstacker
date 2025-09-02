@@ -17,8 +17,12 @@ import platform
 from zemosaic import zemosaic_config
 try:  # Allow running as a standalone module in tests
     from ..core.image_processing import sanitize_header_for_wcs
-except ImportError:  # pragma: no cover
-    from seestar.core.image_processing import sanitize_header_for_wcs
+except Exception:  # pragma: no cover
+    try:
+        from seestar.core.image_processing import sanitize_header_for_wcs
+    except Exception:  # pragma: no cover
+        def sanitize_header_for_wcs(hdr):  # type: ignore
+            return hdr
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -72,22 +76,50 @@ try:
     from astropy.utils.exceptions import AstropyWarning
     _ASTROPY_AVAILABLE = True
     warnings.filterwarnings('ignore', category=FITSFixedWarning)
-    warnings.filterwarnings('ignore', category=AstropyWarning) # Pour d'autres avertissements astropy
-    # print("DEBUG [AstrometrySolverModule]: astropy.io.fits et astropy.wcs importés.")
+    warnings.filterwarnings('ignore', category=AstropyWarning)  # Pour d'autres avertissements astropy
 except ImportError:
     logger.error(
         "ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
 
 
-_CONTINUE_RE = re.compile(r"^(CONTINUE)\s+(?!')(.*)$", re.M)
+def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
+    """
+    Sanitize raw ASTAP ``.wcs`` text before parsing.
 
+    Parameters
+    ----------
+    txt : str
+        Raw text content of the ``.wcs`` sidecar produced by ASTAP.
 
-def _sanitize_astap_wcs_text(text: str) -> str:
-    def repl(m):
-        val = m.group(2).replace("'", "''")
-        return f"{m.group(1)}  '{val}'"
+    Returns
+    -------
+    tuple
+        ``(clean_text, modified, dropped)`` where ``clean_text`` is the
+        sanitized header, ``modified`` counts ``CONTINUE`` lines that were
+        adjusted and ``dropped`` counts invalid ``CONTINUE`` lines removed.
+    """
 
-    return _CONTINUE_RE.sub(repl, text)
+    lines = [l.rstrip() for l in txt.splitlines() if l.strip()]
+    out: list[str] = []
+    modified = 0
+    dropped = 0
+
+    for l in lines:
+        if l.lstrip().startswith('CONTINUE'):
+            m = re.match(r'^CONTINUE\s+(.*)$', l.strip())
+            if not m:
+                dropped += 1
+                continue
+            payload = m.group(1).strip()
+            if not (payload.startswith("'") or payload.startswith('"')):
+                payload = payload.replace('"', '\\"')
+                payload = f'"{payload}"'
+                modified += 1
+            out.append(f"CONTINUE {payload}")
+        else:
+            out.append(l)
+
+    return "\n".join(out) + "\n", modified, dropped
 
 
 def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default_focal_mm=250.0, solver_instance=None):
@@ -1225,7 +1257,14 @@ class AstrometrySolver:
         with open(wcs_file_path, "r", encoding="utf-8", errors="ignore") as f:
             txt = f.read()
 
-        hdr = fits.Header.fromstring(txt, sep="\n")
+        clean, modified, dropped = _sanitize_astap_wcs_text(txt)
+        if modified or dropped:
+            self._log(
+                f"Sanitised ASTAP WCS: modified={modified}, dropped={dropped}",
+                "DEBUG",
+            )
+
+        hdr = fits.Header.fromstring(clean, sep="\n")
 
         for k, v in list(hdr.items()):
             if k == "CONTINUE":
@@ -1241,6 +1280,15 @@ class AstrometrySolver:
             while "CONTINUE" in hdr:
                 del hdr["CONTINUE"]
             wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
+
+        if wcs_obj is not None:
+            try:
+                wcs_obj.pixel_shape = (
+                    int(image_shape_hw[1]),
+                    int(image_shape_hw[0]),
+                )
+            except Exception:
+                pass
 
         return wcs_obj
 
