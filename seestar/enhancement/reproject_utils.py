@@ -68,6 +68,14 @@ def reproject_and_coadd(
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
 
+    mem_required = np.prod(shape_out) * 2 * 8 / 1024**3
+    max_mem = float(os.environ.get("REPROJECT_MAX_ARRAY_GB", "64"))
+    if mem_required > max_mem:
+        raise MemoryError(
+            f"Output shape {shape_out} requires {mem_required:.1f} GiB; "
+            f"limit is {max_mem:.1f} GiB. Reduce the output size or process in tiles."
+        )
+
     weights_iter = input_weights if input_weights is not None else [None] * len(input_data)
     filtered_pairs = []
     filtered_weights = []
