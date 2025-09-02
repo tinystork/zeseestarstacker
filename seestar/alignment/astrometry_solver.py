@@ -67,6 +67,7 @@ except ImportError:
 
 try:
     from astropy.io import fits
+    from astropy.io.fits.verify import VerifyError
     from astropy.wcs import WCS, FITSFixedWarning
     from astropy.utils.exceptions import AstropyWarning
     _ASTROPY_AVAILABLE = True
@@ -1215,74 +1216,33 @@ class AstrometrySolver:
         return solved_wcs_object
 
     def _parse_wcs_file_content(self, wcs_file_path, image_shape_hw):
-        """
-        Lit un fichier .wcs (généré par ASTAP par exemple) et crée un objet astropy.wcs.WCS.
-        Un fichier .wcs typique d'ASTAP contient des mots-clés FITS.
-        """
-        self._log(f"Parsing fichier WCS: {os.path.basename(wcs_file_path)} pour image shape {image_shape_hw}", "DEBUG")
+        """Parse a ``.wcs`` file and return a :class:`~astropy.wcs.WCS` object."""
+
         if not os.path.exists(wcs_file_path) or os.path.getsize(wcs_file_path) == 0:
             self._log(f"Fichier WCS '{wcs_file_path}' non trouvé ou vide.", "ERROR")
             return None
+
+        with open(wcs_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+
+        hdr = fits.Header.fromstring(txt, sep="\n")
+
+        for k, v in list(hdr.items()):
+            if k == "CONTINUE":
+                hdr[k] = str(v)
+        while "HISTORY" in hdr:
+            del hdr["HISTORY"]
+        while "COMMENT" in hdr:
+            del hdr["COMMENT"]
+
         try:
-            # Lire le contenu du fichier .wcs
-            # Utiliser errors='replace' pour éviter les erreurs d'encodage qui
-            # pourraient être présentes dans certains fichiers ASTAP
-            with open(wcs_file_path, 'r', errors='replace') as f:
-                wcs_text_content = f.read()
+            wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
+        except VerifyError:
+            while "CONTINUE" in hdr:
+                del hdr["CONTINUE"]
+            wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
 
-            # Corriger les cartes CONTINUE non conformes (ASTAP)
-            wcs_text_content = _sanitize_astap_wcs_text(wcs_text_content)
-
-            # Créer un header FITS à partir de ce texte
-            # S'assurer que les fins de ligne sont gérées (Unix vs Windows)
-            wcs_header_from_text = fits.Header.fromstring(
-                wcs_text_content.replace('\r\n', '\n').replace('\r', '\n'), sep='\n'
-            )
-            sanitize_header_for_wcs(wcs_header_from_text)
-
-            # Créer l'objet WCS
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", FITSFixedWarning)
-                    wcs_obj = WCS(
-                        wcs_header_from_text, naxis=2, relax=True
-                    )  # relax=True pour accepter les mots-clés non standards
-            except Exception as e:
-                self._log(f"WCS parse failed: {e}", "ERROR")
-                sanitize_header_for_wcs(wcs_header_from_text)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", FITSFixedWarning)
-                    wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)
-
-            if wcs_obj:
-                # Vérifier la présence des mots-clés essentiels et compléter si nécessaire
-                if not wcs_header_from_text.get("CTYPE1") or not wcs_header_from_text.get("CTYPE2"):
-                    wcs_obj.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-                if not wcs_header_from_text.get("CUNIT1") or not wcs_header_from_text.get("CUNIT2"):
-                    wcs_obj.wcs.cunit = ["deg", "deg"]
-                if not (wcs_header_from_text.get("CRVAL1") and wcs_header_from_text.get("CRVAL2")):
-                    self._log("CRVAL manquant dans le fichier WCS.", "WARN")
-
-            if wcs_obj and wcs_obj.is_celestial:
-                # Important: définir la taille de l'image à laquelle ce WCS s'applique
-                # wcs_obj.pixel_shape attend (nx, ny) soit (largeur, hauteur)
-                wcs_obj.pixel_shape = (image_shape_hw[1], image_shape_hw[0])
-                # Certains solveurs peuvent mettre NAXIS1/2 dans le .wcs, d'autres non.
-                # On s'assure que _naxis est aussi mis à jour si possible
-                try:
-                    wcs_obj._naxis1 = image_shape_hw[1]
-                    wcs_obj._naxis2 = image_shape_hw[0]
-                except AttributeError:
-                    pass # Pas grave si ces attributs privés ne sont pas là
-                self._log("Objet WCS parsé avec succès depuis le fichier.", "DEBUG")
-                return wcs_obj
-            else:
-                self._log("Échec création objet WCS valide ou céleste depuis fichier.", "ERROR")
-                return None
-        except Exception as e:
-            self._log(f"Erreur lors du parsing du fichier WCS '{wcs_file_path}': {e}", "ERROR")
-            traceback.print_exc(limit=1)
-            return None
+        return wcs_obj
 
     def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
         """
