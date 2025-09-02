@@ -23,6 +23,14 @@ if __package__ in (None, ""):
 
 from seestar import reproject_utils
 
+try:  # Optional during tests that stub core modules
+    from seestar.core.reprojection_utils import (
+        collect_headers,
+        compute_final_output_grid,
+    )
+except Exception:  # pragma: no cover - allow stubbing in tests
+    collect_headers = compute_final_output_grid = None  # type: ignore
+
 
 def _setup_logging(log_dir: str, log_name: str, level: int) -> str:
     """Configure root logging for both CLI and GUI launches."""
@@ -1064,16 +1072,18 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
             if final_combine == "reproject_coadd":
-                candidates: list[tuple[str, WCS]] = []
+                header_infos: list[tuple[tuple[int, int], WCS]] = []
                 ok = 0
                 skipped = 0
+                valid_paths: list[str] = []
                 for fp in files:
-                    try:
-                        w = _load_wcs_header_only(fp)
-                        candidates.append((fp, w))
+                    infos = collect_headers([fp])
+                    if infos:
+                        header_infos.extend(infos)
+                        valid_paths.append(fp)
                         ok += 1
-                    except Exception as e:
-                        logger.warning("Header-WCS failed for %s -> skip (%s)", fp, e)
+                    else:
+                        logger.warning("Header-WCS failed for %s -> skip", fp)
                         skipped += 1
                 logger.info(
                     "Reprojection candidates: %d, header-WCS OK: %d, skipped: %d",
@@ -1082,19 +1092,31 @@ def _run_stack(args, progress_cb) -> int:
                     skipped,
                 )
                 if ok >= 2:
-                    from seestar import reproject_utils
-
+                    out_wcs, shape_out = compute_final_output_grid(
+                        header_infos, auto_rotate=True
+                    )
+                    rotated = not np.allclose(
+                        out_wcs.wcs.cd, np.diag(np.diag(out_wcs.wcs.cd))
+                    )
+                    logger.info(
+                        "Global output grid: shape_out=%s rotated=%s",
+                        shape_out,
+                        "yes" if rotated else "no",
+                    )
                     dtype = np.float32 if args.dtype_out == "float32" else np.float64
                     t0 = time.monotonic()
                     success = reproject_utils.streaming_reproject_and_coadd(
-                        [fp for fp, _ in candidates],
-                        reference_path=candidates[0][0],
+                        valid_paths,
+                        reference_path=valid_paths[0],
                         output_path=out_fp,
                         tile_size=args.tile_size,
                         dtype_out=dtype,
                         memmap_dir=args.memmap_dir,
                         keep_intermediates=args.keep_intermediates,
                         match_background=True,
+                        output_wcs=out_wcs,
+                        shape_out=shape_out,
+                        crop_to_footprint=True,
                     )
                     duration = time.monotonic() - t0
                     logger.info("Reprojection globale terminée en %.2f s", duration)

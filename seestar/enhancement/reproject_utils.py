@@ -359,6 +359,9 @@ def streaming_reproject_and_coadd(
     keep_intermediates=False,
     match_background=True,
     reproject_function=None,
+    output_wcs=None,
+    shape_out=None,
+    crop_to_footprint=True,
 ):
     """Streamingly reproject ``paths`` and coadd them on disk.
 
@@ -379,9 +382,17 @@ def streaming_reproject_and_coadd(
     keep_intermediates : bool, optional
         If ``True`` temporary memmaps are preserved.
     match_background : bool, optional
-        Currently unused placeholder for API compatibility.
+        If ``True`` a robust median background is subtracted from each input
+        before reprojection.
     reproject_function : callable, optional
         Reprojection function, defaults to :func:`reproject.reproject_interp`.
+    output_wcs : :class:`astropy.wcs.WCS`, optional
+        Precomputed output WCS describing the mosaic grid.
+    shape_out : tuple of int, optional
+        Explicit output ``(H, W)`` shape corresponding to ``output_wcs``.
+    crop_to_footprint : bool, optional
+        If ``True`` crop the final mosaic to the region where the weight map is
+        non-zero before writing to ``output_path``.
     """
 
     if reproject_function is None:
@@ -402,28 +413,35 @@ def streaming_reproject_and_coadd(
         C_out = max(C_out, _to_chw(data_tmp).shape[0])
 
     ref_fp = reference_path or paths[0]
-    try:
-        ref_data_raw, ref_hdr = _open_fits_safely(ref_fp)
-        ref_chw = _to_chw(ref_data_raw)
-        shape_out = ref_chw.shape[1:]  # (H, W)
-    except Exception:
-        ref_data_raw = None
-        ref_hdr = fits.Header()
-        shape_out = None
-
-    sanitize_header_for_wcs(ref_hdr)
-    ref_wcs = WCS(ref_hdr, naxis=2)
+    if output_wcs is not None:
+        out_wcs = output_wcs.deepcopy() if hasattr(output_wcs, "deepcopy") else output_wcs
+        try:
+            _, ref_hdr = _open_fits_safely(ref_fp)
+        except Exception:
+            ref_hdr = fits.Header()
+    else:
+        try:
+            ref_data_raw, ref_hdr = _open_fits_safely(ref_fp)
+            ref_chw = _to_chw(ref_data_raw)
+            if shape_out is None:
+                shape_out = ref_chw.shape[1:]  # (H, W)
+        except Exception:
+            ref_hdr = fits.Header()
+            if shape_out is None:
+                shape_out = None
+        sanitize_header_for_wcs(ref_hdr)
+        out_wcs = WCS(ref_hdr, naxis=2)
 
     if shape_out is None:
-        if ref_wcs.pixel_shape is not None and ref_wcs.array_shape is not None:
-            shape_out = tuple(ref_wcs.array_shape)
+        if out_wcs.pixel_shape is not None and out_wcs.array_shape is not None:
+            shape_out = tuple(out_wcs.array_shape)
         else:
             img_tmp, _ = _open_fits_safely(ref_fp)
             shape_out = _to_chw(img_tmp).shape[1:]
 
-    if ref_wcs.pixel_shape is None or ref_wcs.array_shape is None:
-        ref_wcs.pixel_shape = (shape_out[1], shape_out[0])
-        ref_wcs.array_shape = shape_out
+    if out_wcs.pixel_shape is None or out_wcs.array_shape is None:
+        out_wcs.pixel_shape = (shape_out[1], shape_out[0])
+        out_wcs.array_shape = shape_out
 
     try:  # [B1-COADD-FIX]
         logger.info(
@@ -431,6 +449,21 @@ def streaming_reproject_and_coadd(
         )
     except Exception:  # pragma: no cover - logging should not fail
         pass
+
+    bg_medians = {}
+    if match_background:
+        for fp in paths:
+            try:
+                data_bg, _ = _open_fits_safely(fp)
+                chw_bg = _to_chw(data_bg)
+                step_y = max(1, chw_bg.shape[1] // 32)
+                step_x = max(1, chw_bg.shape[2] // 32)
+                sample = chw_bg[:, ::step_y, ::step_x]
+                bg_medians[fp] = np.nanmedian(sample, axis=(1, 2), keepdims=True)
+            except Exception:
+                logger.warning(
+                    "Background estimation failed for '%s'", fp, exc_info=False
+                )
 
     if memmap_dir is None:
         memmap_dir = tempfile.mkdtemp(prefix="stream_reproject_")
@@ -452,7 +485,7 @@ def streaming_reproject_and_coadd(
         y1 = min(y0 + tile_h, shape_out[0])
         for x0 in range(0, shape_out[1], tile_w):
             x1 = min(x0 + tile_w, shape_out[1])
-            sub_wcs = ref_wcs.slice((slice(y0, y1), slice(x0, x1)))
+            sub_wcs = out_wcs.slice((slice(y0, y1), slice(x0, x1)))
             for fp in paths:
                 try:
                     data, hdr = _open_fits_safely(fp)
@@ -463,6 +496,16 @@ def streaming_reproject_and_coadd(
                 sanitize_header_for_wcs(hdr)
                 in_wcs = WCS(hdr, naxis=2)
                 chw_in = _to_chw(data)
+                if match_background and fp in bg_medians:
+                    bg = bg_medians[fp]
+                    if bg.shape[0] != chw_in.shape[0]:
+                        if bg.shape[0] == 1 and chw_in.shape[0] > 1:
+                            bg = np.repeat(bg, chw_in.shape[0], axis=0)
+                        elif bg.shape[0] > 1 and chw_in.shape[0] == 1:
+                            bg = np.mean(bg, axis=0, keepdims=True)
+                        else:
+                            bg = bg[: chw_in.shape[0]]
+                    chw_in = chw_in - bg
                 if chw_in.shape[0] != C_out:
                     if chw_in.shape[0] == 1 and C_out > 1:
                         # broadcast grayscale -> RGB-like
@@ -500,6 +543,7 @@ def streaming_reproject_and_coadd(
         final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=shape_out)
     else:
         final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=(C_out, *shape_out))
+    final_raw = final_map
     eps = np.finfo(np.float32).eps
     if C_out == 1:
         for y0 in range(0, shape_out[0], tile_h):
@@ -538,7 +582,7 @@ def streaming_reproject_and_coadd(
         wht_max = float(np.nanmax(wht_map))
 
     if float(wht_max) == 0:
-        sum_map.flush(); wht_map.flush(); final_map.flush()
+        sum_map.flush(); wht_map.flush(); final_raw.flush()
         if not keep_intermediates:
             try:
                 os.remove(sum_path)
@@ -549,8 +593,31 @@ def streaming_reproject_and_coadd(
                 pass
         raise RuntimeError("Aucune contribution reçue (mismatch de canaux)")
 
+    if crop_to_footprint:
+        if C_out == 1:
+            mask = wht_map > 0
+        else:
+            mask = np.sum(wht_map, axis=0) > 0
+        ys, xs = np.where(mask)
+        if ys.size > 0 and xs.size > 0:
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+            if C_out == 1:
+                final_map = final_map[y0:y1, x0:x1]
+            else:
+                final_map = final_map[:, y0:y1, x0:x1]
+            out_wcs.wcs.crpix -= [x0, y0]
+            out_wcs.array_shape = (y1 - y0, x1 - x0)
+            out_wcs.pixel_shape = (x1 - x0, y1 - y0)
+            try:
+                out_wcs._naxis1 = x1 - x0
+                out_wcs._naxis2 = y1 - y0
+            except Exception:
+                pass
+            shape_out = (y1 - y0, x1 - x0)
+
     if output_path is not None:
-        hdr_out = ref_wcs.to_header(relax=True)
+        hdr_out = out_wcs.to_header(relax=True)
 
         # Nettoyage des cartes structurelles qui seront recréées par Astropy
         for k in list(hdr_out.keys()):
@@ -598,7 +665,7 @@ def streaming_reproject_and_coadd(
             data_out.dtype,
         )
 
-    sum_map.flush(); wht_map.flush(); final_map.flush()
+    sum_map.flush(); wht_map.flush(); final_raw.flush()
     if not keep_intermediates:
         try:
             os.remove(sum_path)
