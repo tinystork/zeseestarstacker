@@ -11633,19 +11633,38 @@ class SeestarQueuedStacker:
         if self.cumulative_sum_memmap is None or self.cumulative_wht_memmap is None:
             return
 
+        # Flush memmaps to ensure on-disk data is up to date before reading
+        if hasattr(self.cumulative_sum_memmap, "flush"):
+            self.cumulative_sum_memmap.flush()
+        if hasattr(self.cumulative_wht_memmap, "flush"):
+            self.cumulative_wht_memmap.flush()
+
         base_name = self.output_filename or "stack"
         out_path = os.path.join(
             self.output_folder,
             f"{base_name}_batch{self.stacked_batches_count:03d}.fit",
         )
         tmp = out_path + ".tmp"
-        sum_data = np.array(self.cumulative_sum_memmap, dtype=np.float32)
-        wht_data = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+
+        sum_data = np.asarray(self.cumulative_sum_memmap, dtype=np.float32)
+        wht_data = np.asarray(self.cumulative_wht_memmap, dtype=np.float32)
+
+        # If no valid weights are present, avoid writing an empty stack file
+        if not np.any(wht_data > 0):
+            return
+
         eps = 1e-9
         with np.errstate(divide="ignore", invalid="ignore"):
-            avg = sum_data / np.maximum(wht_data[..., None], eps)
+            if sum_data.ndim == 3:
+                avg = sum_data / np.maximum(wht_data[..., None], eps)
+            else:
+                avg = sum_data / np.maximum(wht_data, eps)
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
-        fits.PrimaryHDU(data=np.moveaxis(avg, -1, 0)).writeto(tmp, overwrite=True)
+
+        data_to_write = np.moveaxis(avg, -1, 0) if avg.ndim == 3 else avg
+        fits.PrimaryHDU(data=data_to_write).writeto(
+            tmp, overwrite=True, output_verify="ignore"
+        )
         os.replace(tmp, out_path)
 
         if os.path.exists(out_path):
