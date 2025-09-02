@@ -1093,13 +1093,16 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
             if final_combine == "reproject_coadd":
+
                 aligned_paths = files
                 headers = []
                 paths_ok = []
                 for fp in aligned_paths:
                     try:
                         hdr = fits.getheader(fp)
+
                         hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+
                         _ = WCS(hdr, naxis=2)
                         headers.append(hdr)
                         paths_ok.append(fp)
@@ -1120,6 +1123,7 @@ def _run_stack(args, progress_cb) -> int:
                 logger.info("Global output grid: shape_out=%s", shape_out)
 
                 result_img, result_wht = reproject_utils.reproject_and_coadd_from_paths(
+
                     paths_ok,
                     output_projection=out_wcs,
                     shape_out=shape_out,
