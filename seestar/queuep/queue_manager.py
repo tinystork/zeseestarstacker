@@ -8781,10 +8781,49 @@ class SeestarQueuedStacker:
                 continue
 
             img_np, hdr, score, _wcs_obj, mask_2d = item_tuple  # Déballer
-            if isinstance(img_np, str):
-                img_np = np.load(img_np, mmap_mode="r")
-            if isinstance(mask_2d, str):
-                mask_2d = np.load(mask_2d, mmap_mode="r")
+
+            # ``img_np`` et ``mask_2d`` peuvent être soit des tableaux numpy déjà
+            # en mémoire, soit des chemins vers des fichiers ``.npy`` temporaires
+            # générés par le pipeline.  Dans certains cas une chaîne invalide ou
+            # un chemin inexistant arrivait ici, provoquant une exception lors de
+            # ``np.load`` et interrompant complètement le traitement du lot.
+            #
+            # Pour rendre la fonction plus robuste, on vérifie maintenant que les
+            # chemins existent bien et on encapsule ``np.load`` dans un ``try``.
+            # En cas d'échec, l'item est simplement ignoré avec un message de log
+            # plutôt que de faire échouer tout le batch.
+
+            if isinstance(img_np, (str, os.PathLike)):
+                img_path = Path(img_np)
+                if img_path.exists():
+                    try:
+                        img_np = np.load(str(img_path), mmap_mode="r")
+                    except Exception as e:  # pragma: no cover - log de robustness
+                        self.update_progress(
+                            f"   -> Item {idx+1} du lot {current_batch_num} ignoré (chargement image impossible: {e})."
+                        )
+                        continue
+                else:  # Chemin non valide
+                    self.update_progress(
+                        f"   -> Item {idx+1} du lot {current_batch_num} ignoré (chemin image introuvable)."
+                    )
+                    continue
+
+            if isinstance(mask_2d, (str, os.PathLike)):
+                mask_path = Path(mask_2d)
+                if mask_path.exists():
+                    try:
+                        mask_2d = np.load(str(mask_path), mmap_mode="r")
+                    except Exception as e:  # pragma: no cover - log de robustness
+                        self.update_progress(
+                            f"   -> Item {idx+1} du lot {current_batch_num} ignoré (chargement masque impossible: {e})."
+                        )
+                        continue
+                else:
+                    self.update_progress(
+                        f"   -> Item {idx+1} du lot {current_batch_num} ignoré (chemin masque introuvable)."
+                    )
+                    continue
 
             if img_np is None or hdr is None or score is None or mask_2d is None:
                 self.update_progress(
