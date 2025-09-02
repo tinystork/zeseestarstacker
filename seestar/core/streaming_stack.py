@@ -126,16 +126,25 @@ def stack_disk_streaming(
     if first_path.lower().endswith(".npy"):
         arr0 = np.load(first_path, mmap_mode="r")
         shape = arr0.shape
-        dtype = arr0.dtype
     else:
         with fits.open(first_path, memmap=True) as hdul0:
             shape = tuple(hdul0[0].data.shape)
-            dtype = hdul0[0].data.dtype
-    H, W = shape[:2]
-    C = 1 if len(shape) == 2 else shape[2]
 
+    is_cf = (
+        len(shape) == 3
+        and shape[0] in (1, 3, 4)
+        and shape[1] > 4
+        and shape[2] > 4
+    )
+    if is_cf:
+        C, H, W = shape
+    else:
+        H, W = shape[:2]
+        C = 1 if len(shape) == 2 else shape[2]
+
+    out_shape = (H, W) if C == 1 else (C, H, W)
     out_path = os.path.join(os.getcwd(), "stack_result.fits")
-    out_hdu = fits.PrimaryHDU(np.zeros(shape, dtype=np.float32))
+    out_hdu = fits.PrimaryHDU(np.zeros(out_shape, dtype=np.float32))
     fits.HDUList([out_hdu]).writeto(out_path, overwrite=True)
 
     weights = list(weights) if weights is not None else [1.0] * len(file_list)
@@ -143,7 +152,7 @@ def stack_disk_streaming(
 
     if chunk_rows <= 0:
         chunk_rows, max_workers = estimate_parallel_io_settings(
-            len(file_list), shape, max_ram_frac=0.3
+            len(file_list), (H, W), max_ram_frac=0.3
         )
     else:
         max_workers = min(4, os.cpu_count() or 1)
@@ -153,7 +162,7 @@ def stack_disk_streaming(
         len(file_list),
         chunk_rows,
         max_workers,
-        shape,
+        (H, W, C) if C > 1 else (H, W),
     )
 
     start = time.perf_counter()
@@ -164,13 +173,19 @@ def stack_disk_streaming(
                 def _read_chunk(path, row_start=row_start, row_end=row_end):
                     try:
                         if path.lower().endswith(".npy"):
-                            arr = np.load(path, mmap_mode="r")[row_start:row_end]
-                            return arr.astype(np.float32, copy=False)
+                            arr = np.load(path, mmap_mode="r")
                         else:
                             with fits.open(path, memmap=True) as hdul:
-                                return hdul[0].data[row_start:row_end].astype(
-                                    np.float32, copy=False
-                                )
+                                arr = hdul[0].data
+                        if is_cf:
+                            sl = arr[:, row_start:row_end, :]
+                        else:
+                            sl = arr[row_start:row_end]
+                            if C > 1:
+                                sl = np.moveaxis(sl, -1, 0)
+                            else:
+                                sl = sl[np.newaxis, ...]
+                        return sl.astype(np.float32, copy=False)
                     except Exception as e:
                         logger.warning(f"Failed to read chunk from {path}: {e}")
                         return None
@@ -178,20 +193,32 @@ def stack_disk_streaming(
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     chunk_slices = list(pool.map(lambda p: _read_chunk(p), file_list))
                 chunk_slices = [sl for sl in chunk_slices if sl is not None]
-                arr = np.stack(chunk_slices, axis=0)
+                arr_cf = np.stack(chunk_slices, axis=0)
                 del chunk_slices
             else:
                 chunk_slices = []
                 for path in file_list:
                     if path.lower().endswith(".npy"):
-                        sl = np.load(path, mmap_mode="r")[row_start:row_end]
-                        chunk_slices.append(sl.astype(np.float32, copy=False))
+                        arr = np.load(path, mmap_mode="r")
                     else:
                         with fits.open(path, memmap=True) as hdul:
-                            sl = hdul[0].data[row_start:row_end]
-                            chunk_slices.append(sl.astype(np.float32, copy=False))
-                arr = np.stack(chunk_slices, axis=0)
+                            arr = hdul[0].data
+                    if is_cf:
+                        sl = arr[:, row_start:row_end, :]
+                    else:
+                        sl = arr[row_start:row_end]
+                        if C > 1:
+                            sl = np.moveaxis(sl, -1, 0)
+                        else:
+                            sl = sl[np.newaxis, ...]
+                    chunk_slices.append(sl.astype(np.float32, copy=False))
+                arr_cf = np.stack(chunk_slices, axis=0)
                 del chunk_slices
+
+            if C == 1:
+                arr = arr_cf[:, 0, :, :]
+            else:
+                arr = np.moveaxis(arr_cf, 1, -1)
 
             if mode == "median":
                 chunk_result, _ = _stack_median(arr, weights_arr)
@@ -214,9 +241,14 @@ def stack_disk_streaming(
             else:
                 raise ValueError(f"Unknown stacking mode: {mode}")
 
-            out_hdul[0].data[row_start:row_end] = chunk_result.astype(np.float32)
+            if C == 1:
+                out_hdul[0].data[row_start:row_end] = chunk_result.astype(np.float32)
+            else:
+                out_hdul[0].data[:, row_start:row_end, :] = np.moveaxis(
+                    chunk_result.astype(np.float32), -1, 0
+                )
             out_hdul.flush()
-            del arr, chunk_result
+            del arr, arr_cf, chunk_result
             gc.collect()
             _log_mem(f"chunk_{row_start}_{row_end}")
 
