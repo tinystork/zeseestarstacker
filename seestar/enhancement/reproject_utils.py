@@ -98,7 +98,6 @@ def compute_final_output_grid_from_wcs(wcs_list, shape_list, auto_rotate=True):
     )
     return out_wcs, shape_out, len(wcs_list) - len(valid)
 
-
 def compute_final_output_grid(headers, auto_rotate=True):
     wcs_list = []
     shapes = []
@@ -126,9 +125,11 @@ def subtract_sigma_clipped_median(img):
 
 def _subtract_sky_median(image, nsig=3.0, maxiters=5):
     clipped = sigma_clip(image, sigma=nsig, maxiters=maxiters)
+
     med = np.nanmedian(clipped.filled(np.nan))
     med_val = 0.0 if not np.isfinite(med) else float(med)
     return image - med_val
+
 
 
 class ReprojectCoaddResult:
@@ -441,6 +442,7 @@ def reproject_and_coadd_from_paths(
                     wcs_list.append(w)
                 except Exception:
                     continue
+
         try:
             out_wcs, shape_out, dropped = compute_final_output_grid_from_wcs(
                 wcs_list, shape_list, auto_rotate=True
@@ -456,6 +458,7 @@ def reproject_and_coadd_from_paths(
                 subtract_sky_median=subtract_sky_median,
                 tile_size=tile_size or 1024,
             )
+
     else:
         out_wcs = output_projection if isinstance(output_projection, WCS) else WCS(output_projection)
         dropped = 0
@@ -643,7 +646,9 @@ def streaming_reproject_and_coadd(
                 meds = []
                 for c in range(chw_bg.shape[0]):
                     clipped = sigma_clip(chw_bg[c], sigma=3.0, maxiters=5)
+
                     med = np.nanmedian(clipped.filled(np.nan))
+
                     meds.append(0.0 if not np.isfinite(med) else float(med))
                 bg_medians[fp] = np.asarray(meds)[:, None, None]
             except Exception:
