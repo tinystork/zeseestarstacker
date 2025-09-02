@@ -331,6 +331,13 @@ def reproject_and_coadd(
             **kwargs,
         )  # [B1-COADD-FIX]
 
+        proj_img = np.nan_to_num(
+            proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+        footprint = np.nan_to_num(
+            footprint, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+
         if weight is None:  # [B1-COADD-FIX]
             weight_proj = footprint  # [B1-COADD-FIX]
         elif np.isscalar(weight):  # [B1-COADD-FIX]
@@ -348,6 +355,10 @@ def reproject_and_coadd(
             )  # [B1-COADD-FIX]
             weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
 
+        weight_proj = np.nan_to_num(
+            weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+
         if np.any(footprint > 0):  # [B1-COADD-FIX]
             sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
             cov_image += weight_proj  # [B1-COADD-FIX]
@@ -357,9 +368,13 @@ def reproject_and_coadd(
 
         del proj_img, footprint, weight_proj  # [B1-COADD-FIX]
 
-    out = np.zeros_like(sum_image, dtype=np.float32)  # [B1-COADD-FIX]
-    valid = cov_image > 0  # [B1-COADD-FIX]
-    out[valid] = (sum_image[valid] / cov_image[valid]).astype(np.float32)  # [B1-COADD-FIX]
+    out = np.divide(
+        sum_image,
+        cov_image,
+        out=np.zeros_like(sum_image, dtype=np.float32),
+        where=(cov_image > 0),
+    )  # [B1-COADD-FIX]
+    np.nan_to_num(out, copy=False, nan=0.0, posinf=0.0, neginf=0.0)  # [B1-COADD-FIX]
 
     try:
         logger.info(
@@ -720,11 +735,39 @@ def streaming_reproject_and_coadd(
                         continue
                     arr = arr.astype(dtype_out, copy=False)
                     footprint = footprint.astype(np.float32, copy=False)
+
+                    np.nan_to_num(
+                        arr, copy=False, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    np.nan_to_num(
+                        footprint, copy=False, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+
+                    arr *= footprint
+                    np.nan_to_num(
+                        arr, copy=False, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+
+                    try:
+                        logger.debug(
+                            "[B1-COADD-FIX] tile=(%d:%d,%d:%d) finite(arr)=%s finite(footprint)=%s min/max(arr)=(%.3g,%.3g)",
+                            y0,
+                            y1,
+                            x0,
+                            x1,
+                            bool(np.isfinite(arr).all()),
+                            bool(np.isfinite(footprint).all()),
+                            float(np.nanmin(arr)) if arr.size else float('nan'),
+                            float(np.nanmax(arr)) if arr.size else float('nan'),
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
+
                     if C_out == 1:
-                        sum_map[y0:y1, x0:x1] += arr * footprint
+                        sum_map[y0:y1, x0:x1] += arr
                         wht_map[y0:y1, x0:x1] += footprint
                     else:
-                        sum_map[c, y0:y1, x0:x1] += arr * footprint
+                        sum_map[c, y0:y1, x0:x1] += arr
                         wht_map[c, y0:y1, x0:x1] += footprint
                     del arr, footprint
                 gc.collect()
@@ -735,14 +778,18 @@ def streaming_reproject_and_coadd(
     else:
         final_map = np.memmap(final_path, dtype=dtype_out, mode="w+", shape=(C_out, *shape_out))
     final_raw = final_map
-    eps = np.finfo(np.float32).eps
     if C_out == 1:
         for y0 in range(0, shape_out[0], tile_h):
             y1 = min(y0 + tile_h, shape_out[0])
             for x0 in range(0, shape_out[1], tile_w):
                 s = sum_map[y0:y1, x0:x1]
                 w = wht_map[y0:y1, x0:x1]
-                final_map[y0:y1, x0:x1] = np.where(w > 0, s / np.maximum(w, eps), np.nan)
+                tile_out = final_map[y0:y1, x0:x1]
+                tile_out.fill(0.0)
+                np.divide(s, w, out=tile_out, where=(w > 0))
+                np.nan_to_num(
+                    tile_out, copy=False, nan=0.0, posinf=0.0, neginf=0.0
+                )
     else:
         for c in range(C_out):
             for y0 in range(0, shape_out[0], tile_h):
@@ -750,16 +797,21 @@ def streaming_reproject_and_coadd(
                 for x0 in range(0, shape_out[1], tile_w):
                     s = sum_map[c, y0:y1, x0:x1]
                     w = wht_map[c, y0:y1, x0:x1]
-                    final_map[c, y0:y1, x0:x1] = np.where(
-                        w > 0, s / np.maximum(w, eps), np.nan
+                    tile_out = final_map[c, y0:y1, x0:x1]
+                    tile_out.fill(0.0)
+                    np.divide(s, w, out=tile_out, where=(w > 0))
+                    np.nan_to_num(
+                        tile_out, copy=False, nan=0.0, posinf=0.0, neginf=0.0
                     )
+
+    np.nan_to_num(final_map, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     try:  # [B1-COADD-FIX] log statistics for debugging
         sum_min, sum_max = float(np.nanmin(sum_map)), float(np.nanmax(sum_map))
         wht_min, wht_max = float(np.nanmin(wht_map)), float(np.nanmax(wht_map))
         fin_min, fin_max = float(np.nanmin(final_map)), float(np.nanmax(final_map))
         logger.info(
-            "[B1-COADD-FIX] stats: shape=%s C_out=%d sum=[%.3g, %.3g] wht=[%.3g, %.3g] final=[%.3g, %.3g]",
+            "[B1-COADD-FIX] stats: shape=%s C_out=%d sum_minmax=(%.3g,%.3g) wht_minmax=(%.3g,%.3g) final_minmax=(%.3g,%.3g)",
             shape_out,
             C_out,
             sum_min,
