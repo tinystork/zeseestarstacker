@@ -15,6 +15,7 @@ from typing import Optional
 
 from logging.handlers import RotatingFileHandler
 
+
 # Ensure the project root is on sys.path when executed directly
 if __package__ in (None, ""):
     from pathlib import Path

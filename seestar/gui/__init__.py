@@ -1,3 +1,4 @@
+
 """Lightweight GUI package init avoiding heavy backend imports for tests.
 
 This module provides lazy accessors for the heavy GUI classes so that
