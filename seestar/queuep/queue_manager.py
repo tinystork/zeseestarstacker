@@ -266,42 +266,78 @@ def _reproject_worker(
 ):
     """Reproject a FITS image onto ``ref_wcs_header``.
 
-    The input file's WCS is read from its header so that reprojection is
-    performed in the correct coordinate system.
+    For ``batch_size == 1`` the GPU path is currently a placeholder and would
+    produce an identity reprojection. To guarantee a correct result we force the
+    CPU path even when ``use_gpu`` is ``True``.
 
+    Parameters
+    ----------
+    fits_path : str
+        Path to the FITS image to reproject.
+    ref_wcs_header : fits.Header
+        Header defining the target WCS grid.
+    shape_out : tuple
+        Output shape ``(H, W)`` for the reprojection.
+    use_gpu : bool, optional
+        Ignored. Present for API compatibility.
     """
+
+    from seestar.enhancement.reproject_utils import reproject_interp
+
+    logger.info(
+        "[BATCH SIZE=1] _reproject_worker: using CPU WCS path (GPU disabled placeholder)."
+    )
 
     with fits.open(fits_path, memmap=False) as hdul:
         data = hdul[0].data
+        hdr = hdul[0].header
         try:
-            input_wcs = WCS(hdul[0].header, naxis=2)
+            input_wcs = WCS(hdr, naxis=2)
         except Exception:
             input_wcs = None
 
-    if use_gpu:
-        import cupy as cp
-        from cupyx.scipy.ndimage import map_coordinates
+    target_wcs = WCS(ref_wcs_header, naxis=2)
 
-        data_gpu = cp.asarray(data, dtype=cp.float32)
-        # Coordinates should be precomputed on the CPU and passed to the worker.
-        # Here we simply build a basic identity grid as a placeholder.
-        yy, xx = cp.meshgrid(
-            cp.arange(shape_out[0], dtype=cp.float32),
-            cp.arange(shape_out[1], dtype=cp.float32),
-            indexing="ij",
-        )
-        coords_gpu = cp.stack([yy, xx])
-        reproj_gpu = map_coordinates(
-            data_gpu, coords_gpu, order=1, mode="constant", cval=0.0
-        )
-        reproj = cp.asnumpy(reproj_gpu)
-        footprint = cp.asnumpy(reproj_gpu != 0).astype(np.float32)
-    else:
-        from seestar.enhancement.reproject_utils import reproject_interp
-
+    if data.ndim == 2:
         reproj, footprint = reproject_interp(
-            (data, input_wcs), WCS(ref_wcs_header, naxis=2), shape_out, parallel=False
+            (data, input_wcs), target_wcs, shape_out, parallel=False
         )
+    elif data.ndim == 3:
+        chw_like = (
+            data.shape[0] in (1, 3, 4) and data.shape[-1] not in (1, 3, 4)
+        )
+        if chw_like:
+            layout_in = "CHW"
+            channels = data
+        else:
+            layout_in = "HWC"
+            channels = np.moveaxis(data, -1, 0)
+        logger.info(
+            "[BATCH SIZE=1] 3D input detected: %d channels (input %s → internal CHW)",
+            channels.shape[0],
+            layout_in,
+        )
+        reproj_list = []
+        footprint_list = []
+        for c in range(channels.shape[0]):
+            r, f = reproject_interp(
+                (channels[c], input_wcs), target_wcs, shape_out, parallel=False
+            )
+            reproj_list.append(r)
+            footprint_list.append(f)
+        reproj = np.stack(reproj_list, axis=0)
+        footprint = np.stack(footprint_list, axis=0)
+    else:
+        raise ValueError(
+            f"Unsupported image ndim={data.ndim} in _reproject_worker"
+        )
+
+    logger.info(
+        "[BATCH SIZE=1] reprojected shape=%s, footprint: min=%.3g, max=%.3g",
+        reproj.shape,
+        float(np.nanmin(footprint)),
+        float(np.nanmax(footprint)),
+    )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
 
@@ -10440,6 +10476,10 @@ class SeestarQueuedStacker:
 
     def _final_reproject_coadd_batch1(self, match_background=False):
         from seestar.enhancement import reproject_utils as ru
+
+        logger.info(
+            "[BATCH SIZE=1] Tip: delete previous memmaps/temp and final.fits before re-running to avoid stale accumulation."
+        )
 
         paths = [p for p, _ in getattr(self, "intermediate_classic_batch_files", [])]
         if not paths:
