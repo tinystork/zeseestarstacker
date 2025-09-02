@@ -68,8 +68,22 @@ def compute_final_output_grid(headers, auto_rotate=True):
     if not wcs_list:
         raise RuntimeError("No valid WCS headers to build output grid.")
 
+    # ``find_optimal_celestial_wcs`` from ``reproject`` expects each item in
+    # ``input_data`` to be provided as ``(shape, wcs)`` or ``(array, wcs)``.
+    #
+    # The previous implementation accidentally reversed this order and
+    # supplied ``(wcs, shape)``, which ``reproject`` then attempted to
+    # interpret as an array/WCS pair, ultimately raising a ``TypeError`` in
+    # ``parse_input_shape``.  This manifested as the stack trace reported in
+    # issue where ``input_shape should either be an HDU object or a tuple of
+    # (array-or-shape, WCS) or (array-or-shape, Header)``.
+    #
+    # Here we construct the list in the correct order to satisfy the
+    # ``reproject`` API and avoid the runtime crash.
+    inputs = [((h, w_pix), w) for w, (h, w_pix) in zip(wcs_list, shapes)]
+
     out_wcs, shape_out = find_optimal_celestial_wcs(
-        [(w, (h, w_pix)) for (w, (h, w_pix)) in zip(wcs_list, shapes)],
+        inputs,
         auto_rotate=auto_rotate,
     )
     return out_wcs, shape_out
