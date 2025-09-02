@@ -272,9 +272,14 @@ from astropy.wcs import WCS
 
 
 def _subtract_sky_median(image, nsig: float = 3.0, maxiters: int = 5):
+
+    """Subtract a robust sky median from ``image`` without mask warnings."""
+
     clipped = sigma_clip(image, sigma=nsig, maxiters=maxiters)
-    med = np.nanmedian(clipped)
-    return image - (0.0 if not np.isfinite(med) else float(med))
+    med = np.nanmedian(clipped.filled(np.nan))
+    med_val = 0.0 if not np.isfinite(med) else float(med)
+    return image - med_val
+
 
 
 def streaming_reproject_and_coadd(
