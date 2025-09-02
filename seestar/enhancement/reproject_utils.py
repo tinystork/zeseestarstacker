@@ -19,16 +19,66 @@ except Exception:  # pragma: no cover - gracefully handle absence of reproject
 
 from astropy.wcs import WCS
 from astropy.io import fits
+from astropy.stats import sigma_clip
 from typing import Tuple, Optional  # [B1-COADD-FIX]
 import logging  # [B1-COADD-FIX]
 import os
 import gc
 import tempfile
 
-from seestar.core.image_processing import sanitize_header_for_wcs
-
 logger = logging.getLogger(__name__)
 import numpy as np
+
+
+def sanitize_header_for_wcs(hdr):
+    for k, v in list(hdr.items()):
+        if k == "CONTINUE":
+            hdr[k] = str(v)
+    while "HISTORY" in hdr:
+        del hdr["HISTORY"]
+    while "COMMENT" in hdr:
+        del hdr["COMMENT"]
+    return hdr
+
+
+def ensure_wcs_pixel_shape(wcs_obj, height, width):
+    try:
+        wcs_obj.pixel_shape = (int(width), int(height))
+    except Exception:
+        pass
+    return wcs_obj
+
+
+def compute_final_output_grid(headers, auto_rotate=True):
+    from reproject.mosaicking import find_optimal_celestial_wcs
+
+    wcs_list = []
+    shapes = []
+    for hdr in headers:
+        try:
+            hdr = sanitize_header_for_wcs(hdr)
+            w = WCS(hdr, naxis=2)
+            h = int(hdr.get("NAXIS2"))
+            w_pix = int(hdr.get("NAXIS1"))
+            wcs_list.append(w)
+            shapes.append((h, w_pix))
+        except Exception:
+            continue
+
+    if not wcs_list:
+        raise RuntimeError("No valid WCS headers to build output grid.")
+
+    out_wcs, shape_out = find_optimal_celestial_wcs(
+        [(w, (h, w_pix)) for (w, (h, w_pix)) in zip(wcs_list, shapes)],
+        auto_rotate=auto_rotate,
+    )
+    return out_wcs, shape_out
+
+
+def subtract_sigma_clipped_median(img):
+    clipped = sigma_clip(img, sigma=3.0, maxiters=5, masked=False)
+    med = np.median(clipped)
+    return img - med, float(med)
 
 
 # [B1-COADD-FIX] Garantir une image 2D pour la reprojection
@@ -263,6 +313,8 @@ def reproject_and_coadd_from_paths(
     paths,
     output_projection=None,
     shape_out=None,
+    match_background=True,
+    tile_size=None,
     **kwargs,
 ):
     """Load FITS files from ``paths`` then call :func:`reproject_and_coadd`.
@@ -285,7 +337,6 @@ def reproject_and_coadd_from_paths(
 
     pairs = []
     headers = []
-    # [B1-COADD-FIX] collect meta information for global grid computation
     for fp in paths:
         try:
             with fits.open(fp, memmap=False) as hdul:
@@ -296,29 +347,25 @@ def reproject_and_coadd_from_paths(
             continue
         sanitize_header_for_wcs(hdr)
         wcs = WCS(hdr, naxis=2)
-        if wcs.pixel_shape is None:
-            h, w = data.shape[:2]
-            wcs.pixel_shape = (w, h)
+        h, w = data.shape[:2]
+        ensure_wcs_pixel_shape(wcs, h, w)
         if data.ndim == 3 and data.shape[0] in (1, 3) and data.shape[-1] != data.shape[0]:
             data = np.moveaxis(data, 0, -1)
+        if match_background:
+            if data.ndim == 2:
+                data, _ = subtract_sigma_clipped_median(data)
+            elif data.ndim == 3:
+                for c in range(data.shape[-1]):
+                    data[..., c], _ = subtract_sigma_clipped_median(data[..., c])
         pairs.append((data, wcs))
         headers.append(hdr)
-        logger.debug(
-            "[B1-COADD-FIX] input=%s ndim=%d shape=%s", fp, data.ndim, data.shape
-        )
+        logger.debug("[B1-COADD-FIX] input=%s ndim=%d shape=%s", fp, data.ndim, data.shape)
 
     if not pairs:
         raise RuntimeError("Reproject requested but no aligned FITS were produced.")
 
     if output_projection is None or shape_out is None:
-        try:  # pragma: no cover - depends on reproject availability
-            from reproject.mosaicking import find_optimal_celestial_wcs
-
-            out_wcs, out_shape = find_optimal_celestial_wcs(headers)
-            logger.info("[B1-COADD-FIX] shape_out_global=%s", out_shape)
-        except Exception:  # fall back to first image
-            out_wcs = pairs[0][1]
-            out_shape = pairs[0][0].shape[:2]
+        out_wcs, out_shape = compute_final_output_grid(headers)
         if output_projection is None:
             output_projection = out_wcs
         if shape_out is None:
