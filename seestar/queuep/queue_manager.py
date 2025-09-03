@@ -10534,7 +10534,9 @@ class SeestarQueuedStacker:
 
         final_chw, wht_map, out_wcs = result
         img_hwc = np.transpose(final_chw, (1, 2, 0))
-        cov_hw = wht_map if wht_map.ndim == 2 else wht_map[0]
+        cov_hw  = wht_map if wht_map.ndim == 2 else wht_map[0]
+        # 👉 rognage identique au mode non-BS1
+        img_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(img_hwc, cov_hw, out_wcs)
         self.current_stack = img_hwc.astype(np.float32)
         self.current_coverage = cov_hw.astype(np.float32)
         self.current_stack_header = fits.Header()
