@@ -215,7 +215,9 @@ def _has_essential_wcs(h: fits.Header) -> bool:
 def _wcs_is_valid_celestial(hdr: fits.Header) -> bool:
     try:
         w = WCS(hdr, naxis=2)
+
         return reproject_utils.is_valid_celestial_wcs(w)
+
     except Exception:
         return False
 
@@ -1039,9 +1041,11 @@ def _run_stack(args, progress_cb) -> int:
                 try:
                     hdr = fits.getheader(fp)
                     hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+
                     w = WCS(hdr, naxis=2)
                     if not reproject_utils.is_valid_celestial_wcs(w):
                         raise ValueError("invalid WCS")
+
                     headers.append(hdr)
                     paths_ok.append(fp)
                 except Exception:
