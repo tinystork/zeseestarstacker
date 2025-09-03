@@ -388,8 +388,11 @@ def test_finalize_coadd_removes_bscale(tmp_path, monkeypatch):
     other = tmp_path / "o.fits"
     fits.PrimaryHDU(np.ones((4, 4), dtype=np.float32), hdr).writeto(other)
 
-    def fake_reproj(paths, output_projection=None, reproject_function=None, match_background=True):
-        return np.arange(16, dtype=np.float32).reshape(4, 4), None
+    def fake_reproj(paths, output_projection=None, reproject_function=None, match_background=True, **kwargs):
+        from seestar.enhancement.reproject_utils import ReprojectCoaddResult
+        img = np.arange(16, dtype=np.float32).reshape(4, 4)
+        wcs = WCS(naxis=2)
+        return ReprojectCoaddResult(img, np.ones_like(img, dtype=np.float32), wcs)
 
     monkeypatch.setattr(boring_stack.reproject_utils, "reproject_and_coadd_from_paths", fake_reproj)
 
@@ -401,3 +404,33 @@ def test_finalize_coadd_removes_bscale(tmp_path, monkeypatch):
         assert "BSCALE" not in hdr_out and "BZERO" not in hdr_out
         data = hdul[0].data
         assert float(np.nanmin(data)) < float(np.nanmax(data))
+
+
+def test_crop_to_footprint_not_forwarded(monkeypatch, tmp_path):
+    module = reproject_utils
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import numpy as np
+
+    hdr = WCS(naxis=2).to_header()
+    fp = tmp_path / "src.fits"
+    fits.PrimaryHDU(np.ones((2, 2), dtype=np.float32), hdr).writeto(fp)
+
+    called = {"ok": False}
+
+    def fake_reproject_and_coadd(input_data, output_projection, shape_out, **kwargs):
+        assert "crop_to_footprint" not in kwargs
+        called["ok"] = True
+        return np.zeros(shape_out, dtype=np.float32), np.zeros(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(module, "reproject_and_coadd", fake_reproject_and_coadd)
+
+    result = module.reproject_and_coadd_from_paths(
+        [str(fp)],
+        output_projection=WCS(hdr),
+        shape_out=(2, 2),
+        crop_to_footprint=True,
+    )
+
+    assert called["ok"]
+    assert np.shape(result.image) == (2, 2)
