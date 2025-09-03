@@ -10532,9 +10532,20 @@ class SeestarQueuedStacker:
                 prefer_streaming_fallback=True,
             )
 
-        final_chw, wht_map, out_wcs = result
-        img_hwc = np.transpose(final_chw, (1, 2, 0))
-        cov_hw  = wht_map if wht_map.ndim == 2 else wht_map[0]
+        if hasattr(result, "image"):
+            img_hwc = result.image
+            wht_map = result.weight
+            out_wcs = result.wcs
+            if (
+                img_hwc.ndim == 3
+                and img_hwc.shape[0] in (1, 3, 4)
+                and img_hwc.shape[0] != img_hwc.shape[-1]
+            ):
+                img_hwc = np.transpose(img_hwc, (1, 2, 0))
+        else:
+            final_chw, wht_map, out_wcs = result
+            img_hwc = np.transpose(final_chw, (1, 2, 0))
+        cov_hw = wht_map if wht_map.ndim == 2 else wht_map[0]
         # 👉 rognage identique au mode non-BS1
         img_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(img_hwc, cov_hw, out_wcs)
         self.current_stack = img_hwc.astype(np.float32)
