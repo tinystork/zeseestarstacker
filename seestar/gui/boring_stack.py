@@ -361,9 +361,25 @@ def _finalize_reproject_and_coadd(arg1, arg2, arg3=None) -> bool:
         paths, ref_fp, out_fp = arg1, arg2, arg3
         paths = [ref_fp] + list(paths)
 
-    result, _ = reproject_utils.reproject_and_coadd_from_paths(paths)
-    hdr = fits.getheader(ref_fp)
-    hdr_out = WCS(hdr, naxis=2).to_header(relax=True)
+    # Use the reference file's WCS and dimensions as the target projection so
+    # the reprojection grid exactly matches the stack reference.  This avoids
+    # subtle sub-pixel offsets that could occur when letting
+    # ``reproject_and_coadd_from_paths`` auto-derive an output grid, which was
+    # causing ghosting artefacts for ``batch_size=1`` stacks.
+    ref_hdr = fits.getheader(ref_fp)
+    ref_hdr = reproject_utils.sanitize_header_for_wcs(ref_hdr)
+    try:
+        ref_wcs = WCS(ref_hdr, naxis=2)
+    except Exception as e:
+        logger.error("Reference WCS invalid: %s", e)
+        return False
+    h = int(ref_hdr.get("NAXIS2", 0))
+    w = int(ref_hdr.get("NAXIS1", 0))
+
+    result = reproject_utils.reproject_and_coadd_from_paths(
+        paths, output_projection=ref_wcs, shape_out=(h, w) if h > 0 and w > 0 else None
+    )
+    hdr_out = ref_wcs.to_header(relax=True)
 
     for k in list(hdr_out.keys()):
         if k == "SIMPLE" or k.startswith("NAXIS") or k in (
@@ -376,13 +392,13 @@ def _finalize_reproject_and_coadd(arg1, arg2, arg3=None) -> bool:
             del hdr_out[k]
 
     if (
-        result.ndim == 3
-        and result.shape[-1] in (3, 4)
-        and result.shape[0] not in (1, 3, 4)
+        result.image.ndim == 3
+        and result.image.shape[-1] in (3, 4)
+        and result.image.shape[0] not in (1, 3, 4)
     ):
-        data_out = np.moveaxis(result, -1, 0)
+        data_out = np.moveaxis(result.image, -1, 0)
     else:
-        data_out = result
+        data_out = result.image
 
     if np.issubdtype(data_out.dtype, np.floating):
         for k in ("BSCALE", "BZERO"):
