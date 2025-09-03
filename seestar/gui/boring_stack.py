@@ -338,7 +338,14 @@ def _load_wcs_header_only(fp: str) -> WCS:
     return WCS(hdr, naxis=2, relax=True)
 
 
-def _finalize_reproject_and_coadd(arg1, arg2, arg3=None) -> bool:
+def _finalize_reproject_and_coadd(
+    arg1,
+    arg2,
+    arg3=None,
+    *,
+    prefer_streaming_fallback: bool = True,
+    tile_size: Optional[int] = None,
+) -> bool:
     """Finalize a reprojection + coadd operation.
 
     Two calling conventions are supported for backward compatibility:
@@ -377,7 +384,11 @@ def _finalize_reproject_and_coadd(arg1, arg2, arg3=None) -> bool:
     w = int(ref_hdr.get("NAXIS1", 0))
 
     result = reproject_utils.reproject_and_coadd_from_paths(
-        paths, output_projection=ref_wcs, shape_out=(h, w) if h > 0 and w > 0 else None
+        paths,
+        output_projection=ref_wcs,
+        shape_out=(h, w) if h > 0 and w > 0 else None,
+        prefer_streaming_fallback=prefer_streaming_fallback,
+        tile_size=tile_size,
     )
     hdr_out = ref_wcs.to_header(relax=True)
 
@@ -953,17 +964,22 @@ def _run_stack(args, progress_cb) -> int:
                     logger.error("No aligned FITS with valid WCS. Abort coadd.")
                     return 1
 
-                result = reproject_utils.reproject_and_coadd_from_paths(
-                    paths_ok,
+                t0 = time.monotonic()
+                success = _finalize_reproject_and_coadd(
+                    paths_ok[1:],
+                    paths_ok[0],
+                    out_fp,
                     prefer_streaming_fallback=True,
                     tile_size=getattr(args, "tile", None),
                 )
-
-                hdu = fits.PrimaryHDU(result.image, header=result.wcs.to_header())
-                fits.HDUList([hdu]).writeto(out_fp, overwrite=True)
-                logger.info(
-                    "Final written: %s  (H, W)=%s", out_fp, result.image.shape
-                )
+                duration = time.monotonic() - t0
+                logger.info("Final reprojection+coadd done in %.2f s", duration)
+                if not success:
+                    raise RuntimeError("Reproject and coadd failed.")
+                with fits.open(out_fp, memmap=False) as hdul:
+                    logger.info(
+                        "Final written: %s  (H, W)=%s", out_fp, hdul[0].data.shape
+                    )
                 final_path = out_fp
                 final_reproject_success = True
             else:
