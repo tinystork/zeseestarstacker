@@ -6562,61 +6562,66 @@ class SeestarQueuedStacker:
                 try:
                     from astropy.stats import sigma_clip
 
-                    luminance = (
-                        0.299 * data_final_pour_retour[..., 0]
-                        + 0.587 * data_final_pour_retour[..., 1]
-                        + 0.114 * data_final_pour_retour[..., 2]
-                    )
+                    # Use a single luminance-based offset and scale so colour
+                    # balance matches the batch_size=0 and >1 paths.  Per channel
+                    # adjustments introduced psychedelic tints when the sky mask
+                    # was sparse.
+                    if data_final_pour_retour.ndim == 2:
+                        luminance = data_final_pour_retour
+                    else:
+                        luminance = (
+                            0.299 * data_final_pour_retour[..., 0]
+                            + 0.587 * data_final_pour_retour[..., 1]
+                            + 0.114 * data_final_pour_retour[..., 2]
+                        )
                     sky_mask = valid_pixel_mask_2d & (
                         luminance < np.median(luminance[valid_pixel_mask_2d])
                     )
                     sky_pixels = int(np.sum(sky_mask))
-                    offsets = [0.0, 0.0, 0.0]
-                    scales = [1.0, 1.0, 1.0]
+                    offset = 0.0
+                    scale = 1.0
                     if sky_pixels > 0:
-                        for c in range(min(3, data_final_pour_retour.shape[-1])):
-                            clipped = sigma_clip(
-                                data_final_pour_retour[..., c][sky_mask],
-                                sigma=3.0,
-                                maxiters=5,
-                            )
-                            off = float(np.median(clipped))
-                            offsets[c] = off
-                            data_final_pour_retour[..., c] -= off
-                        np.clip(data_final_pour_retour, 0.0, 1.0, out=data_final_pour_retour)
+                        lum_clip = sigma_clip(
+                            luminance[sky_mask], sigma=3.0, maxiters=5
+                        )
+                        offset = float(np.median(lum_clip))
+                        data_final_pour_retour -= offset
+                        np.clip(
+                            data_final_pour_retour,
+                            0.0,
+                            1.0,
+                            out=data_final_pour_retour,
+                        )
                         if (
                             reference_image_data_for_alignment is not None
-                            and reference_image_data_for_alignment.shape[-1]
-                            >= 3
+                            and reference_image_data_for_alignment.shape[-1] >= 3
                         ):
-                            for c in range(3):
-                                ref_clip = sigma_clip(
-                                    reference_image_data_for_alignment[..., c][sky_mask],
-                                    sigma=3.0,
-                                    maxiters=5,
-                                )
-                                img_clip = sigma_clip(
-                                    data_final_pour_retour[..., c][sky_mask],
-                                    sigma=3.0,
-                                    maxiters=5,
-                                )
-                                m_ref = float(np.median(ref_clip))
-                                m_img = float(np.median(img_clip))
-                                scale = m_ref / m_img if m_img > 1e-6 else 1.0
-                                data_final_pour_retour[..., c] *= scale
-                                scales[c] = scale
+                            ref_lum = (
+                                0.299 * reference_image_data_for_alignment[..., 0]
+                                + 0.587 * reference_image_data_for_alignment[..., 1]
+                                + 0.114 * reference_image_data_for_alignment[..., 2]
+                            )
+                            ref_clip = sigma_clip(
+                                ref_lum[sky_mask], sigma=3.0, maxiters=5
+                            )
+                            img_clip = sigma_clip(
+                                luminance[sky_mask], sigma=3.0, maxiters=5
+                            )
+                            m_ref = float(np.median(ref_clip))
+                            m_img = float(np.median(img_clip))
+                            scale = m_ref / m_img if m_img > 1e-6 else 1.0
+                            data_final_pour_retour *= scale
                             np.clip(
-                                data_final_pour_retour, 0.0, 1.0, out=data_final_pour_retour
+                                data_final_pour_retour,
+                                0.0,
+                                1.0,
+                                out=data_final_pour_retour,
                             )
                     logger.debug(
-                        "Sky mask pixels: %d, sky_offset_R=%.6f G=%.6f B=%.6f, scale_R=%.6f G=%.6f B=%.6f",
+                        "Sky mask pixels: %d, sky_offset=%.6f, scale=%.6f",
                         sky_pixels,
-                        offsets[0],
-                        offsets[1],
-                        offsets[2],
-                        scales[0],
-                        scales[1],
-                        scales[2],
+                        offset,
+                        scale,
                     )
                 except Exception as e_eq:
                     logger.debug(f"Sky background equalization skipped: {e_eq}")
