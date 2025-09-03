@@ -13,6 +13,13 @@ from astropy.io import fits
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
+def _ensure_hwc(img: np.ndarray) -> np.ndarray:
+    """Convert CHW arrays to HWC if needed."""
+    if img.ndim == 3 and img.shape[0] == 3 and img.shape[-1] != 3:
+        return np.moveaxis(img, 0, -1)
+    return img
+
+
 def sanitize_header_for_wcs(header: fits.Header) -> None:
     """Remove non-string ``CONTINUE`` cards that break ``astropy.wcs.WCS``.
 
@@ -309,12 +316,12 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
     print(f"  image_data_01 (entrée) - Shape: {image_data_01.shape}, Dtype: {image_data_01.dtype}, Range: [{np.nanmin(image_data_01):.4g} - {np.nanmax(image_data_01):.4g}]")
 
     try:
-        display_data = image_data_01.astype(np.float32).copy() # Assurer float32 et copie
+        display_data = _ensure_hwc(image_data_01).astype(np.float32, copy=False)
 
-        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 : 
+        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 :
              print(f"  Warning save_preview_image: Image is flat. Saving as black for {output_path}")
              display_data = np.zeros_like(display_data)
-        
+
         stretched_data = display_data # Par défaut, si pas de stretch
 
         if apply_stretch:
@@ -347,6 +354,14 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
         else:
             print(f"  DEBUG save_preview_image: apply_stretch=False. Using data as is (expected 0-1) for {output_path}")
             # stretched_data est déjà display_data
+
+        # Simple percentile stretch to avoid overly dark PNGs
+        finite = np.isfinite(stretched_data)
+        if finite.any():
+            lo = np.nanpercentile(stretched_data[finite], 0.5)
+            hi = np.nanpercentile(stretched_data[finite], 99.5)
+            if hi > lo:
+                stretched_data = np.clip((stretched_data - lo) / (hi - lo), 0, 1)
 
         final_image_data_clipped = np.clip(stretched_data, 0.0, 1.0)
         print(f"  final_image_data_clipped (avant *255) - Range: [{np.nanmin(final_image_data_clipped):.4g} - {np.nanmax(final_image_data_clipped):.4g}]")
