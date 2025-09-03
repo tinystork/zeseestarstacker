@@ -390,7 +390,20 @@ def _finalize_reproject_and_coadd(
         prefer_streaming_fallback=prefer_streaming_fallback,
         tile_size=tile_size,
     )
-    hdr_out = ref_wcs.to_header(relax=True)
+
+    wht = np.asarray(getattr(result, "weight", []))
+    if wht.size == 0 or not np.isfinite(wht).any() or float(np.nanmax(wht)) <= 0:
+        logger.warning(
+            "Reference-grid reprojection produced empty mosaic -> fallback to auto grid"
+        )
+        result = reproject_utils.reproject_and_coadd_from_paths(
+            paths,
+            prefer_streaming_fallback=prefer_streaming_fallback,
+            tile_size=tile_size,
+        )
+        hdr_out = result.wcs.to_header(relax=True)
+    else:
+        hdr_out = ref_wcs.to_header(relax=True)
 
     for k in list(hdr_out.keys()):
         if k == "SIMPLE" or k.startswith("NAXIS") or k in (
