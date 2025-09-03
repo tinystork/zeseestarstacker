@@ -346,6 +346,18 @@ def reproject_and_coadd(
             footprint, nan=0.0, posinf=0.0, neginf=0.0, copy=False
         )  # [B1-COADD-FIX]
 
+        if total == 1:
+            try:
+                logger.debug(
+                    "[BS=1][COADD] first reprojection min/max(img)=(%.3g,%.3g) min/max(fp)=(%.3g,%.3g)",
+                    float(np.nanmin(proj_img)),
+                    float(np.nanmax(proj_img)),
+                    float(np.nanmin(footprint)),
+                    float(np.nanmax(footprint)),
+                )
+            except Exception:
+                pass
+
         if weight is None:  # [B1-COADD-FIX]
             weight_proj = footprint  # [B1-COADD-FIX]
         elif np.isscalar(weight):  # [B1-COADD-FIX]
@@ -710,6 +722,7 @@ def streaming_reproject_and_coadd(
 
     tile_h = tile_w = int(tile_size)
 
+    logged_first = False
     for y0 in range(0, shape_out[0], tile_h):
         y1 = min(y0 + tile_h, shape_out[0])
         for x0 in range(0, shape_out[1], tile_w):
@@ -754,7 +767,9 @@ def streaming_reproject_and_coadd(
                             return_footprint=True,
                         )
                     except Exception:
-                        logger.warning("Reprojection failed for '%s' (channel %d)", fp, c, exc_info=True)
+                        logger.warning(
+                            "Reprojection failed for '%s' (channel %d)", fp, c, exc_info=True
+                        )
                         continue
                     arr = arr.astype(dtype_out, copy=False)
                     footprint = footprint.astype(np.float32, copy=False)
@@ -765,6 +780,19 @@ def streaming_reproject_and_coadd(
                     np.nan_to_num(
                         footprint, copy=False, nan=0.0, posinf=0.0, neginf=0.0
                     )
+
+                    if not logged_first:
+                        try:
+                            logger.debug(
+                                "[BS=1][COADD] first reprojection min/max(img)=(%.3g,%.3g) min/max(fp)=(%.3g,%.3g)",
+                                float(np.nanmin(arr)),
+                                float(np.nanmax(arr)),
+                                float(np.nanmin(footprint)),
+                                float(np.nanmax(footprint)),
+                            )
+                        except Exception:
+                            pass
+                        logged_first = True
 
                     arr *= footprint
                     np.nan_to_num(

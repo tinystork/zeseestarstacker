@@ -199,6 +199,28 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
+# WCS validators
+# -----------------------------------------------------------------------------
+
+
+def _has_essential_wcs(h: fits.Header) -> bool:
+    need = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"}
+    has_scale = (
+        ("CDELT1" in h and "CDELT2" in h)
+        or all(k in h for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2"))
+    )
+    return need.issubset(h.keys()) and has_scale
+
+
+def _wcs_is_valid_celestial(hdr: fits.Header) -> bool:
+    try:
+        w = WCS(hdr, naxis=2)
+        return bool(getattr(w, "has_celestial", False))
+    except Exception:
+        return False
+
+
+# -----------------------------------------------------------------------------
 # ASTAP WCS helpers
 # -----------------------------------------------------------------------------
 
@@ -350,6 +372,8 @@ def _finalize_reproject_and_coadd(
     *,
     prefer_streaming_fallback: bool = True,
     tile_size: Optional[int] = None,
+    output_wcs=None,
+    shape_out=None,
 ) -> bool:
     """Finalize a reprojection + coadd operation.
 
@@ -372,34 +396,47 @@ def _finalize_reproject_and_coadd(
         n_inputs = len(files)
     else:
         paths, ref_fp, out_fp = arg1, arg2, arg3
-        paths = [ref_fp] + list(paths)
+        paths = list(paths)
+        if ref_fp is not None:
+            paths = [ref_fp] + paths
+        elif paths:
+            ref_fp = paths[0]
         n_inputs = len(paths)
 
-    # Use the reference file's WCS and dimensions as the target projection so
-    # the reprojection grid exactly matches the stack reference.  This avoids
-    # subtle sub-pixel offsets that could occur when letting
-    # ``reproject_and_coadd_from_paths`` auto-derive an output grid, which was
-    # causing ghosting artefacts for ``batch_size=1`` stacks.
-    ref_hdr = fits.getheader(ref_fp)
-    ref_hdr = reproject_utils.sanitize_header_for_wcs(ref_hdr)
-    try:
-        ref_wcs = WCS(ref_hdr, naxis=2)
-    except Exception as e:
-        logger.error("Reference WCS invalid: %s", e)
-        return False
-    h = int(ref_hdr.get("NAXIS2", 0))
-    w = int(ref_hdr.get("NAXIS1", 0))
+    if output_wcs is not None and shape_out is not None:
+        ref_wcs = output_wcs if isinstance(output_wcs, WCS) else WCS(output_wcs)
+        h, w = int(shape_out[0]), int(shape_out[1])
+        logger.info("[BS=1][COADD] Using fixed grid shape_out=%dx%d", h, w)
+    else:
+        # Use the reference file's WCS and dimensions as the target projection so
+        # the reprojection grid exactly matches the stack reference.  This avoids
+        # subtle sub-pixel offsets that could occur when letting
+        # ``reproject_and_coadd_from_paths`` auto-derive an output grid, which was
+        # causing ghosting artefacts for ``batch_size=1`` stacks.
+        ref_hdr = fits.getheader(ref_fp)
+        ref_hdr = reproject_utils.sanitize_header_for_wcs(ref_hdr)
+        try:
+            ref_wcs = WCS(ref_hdr, naxis=2)
+        except Exception as e:
+            logger.error("Reference WCS invalid: %s", e)
+            return False
+        h = int(ref_hdr.get("NAXIS2", 0))
+        w = int(ref_hdr.get("NAXIS1", 0))
+        shape_out = (h, w) if h > 0 and w > 0 else None
 
     result = reproject_utils.reproject_and_coadd_from_paths(
         paths,
         output_projection=ref_wcs,
-        shape_out=(h, w) if h > 0 and w > 0 else None,
+        shape_out=shape_out,
         prefer_streaming_fallback=prefer_streaming_fallback,
         tile_size=tile_size,
     )
 
     wht = np.asarray(getattr(result, "weight", []))
-    if wht.size == 0 or not np.isfinite(wht).any() or float(np.nanmax(wht)) <= 0:
+    if (
+        output_wcs is None
+        and (wht.size == 0 or not np.isfinite(wht).any() or float(np.nanmax(wht)) <= 0)
+    ):
         logger.warning(
             "Reference-grid reprojection produced empty mosaic -> fallback to auto grid"
         )
@@ -824,20 +861,6 @@ def _run_stack(args, progress_cb) -> int:
             """Attach solved WCS headers to aligned ``.npy`` files."""
             nonlocal processed_temp_idx
 
-            def _has_essential_wcs(header: fits.Header) -> bool:
-                required = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"}
-                has_scale = (
-                    "CDELT1" in header
-                    and "CDELT2" in header
-                    or (
-                        "CD1_1" in header
-                        and "CD1_2" in header
-                        and "CD2_1" in header
-                        and "CD2_2" in header
-                    )
-                )
-                return required.issubset(header.keys()) and has_scale
-
             if not use_astrometric:
                 return
             new_paths = stacker.aligned_temp_paths[processed_temp_idx:]
@@ -915,11 +938,26 @@ def _run_stack(args, progress_cb) -> int:
                             logger.info(
                                 "FITS aligné exporté: %s", os.path.basename(fits_path)
                             )
-                        try:
-                            write_wcs_to_fits_inplace(fits_path, wcs_obj)
-                        except Exception as e_w:
-                            logger.warning("Persist WCS failed for %s: %s", fits_path, e_w)
-                        # Validate header after write or on existing FITS
+                        hdr_aligned = fits.getheader(fits_path, 0)
+                        if _has_essential_wcs(hdr_aligned) and _wcs_is_valid_celestial(
+                            hdr_aligned
+                        ):
+                            logger.info(
+                                "[BS=1][WCS] Skip sidecar: aligned FITS already has a valid celestial WCS → %s",
+                                os.path.basename(fits_path),
+                            )
+                        else:
+                            try:
+                                write_wcs_to_fits_inplace(fits_path, wcs_obj)
+                                logger.info(
+                                    "[BS=1][WCS] Inject sidecar WCS into aligned FITS → %s",
+                                    os.path.basename(fits_path),
+                                )
+                            except Exception as e_w:
+                                logger.warning(
+                                    "Persist WCS failed for %s: %s", fits_path, e_w
+                                )
+                        # Validate header after skip/injection
                         try:
                             check_hdr = fits.getheader(fits_path)
                             if not _has_essential_wcs(check_hdr):
@@ -993,61 +1031,52 @@ def _run_stack(args, progress_cb) -> int:
                     "Reproject requested but no aligned FITS were produced."
                 )
             out_fp = os.path.join(args.out, "final.fits")
-            if final_combine == "reproject_coadd":
 
-                aligned_paths = files
-                headers = []
-                paths_ok = []
-                for fp in aligned_paths:
-                    try:
-                        hdr = fits.getheader(fp)
+            aligned_paths = files
+            headers = []
+            paths_ok = []
+            for fp in aligned_paths:
+                try:
+                    hdr = fits.getheader(fp)
+                    hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+                    _ = WCS(hdr, naxis=2)
+                    headers.append(hdr)
+                    paths_ok.append(fp)
+                except Exception:
+                    logger.warning("Header-WCS invalid -> skip: %s", fp)
+            logger.info(
+                "Aligned WCS headers: %d valid / %d total",
+                len(headers),
+                len(aligned_paths),
+            )
+            if not paths_ok:
+                logger.error("No aligned FITS with valid WCS. Abort coadd.")
+                return 1
 
-                        hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+            out_wcs, shape_out = reproject_utils.compute_final_output_grid(
+                headers, auto_rotate=True
+            )
 
-                        _ = WCS(hdr, naxis=2)
-                        headers.append(hdr)
-                        paths_ok.append(fp)
-                    except Exception:
-                        logger.warning("Header-WCS invalid -> skip: %s", fp)
+            t0 = time.monotonic()
+            success = _finalize_reproject_and_coadd(
+                paths_ok,
+                None,
+                out_fp,
+                prefer_streaming_fallback=True,
+                tile_size=getattr(args, "tile", None),
+                output_wcs=out_wcs,
+                shape_out=shape_out,
+            )
+            duration = time.monotonic() - t0
+            logger.info("Final reprojection+coadd done in %.2f s", duration)
+            if not success:
+                raise RuntimeError("Reproject and coadd failed.")
+            with fits.open(out_fp, memmap=False) as hdul:
                 logger.info(
-                    "Aligned WCS headers: %d valid / %d total",
-                    len(headers),
-                    len(aligned_paths),
+                    "Final written: %s  (H, W)=%s", out_fp, hdul[0].data.shape
                 )
-                if not paths_ok:
-                    logger.error("No aligned FITS with valid WCS. Abort coadd.")
-                    return 1
-
-                t0 = time.monotonic()
-                success = _finalize_reproject_and_coadd(
-                    paths_ok[1:],
-                    paths_ok[0],
-                    out_fp,
-                    prefer_streaming_fallback=True,
-                    tile_size=getattr(args, "tile", None),
-                )
-                duration = time.monotonic() - t0
-                logger.info("Final reprojection+coadd done in %.2f s", duration)
-                if not success:
-                    raise RuntimeError("Reproject and coadd failed.")
-                with fits.open(out_fp, memmap=False) as hdul:
-                    logger.info(
-                        "Final written: %s  (H, W)=%s", out_fp, hdul[0].data.shape
-                    )
-                final_path = out_fp
-                final_reproject_success = True
-            else:
-                t0 = time.monotonic()
-                success = _finalize_reproject_and_coadd(aligned_dir, out_fp)
-                duration = time.monotonic() - t0
-                logger.info("Reprojection globale terminée en %.2f s", duration)
-                if not success:
-                    raise RuntimeError("Reproject and coadd failed.")
-                logger.debug(
-                    "DEBUG: Reproject and coadd applied in boring stack (batch_size=1)",
-                )
-                final_path = out_fp
-                final_reproject_success = True
+            final_path = out_fp
+            final_reproject_success = True
         if final_path and os.path.isfile(final_path):
             dest = os.path.join(args.out, "final.fits")
             if os.path.abspath(final_path) != os.path.abspath(dest):
