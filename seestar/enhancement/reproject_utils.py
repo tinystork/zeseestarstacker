@@ -263,7 +263,9 @@ def reproject_and_coadd(
         _reproject_interp()
 
     kwargs = dict(kwargs)  # [B1-COADD-FIX]
-    kwargs.pop("return_footprint", None)  # [B1-COADD-FIX]
+    # Ne jamais transmettre ces flags UI/streaming au moteur de reprojection
+    kwargs.pop("return_footprint", None)      # ok pour astropy
+    kwargs.pop("crop_to_footprint", None)     # sinon -> TypeError dans reproject_interp
 
     ref_wcs = WCS(output_projection) if not isinstance(output_projection, WCS) else output_projection
     shape_out = tuple(int(round(x)) for x in shape_out)
