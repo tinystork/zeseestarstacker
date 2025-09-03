@@ -190,6 +190,11 @@ import glob
 from astropy.io.fits.verify import VerifyWarning
 import warnings
 
+try:
+    from seestar.queuep.queue_manager import renormalize_fits as _qm_renorm
+except Exception:  # pragma: no cover - best effort
+    _qm_renorm = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -364,9 +369,11 @@ def _finalize_reproject_and_coadd(
             return False
         paths = files
         ref_fp = files[0]
+        n_inputs = len(files)
     else:
         paths, ref_fp, out_fp = arg1, arg2, arg3
         paths = [ref_fp] + list(paths)
+        n_inputs = len(paths)
 
     # Use the reference file's WCS and dimensions as the target projection so
     # the reprojection grid exactly matches the stack reference.  This avoids
@@ -429,11 +436,48 @@ def _finalize_reproject_and_coadd(
             if k in hdr_out:
                 del hdr_out[k]
 
+    if isinstance(data_out, np.ndarray) and data_out.dtype != np.float32:
+        data_out = data_out.astype(np.float32, copy=False)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=VerifyWarning)
         fits.PrimaryHDU(data=data_out, header=hdr_out).writeto(
             out_fp, overwrite=True
         )
+
+    # ---- Renormalisation post-écriture : BS=1 uniquement ----
+    try:
+        n_inputs = int(n_inputs) if "n_inputs" in locals() else None
+        if n_inputs is None or n_inputs <= 0:
+            n_inputs = 1
+
+        if _qm_renorm is not None:
+            _qm_renorm(out_fp, method="n_images", n_images=n_inputs)
+        else:
+            from astropy.io import fits
+            import numpy as np
+
+            with fits.open(out_fp, mode="update") as hdul:
+                data = hdul[0].data
+                hdr = hdul[0].header
+
+                scale = float(n_inputs)
+                if np.nanmax(np.abs(data)) < 1e-12:
+                    scale = 1.0
+
+                data = (data * scale).astype(np.float32, copy=False)
+                hdul[0].data = data
+
+                hdr["ZNORM"] = ("N_IMAGES", "Output normalized by number of inputs")
+                hdr["ZNSCALE"] = (float(scale), "Normalization factor applied")
+                hdr["NINPUTS"] = (int(n_inputs), "Number of images used in coadd")
+                hdr.add_history("BS=1 normalization applied (method=N_IMAGES).")
+
+                hdul.flush()
+        logger.info(f"[BS=1] Normalized output by N_IMAGES: factor={n_inputs}")
+    except Exception as _e:
+        logger.warning(f"[BS=1] Normalization step failed: {type(_e).__name__}: {_e}")
+
     return True
 
 
