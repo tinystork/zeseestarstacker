@@ -454,9 +454,6 @@ def _finalize_reproject_and_coadd(
         if _qm_renorm is not None:
             _qm_renorm(out_fp, method="n_images", n_images=n_inputs)
         else:
-            from astropy.io import fits
-            import numpy as np
-
             with fits.open(out_fp, mode="update") as hdul:
                 data = hdul[0].data
                 hdr = hdul[0].header
