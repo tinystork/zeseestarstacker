@@ -443,6 +443,7 @@ def reproject_and_coadd_from_paths(
 
     kwargs = dict(kwargs)
     kwargs.pop("return_footprint", None)
+    crop_to_footprint = kwargs.pop("crop_to_footprint", False)
 
     if match_background is not None:
         subtract_sky_median = match_background
@@ -486,6 +487,7 @@ def reproject_and_coadd_from_paths(
                 shape_out=None,
                 subtract_sky_median=subtract_sky_median,
                 tile_size=tile_size or 1024,
+                crop_to_footprint=crop_to_footprint,
             )
 
     else:
@@ -512,6 +514,7 @@ def reproject_and_coadd_from_paths(
             shape_out=shape_out,
             subtract_sky_median=subtract_sky_median,
             tile_size=tile_size or 1024,
+            crop_to_footprint=crop_to_footprint,
         )
 
     pairs = []
