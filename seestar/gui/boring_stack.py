@@ -406,6 +406,27 @@ def _finalize_reproject_and_coadd(
             ref_fp = paths[0]
         n_inputs = len(paths)
 
+    if paths:
+        to_log = [paths[0]]
+        if len(paths) > 1:
+            to_log.append(paths[-1])
+        for fp in to_log:
+            try:
+                with fits.open(fp, memmap=True) as hdul:
+                    data_shape = getattr(hdul[0].data, "shape", None)
+                    hdr = hdul[0].header
+                nax1 = hdr.get("NAXIS1")
+                nax2 = hdr.get("NAXIS2")
+                pc = [[hdr.get("PC1_1"), hdr.get("PC1_2")], [hdr.get("PC2_1"), hdr.get("PC2_2")]]
+                if not any(v is not None for row in pc for v in row):
+                    pc = [[hdr.get("CD1_1"), hdr.get("CD1_2")], [hdr.get("CD2_1"), hdr.get("CD2_2")]]
+                logger.info(
+                    "[BS=1][CHECK] %s data.shape=%s NAXIS1=%s NAXIS2=%s matrix=%s",
+                    os.path.basename(fp), data_shape, nax1, nax2, pc,
+                )
+            except Exception:
+                logger.exception("Failed to log aligned file %s", fp)
+
     if output_wcs is not None and shape_out is not None:
         ref_wcs = output_wcs if isinstance(output_wcs, WCS) else WCS(output_wcs)
         h, w = int(shape_out[0]), int(shape_out[1])
@@ -780,12 +801,7 @@ def _run_stack(args, progress_cb) -> int:
                 except Exception:
                     hdr = fits.Header()
 
-                has_wcs = False
-                try:
-                    WCS(hdr, naxis=2)
-                    has_wcs = True
-                except Exception:
-                    has_wcs = False
+                has_wcs = _wcs_is_valid_celestial(hdr)
 
                 if has_wcs:
                     logger.info("WCS already present for %s", base)

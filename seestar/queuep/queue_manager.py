@@ -6092,6 +6092,15 @@ class SeestarQueuedStacker:
         """
         from seestar.enhancement.reproject_utils import reproject_interp
 
+        if input_wcs is not None:
+            try:
+                input_wcs = WCS(input_wcs.to_header(), naxis=2)
+            except Exception:
+                try:
+                    input_wcs = input_wcs.celestial
+                except Exception:
+                    pass
+
         if self.keep_input_size_for_reproject and self.input_reference_shape_hw:
             target_shape = self.input_reference_shape_hw
         else:
@@ -13528,7 +13537,17 @@ class SeestarQueuedStacker:
 
         try:
             _log_mem("before_save")
-            data = img.astype(np.float32, copy=False)
+            data = img
+            # Ensure aligned images match the reference orientation (H,W,C)
+            ref_shape = getattr(self, "reference_shape", None)
+            if (
+                ref_shape is not None
+                and data.ndim == 3
+                and data.shape[:2] == (ref_shape[1], ref_shape[0])
+            ):
+                # Aligner returned a transposed image (W,H,C) -> swap axes to H,W,C
+                data = np.swapaxes(data, 0, 1)
+            data = data.astype(np.float32, copy=False)
             if data.ndim == 3 and data.shape[2] in (3, 4):
                 data = np.moveaxis(data, -1, 0)
             hdu = fits.PrimaryHDU(data=data)
