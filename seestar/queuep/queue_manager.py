@@ -57,7 +57,11 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
-from seestar.utils.wcs_utils import inject_sanitized_wcs, write_wcs_to_fits_inplace
+from seestar.utils.wcs_utils import (
+    inject_sanitized_wcs,
+    write_wcs_to_fits_inplace,
+    _sanitize_continue_as_string,
+)
 
 from ..tools.file_ops import move_to_stacked
 
@@ -1961,7 +1965,9 @@ class SeestarQueuedStacker:
 
     ########################################################################################################################################################
 
-    def update_progress(self, message: str, progress: float | None = None):
+    def update_progress(
+        self, message: str, progress: float | None = None, level: str | None = None
+    ):
         """Filtre + relaie les messages de progression vers le callback GUI."""
         global _QM_LAST_GUI_PUSH
         message = str(message)
@@ -1974,6 +1980,12 @@ class SeestarQueuedStacker:
                 return
         _QM_LAST_GUI_PUSH = now
 
+        def _invoke_cb(msg=message, prog=progress, lvl=level):
+            try:
+                self.progress_callback(msg, prog, lvl)
+            except TypeError:
+                self.progress_callback(msg, prog)
+
         # 2.b envoi protégé via la file dévénements GUI pour garantir le thread-safety
         if self.progress_callback:
             try:
@@ -1981,11 +1993,9 @@ class SeestarQueuedStacker:
                     hasattr(self, "gui_event_queue")
                     and self.gui_event_queue is not None
                 ):
-                    self.gui_event_queue.put(
-                        lambda m=message, p=progress: self.progress_callback(m, p)
-                    )
+                    self.gui_event_queue.put(_invoke_cb)
                 else:
-                    self.progress_callback(message, progress)
+                    _invoke_cb()
                 return
             except Exception as e:
                 logger.debug(f"Error in progress callback: {e}")
@@ -1994,7 +2004,10 @@ class SeestarQueuedStacker:
         if progress is not None:
             logger.debug(f"[{int(progress)}%] {message}")
         else:
-            logger.debug(message)
+            if level:
+                logger.log(getattr(logging, str(level).upper(), logging.DEBUG), message)
+            else:
+                logger.debug(message)
 
     def _send_eta_update(self):
         """Compute and send remaining time estimation to the GUI."""
@@ -13548,26 +13561,27 @@ class SeestarQueuedStacker:
                 # Aligner returned a transposed image (W,H,C) -> swap axes to H,W,C
                 data = np.swapaxes(data, 0, 1)
             data = data.astype(np.float32, copy=False)
-            if data.ndim == 3 and data.shape[2] in (3, 4):
+            if (
+                data.ndim == 3
+                and data.shape[-1] in (3, 4)
+                and data.shape[0] not in (1, 3, 4)
+            ):
                 data = np.moveaxis(data, -1, 0)
             hdu = fits.PrimaryHDU(data=data)
-            wcs_written = 0
+            hdu.writeto(img_path, overwrite=True, output_verify="ignore")
+            np.save(mask_path, mask.astype(np.uint8))
             if getattr(self, "reference_wcs_object", None) is not None:
                 try:
-                    wcs_written = inject_sanitized_wcs(
-                        hdu.header, self.reference_wcs_object
-                    )
+                    hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                    for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                        if k in hdr_ref:
+                            del hdr_ref[k]
+                    _sanitize_continue_as_string(hdr_ref)
+                    write_wcs_to_fits_inplace(img_path, hdr_ref)
                 except Exception as e_wcs:
                     self.update_progress(
                         f"⚠️ Échec écriture WCS temp: {e_wcs}", "WARN"
                     )
-            hdu.writeto(img_path, overwrite=True, output_verify="ignore")
-            np.save(mask_path, mask.astype(np.uint8))
-            if wcs_written == 0:
-                self.update_progress(
-                    f"⚠️ header-WCS OK == 0 pour {os.path.basename(img_path)}",
-                    "WARN",
-                )
             _log_mem("after_save")
             return img_path, mask_path
         except Exception as e:

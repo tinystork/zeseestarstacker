@@ -67,8 +67,15 @@ def inject_sanitized_wcs(header: fits.Header, wcs_obj: WCS) -> int:
     return count
 
 
-def write_wcs_to_fits_inplace(fits_path: str, wcs_obj: WCS) -> int:
-    """Persist ``wcs_obj`` into ``fits_path`` updating header only.
+def write_wcs_to_fits_inplace(fits_path: str, wcs_obj) -> int:
+    """Persist a WCS solution or header into ``fits_path`` updating header only.
+
+    Parameters
+    ----------
+    fits_path : str
+        Path to the FITS file to update.
+    wcs_obj : :class:`~astropy.wcs.WCS` or :class:`~astropy.io.fits.Header`
+        WCS object or ready-to-write header containing WCS keywords.
 
     The FITS file is opened with ``memmap=True`` and data are left untouched.
     Any previous WCS cards are removed before injecting the new solution.
@@ -76,6 +83,16 @@ def write_wcs_to_fits_inplace(fits_path: str, wcs_obj: WCS) -> int:
     """
     with fits.open(fits_path, mode="update", memmap=True) as hdul:
         h = hdul[0].header
-        count = inject_sanitized_wcs(h, wcs_obj)
+        if isinstance(wcs_obj, WCS):
+            count = inject_sanitized_wcs(h, wcs_obj)
+        else:  # assume fits.Header
+            _strip_wcs_cards(h)
+            for k, v in wcs_obj.items():
+                upk = k.upper()
+                if upk in ("HISTORY", "COMMENT", "CONTINUE"):
+                    continue
+                h[k[:8]] = v
+            _sanitize_continue_as_string(h)
+            count = len(wcs_obj)
         hdul.flush()
     return count
