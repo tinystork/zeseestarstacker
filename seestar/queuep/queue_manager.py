@@ -4345,10 +4345,11 @@ class SeestarQueuedStacker:
                                                 aligned_data, valid_mask_val
                                             )
                                             if img_p and mask_p:
+                                                hdr_to_save = self._merge_reference_wcs(header_orig)
                                                 try:
                                                     hdr_path = os.path.splitext(img_p)[0] + ".hdr"
                                                     with open(hdr_path, "w", encoding="utf-8") as hf:
-                                                        hf.write(header_orig.tostring(sep="\n"))
+                                                        hf.write(hdr_to_save.tostring(sep="\n"))
                                                 except Exception as e_hdr:
                                                     logger.error(
                                                         "Échec sauvegarde header WCS pour %s: %s",
@@ -4357,7 +4358,7 @@ class SeestarQueuedStacker:
                                                     )
                                                 classic_stack_item = (
                                                     img_p,
-                                                    header_orig,
+                                                    hdr_to_save,
                                                     scores_val,
                                                     wcs_gen_val,
                                                     mask_p,
@@ -13587,6 +13588,29 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"❌ Save aligned temp failed: {e}", "WARN")
             return None, None
+
+    def _merge_reference_wcs(self, header_orig: fits.Header) -> fits.Header:
+        """Return a copy of ``header_orig`` with reference WCS keywords.
+
+        For ``batch_size == 1`` streaming stacks, aligned images are written to
+        disk already geometrically aligned.  To avoid a second, redundant WCS
+        reprojection, replace the original WCS in the sidecar header with the
+        reference WCS solved from the stack anchor.  If no reference WCS is
+        available, the original header is returned unchanged.
+        """
+        hdr = header_orig.copy()
+        ref = getattr(self, "reference_wcs_object", None)
+        if ref is not None:
+            try:
+                hdr_ref = ref.to_header(relax=True)
+                for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                    if k in hdr_ref:
+                        del hdr_ref[k]
+                _sanitize_continue_as_string(hdr_ref)
+                hdr.update(hdr_ref, update=True)
+            except Exception:
+                pass
+        return hdr
 
     ################################################################################################################################################
 
