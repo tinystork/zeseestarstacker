@@ -290,11 +290,77 @@ def _reproject_worker(
 
     with fits.open(fits_path, memmap=False) as hdul:
         data = hdul[0].data
-        hdr = hdul[0].header
+        hdr  = hdul[0].header
+
+        # --- [BS=1 FIX] Toujours tenter d'injecter/forcer le WCS corrigé (ASTAP/alignment) ---
+        # On évite absolument d'utiliser le WCS brut d'origine.
+        from seestar.utils.wcs_utils import inject_sanitized_wcs
+        from astropy.io import fits as _fits
+        import os, re
+
+        input_wcs = None
         try:
-            input_wcs = WCS(hdr, naxis=2)
-        except Exception:
-            input_wcs = None
+            # 1) Injection (prend en compte sidecar ASTAP + sanitize CONTINUE)
+            hdr_fixed = inject_sanitized_wcs(hdr, fits_path)
+            if hdr_fixed is not None:
+                hdr = hdr_fixed
+                input_wcs = WCS(hdr, naxis=2)
+        except Exception as e:
+            logger.warning("[B1] inject_sanitized_wcs failed for %s: %s", os.path.basename(fits_path), e)
+
+        # 2) Fallback explicite: charger un sidecar .wcs si présent (et si l'injection n'a pas abouti)
+        if input_wcs is None:
+            base, _ = os.path.splitext(fits_path)
+            sidecar = base + ".wcs"
+            if os.path.isfile(sidecar):
+                try:
+                    txt = open(sidecar, "r", encoding="utf-8", errors="replace").read()
+                    # Sanitize minimal: chaque CONTINUE doit porter une string
+                    lines = []
+                    for l in txt.splitlines():
+                        l = l.strip()
+                        if not l:
+                            continue
+                        if l.upper().startswith("CONTINUE"):
+                            # Forcer guillemets si absents, pour astropy
+                            if "'" not in l and '"' not in l:
+                                payload = l.split(None, 1)[1] if " " in l else ""
+                                l = f'CONTINUE "{payload}"'
+                        lines.append(l)
+                    txt = "\n".join(lines) + "\n"
+                    h = _fits.Header.fromstring(txt, sep="\n")
+                    input_wcs = WCS(h, naxis=2)
+                    # On fusionne ce WCS au header courant pour garder les autres cartes utiles
+                    for k, v in h.items():
+                        hdr[k] = v
+                except Exception as e:
+                    logger.error("[B1] Failed parsing sidecar WCS for %s: %s", os.path.basename(fits_path), e)
+
+        if input_wcs is None or not input_wcs.is_celestial:
+            logger.error("[B1] No valid corrected WCS available for %s; skipping.", os.path.basename(fits_path))
+            raise ValueError("Corrected WCS required but not found (BS=1).")
+
+        # Harmoniser les dimensions WCS/data pour éviter des rotations implicites
+        try:
+            if data.ndim == 2:
+                H, W = data.shape
+            elif data.ndim == 3:
+                # HWC ou CHW
+                if data.shape[0] in (1,3,4) and data.shape[1] > 4 and data.shape[2] > 4:
+                    # CHW (C,H,W)
+                    H, W = int(data.shape[1]), int(data.shape[2])
+                else:
+                    # HWC
+                    H, W = int(data.shape[0]), int(data.shape[1])
+            else:
+                raise ValueError(f"Unsupported ndim={data.ndim}")
+            # Fixer la pixel_shape quand c'est possible
+            try:
+                input_wcs.pixel_shape = (int(W), int(H))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("[B1] Could not align WCS pixel_shape with data for %s: %s", os.path.basename(fits_path), e)
 
     target_wcs = WCS(ref_wcs_header, naxis=2)
 
@@ -10514,7 +10580,14 @@ class SeestarQueuedStacker:
         )
 
         if valid_wcs_count > 0:
-            out_wcs, shape_out = ru.compute_final_output_grid(headers, auto_rotate=True)
+            # [B1 ORIENTATION] Respecter l'orientation d'entrée en BS=1
+            auto_rot = True
+            try:
+                if getattr(self, "batch_size", 0) == 1:
+                    auto_rot = False
+            except Exception:
+                pass
+            out_wcs, shape_out = ru.compute_final_output_grid(headers, auto_rotate=auto_rot)
             logger.info("Using global WCS (no fallback)")
             result = ru.reproject_and_coadd_from_paths(
                 valid_paths,
