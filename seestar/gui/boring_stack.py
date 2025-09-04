@@ -214,9 +214,11 @@ def _has_essential_wcs(h: fits.Header) -> bool:
 
 def _wcs_is_valid_celestial(hdr: fits.Header) -> bool:
     try:
+
         hdr = reproject_utils.sanitize_header_for_wcs(hdr.copy())
         w = WCS(hdr, naxis=2)
         return reproject_utils.is_valid_celestial_wcs(w)
+
     except Exception:
         return False
 
@@ -1033,6 +1035,7 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
 
+
             aligned_paths = files
             headers = []
             paths_ok = []
@@ -1043,6 +1046,7 @@ def _run_stack(args, progress_cb) -> int:
                     w = WCS(hdr, naxis=2)
                     if not reproject_utils.is_valid_celestial_wcs(w):
                         raise ValueError("invalid WCS")
+
                     headers.append(hdr)
                     paths_ok.append(fp)
                 except Exception:
@@ -1057,7 +1061,9 @@ def _run_stack(args, progress_cb) -> int:
                 return 1
 
             out_wcs, shape_out = reproject_utils.compute_final_output_grid(
+
                 headers, auto_rotate=False
+
             )
 
             t0 = time.monotonic()
