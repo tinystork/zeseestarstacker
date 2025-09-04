@@ -13692,7 +13692,7 @@ class SeestarQueuedStacker:
                         hdr_src = fits.getheader(src_fp, memmap=False)
 
                         inject_sanitized_wcs(hdr, hdr_src)
-     except Exception:
+                    except Exception:
                         pass
 
                 h = int(data.shape[0]) if data.ndim >= 2 else 0
