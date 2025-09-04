@@ -1,11 +1,30 @@
+import os
 from astropy.io import fits
 from astropy.wcs import WCS
 
 WCS_KEYS_PREFIXES = (
-    "WCSAXES", "CTYPE", "CUNIT", "CRVAL", "CRPIX",
-    "CD", "PC", "CDELT", "CROTA", "LONPOLE", "LATPOLE",
-    "MJDREF", "EQUINOX", "RADESYS", "A_ORDER", "B_ORDER", "A_", "B_", "AP_", "BP_",
-    "PV", "PROJP"
+    "WCSAXES",
+    "CTYPE",
+    "CUNIT",
+    "CRVAL",
+    "CRPIX",
+    "CD",
+    "PC",
+    "CDELT",
+    "CROTA",
+    "LONPOLE",
+    "LATPOLE",
+    "MJDREF",
+    "EQUINOX",
+    "RADESYS",
+    "A_ORDER",
+    "B_ORDER",
+    "A_",
+    "B_",
+    "AP_",
+    "BP_",
+    "PV",
+    "PROJP",
 )
 
 def _strip_wcs_cards(header: fits.Header) -> None:
@@ -30,41 +49,66 @@ def _sanitize_continue_as_string(header: fits.Header) -> None:
             header[k] = str(v)
 
 
-def inject_sanitized_wcs(header: fits.Header, wcs_obj: WCS) -> int:
-    """Inject a sanitized WCS solution into ``header``.
+def inject_sanitized_wcs(header: fits.Header, src) -> fits.Header | None:
+    """Inject a sanitized WCS into ``header`` from various sources.
 
-    Existing WCS cards and verbose HISTORY/COMMENT entries are removed.
-    Only ASCII values are written, keys are truncated to 8 characters and
-    ``CONTINUE`` cards are skipped.  Returns the number of WCS keywords
-    written to ``header``.
+    Parameters
+    ----------
+    header : fits.Header
+        Destination header updated in-place.
+    src : astropy.wcs.WCS | fits.Header | str
+        Source of the WCS information.  If a :class:`~astropy.wcs.WCS` is
+        provided, its serialized header is merged.  If ``src`` is a
+        :class:`~astropy.io.fits.Header`, it is used directly.  When ``src``
+        is a string, it is interpreted as a path to a FITS file or to a
+        ``.wcs``/``.hdr`` sidecar containing WCS keywords.
+
+    Returns
+    -------
+    fits.Header or None
+        The updated ``header`` on success, otherwise ``None``.
     """
 
-    _strip_wcs_cards(header)
-    # Purge existing HISTORY/COMMENT
-    for key in ["HISTORY", "COMMENT"]:
-        while key in header:
-            del header[key]
+    try:
+        if isinstance(src, WCS):
+            src_hdr = src.to_header(relax=True)
+        elif isinstance(src, fits.Header):
+            src_hdr = src
+        else:  # assume path
+            path = str(src)
+            base, ext = os.path.splitext(path)
+            sidecar = base + ".wcs"
+            if os.path.isfile(sidecar):
+                src_hdr = fits.Header.fromtextfile(sidecar)
+            elif os.path.isfile(path):
+                src_hdr = fits.getheader(path, memmap=False)
+            else:
+                return None
 
-    h_wcs = wcs_obj.to_header(relax=True)
-    count = 0
-    for k, v in h_wcs.items():
-        upk = k.upper()
-        if upk in ("HISTORY", "COMMENT", "CONTINUE"):
-            continue
-        k8 = k[:8]
-        if isinstance(v, str):
+        _strip_wcs_cards(header)
+        for key in ["HISTORY", "COMMENT"]:
+            while key in header:
+                del header[key]
+
+        for k, v in src_hdr.items():
+            upk = k.upper()
+            if upk in ("HISTORY", "COMMENT", "CONTINUE"):
+                continue
+            k8 = k[:8]
+            if isinstance(v, str):
+                try:
+                    v = v.encode("ascii", "ignore").decode("ascii")
+                except Exception:
+                    continue
             try:
-                v = v.encode("ascii", "ignore").decode("ascii")
+                header[k8] = v
             except Exception:
                 continue
-        try:
-            header[k8] = v
-            count += 1
-        except Exception:
-            continue
 
-    _sanitize_continue_as_string(header)
-    return count
+        _sanitize_continue_as_string(header)
+        return header
+    except Exception:
+        return None
 
 
 def write_wcs_to_fits_inplace(fits_path: str, wcs_obj) -> int:
@@ -83,16 +127,7 @@ def write_wcs_to_fits_inplace(fits_path: str, wcs_obj) -> int:
     """
     with fits.open(fits_path, mode="update", memmap=True) as hdul:
         h = hdul[0].header
-        if isinstance(wcs_obj, WCS):
-            count = inject_sanitized_wcs(h, wcs_obj)
-        else:  # assume fits.Header
-            _strip_wcs_cards(h)
-            for k, v in wcs_obj.items():
-                upk = k.upper()
-                if upk in ("HISTORY", "COMMENT", "CONTINUE"):
-                    continue
-                h[k[:8]] = v
-            _sanitize_continue_as_string(h)
-            count = len(wcs_obj)
+        inject_sanitized_wcs(h, wcs_obj)
+        count = sum(1 for k in h.keys() if any(k.startswith(p) for p in WCS_KEYS_PREFIXES))
         hdul.flush()
     return count

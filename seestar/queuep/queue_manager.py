@@ -4361,6 +4361,14 @@ class SeestarQueuedStacker:
                                                         img_p,
                                                         e_hdr,
                                                     )
+                                                try:
+                                                    self._ensure_wcs_on_aligned_fits(
+                                                        img_p,
+                                                        src_fp=file_path,
+                                                        ref_wcs_header=hdr_to_save,
+                                                    )
+                                                except Exception:
+                                                    pass
                                                 classic_stack_item = (
                                                     img_p,
                                                     hdr_to_save,
@@ -10784,14 +10792,25 @@ class SeestarQueuedStacker:
         headers = []
         valid_paths = []
         for fp in paths:
+            ok = False
             try:
                 hdr = fits.getheader(fp, memmap=False)
                 hdr = ru.sanitize_header_for_wcs(hdr)
                 WCS(hdr, naxis=2)
+                ok = True
+            except Exception:
+                pass
+            if not ok:
+                try:
+                    hdr = fits.getheader(fp, memmap=False)
+                    hdr = inject_sanitized_wcs(hdr, fp) or hdr
+                    WCS(hdr, naxis=2)
+                    ok = True
+                except Exception:
+                    logger.warning("Header-WCS invalid -> skip: %s", fp)
+            if ok:
                 headers.append(hdr)
                 valid_paths.append(fp)
-            except Exception:
-                logger.warning("Header-WCS invalid -> skip: %s", fp)
 
         valid_wcs_count = len(headers)
         self.update_progress(
@@ -13624,6 +13643,86 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"❌ Save aligned temp failed: {e}", "WARN")
             return None, None
+
+    def _ensure_wcs_on_aligned_fits(
+        self,
+        aligned_fp: str,
+        *,
+        src_fp: str | None = None,
+        ref_wcs_header: fits.Header | None = None,
+    ) -> bool:
+        """Garantit qu'un WCS valide est présent dans ``aligned_fp``.
+
+        Parameters
+        ----------
+        aligned_fp : str
+            Path to the aligned FITS file.
+        src_fp : str, optional
+            Optional source file path used as a fallback to fetch WCS info.
+        ref_wcs_header : fits.Header, optional
+            Reference WCS header to merge in priority.
+
+        Returns
+        -------
+        bool
+            ``True`` if a valid WCS has been written, ``False`` otherwise.
+        """
+
+        try:
+            with fits.open(aligned_fp, mode="update", memmap=False) as hdul:
+                data = hdul[0].data
+                hdr = hdul[0].header
+
+                if ref_wcs_header is not None:
+                    try:
+                        hdr.update(ref_wcs_header, useblanks=False, strip=True)
+                    except Exception:
+                        pass
+
+                if "CTYPE1" not in hdr or "CTYPE2" not in hdr:
+                    try:
+                        inject_sanitized_wcs(hdr, aligned_fp)
+                    except Exception:
+                        pass
+
+                if ("CTYPE1" not in hdr or "CTYPE2" not in hdr) and src_fp:
+                    try:
+                        hdr_src = fits.getheader(src_fp, memmap=False)
+                        inject_sanitized_wcs(hdr, hdr_src)
+                    except Exception:
+                        pass
+
+                h = int(data.shape[0]) if data.ndim >= 2 else 0
+                w = int(data.shape[1]) if data.ndim >= 2 else 0
+                hdr["NAXIS"] = 2
+                hdr["NAXIS1"] = w
+                hdr["NAXIS2"] = h
+                try:
+                    wcs_obj = WCS(hdr, naxis=2)
+                    if wcs_obj.pixel_shape is None:
+                        wcs_obj.pixel_shape = (w, h)
+                    hdr.update(wcs_obj.to_header(relax=True))
+                    try:
+                        wcs_obj._naxis1 = w
+                        wcs_obj._naxis2 = h
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(
+                        "[BS=1] Unable to stamp WCS into %s: %s",
+                        os.path.basename(aligned_fp),
+                        e,
+                    )
+                    return False
+            logger.info("WCS stored: %s", os.path.basename(aligned_fp))
+            return True
+        except Exception as e:
+            logger.warning(
+                "[BS=1] Unable to stamp WCS into %s: %s",
+                os.path.basename(aligned_fp),
+                e,
+            )
+            return False
 
     def _merge_reference_wcs(self, header_orig: fits.Header) -> fits.Header:
         """Return a copy of ``header_orig`` with reference WCS keywords.

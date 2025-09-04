@@ -104,9 +104,7 @@ class ProgressManager:
                 if message:
                     original_state = self.status_text['state']
                     tag_to_apply = None # Tag par défaut (pas de couleur spéciale)
-                    # --- DEBUG LOG POUR LE NIVEAU REÇU ---
-                    print(f"DEBUG ProgressManager._update_ui: Message='{str(message)[:50]}...', Progress={progress}, Level REÇU='{level}'")
-                    # --- FIN DEBUG LOG ---
+                    # Avertissement de niveau désactivé pour éviter les sorties de debug
                     # --- Choix du tag en fonction du niveau ---
                     if level == "ERROR":
                         tag_to_apply = "error_log"
