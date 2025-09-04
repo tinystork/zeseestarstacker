@@ -4919,7 +4919,35 @@ class SeestarQueuedStacker:
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
                     if getattr(self, "batch_size", 1) == 1:
-                        self._final_reproject_coadd_batch1(match_background=False)
+                        # --- Batch size = 1 : reprojection finale en streaming ---
+                        # Déterminer le chemin de sortie final (similaire à _save_final_stack)
+                        if getattr(self, "output_filename", ""):
+                            base_name = self.output_filename.strip()
+                            if not base_name.lower().endswith(".fit"):
+                                base_name += ".fit"
+                            out_final_path = os.path.join(self.output_folder, base_name)
+                        else:
+                            out_final_path = os.path.join(
+                                self.output_folder, "stack_final_classic_reproject.fit"
+                            )
+
+                        ok = self._finalize_reproject_and_coadd_streaming(
+                            aligned_dir=self.aligned_temp_dir,
+                            out_fp=out_final_path,
+                            auto_rotate=False,
+                            wht_mode="mean",
+                            memmap_dir=self.aligned_temp_dir if self.aligned_temp_dir else None,
+                        )
+                        if not ok:
+                            self.update_progress(
+                                "   [BS=1] Reproject+Coadd streaming a échoué.",
+                                level="ERROR",
+                            )
+                            return False
+                        self.final_stacked_path = out_final_path
+                        self.update_progress(
+                            f"Chemin FITS final: {os.path.basename(out_final_path)}"
+                        )
                     elif self.intermediate_classic_batch_files:
                         if len(self.intermediate_classic_batch_files) == 1:
                             self._finalize_single_classic_batch(
@@ -10544,6 +10572,139 @@ class SeestarQueuedStacker:
         self.current_stack_header.update(out_wcs.to_header(relax=True))
 
         # Caller will take care of saving the FITS file / updating GUI, etc.
+
+    def _finalize_reproject_and_coadd_streaming(
+        self,
+        aligned_dir: str,
+        out_fp: str,
+        *,
+        auto_rotate: bool = False,
+        wht_mode: str = "mean",
+        memmap_dir: str | None = None,
+    ) -> bool:
+        """Reproject & Coadd en streaming pour batch size = 1.
+
+        Les images alignées ``aligned_*.fits`` sont reprojetées vers une grille
+        WCS globale fixe, puis accumulées sur disque via des memmaps afin de ne
+        pas consommer de RAM. L'image finale est sauvegardée avec une extension
+        ``WHT``.
+        """
+
+        import glob
+        import os
+        import tempfile
+        import numpy as np
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        from seestar.core.reprojection_utils import (
+            collect_headers,
+            compute_final_output_grid,
+        )
+        from seestar.utils.wcs_utils import inject_sanitized_wcs
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
+        if not files:
+            self.update_progress(
+                "   [BS=1] Aucun fichier 'aligned_*.fits' pour la reprojection finale.",
+                level="ERROR",
+            )
+            return False
+
+        infos = collect_headers(files)
+        if not infos:
+            self.update_progress(
+                "   [BS=1] Impossible de construire la grille WCS globale.",
+                level="ERROR",
+            )
+            return False
+
+        out_wcs, shape_out = compute_final_output_grid(
+            infos, scale=1.0, auto_rotate=auto_rotate
+        )
+        out_h, out_w = int(shape_out[0]), int(shape_out[1])
+        out_hdr = out_wcs.to_header(relax=True)
+
+        with fits.open(files[0], memmap=False) as hdul0:
+            d0 = hdul0[0].data
+        if d0.ndim == 2:
+            C = 1
+        elif d0.ndim == 3 and d0.shape[0] in (1, 3, 4):
+            C = min(3, int(d0.shape[0]))
+        else:
+            C = min(3, int(np.moveaxis(d0, -1, 0).shape[0]))
+
+        mm_dir = memmap_dir or tempfile.gettempdir()
+        sum_path = os.path.join(mm_dir, "b1_sum_mm.dat")
+        wht_path = os.path.join(mm_dir, "b1_wht_mm.dat")
+        sum_mm = np.memmap(sum_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
+        wht_mm = np.memmap(wht_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
+        sum_mm[:] = 0.0
+        wht_mm[:] = 0.0
+
+        n = len(files)
+        for i, fp in enumerate(files, 1):
+            self.update_progress(
+                f"   [BS=1] Reprojection {i}/{n}: {os.path.basename(fp)} ..."
+            )
+            with fits.open(fp, memmap=False) as hdul:
+                data = hdul[0].data
+                hdr = hdul[0].header
+            try:
+                hdr = inject_sanitized_wcs(hdr, fp) or hdr
+                wcs_in = WCS(hdr, naxis=2)
+                if not wcs_in.is_celestial:
+                    raise ValueError("WCS non céleste.")
+            except Exception as e:
+                self.update_progress(
+                    f"   [BS=1] WCS invalide pour {os.path.basename(fp)}: {e}",
+                    level="ERROR",
+                )
+                continue
+
+            if data.ndim == 2:
+                chans = data[np.newaxis, ...].astype(np.float32)
+            elif data.ndim == 3 and data.shape[0] in (1, 3, 4):
+                chans = data.astype(np.float32)
+            else:
+                chans = np.moveaxis(data, -1, 0).astype(np.float32)
+            C_run = min(C, chans.shape[0])
+
+            for c in range(C_run):
+                reproj, footprint = reproject_interp(
+                    (chans[c], wcs_in), out_wcs, shape_out, parallel=False
+                )
+                reproj = np.nan_to_num(
+                    reproj, nan=0.0, posinf=0.0, neginf=0.0
+                ).astype(np.float32)
+                f = np.asarray(footprint, dtype=np.float32)
+                sum_mm[c] += reproj * f
+                wht_mm[c] += f
+
+        eps = 1e-6
+        res = np.empty_like(sum_mm)
+        for c in range(C):
+            res[c] = sum_mm[c] / np.maximum(wht_mm[c], eps)
+        if wht_mode.lower() == "max":
+            wht_final = np.max(wht_mm, axis=0)
+        else:
+            wht_final = np.mean(wht_mm, axis=0)
+
+        hdu0 = fits.PrimaryHDU(res.astype(np.float32), header=out_hdr)
+        hdu1 = fits.ImageHDU(wht_final.astype(np.float32), name="WHT")
+        fits.HDUList([hdu0, hdu1]).writeto(out_fp, overwrite=True)
+
+        try:
+            del sum_mm
+            del wht_mm
+        except Exception:
+            pass
+        for p in (sum_path, wht_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        return True
 
     def _final_reproject_coadd_batch1(self, match_background=False):
         from seestar.enhancement import reproject_utils as ru
