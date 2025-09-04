@@ -13681,15 +13681,18 @@ class SeestarQueuedStacker:
 
                 if "CTYPE1" not in hdr or "CTYPE2" not in hdr:
                     try:
+
                         inject_sanitized_wcs(hdr, aligned_fp)
+
                     except Exception:
                         pass
 
                 if ("CTYPE1" not in hdr or "CTYPE2" not in hdr) and src_fp:
                     try:
                         hdr_src = fits.getheader(src_fp, memmap=False)
+
                         inject_sanitized_wcs(hdr, hdr_src)
-                    except Exception:
+     except Exception:
                         pass
 
                 h = int(data.shape[0]) if data.ndim >= 2 else 0
