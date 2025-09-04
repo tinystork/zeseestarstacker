@@ -431,30 +431,47 @@ def _finalize_reproject_and_coadd(
         ref_wcs = output_wcs if isinstance(output_wcs, WCS) else WCS(output_wcs)
         h, w = int(shape_out[0]), int(shape_out[1])
         logger.info("[BS=1][COADD] Using fixed grid shape_out=%dx%d", h, w)
+        result = reproject_utils.reproject_and_coadd_from_paths(
+            paths,
+            output_projection=ref_wcs,
+            shape_out=shape_out,
+            prefer_streaming_fallback=prefer_streaming_fallback,
+            tile_size=tile_size,
+        )
+        hdr_out = ref_wcs.to_header(relax=True)
     else:
         # Use the reference file's WCS and dimensions as the target projection so
         # the reprojection grid exactly matches the stack reference.  This avoids
         # subtle sub-pixel offsets that could occur when letting
         # ``reproject_and_coadd_from_paths`` auto-derive an output grid, which was
         # causing ghosting artefacts for ``batch_size=1`` stacks.
-        ref_hdr = fits.getheader(ref_fp)
-        ref_hdr = reproject_utils.sanitize_header_for_wcs(ref_hdr)
         try:
+            ref_hdr = fits.getheader(
+                ref_fp, memmap=False, ignore_missing_simple=True
+            )
+            ref_hdr = reproject_utils.sanitize_header_for_wcs(ref_hdr)
             ref_wcs = WCS(ref_hdr, naxis=2)
+            h = int(ref_hdr.get("NAXIS2", 0))
+            w = int(ref_hdr.get("NAXIS1", 0))
+            shape_out = (h, w) if h > 0 and w > 0 else None
+            result = reproject_utils.reproject_and_coadd_from_paths(
+                paths,
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                prefer_streaming_fallback=prefer_streaming_fallback,
+                tile_size=tile_size,
+            )
+            hdr_out = ref_wcs.to_header(relax=True)
         except Exception as e:
-            logger.error("Reference WCS invalid: %s", e)
-            return False
-        h = int(ref_hdr.get("NAXIS2", 0))
-        w = int(ref_hdr.get("NAXIS1", 0))
-        shape_out = (h, w) if h > 0 and w > 0 else None
-
-    result = reproject_utils.reproject_and_coadd_from_paths(
-        paths,
-        output_projection=ref_wcs,
-        shape_out=shape_out,
-        prefer_streaming_fallback=prefer_streaming_fallback,
-        tile_size=tile_size,
-    )
+            logger.warning(
+                "Reference WCS invalid: %s -> fallback to auto grid", e
+            )
+            result = reproject_utils.reproject_and_coadd_from_paths(
+                paths,
+                prefer_streaming_fallback=prefer_streaming_fallback,
+                tile_size=tile_size,
+            )
+            hdr_out = result.wcs.to_header(relax=True)
 
     wht = np.asarray(getattr(result, "weight", []))
     if (
@@ -470,8 +487,6 @@ def _finalize_reproject_and_coadd(
             tile_size=tile_size,
         )
         hdr_out = result.wcs.to_header(relax=True)
-    else:
-        hdr_out = ref_wcs.to_header(relax=True)
 
     for k in list(hdr_out.keys()):
         if k == "SIMPLE" or k.startswith("NAXIS") or k in (
@@ -1052,45 +1067,13 @@ def _run_stack(args, progress_cb) -> int:
             out_fp = os.path.join(args.out, "final.fits")
 
 
-            aligned_paths = files
-            headers = []
-            paths_ok = []
-            for fp in aligned_paths:
-                try:
-                    hdr = fits.getheader(fp)
-                    hdr = reproject_utils.sanitize_header_for_wcs(hdr)
-                    w = WCS(hdr, naxis=2)
-                    if not reproject_utils.is_valid_celestial_wcs(w):
-                        raise ValueError("invalid WCS")
-
-                    headers.append(hdr)
-                    paths_ok.append(fp)
-                except Exception:
-                    logger.warning("Header-WCS invalid -> skip: %s", fp)
-            logger.info(
-                "Aligned WCS headers: %d valid / %d total",
-                len(headers),
-                len(aligned_paths),
-            )
-            if not paths_ok:
-                logger.error("No aligned FITS with valid WCS. Abort coadd.")
-                return 1
-
-            out_wcs, shape_out = reproject_utils.compute_final_output_grid(
-
-                headers, auto_rotate=False
-
-            )
-
             t0 = time.monotonic()
             success = _finalize_reproject_and_coadd(
-                paths_ok,
+                files,
                 None,
                 out_fp,
                 prefer_streaming_fallback=True,
                 tile_size=getattr(args, "tile", None),
-                output_wcs=out_wcs,
-                shape_out=shape_out,
             )
             duration = time.monotonic() - t0
             logger.info("Final reprojection+coadd done in %.2f s", duration)
