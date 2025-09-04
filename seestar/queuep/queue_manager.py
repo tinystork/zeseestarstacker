@@ -1968,46 +1968,51 @@ class SeestarQueuedStacker:
     def update_progress(
         self, message: str, progress: float | None = None, level: str | None = None
     ):
-        """Filtre + relaie les messages de progression vers le callback GUI."""
+        """Relais tolérant des messages de progression vers un callback facultatif."""
         global _QM_LAST_GUI_PUSH
         message = str(message)
+        lvl = str(level).upper() if level is not None else None
 
         # 2.a throttle : si le dernier envoi < _QM_DEBOUNCE sec → on ignore
         now = _mono()
         if now - _QM_LAST_GUI_PUSH < _QM_DEBOUNCE:
-            # … sauf si c’est une véritable valeur de pourcentage
+            # … sauf si c'est une véritable valeur de pourcentage
             if progress is None:
                 return
         _QM_LAST_GUI_PUSH = now
 
-        def _invoke_cb(msg=message, prog=progress, lvl=level):
-            try:
-                self.progress_callback(msg, prog, lvl)
-            except TypeError:
-                self.progress_callback(msg, prog)
+        try:
+            cb = getattr(self, "progress_callback", None)
+            if cb:
+                def _call_cb():
+                    try:
+                        cb(message, progress, lvl)
+                    except TypeError:
+                        cb(message, progress)
 
-        # 2.b envoi protégé via la file dévénements GUI pour garantir le thread-safety
-        if self.progress_callback:
-            try:
-                if (
-                    hasattr(self, "gui_event_queue")
-                    and self.gui_event_queue is not None
-                ):
-                    self.gui_event_queue.put(_invoke_cb)
+                if hasattr(self, "gui_event_queue") and self.gui_event_queue is not None:
+                    self.gui_event_queue.put(_call_cb)
                 else:
-                    _invoke_cb()
+                    _call_cb()
                 return
-            except Exception as e:
-                logger.debug(f"Error in progress callback: {e}")
+        except Exception:
+            # On se rabat sur le logger/print plus bas
+            pass
 
-        # 2.c fallback console
-        if progress is not None:
-            logger.debug(f"[{int(progress)}%] {message}")
-        else:
-            if level:
-                logger.log(getattr(logging, str(level).upper(), logging.DEBUG), message)
+        logger_obj = getattr(self, "logger", None)
+        if logger_obj is not None:
+            if progress is not None:
+                logger_obj.debug(f"[{int(progress)}%] {message}")
             else:
-                logger.debug(message)
+                if lvl == "ERROR":
+                    logger_obj.error(message)
+                elif lvl in ("WARNING", "WARN"):
+                    logger_obj.warning(message)
+                else:
+                    logger_obj.info(message)
+        else:
+            print(message)
+
 
     def _send_eta_update(self):
         """Compute and send remaining time estimation to the GUI."""
@@ -10626,25 +10631,47 @@ class SeestarQueuedStacker:
         from seestar.utils.wcs_utils import inject_sanitized_wcs
         from seestar.enhancement.reproject_utils import reproject_interp
 
+        def _safe_progress(msg, prog=None, level=None):
+            try:
+                self.update_progress(msg, prog, level)
+            except Exception:
+                pass
+
         files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
         if not files:
-            self.update_progress(
+            _safe_progress(
                 "   [BS=1] Aucun fichier 'aligned_*.fits' pour la reprojection finale.",
                 level="ERROR",
             )
             return False
 
-        infos = collect_headers(files)
+        try:
+            infos = collect_headers(files)
+        except Exception:
+            infos = None
         if not infos:
-            self.update_progress(
+            _safe_progress(
                 "   [BS=1] Impossible de construire la grille WCS globale.",
                 level="ERROR",
             )
             return False
 
-        out_wcs, shape_out = compute_final_output_grid(
-            infos, scale=1.0, auto_rotate=auto_rotate
-        )
+        try:
+            if (
+                getattr(self, "reference_wcs_object", None) is not None
+                and getattr(self, "reference_shape", None) is not None
+            ):
+                out_wcs, shape_out = self.reference_wcs_object, self.reference_shape
+            else:
+                out_wcs, shape_out = compute_final_output_grid(
+                    infos, scale=1.0, auto_rotate=auto_rotate
+                )
+        except Exception:
+            _safe_progress(
+                "   [BS=1] Impossible de construire la grille WCS globale.",
+                level="ERROR",
+            )
+            return False
         out_h, out_w = int(shape_out[0]), int(shape_out[1])
         out_hdr = out_wcs.to_header(relax=True)
 
@@ -10660,74 +10687,83 @@ class SeestarQueuedStacker:
         mm_dir = memmap_dir or tempfile.gettempdir()
         sum_path = os.path.join(mm_dir, "b1_sum_mm.dat")
         wht_path = os.path.join(mm_dir, "b1_wht_mm.dat")
-        sum_mm = np.memmap(sum_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
-        wht_mm = np.memmap(wht_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
-        sum_mm[:] = 0.0
-        wht_mm[:] = 0.0
-
-        n = len(files)
-        for i, fp in enumerate(files, 1):
-            self.update_progress(
-                f"   [BS=1] Reprojection {i}/{n}: {os.path.basename(fp)} ..."
-            )
-            with fits.open(fp, memmap=False) as hdul:
-                data = hdul[0].data
-                hdr = hdul[0].header
-            try:
-                hdr = inject_sanitized_wcs(hdr, fp) or hdr
-                wcs_in = WCS(hdr, naxis=2)
-                if not wcs_in.is_celestial:
-                    raise ValueError("WCS non céleste.")
-            except Exception as e:
-                self.update_progress(
-                    f"   [BS=1] WCS invalide pour {os.path.basename(fp)}: {e}",
-                    level="ERROR",
-                )
-                continue
-
-            if data.ndim == 2:
-                chans = data[np.newaxis, ...].astype(np.float32)
-            elif data.ndim == 3 and data.shape[0] in (1, 3, 4):
-                chans = data.astype(np.float32)
-            else:
-                chans = np.moveaxis(data, -1, 0).astype(np.float32)
-            C_run = min(C, chans.shape[0])
-
-            for c in range(C_run):
-                reproj, footprint = reproject_interp(
-                    (chans[c], wcs_in), out_wcs, shape_out, parallel=False
-                )
-                reproj = np.nan_to_num(
-                    reproj, nan=0.0, posinf=0.0, neginf=0.0
-                ).astype(np.float32)
-                f = np.asarray(footprint, dtype=np.float32)
-                sum_mm[c] += reproj * f
-                wht_mm[c] += f
-
-        eps = 1e-6
-        res = np.empty_like(sum_mm)
-        for c in range(C):
-            res[c] = sum_mm[c] / np.maximum(wht_mm[c], eps)
-        if wht_mode.lower() == "max":
-            wht_final = np.max(wht_mm, axis=0)
-        else:
-            wht_final = np.mean(wht_mm, axis=0)
-
-        hdu0 = fits.PrimaryHDU(res.astype(np.float32), header=out_hdr)
-        hdu1 = fits.ImageHDU(wht_final.astype(np.float32), name="WHT")
-        fits.HDUList([hdu0, hdu1]).writeto(out_fp, overwrite=True)
-
+        sum_mm = wht_mm = None
         try:
-            del sum_mm
-            del wht_mm
-        except Exception:
-            pass
-        for p in (sum_path, wht_path):
+            sum_mm = np.memmap(sum_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
+            wht_mm = np.memmap(wht_path, mode="w+", dtype=np.float32, shape=(C, out_h, out_w))
+            sum_mm[:] = 0.0
+            wht_mm[:] = 0.0
+
+            n = len(files)
+            for i, fp in enumerate(files, 1):
+                _safe_progress(
+                    f"   [BS=1] Reprojection {i}/{n}: {os.path.basename(fp)} ..."
+                )
+                with fits.open(fp, memmap=False) as hdul:
+                    data = hdul[0].data
+                    hdr = hdul[0].header
+                try:
+                    hdr = inject_sanitized_wcs(hdr, fp) or hdr
+                    wcs_in = WCS(hdr, naxis=2)
+                    if not wcs_in.is_celestial:
+                        raise ValueError("WCS non céleste.")
+                except Exception as e:
+                    _safe_progress(
+                        f"   [BS=1] WCS invalide pour {os.path.basename(fp)}: {e}",
+                        level="ERROR",
+                    )
+                    continue
+
+                if data.ndim == 2:
+                    chans = data[np.newaxis, ...].astype(np.float32)
+                elif data.ndim == 3 and data.shape[0] in (1, 3, 4):
+                    chans = data.astype(np.float32)
+                else:
+                    chans = np.moveaxis(data, -1, 0).astype(np.float32)
+                C_run = min(C, chans.shape[0])
+
+                for c in range(C_run):
+                    reproj, footprint = reproject_interp(
+                        (chans[c], wcs_in), out_wcs, shape_out, parallel=False
+                    )
+                    reproj = np.nan_to_num(
+                        reproj, nan=0.0, posinf=0.0, neginf=0.0
+                    ).astype(np.float32)
+                    f = np.asarray(footprint, dtype=np.float32)
+                    sum_mm[c] += reproj * f
+                    wht_mm[c] += f
+
+            eps = 1e-6
+            res = np.empty_like(sum_mm)
+            for c in range(C):
+                res[c] = sum_mm[c] / np.maximum(wht_mm[c], eps)
+            if wht_mode.lower() == "max":
+                wht_final = np.max(wht_mm, axis=0)
+            else:
+                wht_final = np.mean(wht_mm, axis=0)
+
+            hdu0 = fits.PrimaryHDU(res.astype(np.float32), header=out_hdr)
+            hdu1 = fits.ImageHDU(wht_final.astype(np.float32), name="WHT")
+            fits.HDUList([hdu0, hdu1]).writeto(out_fp, overwrite=True)
+            ok = True
+        except Exception as e:
+            _safe_progress(f"   [BS=1] Erreur finale: {e}", level="ERROR")
+            ok = False
+        finally:
             try:
-                os.remove(p)
+                if sum_mm is not None:
+                    del sum_mm
+                if wht_mm is not None:
+                    del wht_mm
             except Exception:
                 pass
-        return True
+            for p in (sum_path, wht_path):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+        return ok
 
     def _final_reproject_coadd_batch1(self, match_background=False):
         from seestar.enhancement import reproject_utils as ru
