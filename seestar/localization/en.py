@@ -41,6 +41,8 @@ EN_TRANSLATIONS = {
     "kappa_value": "Kappa:",
     "batch_size": "Batch Size:",
     "batch_size_auto": "(0=auto)",  # Gardé même si 0 n'est plus auto pour compatibilité affichage
+    "enable_boring_thread": "Threaded Boring Stack",
+    "tooltip_enable_boring_thread": "Runs boring_stack.py in a background thread and sets batch size to 0.",
     "hot_pixels_correction": "Hot Pixel Correction",
     "perform_hot_pixels_correction": "Correct hot pixels",
     "hot_pixel_threshold": "Threshold:",
@@ -53,9 +55,10 @@ EN_TRANSLATIONS = {
     "norm_method_sky_mean": "Sky Mean Subtraction",
     "stacking_weight_method_label": "Weighting:",
     "weight_method_none": "None",
+    "weight_method_snr": "SNR",
+    "weight_method_stars": "Stars",
     "weight_method_noise_variance": "Noise Variance (1/σ²)",
     "weight_method_noise_fwhm": "Noise + FWHM",
-    "weight_method_quality": "Quality (SNR & Stars)",
     "reject_algo_kappa_sigma": "Kappa-Sigma Clip",
     "reject_algo_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "reject_algo_linear_fit_clip": "Linear Fit Clip",
@@ -391,5 +394,6 @@ EN_TRANSLATIONS = {
     "use_best_reference_button": "Use Recommended Reference",
     "status_label": "Status:",
     "apply_snr_rejection": "Apply SNR Rejection",
+    "stack_plan_missing_file_error": "File listed in stack_plan.csv not found:\n{path}",
 }
 # --- END OF FILE seestar/localization/en.py ---

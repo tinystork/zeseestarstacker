@@ -1,8 +1,21 @@
 # Stacking algorithms duplicated from ZeMosaic
 
+import os
 import numpy as np
 import logging
 from typing import Optional, Sequence, Tuple
+
+USE_SCIPY_WINSOR = os.getenv("SEESTAR_USE_SCIPY_WINSOR", "0") == "1"
+if USE_SCIPY_WINSOR:
+    try:
+        from scipy.stats.mstats import winsorize as _scipy_winsorize
+        SCIPY_AVAILABLE = True
+    except Exception:  # pragma: no cover - optional dependency
+        _scipy_winsorize = None
+        SCIPY_AVAILABLE = False
+else:  # Prefer the NumPy fallback for better performance
+    _scipy_winsorize = None
+    SCIPY_AVAILABLE = False
 
 
 try:  # optional acceleration
@@ -15,6 +28,37 @@ NANSTD = bn.nanstd if bn else np.nanstd
 
 
 logger = logging.getLogger(__name__)
+
+
+def _winsorize_axis0_numpy(arr: np.ndarray, limits: Tuple[float, float]) -> np.ndarray:
+    """Vectorized winsorization along the first axis using NumPy.
+
+    This replicates the behaviour of ``scipy.stats.mstats.winsorize`` with
+    ``inclusive=(False, False)`` which matches the default of SciPy. The
+    implementation is significantly faster for large arrays than the SciPy
+    version which relies on ``apply_along_axis``.
+    """
+
+    low, high = limits
+    arr = arr.astype(np.float32, copy=False)
+    result = arr.copy()
+
+    n = arr.shape[0]
+    order = np.argsort(arr, axis=0)
+
+    if low > 0:
+        lowidx = int(round(low * n))
+        low_values = np.take_along_axis(arr, order, axis=0)[lowidx]
+        idx = order[:lowidx]
+        np.put_along_axis(result, idx, low_values, axis=0)
+
+    if high > 0:
+        upidx = n - int(round(high * n))
+        up_values = np.take_along_axis(arr, order, axis=0)[upidx - 1]
+        idx = order[upidx:]
+        np.put_along_axis(result, idx, up_values, axis=0)
+
+    return result
 
 
 def _stack_mean(images, weights=None):
@@ -88,7 +132,7 @@ def _stack_winsorized_sigma_iter(
     apply_rewinsor: bool = True,
     max_iters: int = 5,
     kappa_decay: float = 0.9,
-    max_mem_bytes: int = 2_000_000_000,
+    max_mem_bytes: int = int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000)),
 ) -> Tuple[np.ndarray, float]:
 
     """Iterative Winsorized sigma clipping.
@@ -114,7 +158,8 @@ def _stack_winsorized_sigma_iter(
         Multiplicative decay for ``kappa`` at each iteration.
 
     max_mem_bytes : int, optional
-        Abort if stacking would exceed this memory usage.
+        Abort if stacking would exceed this memory usage. Defaults to the value
+        of the ``SEESTAR_MAX_MEM`` environment variable (2 GB if unset).
 
     Returns
     -------
@@ -141,9 +186,6 @@ def _stack_winsorized_sigma_iter(
         apply_rewinsor,
     )
 
-    from scipy.stats.mstats import winsorize
-
-
     shape = images[0].shape
     exp_bytes = len(images) * np.prod(shape) * 4
     if exp_bytes > max_mem_bytes:
@@ -155,9 +197,13 @@ def _stack_winsorized_sigma_iter(
     kappa_iter = float(kappa)
 
     for itr in range(max_iters):
-        arr_masked = np.ma.array(arr, mask=~mask)
-        arr_w = winsorize(arr_masked, limits=winsor_limits, axis=0)
-        arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
+        if SCIPY_AVAILABLE:
+            arr_masked = np.ma.array(arr, mask=~mask)
+            arr_w = _scipy_winsorize(arr_masked, limits=winsor_limits, axis=0)
+            arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
+        else:
+            arr_masked = np.where(mask, arr, np.nan)
+            arr_w_data = _winsorize_axis0_numpy(arr_masked, winsor_limits)
 
         mu_w = NANMEAN(arr_w_data, axis=0)
         sigma_w = NANSTD(arr_w_data, axis=0, ddof=1)
@@ -178,9 +224,13 @@ def _stack_winsorized_sigma_iter(
         if kappa_decay < 1.0:
             kappa_iter = kappa * (kappa_decay ** (itr + 1))
 
-    arr_masked = np.ma.array(arr, mask=~mask)
-    arr_w_final = winsorize(arr_masked, limits=winsor_limits, axis=0)
-    arr_w_final = np.asarray(arr_w_final.filled(np.nan), dtype=np.float32)
+    if SCIPY_AVAILABLE:
+        arr_masked = np.ma.array(arr, mask=~mask)
+        arr_w_final = _scipy_winsorize(arr_masked, limits=winsor_limits, axis=0)
+        arr_w_final = np.asarray(arr_w_final.filled(np.nan), dtype=np.float32)
+    else:
+        arr_masked = np.where(mask, arr, np.nan)
+        arr_w_final = _winsorize_axis0_numpy(arr_masked, winsor_limits)
 
     arr_nan = np.where(mask, arr, np.nan)
     if apply_rewinsor:
@@ -218,6 +268,7 @@ def _stack_winsorized_sigma(
     kappa: float = 3.0,
     winsor_limits: Tuple[float, float] = (0.05, 0.05),
     apply_rewinsor: bool = True,
+    max_mem_bytes: Optional[int] = None,
 ) -> Tuple[np.ndarray, float]:
     """Compatibility wrapper for iterative Winsorized sigma clipping."""
     return _stack_winsorized_sigma_iter(
@@ -226,5 +277,8 @@ def _stack_winsorized_sigma(
         kappa=kappa,
         winsor_limits=winsor_limits,
         apply_rewinsor=apply_rewinsor,
+        max_mem_bytes=max_mem_bytes
+        if max_mem_bytes is not None
+        else int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000)),
     )
 

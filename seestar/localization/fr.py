@@ -40,6 +40,8 @@ FR_TRANSLATIONS = {
     "kappa_value": "Kappa :",
     "batch_size": "Taille Lot :",
     "batch_size_auto": "(0=auto)",  # Gardé pour affichage
+    "enable_boring_thread": "Empilement Boring en Thread",
+    "tooltip_enable_boring_thread": "Lance boring_stack.py en arrière-plan et force batch_size à 0.",
     "hot_pixels_correction": "Correction Pixels Chauds",
     "perform_hot_pixels_correction": "Corriger pixels chauds",
     "hot_pixel_threshold": "Seuil :",
@@ -53,9 +55,10 @@ FR_TRANSLATIONS = {
     "norm_method_sky_mean": "Soustraction Fond Ciel Moyen",
     "stacking_weight_method_label": "Pondération :",
     "weight_method_none": "Aucune",
+    "weight_method_snr": "SNR",
+    "weight_method_stars": "Étoiles",
     "weight_method_noise_variance": "Variance Bruit (1/σ²)",
     "weight_method_noise_fwhm": "Bruit + FWHM",
-    "weight_method_quality": "Qualité (SNR+Étoiles)",
     "reject_algo_kappa_sigma": "Kappa-Sigma Clip",
     "reject_algo_winsorized_sigma_clip": "Winsorized Sigma Clip",
     "reject_algo_linear_fit_clip": "Linear Fit Clip",
@@ -390,5 +393,6 @@ FR_TRANSLATIONS = {
         "- L'aperçu en direct montrera un stack classique ; le Drizzle sera appliqué à la toute fin.\n\n",
         "Continuer avec Drizzle ?",
     ),
+    "stack_plan_missing_file_error": "Fichier indique dans stack_plan.csv introuvable :\n{path}",
 }
 # --- END OF FILE seestar/localization/fr.py ---

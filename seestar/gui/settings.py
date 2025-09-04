@@ -13,6 +13,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Default tile height used when stacking with disk-backed memmaps.
+TILE_HEIGHT = 512
+
 
 class SettingsManager:
     """
@@ -158,18 +161,17 @@ class SettingsManager:
                     )
                 ),
             ).get()
-            if getattr(gui_instance, "reproject_between_batches_var", tk.BooleanVar()).get():
-                self.stack_final_combine = "reproject"
-            elif getattr(gui_instance, "reproject_coadd_var", tk.BooleanVar()).get():
-                self.stack_final_combine = "reproject_coadd"
-            else:
-                self.stack_final_combine = getattr(
-                    gui_instance,
-                    "stack_final_combine_var",
-                    tk.StringVar(
-                        value=default_values_from_code.get("stack_final_combine", "reproject_coadd")
-                    ),
-                ).get()
+            self.stack_final_combine = getattr(
+                gui_instance,
+                "stack_final_combine_var",
+                tk.StringVar(
+                    value=default_values_from_code.get("stack_final_combine", "mean")
+                ),
+            ).get()
+            self.reproject_between_batches = self.stack_final_combine == "reproject"
+            self.reproject_coadd_final = (
+                self.stack_final_combine == "reproject_coadd"
+            )
             self.stack_method = getattr(
                 gui_instance,
                 "stack_method_var",
@@ -616,6 +618,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NEW: read boring thread mode ---
+            self.boring_thread_mode = getattr(
+                gui_instance,
+                "boring_thread_var",
+                tk.BooleanVar(value=default_values_from_code.get("boring_thread_mode", False)),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): boring_thread_mode lu (attribut UI ou défaut): {self.boring_thread_mode}"
+            )
+            # --- END NEW ---
+
             self.mosaic_mode_active = bool(
                 getattr(
                     gui_instance,
@@ -681,26 +694,6 @@ class SettingsManager:
                 "astrometry_solve_field_dir",
                 default_values_from_code.get("astrometry_solve_field_dir", ""),
             )
-
-            self.reproject_between_batches = getattr(
-                gui_instance,
-                "reproject_between_batches_var",
-                tk.BooleanVar(
-                    value=default_values_from_code.get(
-                        "reproject_between_batches", False
-                    )
-                ),
-            ).get()
-
-            self.reproject_coadd_final = getattr(
-                gui_instance,
-                "reproject_coadd_var",
-                tk.BooleanVar(
-                    value=default_values_from_code.get(
-                        "reproject_coadd_final", False
-                    )
-                ),
-            ).get()
 
             # In classic stacking mode this option defaults to disabled unless
             # the user explicitly checked the box in the Local Solver window.
@@ -807,6 +800,8 @@ class SettingsManager:
             getattr(gui_instance, "stacking_winsor_limits_str_var", tk.StringVar()).set(
                 self.stack_winsor_limits
             )
+            if getattr(self, "reproject_coadd_final", False):
+                self.stack_final_combine = "reproject_coadd"
             getattr(gui_instance, "stack_final_combine_var", tk.StringVar()).set(
                 self.stack_final_combine
             )
@@ -1101,6 +1096,17 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- NEW: Apply boring thread mode ---
+            getattr(gui_instance, "boring_thread_var", tk.BooleanVar()).set(
+                self.boring_thread_mode
+            )
+            if hasattr(gui_instance, "_toggle_boring_thread"):
+                gui_instance._toggle_boring_thread()
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): boring_thread_mode appliqué à l'UI (valeur: {self.boring_thread_mode})"
+            )
+            # --- END NEW ---
+
             getattr(gui_instance, "preview_stretch_method", tk.StringVar()).set(
                 self.preview_stretch_method
             )
@@ -1220,6 +1226,8 @@ class SettingsManager:
         defaults_dict["temp_folder"] = ""
         defaults_dict["bayer_pattern"] = "GRBG"
         defaults_dict["batch_size"] = 0
+        defaults_dict["order_csv_path"] = ""
+        defaults_dict["order_file_list"] = []
         defaults_dict["stacking_mode"] = "kappa-sigma"
         defaults_dict["kappa"] = 2.5
         defaults_dict["stack_norm_method"] = "none"
@@ -1228,8 +1236,8 @@ class SettingsManager:
         defaults_dict["stack_kappa_low"] = 3.0
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
-        # Default to Reproject & Coadd for final combine
-        defaults_dict["stack_final_combine"] = "reproject_coadd"
+        # Default final combination method
+        defaults_dict["stack_final_combine"] = "mean"
         defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
@@ -1297,6 +1305,13 @@ class SettingsManager:
         )
         # --- FIN NOUVEAU ---
 
+        # --- NEW: boring thread mode default ---
+        defaults_dict["boring_thread_mode"] = False
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'boring_thread_mode'={defaults_dict['boring_thread_mode']}"
+        )
+        # --- END NEW ---
+
         # --- NOUVEAU : Préserver la sortie linéaire ---
         defaults_dict["preserve_linear_output"] = False
         logger.debug(
@@ -1334,8 +1349,8 @@ class SettingsManager:
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
-        # Default to "Reproject & Coadd" for the final combine option
-        defaults_dict["reproject_coadd_final"] = True
+        # Enable final reproject+coadd only when explicitly requested
+        defaults_dict["reproject_coadd_final"] = False
 
         defaults_dict["mosaic_mode_active"] = False
         defaults_dict["mosaic_settings"] = {
@@ -1510,7 +1525,7 @@ class SettingsManager:
                 )
                 self.stack_norm_method = defaults_fallback["stack_norm_method"]
 
-            valid_weight_methods = ["none", "noise_variance", "noise_fwhm", "quality"]
+            valid_weight_methods = ["none", "noise_variance", "noise_fwhm", "snr", "stars"]
             self.stack_weight_method = str(
                 getattr(
                     self,
@@ -2190,6 +2205,22 @@ class SettingsManager:
                 self.use_third_party_solver = current_use_solver_val
             # --- FIN NOUVEAU ---
 
+            # --- NEW: Validation of boring_thread_mode ---
+            logger.debug("    -> Validating boring_thread_mode...")
+            current_boring_val = getattr(
+                self,
+                "boring_thread_mode",
+                defaults_fallback["boring_thread_mode"],
+            )
+            if not isinstance(current_boring_val, bool):
+                messages.append(
+                    f"Option 'Boring Thread Mode' ('{current_boring_val}') invalide, réinitialisée à {defaults_fallback['boring_thread_mode']}."
+                )
+                self.boring_thread_mode = defaults_fallback["boring_thread_mode"]
+            else:
+                self.boring_thread_mode = current_boring_val
+            # --- END NEW ---
+
             logger.debug("    -> Validating reproject_coadd_final...")
             current_rc_val = getattr(
                 self,
@@ -2434,7 +2465,7 @@ class SettingsManager:
         MODIFIED: Ajout de save_final_as_float32.
         """
         settings_data = {
-            "version": "6.0.0",  # Version mise à jour pour refléter l'ajout
+            "version": "6.2.0 Boring",  # Version mise à jour pour refléter l'ajout
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             "input_folder": str(self.input_folder),
             "output_folder": str(self.output_folder),
@@ -2455,6 +2486,8 @@ class SettingsManager:
             "max_hq_mem_gb": float(self.max_hq_mem_gb),
             "stack_method": str(self.stack_method),
             "batch_size": int(self.batch_size),
+            "order_csv_path": str(getattr(self, "order_csv_path", "")),
+            "order_file_list": list(getattr(self, "order_file_list", [])),
             "correct_hot_pixels": bool(self.correct_hot_pixels),
             "hot_pixel_threshold": float(self.hot_pixel_threshold),
             "neighborhood_size": int(self.neighborhood_size),
@@ -2540,6 +2573,11 @@ class SettingsManager:
                 getattr(self, "use_third_party_solver", True)
             ),
             # --- FIN NOUVEAU ---
+            # --- NEW: Save boring thread mode ---
+            "boring_thread_mode": bool(
+                getattr(self, "boring_thread_mode", False)
+            ),
+            # --- END NEW ---
             "local_solver_preference": str(
                 getattr(self, "local_solver_preference", "none")
             ),
@@ -2779,6 +2817,20 @@ class SettingsManager:
             "DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Fin de la méthode load_settings."
         )
         return True
+
+    @property
+    def tile_height(self):
+        return TILE_HEIGHT
+
+    @property
+    def winsor_limits(self):
+        try:
+            parts = [float(x.strip()) for x in str(self.stack_winsor_limits).split(',')]
+            if len(parts) == 2:
+                return (parts[0], parts[1])
+        except Exception:
+            pass
+        return (0.05, 0.05)
 
     # Fin settings.py
 

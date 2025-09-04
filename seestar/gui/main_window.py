@@ -8,11 +8,19 @@ import gc
 import logging
 import math
 import os
+import csv
 import platform  # NOUVEL import
-import subprocess  # NOUVEL import
+import subprocess, shutil, sys
+
+# Import psutil lazily for automatic chunk size estimation
+try:
+    import psutil
+    _psutil_available = True
+except Exception:
+    psutil = None
+    _psutil_available = False
 
 # --- NOUVEAUX IMPORTS SPÉCIFIQUES POUR LE LANCEUR ---
-import sys  # Pour sys.executable
 
 # ----------------------------------------------------
 import tempfile  # <-- AJOUTÉ
@@ -20,9 +28,11 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import re
 from pathlib import Path
 from tkinter import font as tkFont
 from tkinter import messagebox, ttk
+from queue import Empty
 
 import numpy as np
 from astropy.io import fits
@@ -35,8 +45,21 @@ from ..queuep.queue_manager import (
 )
 
 from .ui_utils import ToolTip
+from .boring_stack import read_paths
+
 
 logger = logging.getLogger(__name__)
+
+
+def _to_slug(gui_value: str) -> str:
+    m = {
+        "Reproject and coadd": "reproject_coadd",
+        "Reproject": "reproject",
+        "Mean": "mean",
+        "Reject": "reject",
+        "None": "none",
+    }
+    return m.get(gui_value, gui_value.strip().lower())
 
 logger.debug("-" * 20)
 logger.debug("Tentative d'importation de SeestarQueuedStacker...")
@@ -97,9 +120,7 @@ except ImportError as tool_err:
             data_c = np.maximum(data_s, 0.0)
             max_v = np.nanmax(data_c)
             den = np.arcsinh(scale * max_v)
-            return (
-                np.arcsinh(scale * data_c) / den if den > 1e-6 else np.zeros_like(data)
-            )
+            return np.arcsinh(scale * data_c) / den if den > 1e-6 else np.zeros_like(data)
 
         @staticmethod
         def logarithmic(data, scale=1.0, bp=0.0):
@@ -150,9 +171,7 @@ class SeestarStackerGUI:
         # Créer un nom de logger unique basé sur l'ID de l'objet pour éviter les conflits
         # si plusieurs instances étaient créées (bien que peu probable pour une GUI principale).
         self.logger = logging.getLogger(f"SeestarStackerGUI_{id(self)}")
-        self.logger.setLevel(
-            logging.DEBUG
-        )  # Capturer tous les niveaux de logs pour ce logger
+        self.logger.setLevel(logging.DEBUG)  # Capturer tous les niveaux de logs pour ce logger
 
         # Déterminer le chemin du fichier log (à côté de main_window.py)
         try:
@@ -160,9 +179,7 @@ class SeestarStackerGUI:
             gui_module_dir = os.path.dirname(os.path.abspath(__file__))
             log_file_name = "seestar_gui_debug.log"
             log_file_path = os.path.join(gui_module_dir, log_file_name)
-        except (
-            NameError
-        ):  # Au cas où __file__ ne serait pas défini (très rare pour un module)
+        except NameError:  # Au cas où __file__ ne serait pas défini (très rare pour un module)
             log_file_path = "seestar_gui_debug.log"  # Fallback dans le dossier courant
             gui_module_dir = "."  # Pour le message de log
 
@@ -174,8 +191,7 @@ class SeestarStackerGUI:
             if (
                 isinstance(handler, logging.FileHandler)
                 and hasattr(handler, "baseFilename")
-                and os.path.normpath(handler.baseFilename)
-                == os.path.normpath(log_file_path)
+                and os.path.normpath(handler.baseFilename) == os.path.normpath(log_file_path)
             ):
                 handler_exists = True
                 break
@@ -191,31 +207,23 @@ class SeestarStackerGUI:
                 )
                 fh.setFormatter(formatter)
                 self.logger.addHandler(fh)
-                self.logger.propagate = False  # Empêcher les messages de remonter au logger root si d'autres configs existent
-                self.logger.info(
-                    f"Logger pour SeestarStackerGUI initialisé. Logs dans: {log_file_path}"
+                self.logger.propagate = (
+                    False  # Empêcher les messages de remonter au logger root si d'autres configs existent
                 )
+                self.logger.info(f"Logger pour SeestarStackerGUI initialisé. Logs dans: {log_file_path}")
             except Exception as e_log_init:
                 # Si la création du logger échoue, on ne peut pas utiliser self.logger, donc print.
-                print(
-                    f"ERREUR CRITIQUE: Impossible d'initialiser le FileHandler pour le logger: {e_log_init}"
-                )
-                print(
-                    f"  Les logs de SeestarStackerGUI ne seront pas écrits dans '{log_file_path}'."
-                )
+                print(f"ERREUR CRITIQUE: Impossible d'initialiser le FileHandler pour le logger: {e_log_init}")
+                print(f"  Les logs de SeestarStackerGUI ne seront pas écrits dans '{log_file_path}'.")
                 # On peut créer un logger "nul" pour éviter des AttributeError plus tard,
                 # mais les logs ne seront pas sauvegardés.
                 self.logger = logging.getLogger("SeestarStackerGUI_Null")
                 self.logger.addHandler(logging.NullHandler())
         else:
-            self.logger.info(
-                f"FileHandler pour {log_file_path} existe déjà pour ce logger. Pas de nouvel ajout."
-            )
+            self.logger.info(f"FileHandler pour {log_file_path} existe déjà pour ce logger. Pas de nouvel ajout.")
         # --- FIN CONFIGURATION LOGGER DE BASE ---
 
-        self.logger.info(
-            "DEBUG (GUI __init__): Initialisation SeestarStackerGUI..."
-        )  # Maintenant self.logger existe
+        self.logger.info("DEBUG (GUI __init__): Initialisation SeestarStackerGUI...")  # Maintenant self.logger existe
         self.logger.info(
             f"DEBUG (GUI __init__): Reçu initial_input_dir='{initial_input_dir}', stack_immediately_from='{stack_immediately_from}'"
         )
@@ -226,13 +234,9 @@ class SeestarStackerGUI:
                 icon_image = Image.open(icon_path)
                 self.tk_icon = ImageTk.PhotoImage(icon_image)
                 self.root.iconphoto(True, self.tk_icon)
-                self.logger.info(
-                    f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}"
-                )
+                self.logger.info(f"DEBUG (GUI __init__): Icone chargée depuis: {icon_path}")
             else:
-                self.logger.warning(
-                    f"Warning: Icon file not found at: {icon_path}. Using default icon."
-                )
+                self.logger.warning(f"Warning: Icon file not found at: {icon_path}. Using default icon.")
         except Exception as e:
             self.logger.error(f"Error loading or setting window icon: {e}")
 
@@ -248,17 +252,13 @@ class SeestarStackerGUI:
             if "settings" in qs_init_params:
                 self.queued_stacker = SeestarQueuedStacker(settings=self.settings)
             else:
-                self.logger.debug(
-                    "SeestarQueuedStacker.__init__ ne supporte pas le param\u00e8tre 'settings'."
-                )
+                self.logger.debug("SeestarQueuedStacker.__init__ ne supporte pas le param\u00e8tre 'settings'.")
                 self.queued_stacker = SeestarQueuedStacker()
                 # Tenter d'attacher les settings manuellement
                 if hasattr(self.queued_stacker, "settings"):
                     self.queued_stacker.settings = self.settings
         except Exception as init_err:
-            self.logger.error(
-                "Erreur lors de l'initialisation de SeestarQueuedStacker: %s", init_err
-            )
+            self.logger.error("Erreur lors de l'initialisation de SeestarQueuedStacker: %s", init_err)
             self.queued_stacker = SeestarQueuedStacker()
             if hasattr(self.queued_stacker, "settings"):
                 self.queued_stacker.settings = self.settings
@@ -278,20 +278,14 @@ class SeestarStackerGUI:
         # Track when histogram range should be refreshed from sliders
         self._hist_range_update_pending = False
         self.mosaic_mode_active = False
-        self.logger.info(
-            "DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False."
-        )
+        self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active initialisé à False.")
         self.mosaic_settings = {}
-        self.logger.info(
-            "DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés."
-        )
+        self.logger.info("DEBUG (GUI __init__): Flag self.mosaic_mode_active et dict self.mosaic_settings initialisés.")
 
         # Load shared configuration used by mosaic and solver settings dialogs
         try:
             self.config = zemosaic_config.load_config()
-            self.logger.info(
-                "DEBUG (GUI __init__): Configuration chargée depuis zemosaic_config."
-            )
+            self.logger.info("DEBUG (GUI __init__): Configuration chargée depuis zemosaic_config.")
         except Exception as e:
             self.logger.error(f"Error loading configuration: {e}")
             self.config = {}
@@ -306,9 +300,7 @@ class SeestarStackerGUI:
         self.stars_exponent_var = tk.DoubleVar(value=0.5)
         self.min_weight_var = tk.DoubleVar(value=0.1)
 
-        self._final_stretch_set_by_processing_finished = (
-            False  # <--- C'EST LA LIGNE DE LA MÉTHODE 2
-        )
+        self._final_stretch_set_by_processing_finished = False  # <--- C'EST LA LIGNE DE LA MÉTHODE 2
 
         self.init_variables()
         self.last_stack_path.trace_add("write", self._on_last_stack_changed)
@@ -316,9 +308,7 @@ class SeestarStackerGUI:
         self.settings.load_settings()
         self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
-        self.logger.info(
-            f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'."
-        )
+        self.logger.info(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.")
         self.logger.info(
             f"DEBUG (GUI __init__): Valeur de self.settings.astrometry_api_key APRES load_settings: '{self.settings.astrometry_api_key}' (longueur: {len(self.settings.astrometry_api_key)})"
         )
@@ -326,30 +316,16 @@ class SeestarStackerGUI:
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
-        self.auto_zoom_histogram_var.trace_add(
-            "write", self._update_histogram_autozoom_state
-        )
+        self.auto_zoom_histogram_var.trace_add("write", self._update_histogram_autozoom_state)
         self.initial_auto_stretch_done = False
 
-        if (
-            stack_immediately_from
-            and isinstance(stack_immediately_from, str)
-            and os.path.isdir(stack_immediately_from)
-        ):
-            self.logger.info(
-                f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}"
-            )
+        if stack_immediately_from and isinstance(stack_immediately_from, str) and os.path.isdir(stack_immediately_from):
+            self.logger.info(f"INFO (GUI __init__): Stacking immédiat demandé pour: {stack_immediately_from}")
             self.input_path.set(stack_immediately_from)
             self._folder_for_immediate_stack = stack_immediately_from
             self._trigger_immediate_stack = True
-            self.logger.info(
-                f"DEBUG (GUI __init__): Flag _trigger_immediate_stack mis à True."
-            )
-        elif (
-            initial_input_dir
-            and isinstance(initial_input_dir, str)
-            and os.path.isdir(initial_input_dir)
-        ):
+            self.logger.info(f"DEBUG (GUI __init__): Flag _trigger_immediate_stack mis à True.")
+        elif initial_input_dir and isinstance(initial_input_dir, str) and os.path.isdir(initial_input_dir):
             self.logger.info(
                 f"INFO (GUI __init__): Pré-remplissage dossier entrée depuis argument: {initial_input_dir}"
             )
@@ -375,22 +351,17 @@ class SeestarStackerGUI:
         if hasattr(self, "_update_spinbox_from_float"):
             self._update_spinbox_from_float()
         self._update_drizzle_options_state()
+        self._toggle_boring_thread()
         self._update_show_folders_button_state()
         self.update_ui_language()
 
         self.logger.info("--------------------")
-        self.logger.info(
-            "DEBUG MW __init__: Vérification de self.queued_stacker.set_preview_callback AVANT appel..."
-        )
-        if hasattr(self.queued_stacker, "set_preview_callback") and callable(
-            self.queued_stacker.set_preview_callback
-        ):
+        self.logger.info("DEBUG MW __init__: Vérification de self.queued_stacker.set_preview_callback AVANT appel...")
+        if hasattr(self.queued_stacker, "set_preview_callback") and callable(self.queued_stacker.set_preview_callback):
             import inspect
 
             try:
-                source_lines, start_line = inspect.getsourcelines(
-                    self.queued_stacker.set_preview_callback
-                )
+                source_lines, start_line = inspect.getsourcelines(self.queued_stacker.set_preview_callback)
                 self.logger.info(
                     f"  Source de self.queued_stacker.set_preview_callback (ligne de début: {start_line}):"
                 )
@@ -417,8 +388,18 @@ class SeestarStackerGUI:
             )
         self.logger.info("--------------------")
 
-        self.queued_stacker.set_progress_callback(self.update_progress_gui)
-        self.queued_stacker.set_preview_callback(self.update_preview_from_stacker)
+        self.gui_event_queue = self.queued_stacker.gui_event_queue
+        self.queued_stacker.set_progress_callback(
+            lambda m, p=None: self.gui_event_queue.put(
+                lambda mm=m, pp=p: self.update_progress_gui(mm, pp)
+            )
+        )
+        self.queued_stacker.set_preview_callback(
+            lambda *a, **k: self.gui_event_queue.put(
+                lambda aa=a, kk=k: self.update_preview_from_stacker(*aa, **kk)
+            )
+        )
+        self._poll_gui_events()
         self.logger.info("DEBUG (GUI __init__): Callbacks backend connectés.")
 
         self.root.title(f"{self.tr('title')}  –  {self.app_version}")
@@ -444,16 +425,12 @@ class SeestarStackerGUI:
         self.update_additional_folders_display()
 
         if self._trigger_immediate_stack:
-            self.logger.info(
-                "DEBUG (GUI __init__): Planification du lancement immédiat via after(500, ...)."
-            )
+            self.logger.info("DEBUG (GUI __init__): Planification du lancement immédiat via after(500, ...).")
             self.root.after(500, self._start_immediate_stack)
         else:
             self.logger.info("DEBUG (GUI __init__): Pas de stacking immédiat demandé.")
 
-        self.logger.info(
-            "DEBUG (GUI __init__): Initialisation SeestarStackerGUI terminée."
-        )
+        self.logger.info("DEBUG (GUI __init__): Initialisation SeestarStackerGUI terminée.")
 
     # --- DANS LA CLASSE SeestarStackerGUI ---
     # (Ajoutez cette méthode, par exemple après __init__ ou près de start_processing)
@@ -472,9 +449,7 @@ class SeestarStackerGUI:
             # Assurer que le dossier d'entrée dans l'UI correspond bien
             # (Normalement déjà fait dans __init__, mais sécurité supplémentaire)
             current_ui_input = self.input_path.get()
-            if os.path.normpath(current_ui_input) != os.path.normpath(
-                self._folder_for_immediate_stack
-            ):
+            if os.path.normpath(current_ui_input) != os.path.normpath(self._folder_for_immediate_stack):
                 print(
                     f"AVERTISSEMENT (GUI): Dossier UI ({current_ui_input}) ne correspond pas au dossier demandé ({self._folder_for_immediate_stack}). Mise à jour UI."
                 )
@@ -483,12 +458,8 @@ class SeestarStackerGUI:
 
             # Vérifier si le dossier de sortie est défini, sinon, suggérer un défaut
             if not self.output_path.get():
-                default_output = os.path.join(
-                    self._folder_for_immediate_stack, "stack_output"
-                )
-                print(
-                    f"INFO (GUI): Dossier de sortie non défini, utilisation défaut: {default_output}"
-                )
+                default_output = os.path.join(self._folder_for_immediate_stack, "stack_output")
+                print(f"INFO (GUI): Dossier de sortie non défini, utilisation défaut: {default_output}")
                 self.output_path.set(default_output)
                 # Il faudra peut-être créer ce dossier dans start_processing
 
@@ -510,9 +481,7 @@ class SeestarStackerGUI:
         Initialise les variables Tkinter.
         MODIFIED: Ajout de save_as_float32_var.
         """
-        print(
-            "DEBUG (GUI init_variables V_SaveAsFloat32_1): Initialisation des variables Tkinter..."
-        )  # Version Log
+        print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Initialisation des variables Tkinter...")  # Version Log
 
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
@@ -533,13 +502,15 @@ class SeestarStackerGUI:
         self.stack_norm_method_var = tk.StringVar(value="none")
         self.stack_weight_method_var = tk.StringVar(value="none")
         self.stack_reject_algo_var = tk.StringVar(value="kappa_sigma")
-        # Default final combine to "Reproject & Coadd"
-        self.stack_final_combine_var = tk.StringVar(value="reproject_coadd")
+        # Default final combine method
+        self.stack_final_combine_var = tk.StringVar(value="mean")
         self.stacking_kappa_low_var = tk.DoubleVar(value=3.0)
         self.stacking_kappa_high_var = tk.DoubleVar(value=3.0)
         self.stacking_winsor_limits_str_var = tk.StringVar(value="0.05,0.05")
         self.max_hq_mem_var = tk.DoubleVar(value=8)
         self.batch_size = tk.IntVar(value=10)
+        self.batch_size.trace_add("write", self._on_batch_size_changed)
+        self.boring_thread_var = tk.BooleanVar(value=False)
         self.correct_hot_pixels = tk.BooleanVar(value=True)
         self.hot_pixel_threshold = tk.DoubleVar(value=3.0)
         self.neighborhood_size = tk.IntVar(value=5)
@@ -566,18 +537,10 @@ class SeestarStackerGUI:
         self.preview_saturation = tk.DoubleVar(value=1.0)
 
         self.language_var = tk.StringVar(value="en")
-        self.remaining_files_var = tk.StringVar(
-            value=self.tr("no_files_waiting", default="No files waiting")
-        )
-        self.additional_folders_var = tk.StringVar(
-            value=self.tr("no_additional_folders", default="None")
-        )
-        default_aligned_fmt = self.tr(
-            "aligned_files_label_format", default="Aligned: {count}"
-        )
-        self.aligned_files_var = tk.StringVar(
-            value=default_aligned_fmt.format(count="--")
-        )
+        self.remaining_files_var = tk.StringVar(value=self.tr("no_files_waiting", default="No files waiting"))
+        self.additional_folders_var = tk.StringVar(value=self.tr("no_additional_folders", default="None"))
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+        self.aligned_files_var = tk.StringVar(value=default_aligned_fmt.format(count="--"))
         self.remaining_time_var = tk.StringVar(value="--:--:--")
         self.elapsed_time_var = tk.StringVar(value="00:00:00")
         self._after_id_resize = None
@@ -613,9 +576,7 @@ class SeestarStackerGUI:
         self.apply_cb_var = tk.BooleanVar(value=True)
         self.apply_final_crop_var = tk.BooleanVar(value=True)
 
-        print(
-            "DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées."
-        )
+        print("DEBUG (GUI init_variables): Variables Onglet Expert (BN, CB, Crop) créées.")
 
         self.apply_photutils_bn_var = tk.BooleanVar(value=False)
         self.photutils_bn_box_size_var = tk.IntVar(value=128)
@@ -626,13 +587,9 @@ class SeestarStackerGUI:
         self.apply_feathering_var = tk.BooleanVar(value=False)
         self.feather_blur_px_var = tk.IntVar(value=256)
         self.apply_batch_feathering_var = tk.BooleanVar(value=True)
-        print(
-            "DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var)."
-        )
+        print("DEBUG (GUI init_variables): Variables Feathering créées (apply_feathering_var, feather_blur_px_var).")
 
-        print(
-            "DEBUG (GUI init_variables): Variables pour Photutils Background Subtraction créées."
-        )
+        print("DEBUG (GUI init_variables): Variables pour Photutils Background Subtraction créées.")
 
         self.apply_low_wht_mask_var = tk.BooleanVar(value=False)
         self.low_wht_pct_var = tk.IntVar(value=5)
@@ -640,9 +597,7 @@ class SeestarStackerGUI:
         print("DEBUG (GUI init_variables): Variables Low WHT Mask créées.")
 
         # --- NOUVELLE VARIABLE TKINTER POUR L'OPTION DE SAUVEGARDE ---
-        self.save_as_float32_var = tk.BooleanVar(
-            value=False
-        )  # Défaut à False (donc uint16)
+        self.save_as_float32_var = tk.BooleanVar(value=False)  # Défaut à False (donc uint16)
         print(
             f"DEBUG (GUI init_variables): Variable save_as_float32_var créée (valeur initiale: {self.save_as_float32_var.get()})."
         )
@@ -655,17 +610,15 @@ class SeestarStackerGUI:
             f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
         )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
-        # Default final combine selection is "Reproject & Coadd"
-        self.reproject_coadd_var = tk.BooleanVar(value=True)
+        # Separate toggle for final reproject+coadd
+        self.reproject_coadd_var = tk.BooleanVar(value=False)
         self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
 
         self.astrometry_solve_field_dir_var = tk.StringVar(value="")
 
         # --- FIN NOUVELLE VARIABLE ---
 
-        print(
-            "DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter."
-        )  # Version Log
+        print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter.")  # Version Log
 
     #######################################################################################################################
 
@@ -716,8 +669,6 @@ class SeestarStackerGUI:
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
 
-
-
         except tk.TclError:
             # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
             pass
@@ -744,18 +695,11 @@ class SeestarStackerGUI:
                     self.scnr_amount_ctrls.get("label"),  # Griser le label aussi
                 ]
                 for widget in amount_widgets:
-                    if (
-                        widget
-                        and hasattr(widget, "winfo_exists")
-                        and widget.winfo_exists()
-                    ):
+                    if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists():
                         widget.config(state=new_state)
 
             # Checkbox pour préserver la luminance
-            if (
-                hasattr(self, "final_scnr_preserve_lum_check")
-                and self.final_scnr_preserve_lum_check.winfo_exists()
-            ):
+            if hasattr(self, "final_scnr_preserve_lum_check") and self.final_scnr_preserve_lum_check.winfo_exists():
                 self.final_scnr_preserve_lum_check.config(state=new_state)
 
             # print(f"DEBUG: État options SCNR mis à jour vers: {'NORMAL' if scnr_active else 'DISABLED'}") # Debug
@@ -769,6 +713,35 @@ class SeestarStackerGUI:
         except Exception as e:
             print(f"ERREUR inattendue dans _update_final_scnr_options_state: {e}")
             traceback.print_exc(limit=1)
+
+    def _toggle_boring_thread(self):
+        """Synchronize ``batch_size`` with the boring-thread checkbox."""
+        try:
+            if self.boring_thread_var.get():
+                if self.batch_size.get() != 1:
+                    self.batch_size.set(1)
+                if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
+                    self.batch_spinbox.config(state=tk.DISABLED)
+            else:
+                if hasattr(self, "batch_spinbox") and self.batch_spinbox.winfo_exists():
+                    self.batch_spinbox.config(state=tk.NORMAL)
+                if self.batch_size.get() == 1:
+                    self.batch_size.set(0)
+        except tk.TclError:
+            pass
+
+    def _on_batch_size_changed(self, *args):
+        """Toggle boring-thread mode when the batch size equals 1."""
+        try:
+            val = self.batch_size.get()
+        except tk.TclError:
+            return
+        if val == 1 and not self.boring_thread_var.get():
+            self.boring_thread_var.set(True)
+            self._toggle_boring_thread()
+        elif val != 1 and self.boring_thread_var.get():
+            self.boring_thread_var.set(False)
+            self._toggle_boring_thread()
 
     # Assurez-vous d'appeler cette méthode aussi dans SettingsManager.apply_to_ui
     # et dans SeestarStackerGUI.__init__ après avoir appliqué les settings
@@ -791,9 +764,7 @@ class SeestarStackerGUI:
                 self.elapsed_time_var,
             )
         else:
-            print(
-                "Error: Progress widgets not found for ProgressManager initialization."
-            )
+            print("Error: Progress widgets not found for ProgressManager initialization.")
 
         # Preview Manager
         if hasattr(self, "preview_canvas"):
@@ -803,9 +774,7 @@ class SeestarStackerGUI:
 
         # Histogram Widget Callback (if widget exists)
         if hasattr(self, "histogram_widget") and self.histogram_widget:
-            self.histogram_widget.range_change_callback = (
-                self.update_stretch_from_histogram
-            )
+            self.histogram_widget.range_change_callback = self.update_stretch_from_histogram
         else:
             print("Error: HistogramWidget reference not found after create_layout.")
 
@@ -846,9 +815,7 @@ class SeestarStackerGUI:
 
         except (ValueError, tk.TclError, AttributeError) as e:
             # Ignorer erreurs de conversion ou si les variables n'existent pas encore
-            print(
-                f"DEBUG (Spinbox Cmd): Ignored error during conversion: {e}"
-            )  # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (Spinbox Cmd): Ignored error during conversion: {e}")  # <-- AJOUTÉ DEBUG
             pass
 
     #    def _update_spinbox_from_float(self, *args):
@@ -883,9 +850,7 @@ class SeestarStackerGUI:
 
     def create_layout(self):
         """Crée la disposition des widgets avec la scrollbar pour le panneau gauche et le SCNR réorganisé."""
-        print(
-            "DEBUG (GUI create_layout V_SaveAsFloat32_1): Début création layout..."
-        )  # Version Log
+        print("DEBUG (GUI create_layout V_SaveAsFloat32_1): Début création layout...")  # Version Log
 
         # --- Cadre Principal et PanedWindow ---
         main_frame = ttk.Frame(self.root)
@@ -910,13 +875,11 @@ class SeestarStackerGUI:
         self.left_scrollable_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.left_scrollbar.config(command=self.left_scrollable_canvas.yview)
         self.left_content_frame = ttk.Frame(self.left_scrollable_canvas)
-        self.left_content_frame_id_on_canvas = (
-            self.left_scrollable_canvas.create_window(
-                (0, 0),
-                window=self.left_content_frame,
-                anchor="nw",
-                tags="self.left_content_frame_tag",
-            )
+        self.left_content_frame_id_on_canvas = self.left_scrollable_canvas.create_window(
+            (0, 0),
+            window=self.left_content_frame,
+            anchor="nw",
+            tags="self.left_content_frame_tag",
         )
 
         def _on_left_content_frame_configure(event):
@@ -925,9 +888,7 @@ class SeestarStackerGUI:
                     self.left_content_frame_id_on_canvas,
                     width=self.left_scrollable_canvas.winfo_width(),
                 )
-            self.left_scrollable_canvas.config(
-                scrollregion=self.left_scrollable_canvas.bbox("all")
-            )
+            self.left_scrollable_canvas.config(scrollregion=self.left_scrollable_canvas.bbox("all"))
 
         self.left_content_frame.bind("<Configure>", _on_left_content_frame_configure)
         self.left_scrollable_canvas.bind(
@@ -966,9 +927,7 @@ class SeestarStackerGUI:
 
         # 2. Notebook pour les Onglets d'Options
         self.control_notebook = ttk.Notebook(self.left_content_frame)
-        self.control_notebook.pack(
-            side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5), padx=5
-        )
+        self.control_notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5), padx=5)
         print("DEBUG (GUI create_layout): Notebook de contrôle créé.")
 
         # --- Onglet Empilement (Index 0) ---
@@ -1024,12 +983,8 @@ class SeestarStackerGUI:
             anchor="w",
         )
         self.output_filename_label.pack(side=tk.LEFT)
-        self.output_filename_entry = ttk.Entry(
-            fname_frame, textvariable=self.output_filename_var
-        )
-        self.output_filename_entry.pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
-        )
+        self.output_filename_entry = ttk.Entry(fname_frame, textvariable=self.output_filename_var)
+        self.output_filename_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         ref_frame = ttk.Frame(self.folders_frame)
         ref_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
         self.reference_label = ttk.Label(
@@ -1057,9 +1012,7 @@ class SeestarStackerGUI:
             anchor="w",
         )
         last_lbl.pack(side=tk.LEFT)
-        last_browse = ttk.Button(
-            last_frame, text="…", command=self.file_handler.browse_last_stack
-        )
+        last_browse = ttk.Button(last_frame, text="…", command=self.file_handler.browse_last_stack)
         last_browse.pack(side=tk.RIGHT)
         last_entry = ttk.Entry(last_frame, textvariable=self.last_stack_path, width=42)
         last_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
@@ -1073,13 +1026,10 @@ class SeestarStackerGUI:
             anchor="w",
         )
         temp_lbl.pack(side=tk.LEFT)
-        temp_browse = ttk.Button(
-            temp_frame, text="…", command=self.file_handler.browse_temp_folder
-        )
+        temp_browse = ttk.Button(temp_frame, text="…", command=self.file_handler.browse_temp_folder)
         temp_browse.pack(side=tk.RIGHT)
         temp_entry = ttk.Entry(temp_frame, textvariable=self.temp_folder_path, width=42)
         temp_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-
 
         crop_frame = ttk.Frame(tab_stacking)
         crop_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -1093,9 +1043,7 @@ class SeestarStackerGUI:
         ttk.Label(
             crop_frame,
             text=self.tr("crop_percent_side_label", default="Crop % per side"),
-        ).grid(
-            row=0, column=1, sticky=tk.W, padx=(10, 2)
-        )
+        ).grid(row=0, column=1, sticky=tk.W, padx=(10, 2))
         self.master_tile_crop_spinbox = ttk.Spinbox(
             crop_frame,
             from_=0.0,
@@ -1140,9 +1088,7 @@ class SeestarStackerGUI:
             width=15,
         )
         self.stack_weight_combo.pack(side=tk.LEFT, padx=(5, 0))
-        self.stack_weight_combo.bind(
-            "<<ComboboxSelected>>", self._on_weight_combo_change
-        )
+        self.stack_weight_combo.bind("<<ComboboxSelected>>", self._on_weight_combo_change)
 
         kappa_frame = ttk.Frame(self.options_frame)
         kappa_frame.pack(fill=tk.X, padx=20, pady=(2, 0))
@@ -1176,15 +1122,11 @@ class SeestarStackerGUI:
             text=self.tr("stacking_winsor_limits_label", default="Winsor Limits:"),
         )
         self.winsor_limits_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.winsor_limits_entry = ttk.Entry(
-            winsor_frame, textvariable=self.stacking_winsor_limits_str_var, width=10
-        )
+        self.winsor_limits_entry = ttk.Entry(winsor_frame, textvariable=self.stacking_winsor_limits_str_var, width=10)
         self.winsor_limits_entry.pack(side=tk.LEFT, padx=(0, 5))
         self.winsor_note_label = ttk.Label(
             winsor_frame,
-            text=self.tr(
-                "stacking_winsor_note", default="(e.g., 0.05,0.05 for 5% each side)"
-            ),
+            text=self.tr("stacking_winsor_note", default="(e.g., 0.05,0.05 for 5% each side)"),
         )
         self.winsor_note_label.pack(side=tk.LEFT, padx=(5, 0))
 
@@ -1205,8 +1147,7 @@ class SeestarStackerGUI:
         self.stack_final_combo.bind("<<ComboboxSelected>>", self._on_final_combo_change)
 
         self.hq_ram_limit_label_widget = tk.Label(
-            final_frame,
-            text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
+            final_frame, text=self.tr("hq_ram_limit_label", default="HQ RAM limit (GB)")
         )
         self.hq_ram_limit_label_widget.pack(side=tk.LEFT, padx=(10, 2))
         self.hq_ram_limit_spinbox = tk.Spinbox(
@@ -1229,12 +1170,10 @@ class SeestarStackerGUI:
             self.norm_label_to_key[label] = k
         self.stack_norm_combo["values"] = list(self.norm_key_to_label.values())
         self.stack_norm_display_var.set(
-            self.norm_key_to_label.get(
-                self.stack_norm_method_var.get(), self.stack_norm_method_var.get()
-            )
+            self.norm_key_to_label.get(self.stack_norm_method_var.get(), self.stack_norm_method_var.get())
         )
 
-        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "quality"]
+        self.weight_keys = ["none", "noise_variance", "noise_fwhm", "snr", "stars"]
         self.weight_key_to_label = {}
         self.weight_label_to_key = {}
         for k in self.weight_keys:
@@ -1243,9 +1182,7 @@ class SeestarStackerGUI:
             self.weight_label_to_key[label] = k
         self.stack_weight_combo["values"] = list(self.weight_key_to_label.values())
         self.stack_weight_display_var.set(
-            self.weight_key_to_label.get(
-                self.stack_weight_method_var.get(), self.stack_weight_method_var.get()
-            )
+            self.weight_key_to_label.get(self.stack_weight_method_var.get(), self.stack_weight_method_var.get())
         )
 
         self.final_keys = [
@@ -1263,17 +1200,14 @@ class SeestarStackerGUI:
             self.final_label_to_key[label] = k
         self.stack_final_combo["values"] = list(self.final_key_to_label.values())
         if self.reproject_between_batches_var.get():
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get("reproject", "reproject")
-            )
+            self.stack_final_display_var.set(self.final_key_to_label.get("reproject", "reproject"))
         elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
-            self.stack_final_display_var.set(
-                self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
-            )
+            self.stack_final_display_var.set(self.final_key_to_label.get("reproject_coadd", "reproject_coadd"))
         else:
             self.stack_final_display_var.set(
                 self.final_key_to_label.get(
-                    self.stack_final_combine_var.get(), self.stack_final_combine_var.get()
+                    self.stack_final_combine_var.get(),
+                    self.stack_final_combine_var.get(),
                 )
             )
 
@@ -1281,9 +1215,7 @@ class SeestarStackerGUI:
         method_kappa_scnr_frame.pack(fill=tk.X, padx=0, pady=(5, 0))
         mk_line1_frame = ttk.Frame(method_kappa_scnr_frame)
         mk_line1_frame.pack(fill=tk.X, padx=5)
-        self.stack_method_label = ttk.Label(
-            mk_line1_frame, text=self.tr("stack_method_label", default="Method:")
-        )
+        self.stack_method_label = ttk.Label(mk_line1_frame, text=self.tr("stack_method_label", default="Method:"))
         self.stack_method_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 2))
         self.method_combo = ttk.Combobox(
             mk_line1_frame,
@@ -1311,9 +1243,7 @@ class SeestarStackerGUI:
         self.method_combo["values"] = list(self.method_key_to_label.values())
         # Set display variable based on current internal value
         self.stack_method_display_var.set(
-            self.method_key_to_label.get(
-                self.stack_method_var.get(), self.stack_method_var.get()
-            )
+            self.method_key_to_label.get(self.stack_method_var.get(), self.stack_method_var.get())
         )
         scnr_options_subframe_in_stacking = ttk.Frame(method_kappa_scnr_frame)
         scnr_options_subframe_in_stacking.pack(fill=tk.X, padx=5, pady=(5, 2))
@@ -1337,9 +1267,7 @@ class SeestarStackerGUI:
         )
         self.final_scnr_preserve_lum_check = ttk.Checkbutton(
             self.scnr_params_frame,
-            text=self.tr(
-                "final_scnr_preserve_lum_label", default="Preserve Luminosity (SCNR)"
-            ),
+            text=self.tr("final_scnr_preserve_lum_label", default="Preserve Luminosity (SCNR)"),
             variable=self.final_scnr_preserve_lum_var,
         )
         self.final_scnr_preserve_lum_check.pack(anchor=tk.W, pady=(0, 5))
@@ -1349,16 +1277,21 @@ class SeestarStackerGUI:
         self.batch_size_label.pack(side=tk.LEFT, padx=(0, 5))
         self.batch_spinbox = ttk.Spinbox(
             batch_frame,
-            from_=3,
-            to=500,
+            from_=0,
+            to=9999,
             increment=1,
             textvariable=self.batch_size,
             width=5,
         )
         self.batch_spinbox.pack(side=tk.LEFT)
-        self.drizzle_options_frame = ttk.LabelFrame(
-            tab_stacking, text="Drizzle Options"
+        self.boring_thread_check = ttk.Checkbutton(
+            batch_frame,
+            text=self.tr("enable_boring_thread", default="Threaded Boring Stack"),
+            variable=self.boring_thread_var,
+            command=self._toggle_boring_thread,
         )
+        self.boring_thread_check.pack(side=tk.LEFT, padx=5)
+        self.drizzle_options_frame = ttk.LabelFrame(tab_stacking, text="Drizzle Options")
         self.drizzle_options_frame.pack(fill=tk.X, pady=5, padx=5)
         self.drizzle_check = ttk.Checkbutton(
             self.drizzle_options_frame,
@@ -1500,9 +1433,7 @@ class SeestarStackerGUI:
             width=4,
         )
         self.hp_neigh_spinbox.pack(side=tk.LEFT, padx=5)
-        self.post_proc_opts_frame = ttk.LabelFrame(
-            tab_stacking, text="Post-Processing Options"
-        )
+        self.post_proc_opts_frame = ttk.LabelFrame(tab_stacking, text="Post-Processing Options")
         self.post_proc_opts_frame.pack(fill=tk.X, pady=5, padx=5)
         self.cleanup_temp_check = ttk.Checkbutton(
             self.post_proc_opts_frame,
@@ -1517,21 +1448,15 @@ class SeestarStackerGUI:
         )
         self.chroma_correction_check.pack(side=tk.LEFT, padx=5, pady=5)
 
-        self.control_notebook.add(
-            tab_stacking, text=f' {self.tr("tab_stacking", default=" Stacking ")} '
-        )
+        self.control_notebook.add(tab_stacking, text=f' {self.tr("tab_stacking", default=" Stacking ")} ')
         print("DEBUG (GUI create_layout): Onglet Empilement créé et ajouté.")
 
         # --- Onglet Expert (Index 1) ---
         tab_expert = ttk.Frame(self.control_notebook)
         print("DEBUG (GUI create_layout): Frame pour onglet Expert créé.")
 
-        expert_scroll_canvas = tk.Canvas(
-            tab_expert, highlightthickness=0, bg=canvas_background_color
-        )
-        expert_scrollbar = ttk.Scrollbar(
-            tab_expert, orient="vertical", command=expert_scroll_canvas.yview
-        )
+        expert_scroll_canvas = tk.Canvas(tab_expert, highlightthickness=0, bg=canvas_background_color)
+        expert_scrollbar = ttk.Scrollbar(tab_expert, orient="vertical", command=expert_scroll_canvas.yview)
         expert_scroll_canvas.configure(yscrollcommand=expert_scrollbar.set)
         expert_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         expert_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1545,10 +1470,7 @@ class SeestarStackerGUI:
         )
 
         def _on_expert_content_configure_local(event):
-            if (
-                expert_scroll_canvas.winfo_exists()
-                and expert_scroll_canvas.winfo_width() > 1
-            ):
+            if expert_scroll_canvas.winfo_exists() and expert_scroll_canvas.winfo_width() > 1:
                 try:
                     expert_scroll_canvas.itemconfig(
                         expert_content_frame_id,
@@ -1558,9 +1480,7 @@ class SeestarStackerGUI:
                     pass
             if expert_scroll_canvas.winfo_exists():
                 try:
-                    expert_scroll_canvas.config(
-                        scrollregion=expert_scroll_canvas.bbox("all")
-                    )
+                    expert_scroll_canvas.config(scrollregion=expert_scroll_canvas.bbox("all"))
                 except tk.TclError:
                     pass
 
@@ -1568,18 +1488,12 @@ class SeestarStackerGUI:
         expert_scroll_canvas.bind(
             "<Configure>",
             lambda e, c=expert_scroll_canvas, i=expert_content_frame_id: (
-                (
-                    c.itemconfig(i, width=e.width)
-                    if c.winfo_exists() and e.width > 1
-                    else None
-                )
+                (c.itemconfig(i, width=e.width) if c.winfo_exists() and e.width > 1 else None)
                 if c.winfo_exists()
                 else None
             ),
         )
-        print(
-            "DEBUG (GUI create_layout): Canvas scrollable pour onglet Expert configuré."
-        )
+        print("DEBUG (GUI create_layout): Canvas scrollable pour onglet Expert configuré.")
 
         self.warning_label = ttk.Label(
             expert_content_frame,
@@ -1591,7 +1505,10 @@ class SeestarStackerGUI:
 
         self.apply_batch_feathering_check = ttk.Checkbutton(
             expert_content_frame,
-            text=self.tr("feather_inter_batch_label", default="Feather inter-batch (radial blend)"),
+            text=self.tr(
+                "feather_inter_batch_label",
+                default="Feather inter-batch (radial blend)",
+            ),
             variable=self.apply_batch_feathering_var,
             command=self._on_apply_batch_feathering_changed,
         )
@@ -1603,9 +1520,7 @@ class SeestarStackerGUI:
             padding=5,
         )
         self.feathering_frame.pack(fill=tk.X, padx=5, pady=5)
-        print(
-            "DEBUG (GUI create_layout): Feathering Frame (conteneur pour Feathering et Low WHT) créé."
-        )
+        print("DEBUG (GUI create_layout): Feathering Frame (conteneur pour Feathering et Low WHT) créé.")
 
         self.apply_feathering_check = ttk.Checkbutton(
             self.feathering_frame,
@@ -1687,9 +1602,7 @@ class SeestarStackerGUI:
         )
         self.apply_bn_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
         self.bn_grid_size_actual_label = ttk.Label(self.bn_frame, text="Grid Size:")
-        self.bn_grid_size_actual_label.grid(
-            row=1, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.bn_grid_size_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_grid_size_combo = ttk.Combobox(
             self.bn_frame,
             textvariable=self.bn_grid_size_str_var,
@@ -1710,9 +1623,7 @@ class SeestarStackerGUI:
         )
         self.bn_perc_low_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_high_actual_label = ttk.Label(self.bn_frame, text="BG Perc. High:")
-        self.bn_perc_high_actual_label.grid(
-            row=2, column=2, sticky=tk.W, padx=2, pady=2
-        )
+        self.bn_perc_high_actual_label.grid(row=2, column=2, sticky=tk.W, padx=2, pady=2)
         self.bn_perc_high_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=10,
@@ -1722,12 +1633,8 @@ class SeestarStackerGUI:
             textvariable=self.bn_perc_high_var,
         )
         self.bn_perc_high_spinbox.grid(row=2, column=3, sticky=tk.W, padx=2, pady=2)
-        self.bn_std_factor_actual_label = ttk.Label(
-            self.bn_frame, text="BG Std Factor:"
-        )
-        self.bn_std_factor_actual_label.grid(
-            row=3, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.bn_std_factor_actual_label = ttk.Label(self.bn_frame, text="BG Std Factor:")
+        self.bn_std_factor_actual_label.grid(row=3, column=0, sticky=tk.W, padx=2, pady=2)
         self.bn_std_factor_spinbox = ttk.Spinbox(
             self.bn_frame,
             from_=0.5,
@@ -1780,12 +1687,8 @@ class SeestarStackerGUI:
             command=self._update_cb_options_state,
         )
         self.apply_cb_check.grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 3))
-        self.cb_border_size_actual_label = ttk.Label(
-            self.cb_frame, text="Border Size (px):"
-        )
-        self.cb_border_size_actual_label.grid(
-            row=1, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.cb_border_size_actual_label = ttk.Label(self.cb_frame, text="Border Size (px):")
+        self.cb_border_size_actual_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
         self.cb_border_size_spinbox = ttk.Spinbox(
             self.cb_frame,
             from_=5,
@@ -1795,12 +1698,8 @@ class SeestarStackerGUI:
             textvariable=self.cb_border_size_var,
         )
         self.cb_border_size_spinbox.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
-        self.cb_blur_radius_actual_label = ttk.Label(
-            self.cb_frame, text="Blur Radius (px):"
-        )
-        self.cb_blur_radius_actual_label.grid(
-            row=1, column=2, sticky=tk.W, padx=2, pady=2
-        )
+        self.cb_blur_radius_actual_label = ttk.Label(self.cb_frame, text="Blur Radius (px):")
+        self.cb_blur_radius_actual_label.grid(row=1, column=2, sticky=tk.W, padx=2, pady=2)
         self.cb_blur_radius_spinbox = ttk.Spinbox(
             self.cb_frame,
             from_=0,
@@ -1810,12 +1709,8 @@ class SeestarStackerGUI:
             textvariable=self.cb_blur_radius_var,
         )
         self.cb_blur_radius_spinbox.grid(row=1, column=3, sticky=tk.W, padx=2, pady=2)
-        self.cb_min_b_factor_actual_label = ttk.Label(
-            self.cb_frame, text="Min Blue Factor:"
-        )
-        self.cb_min_b_factor_actual_label.grid(
-            row=2, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.cb_min_b_factor_actual_label = ttk.Label(self.cb_frame, text="Min Blue Factor:")
+        self.cb_min_b_factor_actual_label.grid(row=2, column=0, sticky=tk.W, padx=2, pady=2)
         self.cb_min_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
             from_=0.1,
@@ -1826,12 +1721,8 @@ class SeestarStackerGUI:
             textvariable=self.cb_min_b_factor_var,
         )
         self.cb_min_b_factor_spinbox.grid(row=2, column=1, sticky=tk.W, padx=2, pady=2)
-        self.cb_max_b_factor_actual_label = ttk.Label(
-            self.cb_frame, text="Max Blue Factor:"
-        )
-        self.cb_max_b_factor_actual_label.grid(
-            row=2, column=2, sticky=tk.W, padx=2, pady=2
-        )
+        self.cb_max_b_factor_actual_label = ttk.Label(self.cb_frame, text="Max Blue Factor:")
+        self.cb_max_b_factor_actual_label.grid(row=2, column=2, sticky=tk.W, padx=2, pady=2)
         self.cb_max_b_factor_spinbox = ttk.Spinbox(
             self.cb_frame,
             from_=1.0,
@@ -1857,9 +1748,7 @@ class SeestarStackerGUI:
             command=self._update_crop_options_state,
         )
         self.apply_crop_check.pack(anchor=tk.W, padx=5, pady=(0, 3))
-        self.final_edge_crop_actual_label = ttk.Label(
-            self.crop_frame, text="Edge Crop (%):"
-        )
+        self.final_edge_crop_actual_label = ttk.Label(self.crop_frame, text="Edge Crop (%):")
         self.final_edge_crop_actual_label.pack(side=tk.LEFT, padx=(2, 5), pady=2)
         self.final_edge_crop_spinbox = ttk.Spinbox(
             self.crop_frame,
@@ -1893,12 +1782,8 @@ class SeestarStackerGUI:
         self.photutils_params_frame.pack(fill=tk.X, padx=(20, 0), pady=2)
         self.photutils_params_frame.columnconfigure(1, weight=0)
         self.photutils_params_frame.columnconfigure(3, weight=0)
-        self.photutils_bn_box_size_label = ttk.Label(
-            self.photutils_params_frame, text="Box Size (px):"
-        )
-        self.photutils_bn_box_size_label.grid(
-            row=0, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.photutils_bn_box_size_label = ttk.Label(self.photutils_params_frame, text="Box Size (px):")
+        self.photutils_bn_box_size_label.grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
         self.pb_box_spinbox = ttk.Spinbox(
             self.photutils_params_frame,
             from_=16,
@@ -1908,12 +1793,8 @@ class SeestarStackerGUI:
             textvariable=self.photutils_bn_box_size_var,
         )
         self.pb_box_spinbox.grid(row=0, column=1, sticky=tk.W, padx=2, pady=2)
-        self.photutils_bn_filter_size_label = ttk.Label(
-            self.photutils_params_frame, text="Filter Size (px, odd):"
-        )
-        self.photutils_bn_filter_size_label.grid(
-            row=0, column=2, sticky=tk.W, padx=(10, 2), pady=2
-        )
+        self.photutils_bn_filter_size_label = ttk.Label(self.photutils_params_frame, text="Filter Size (px, odd):")
+        self.photutils_bn_filter_size_label.grid(row=0, column=2, sticky=tk.W, padx=(10, 2), pady=2)
         self.pb_filt_spinbox = ttk.Spinbox(
             self.photutils_params_frame,
             from_=1,
@@ -1923,12 +1804,8 @@ class SeestarStackerGUI:
             textvariable=self.photutils_bn_filter_size_var,
         )
         self.pb_filt_spinbox.grid(row=0, column=3, sticky=tk.W, padx=2, pady=2)
-        self.photutils_bn_sigma_clip_label = ttk.Label(
-            self.photutils_params_frame, text="Sigma Clip Value:"
-        )
-        self.photutils_bn_sigma_clip_label.grid(
-            row=1, column=0, sticky=tk.W, padx=2, pady=2
-        )
+        self.photutils_bn_sigma_clip_label = ttk.Label(self.photutils_params_frame, text="Sigma Clip Value:")
+        self.photutils_bn_sigma_clip_label.grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
         self.pb_sig_spinbox = ttk.Spinbox(
             self.photutils_params_frame,
             from_=1.0,
@@ -1942,9 +1819,7 @@ class SeestarStackerGUI:
         self.photutils_bn_exclude_percentile_label = ttk.Label(
             self.photutils_params_frame, text="Exclude Brightest (%):"
         )
-        self.photutils_bn_exclude_percentile_label.grid(
-            row=1, column=2, sticky=tk.W, padx=(10, 2), pady=2
-        )
+        self.photutils_bn_exclude_percentile_label.grid(row=1, column=2, sticky=tk.W, padx=(10, 2), pady=2)
         self.pb_excl_spinbox = ttk.Spinbox(
             self.photutils_params_frame,
             from_=0.0,
@@ -2007,15 +1882,9 @@ class SeestarStackerGUI:
         tab_preview = ttk.Frame(self.control_notebook)
         self.wb_frame = ttk.LabelFrame(tab_preview, text="White Balance (Preview)")
         self.wb_frame.pack(fill=tk.X, pady=5, padx=5)
-        self.wb_r_ctrls = self._create_slider_spinbox_group(
-            self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain
-        )
-        self.wb_g_ctrls = self._create_slider_spinbox_group(
-            self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain
-        )
-        self.wb_b_ctrls = self._create_slider_spinbox_group(
-            self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain
-        )
+        self.wb_r_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_r", 0.1, 5.0, 0.01, self.preview_r_gain)
+        self.wb_g_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_g", 0.1, 5.0, 0.01, self.preview_g_gain)
+        self.wb_b_ctrls = self._create_slider_spinbox_group(self.wb_frame, "wb_b", 0.1, 5.0, 0.01, self.preview_b_gain)
         wb_btn_frame = ttk.Frame(self.wb_frame)
         wb_btn_frame.pack(fill=tk.X, pady=5)
         self.auto_wb_button = ttk.Button(
@@ -2025,13 +1894,9 @@ class SeestarStackerGUI:
             state=tk.NORMAL if _tools_available else tk.DISABLED,
         )
         self.auto_wb_button.pack(side=tk.LEFT, padx=5)
-        self.reset_wb_button = ttk.Button(
-            wb_btn_frame, text="Reset WB", command=self.reset_white_balance
-        )
+        self.reset_wb_button = ttk.Button(wb_btn_frame, text="Reset WB", command=self.reset_white_balance)
         self.reset_wb_button.pack(side=tk.LEFT, padx=5)
-        self.stretch_frame_controls = ttk.LabelFrame(
-            tab_preview, text="Stretch (Preview)"
-        )
+        self.stretch_frame_controls = ttk.LabelFrame(tab_preview, text="Stretch (Preview)")
         self.stretch_frame_controls.pack(fill=tk.X, pady=5, padx=5)
         stretch_method_frame = ttk.Frame(self.stretch_frame_controls)
         stretch_method_frame.pack(fill=tk.X, pady=2)
@@ -2081,9 +1946,7 @@ class SeestarStackerGUI:
             state=tk.NORMAL if _tools_available else tk.DISABLED,
         )
         self.auto_stretch_button.pack(side=tk.LEFT, padx=5)
-        self.reset_stretch_button = ttk.Button(
-            stretch_btn_frame, text="Reset Stretch", command=self.reset_stretch
-        )
+        self.reset_stretch_button = ttk.Button(stretch_btn_frame, text="Reset Stretch", command=self.reset_stretch)
         self.reset_stretch_button.pack(side=tk.LEFT, padx=5)
         self.bcs_frame = ttk.LabelFrame(tab_preview, text="Image Adjustments")
         self.bcs_frame.pack(fill=tk.X, pady=5, padx=5)
@@ -2110,15 +1973,9 @@ class SeestarStackerGUI:
 
         # --- Zone Progression (ENFANT DE self.left_content_frame, packé EN BAS) ---
         # ... (inchangé) ...
-        self.progress_frame = ttk.LabelFrame(
-            self.left_content_frame, text=self.tr("progress", default="Progress")
-        )
-        self.progress_frame.pack(
-            side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(10, 5)
-        )
-        self.progress_bar = ttk.Progressbar(
-            self.progress_frame, maximum=100, mode="determinate"
-        )
+        self.progress_frame = ttk.LabelFrame(self.left_content_frame, text=self.tr("progress", default="Progress"))
+        self.progress_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(10, 5))
+        self.progress_bar = ttk.Progressbar(self.progress_frame, maximum=100, mode="determinate")
         self.progress_bar.pack(fill=tk.X, padx=5, pady=(5, 2))
         time_frame = ttk.Frame(self.progress_frame)
         time_frame.pack(fill=tk.X, padx=5, pady=2)
@@ -2160,18 +2017,14 @@ class SeestarStackerGUI:
             files_info_frame, textvariable=self.aligned_files_var, width=12, anchor="w"
         )
         self.aligned_files_label.pack(side=tk.LEFT, padx=(10, 0))
-        self.additional_value_label = ttk.Label(
-            files_info_frame, textvariable=self.additional_folders_var, anchor="e"
-        )
+        self.additional_value_label = ttk.Label(files_info_frame, textvariable=self.additional_folders_var, anchor="e")
         self.additional_value_label.pack(side=tk.RIGHT)
         self.additional_static_label = ttk.Label(files_info_frame, text="Additional:")
         self.additional_static_label.pack(side=tk.RIGHT, padx=(0, 2))
         status_text_frame = ttk.Frame(self.progress_frame)
         status_text_font = tkFont.Font(family="Arial", size=8)
         status_text_frame.pack(fill=tk.X, expand=False, padx=5, pady=(2, 5))
-        self.copy_log_button = ttk.Button(
-            status_text_frame, text="Copy", command=self._copy_log_to_clipboard, width=5
-        )
+        self.copy_log_button = ttk.Button(status_text_frame, text="Copy", command=self._copy_log_to_clipboard, width=5)
         self.copy_log_button.pack(side=tk.RIGHT, padx=(2, 0), pady=0, anchor="ne")
         self.status_scrollbar = ttk.Scrollbar(status_text_frame, orient="vertical")
         self.status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=0)
@@ -2198,11 +2051,7 @@ class SeestarStackerGUI:
         control_frame = ttk.Frame(right_frame)
         try:
             style = ttk.Style()
-            accent_style = (
-                "Accent.TButton"
-                if "Accent.TButton" in style.element_names()
-                else "TButton"
-            )
+            accent_style = "Accent.TButton" if "Accent.TButton" in style.element_names() else "TButton"
         except tk.TclError:
             accent_style = "TButton"
         self.start_button = ttk.Button(
@@ -2212,9 +2061,7 @@ class SeestarStackerGUI:
             style=accent_style,
         )
         self.start_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        self.stop_button = ttk.Button(
-            control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED
-        )
+        self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.analyze_folder_button = ttk.Button(
             control_frame,
@@ -2271,9 +2118,7 @@ class SeestarStackerGUI:
             self.histogram_frame,
             range_change_callback=self.update_stretch_from_histogram,
         )
-        self.histogram_widget.pack(
-            fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 2), pady=(0, 2)
-        )
+        self.histogram_widget.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 2), pady=(0, 2))
         self.histogram_widget.auto_zoom_enabled = self.auto_zoom_histogram_var.get()
 
         # Appliquer l'état de verrouillage de l'échelle X selon l'option
@@ -2311,9 +2156,7 @@ class SeestarStackerGUI:
         )
         self.hist_reset_btn.pack(side=tk.RIGHT, anchor=tk.NE, padx=(0, 2), pady=2)
         self.preview_frame = ttk.LabelFrame(right_frame, text="Preview")
-        self.preview_canvas = tk.Canvas(
-            self.preview_frame, bg="#1E1E1E", highlightthickness=0
-        )
+        self.preview_canvas = tk.Canvas(self.preview_frame, bg="#1E1E1E", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         zoom_btn_frame = ttk.Frame(self.preview_frame)
         zoom_btn_frame.pack(fill=tk.X, pady=(2, 2))
@@ -2329,13 +2172,9 @@ class SeestarStackerGUI:
             command=lambda: self.preview_manager.zoom_fit(),
         )
         self.zoom_fit_button.pack(side=tk.LEFT, padx=5)
-        self.histogram_frame.pack(
-            side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5)
-        )
+        self.histogram_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5))
         control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))
-        self.preview_frame.pack(
-            side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5)
-        )
+        self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
         print("DEBUG (GUI create_layout): Panneau droit rempli.")
 
         self._store_widget_references()
@@ -2361,22 +2200,12 @@ class SeestarStackerGUI:
             feathering_active = self.apply_feathering_var.get()
             new_state = tk.NORMAL if feathering_active else tk.DISABLED
 
-            if (
-                hasattr(self, "feather_blur_px_spinbox")
-                and self.feather_blur_px_spinbox.winfo_exists()
-            ):
+            if hasattr(self, "feather_blur_px_spinbox") and self.feather_blur_px_spinbox.winfo_exists():
                 self.feather_blur_px_spinbox.config(state=new_state)
-            if (
-                hasattr(self, "feather_blur_px_label")
-                and self.feather_blur_px_label.winfo_exists()
-            ):
-                self.feather_blur_px_label.config(
-                    state=new_state
-                )  # Griser le label aussi
+            if hasattr(self, "feather_blur_px_label") and self.feather_blur_px_label.winfo_exists():
+                self.feather_blur_px_label.config(state=new_state)  # Griser le label aussi
 
-            print(
-                f"DEBUG (GUI): État options Feathering (Blur Px Spinbox) mis à jour: {new_state}"
-            )
+            print(f"DEBUG (GUI): État options Feathering (Blur Px Spinbox) mis à jour: {new_state}")
         except tk.TclError:
             pass
         except AttributeError:
@@ -2404,54 +2233,32 @@ class SeestarStackerGUI:
             # Lire l'état de la checkbox principale pour "Low WHT Mask"
             mask_active = self.apply_low_wht_mask_var.get()
             new_state = tk.NORMAL if mask_active else tk.DISABLED
-            print(
-                f"  -> Mask active: {mask_active}, New state for options: {new_state}"
-            )  # Debug
+            print(f"  -> Mask active: {mask_active}, New state for options: {new_state}")  # Debug
 
             # Mettre à jour l'état du label et du spinbox pour le percentile
-            if (
-                hasattr(self, "low_wht_pct_label")
-                and self.low_wht_pct_label.winfo_exists()
-            ):
+            if hasattr(self, "low_wht_pct_label") and self.low_wht_pct_label.winfo_exists():
                 self.low_wht_pct_label.config(state=new_state)
-            if (
-                hasattr(self, "low_wht_pct_spinbox")
-                and self.low_wht_pct_spinbox.winfo_exists()
-            ):
+            if hasattr(self, "low_wht_pct_spinbox") and self.low_wht_pct_spinbox.winfo_exists():
                 self.low_wht_pct_spinbox.config(state=new_state)
 
             # Mettre à jour l'état du label et du spinbox pour soften_px
-            if (
-                hasattr(self, "low_wht_soften_px_label")
-                and self.low_wht_soften_px_label.winfo_exists()
-            ):
+            if hasattr(self, "low_wht_soften_px_label") and self.low_wht_soften_px_label.winfo_exists():
                 self.low_wht_soften_px_label.config(state=new_state)
-            if (
-                hasattr(self, "low_wht_soften_px_spinbox")
-                and self.low_wht_soften_px_spinbox.winfo_exists()
-            ):
+            if hasattr(self, "low_wht_soften_px_spinbox") and self.low_wht_soften_px_spinbox.winfo_exists():
                 self.low_wht_soften_px_spinbox.config(state=new_state)
 
-            print(
-                f"DEBUG (GUI _update_low_wht_mask_options_state): État des options Low WHT Mask mis à jour."
-            )  # Debug
+            print(f"DEBUG (GUI _update_low_wht_mask_options_state): État des options Low WHT Mask mis à jour.")  # Debug
 
         except tk.TclError as e:
             # Peut arriver si les widgets sont en cours de destruction/création
-            print(
-                f"DEBUG (GUI _update_low_wht_mask_options_state): Erreur TclError -> {e}"
-            )  # Debug
+            print(f"DEBUG (GUI _update_low_wht_mask_options_state): Erreur TclError -> {e}")  # Debug
             pass
         except AttributeError as e:
             # Peut arriver si un attribut (widget) n'existe pas encore (ex: pendant l'init)
-            print(
-                f"DEBUG (GUI _update_low_wht_mask_options_state): Erreur AttributeError -> {e}"
-            )  # Debug
+            print(f"DEBUG (GUI _update_low_wht_mask_options_state): Erreur AttributeError -> {e}")  # Debug
             pass
         except Exception as e:
-            print(
-                f"ERREUR (GUI _update_low_wht_mask_options_state): Erreur inattendue -> {e}"
-            )
+            print(f"ERREUR (GUI _update_low_wht_mask_options_state): Erreur inattendue -> {e}")
             traceback.print_exc(limit=1)
 
     ##############################################################################################################################
@@ -2581,9 +2388,7 @@ class SeestarStackerGUI:
                 self.kappa_high_label.pack_forget()
                 self.kappa_high_spinbox.pack_forget()
 
-        if hasattr(self, "winsor_limits_entry") and hasattr(
-            self, "winsor_limits_label"
-        ):
+        if hasattr(self, "winsor_limits_entry") and hasattr(self, "winsor_limits_label"):
             if show_winsor:
                 if not self.winsor_limits_entry.winfo_ismapped():
                     self.winsor_limits_label.pack(side=tk.LEFT, padx=(0, 2))
@@ -2625,19 +2430,13 @@ class SeestarStackerGUI:
         if hasattr(self, "final_key_to_label"):
             if self.reproject_between_batches_var.get():
                 self.stack_final_combine_var.set("reproject")
-                self.stack_final_display_var.set(
-                    self.final_key_to_label.get("reproject", "reproject")
-                )
+                self.stack_final_display_var.set(self.final_key_to_label.get("reproject", "reproject"))
             elif getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
                 self.stack_final_combine_var.set("reproject_coadd")
-                self.stack_final_display_var.set(
-                    self.final_key_to_label.get("reproject_coadd", "reproject_coadd")
-                )
+                self.stack_final_display_var.set(self.final_key_to_label.get("reproject_coadd", "reproject_coadd"))
             else:
                 current_key = self.stack_final_combine_var.get()
-                self.stack_final_display_var.set(
-                    self.final_key_to_label.get(current_key, current_key)
-                )
+                self.stack_final_display_var.set(self.final_key_to_label.get(current_key, current_key))
         self._toggle_kappa_visibility()
 
     def _on_norm_combo_change(self, event=None):
@@ -2683,9 +2482,7 @@ class SeestarStackerGUI:
             messagebox.showerror(self.tr("error"), self.tr("select_folders"))
             return
         if not os.path.isdir(input_folder):
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"
-            )
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             return
 
         # --- MODIFIÉ : Détermination du chemin du fichier de commande ---
@@ -2702,9 +2499,7 @@ class SeestarStackerGUI:
             self.analyzer_command_file_path = os.path.join(
                 app_temp_dir, command_filename
             )  # <-- Stocker le chemin dans l'instance
-            print(
-                f"DEBUG (GUI): Chemin fichier commande défini: {self.analyzer_command_file_path}"
-            )  # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (GUI): Chemin fichier commande défini: {self.analyzer_command_file_path}")  # <-- AJOUTÉ DEBUG
 
             # --- Nettoyer ancien fichier de commande s'il existe (sécurité) ---
             if os.path.exists(self.analyzer_command_file_path):
@@ -2714,21 +2509,15 @@ class SeestarStackerGUI:
                 try:
                     os.remove(self.analyzer_command_file_path)
                 except OSError as e_rem:
-                    print(
-                        f"AVERTISSEMENT (GUI): Impossible de supprimer ancien fichier commande: {e_rem}"
-                    )
+                    print(f"AVERTISSEMENT (GUI): Impossible de supprimer ancien fichier commande: {e_rem}")
             # --- Fin Nettoyage ---
 
         except Exception as e_path:
             messagebox.showerror(
-                self.tr(
-                    "error"
-                ),  # Utiliser une clé générique ou créer une clé spécifique
+                self.tr("error"),  # Utiliser une clé générique ou créer une clé spécifique
                 f"Impossible de déterminer le chemin du fichier de communication temporaire:\n{e_path}",
             )
-            print(
-                f"ERREUR (GUI): Échec détermination chemin fichier commande: {e_path}"
-            )  # <-- AJOUTÉ DEBUG
+            print(f"ERREUR (GUI): Échec détermination chemin fichier commande: {e_path}")  # <-- AJOUTÉ DEBUG
             traceback.print_exc(limit=2)
             return
         # --- FIN MODIFICATION ---
@@ -2739,13 +2528,9 @@ class SeestarStackerGUI:
             gui_dir = os.path.dirname(gui_file_path)
             seestar_dir = os.path.dirname(gui_dir)
             project_root_parent = os.path.dirname(seestar_dir)
-            analyzer_script_path = os.path.join(
-                project_root_parent, "seestar", "beforehand", "analyse_gui.py"
-            )
+            analyzer_script_path = os.path.join(project_root_parent, "seestar", "beforehand", "analyse_gui.py")
             analyzer_script_path = os.path.normpath(analyzer_script_path)
-            print(
-                f"DEBUG (GUI): Chemin script analyseur trouvé: {analyzer_script_path}"
-            )  # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (GUI): Chemin script analyseur trouvé: {analyzer_script_path}")  # <-- AJOUTÉ DEBUG
         except Exception as e:
             messagebox.showerror(
                 self.tr("analyzer_launch_error_title"),
@@ -2774,26 +2559,17 @@ class SeestarStackerGUI:
                 self.settings.language,
                 "--lock-lang",
             ]
-            print(
-                f"DEBUG (GUI): Commande lancement analyseur: {' '.join(command)}"
-            )  # <-- AJOUTÉ DEBUG
+            print(f"DEBUG (GUI): Commande lancement analyseur: {' '.join(command)}")  # <-- AJOUTÉ DEBUG
 
             # Lancer comme processus séparé non bloquant
             process = subprocess.Popen(command)
             self.update_progress_gui(self.tr("analyzer_launched"), None)
 
             # --- NOUVEAU : Démarrer la surveillance du fichier de commande ---
-            print(
-                "DEBUG (GUI): Démarrage de la surveillance du fichier commande..."
-            )  # <-- AJOUTÉ DEBUG
+            print("DEBUG (GUI): Démarrage de la surveillance du fichier commande...")  # <-- AJOUTÉ DEBUG
             # Assurer qu'une seule boucle de vérification tourne à la fois
-            if (
-                hasattr(self, "_analyzer_check_after_id")
-                and self._analyzer_check_after_id
-            ):
-                print(
-                    "DEBUG (GUI): Annulation surveillance précédente..."
-                )  # <-- AJOUTÉ DEBUG
+            if hasattr(self, "_analyzer_check_after_id") and self._analyzer_check_after_id:
+                print("DEBUG (GUI): Annulation surveillance précédente...")  # <-- AJOUTÉ DEBUG
                 try:
                     self.root.after_cancel(self._analyzer_check_after_id)
                 except tk.TclError:
@@ -2808,9 +2584,7 @@ class SeestarStackerGUI:
         except FileNotFoundError:
             messagebox.showerror(
                 self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_launch_failed").format(
-                    error=f"Python '{sys.executable}' or script not found."
-                ),
+                self.tr("analyzer_launch_failed").format(error=f"Python '{sys.executable}' or script not found."),
             )
         except OSError as e:
             messagebox.showerror(
@@ -2836,13 +2610,8 @@ class SeestarStackerGUI:
 
         # --- Vérifications préliminaires ---
         # 1. Le chemin du fichier de commande est-il défini ?
-        if (
-            not hasattr(self, "analyzer_command_file_path")
-            or not self.analyzer_command_file_path
-        ):
-            print(
-                "DEBUG (GUI): Vérification fichier commande annulée (chemin non défini)."
-            )
+        if not hasattr(self, "analyzer_command_file_path") or not self.analyzer_command_file_path:
+            print("DEBUG (GUI): Vérification fichier commande annulée (chemin non défini).")
             self._analyzer_check_after_id = None  # Assurer l'arrêt
             return
 
@@ -2852,25 +2621,19 @@ class SeestarStackerGUI:
             # Pas besoin de vérifier le fichier si on est déjà en train de stacker/traiter.
             # On pourrait replanifier plus tard, mais pour l'instant, on arrête la surveillance
             # une fois le traitement principal démarré.
-            self._analyzer_check_after_id = (
-                None  # Arrêter la boucle si traitement lancé par autre chose
-            )
+            self._analyzer_check_after_id = None  # Arrêter la boucle si traitement lancé par autre chose
             return
 
         # 3. Le fichier de commande existe-t-il ?
         try:
             if os.path.exists(self.analyzer_command_file_path):
-                print(
-                    f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}"
-                )  # <-- AJOUTÉ DEBUG
+                print(f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}")  # <-- AJOUTÉ DEBUG
 
                 # --- Traitement du fichier ---
                 folder_path = None
                 ref_path = None
                 try:
-                    with open(
-                        self.analyzer_command_file_path, "r", encoding="utf-8"
-                    ) as f_cmd:
+                    with open(self.analyzer_command_file_path, "r", encoding="utf-8") as f_cmd:
                         lines = [ln.strip() for ln in f_cmd.readlines()]
                     folder_path = lines[0] if lines else None
                     ref_path = lines[1] if len(lines) > 1 else None
@@ -2879,9 +2642,7 @@ class SeestarStackerGUI:
                     # Supprimer le fichier IMMÉDIATEMENT après lecture réussie
                     try:
                         os.remove(self.analyzer_command_file_path)
-                        print(
-                            f"DEBUG (GUI): Fichier commande supprimé."
-                        )  # <-- AJOUTÉ DEBUG
+                        print(f"DEBUG (GUI): Fichier commande supprimé.")  # <-- AJOUTÉ DEBUG
                     except OSError as e_rem:
                         print(
                             f"AVERTISSEMENT (GUI): Échec suppression fichier commande {self.analyzer_command_file_path}: {e_rem}"
@@ -2907,15 +2668,11 @@ class SeestarStackerGUI:
                 # --- Agir sur le contenu lu ---
                 if folder_path and os.path.isdir(folder_path):
                     analyzed_folder_path = os.path.abspath(folder_path)
-                    print(
-                        f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}"
-                    )  # <-- AJOUTÉ INFO
+                    print(f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}")  # <-- AJOUTÉ INFO
 
                     # Mettre à jour le champ d'entrée
                     current_input = self.input_path.get()
-                    if os.path.normpath(current_input) != os.path.normpath(
-                        analyzed_folder_path
-                    ):
+                    if os.path.normpath(current_input) != os.path.normpath(analyzed_folder_path):
                         print(
                             f"DEBUG (GUI): Mise à jour du champ dossier d'entrée vers: {analyzed_folder_path}"
                         )  # <-- AJOUTÉ DEBUG
@@ -2927,9 +2684,7 @@ class SeestarStackerGUI:
 
                     # Vérifier si le dossier de sortie est défini
                     if not self.output_path.get():
-                        default_output = os.path.join(
-                            analyzed_folder_path, "stack_output_analyzer"
-                        )  # Nom différent?
+                        default_output = os.path.join(analyzed_folder_path, "stack_output_analyzer")  # Nom différent?
                         print(
                             f"INFO (GUI): Dossier sortie non défini, utilisation défaut: {default_output}"
                         )  # <-- AJOUTÉ INFO
@@ -2970,17 +2725,11 @@ class SeestarStackerGUI:
                         1000, self._check_analyzer_command_file
                     )  # Vérifier à nouveau dans 1000 ms (1 seconde)
                 else:
-                    print(
-                        "DEBUG (GUI): Fenêtre racine détruite, arrêt surveillance fichier commande."
-                    )
-                    self._analyzer_check_after_id = (
-                        None  # Arrêter si la fenêtre est fermée
-                    )
+                    print("DEBUG (GUI): Fenêtre racine détruite, arrêt surveillance fichier commande.")
+                    self._analyzer_check_after_id = None  # Arrêter si la fenêtre est fermée
 
         except Exception as e_check:
-            print(
-                f"ERREUR (GUI): Erreur inattendue dans _check_analyzer_command_file: {e_check}"
-            )
+            print(f"ERREUR (GUI): Erreur inattendue dans _check_analyzer_command_file: {e_check}")
             traceback.print_exc(limit=2)
             # Essayer de replanifier même en cas d'erreur pour ne pas bloquer
             if hasattr(self.root, "after"):
@@ -2989,9 +2738,7 @@ class SeestarStackerGUI:
                         2000, self._check_analyzer_command_file
                     )  # Attendre un peu plus longtemps après une erreur
                 except tk.TclError:
-                    self._analyzer_check_after_id = (
-                        None  # Arrêter si la fenêtre est fermée
-                    )
+                    self._analyzer_check_after_id = None  # Arrêter si la fenêtre est fermée
             else:
                 self._analyzer_check_after_id = None
 
@@ -3001,23 +2748,15 @@ class SeestarStackerGUI:
         """Enables/disables the 'View Inputs' and 'Analyze Input' buttons."""
         try:
             # Déterminer l'état basé sur la validité du dossier d'entrée
-            is_input_valid = self.input_path.get() and os.path.isdir(
-                self.input_path.get()
-            )
+            is_input_valid = self.input_path.get() and os.path.isdir(self.input_path.get())
             new_state = tk.NORMAL if is_input_valid else tk.DISABLED
 
             # Mettre à jour le bouton "View Inputs"
-            if (
-                hasattr(self, "show_folders_button")
-                and self.show_folders_button.winfo_exists()
-            ):
+            if hasattr(self, "show_folders_button") and self.show_folders_button.winfo_exists():
                 self.show_folders_button.config(state=new_state)
 
             # Mettre à jour le bouton "Analyze Input Folder"
-            if (
-                hasattr(self, "analyze_folder_button")
-                and self.analyze_folder_button.winfo_exists()
-            ):
+            if hasattr(self, "analyze_folder_button") and self.analyze_folder_button.winfo_exists():
                 self.analyze_folder_button.config(state=new_state)
 
         except tk.TclError:
@@ -3121,9 +2860,7 @@ class SeestarStackerGUI:
             # --- Add Close Button ---
             button_frame = ttk.Frame(dialog, padding="0 10 10 10")
             button_frame.pack(fill=tk.X)
-            close_button = ttk.Button(
-                button_frame, text="Close", command=dialog.destroy
-            )  # Add translation if needed
+            close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy)  # Add translation if needed
             # Use pack with anchor or alignment if needed
             close_button.pack(anchor=tk.CENTER)  # Center the button
             close_button.focus_set()  # Set focus to close button
@@ -3150,19 +2887,13 @@ class SeestarStackerGUI:
         except Exception as e:
             print(f"Unexpected error showing folder list: {e}")
             traceback.print_exc(limit=2)
-            messagebox.showerror(
-                self.tr("error"), f"Failed to display folder list:\n{e}"
-            )
+            messagebox.showerror(self.tr("error"), f"Failed to display folder list:\n{e}")
 
-    def _create_slider_spinbox_group(
-        self, parent, label_key, min_val, max_val, step, tk_var, callback=None
-    ):
+    def _create_slider_spinbox_group(self, parent, label_key, min_val, max_val, step, tk_var, callback=None):
         """Helper to create a consistent Slider + SpinBox group with debouncing."""
         frame = ttk.Frame(parent)
         frame.pack(fill=tk.X, padx=5, pady=(1, 1))
-        label_widget = ttk.Label(
-            frame, text=self.tr(label_key, default=label_key), width=10
-        )
+        label_widget = ttk.Label(frame, text=self.tr(label_key, default=label_key), width=10)
         label_widget.pack(side=tk.LEFT)
         decimals = 0
         log_step = -3
@@ -3230,14 +2961,10 @@ class SeestarStackerGUI:
         )  # Version Log
         notebook_widget = None
         try:
-            if hasattr(self, "control_notebook") and isinstance(
-                self.control_notebook, ttk.Notebook
-            ):
+            if hasattr(self, "control_notebook") and isinstance(self.control_notebook, ttk.Notebook):
                 notebook_widget = self.control_notebook
         except Exception as e:
-            print(
-                f"Warning (GUI _store_widget_references): Erreur accès control_notebook: {e}"
-            )
+            print(f"Warning (GUI _store_widget_references): Erreur accès control_notebook: {e}")
 
         self.widgets_to_translate = {}
 
@@ -3331,9 +3058,7 @@ class SeestarStackerGUI:
             "cb_max_b_factor_label": "cb_max_b_factor_actual_label",
             "final_edge_crop_label": "final_edge_crop_actual_label",
             "apply_final_scnr_label": "apply_final_scnr_check",
-            "final_scnr_amount_label": getattr(self, "scnr_amount_ctrls", {}).get(
-                "label"
-            ),
+            "final_scnr_amount_label": getattr(self, "scnr_amount_ctrls", {}).get("label"),
             "final_scnr_preserve_lum_label": "final_scnr_preserve_lum_check",
             "apply_photutils_bn_label": "apply_photutils_bn_check",
             "photutils_bn_box_size_label": "photutils_bn_box_size_label",
@@ -3400,9 +3125,7 @@ class SeestarStackerGUI:
 
         # --- TOOLTIPS ---
         self.tooltips = {}
-        print(
-            f"DEBUG (GUI _store_widget_references): Dictionnaire self.tooltips réinitialisé."
-        )
+        print(f"DEBUG (GUI _store_widget_references): Dictionnaire self.tooltips réinitialisé.")
 
         tooltips_config_list = [
             # ... (toutes les configurations de tooltips existantes restent ici) ...
@@ -3481,7 +3204,9 @@ class SeestarStackerGUI:
             elif isinstance(item_identifier, tk.Widget):
                 widget_to_attach_tooltip = item_identifier
                 try:
-                    debug_item_name = f"WidgetDirect({widget_to_attach_tooltip.winfo_class()}-{id(widget_to_attach_tooltip)})"
+                    debug_item_name = (
+                        f"WidgetDirect({widget_to_attach_tooltip.winfo_class()}-{id(widget_to_attach_tooltip)})"
+                    )
                 except:
                     debug_item_name = f"WidgetDirect(id-{id(widget_to_attach_tooltip)})"
             else:
@@ -3530,54 +3255,32 @@ class SeestarStackerGUI:
             if key == "tab_preview":
                 print(f"DEBUG UI_LANG: Traitement clé '{key}'")
                 current_lang_for_tr = self.localization.language
-                print(
-                    f"DEBUG UI_LANG: Langue actuelle pour self.tr: '{current_lang_for_tr}'"
-                )
+                print(f"DEBUG UI_LANG: Langue actuelle pour self.tr: '{current_lang_for_tr}'")
 
-                translation_directe_langue_courante = self.localization.translations[
-                    current_lang_for_tr
-                ].get(key)
+                translation_directe_langue_courante = self.localization.translations[current_lang_for_tr].get(key)
                 print(
                     f"DEBUG UI_LANG: Traduction directe pour '{key}' en '{current_lang_for_tr}': '{translation_directe_langue_courante}'"
                 )
 
-                traduction_fallback_anglais = self.localization.translations["en"].get(
-                    key
-                )
-                print(
-                    f"DEBUG UI_LANG: Traduction fallback anglais pour '{key}': '{traduction_fallback_anglais}'"
-                )
+                traduction_fallback_anglais = self.localization.translations["en"].get(key)
+                print(f"DEBUG UI_LANG: Traduction fallback anglais pour '{key}': '{traduction_fallback_anglais}'")
 
-                default_text_calcul = self.localization.translations["en"].get(
-                    key, key.replace("_", " ").title()
-                )
-                print(
-                    f"DEBUG UI_LANG: default_text calculé pour '{key}': '{default_text_calcul}'"
-                )
+                default_text_calcul = self.localization.translations["en"].get(key, key.replace("_", " ").title())
+                print(f"DEBUG UI_LANG: default_text calculé pour '{key}': '{default_text_calcul}'")
 
                 translation_finale_pour_tab = self.tr(key, default=default_text_calcul)
-                print(
-                    f"DEBUG UI_LANG: self.tr('{key}') a retourné: '{translation_finale_pour_tab}'"
-                )
+                print(f"DEBUG UI_LANG: self.tr('{key}') a retourné: '{translation_finale_pour_tab}'")
             # --- FIN DEBUG SPÉCIFIQUE ---
-            default_text = self.localization.translations["en"].get(
-                key, key.replace("_", " ").title()
-            )
+            default_text = self.localization.translations["en"].get(key, key.replace("_", " ").title())
             translation = self.tr(key, default=default_text)
             try:
                 if widget_info is None:
                     continue
                 if isinstance(widget_info, tuple):
                     notebook, index = widget_info
-                    if (
-                        notebook
-                        and notebook.winfo_exists()
-                        and index < notebook.index("end")
-                    ):
+                    if notebook and notebook.winfo_exists() and index < notebook.index("end"):
                         notebook.tab(index, text=f" {translation} ")
-                elif (
-                    hasattr(widget_info, "winfo_exists") and widget_info.winfo_exists()
-                ):
+                elif hasattr(widget_info, "winfo_exists") and widget_info.winfo_exists():
                     widget = widget_info
                     if isinstance(widget, (ttk.Label, ttk.Button, ttk.Checkbutton)):
                         widget.config(text=translation)
@@ -3598,9 +3301,7 @@ class SeestarStackerGUI:
                 self.method_label_to_key[label] = k
             self.method_combo["values"] = list(self.method_key_to_label.values())
             current_key = self.stack_method_var.get()
-            self.stack_method_display_var.set(
-                self.method_key_to_label.get(current_key, current_key)
-            )
+            self.stack_method_display_var.set(self.method_key_to_label.get(current_key, current_key))
         if hasattr(self, "stack_norm_combo"):
             self.norm_key_to_label = {}
             self.norm_label_to_key = {}
@@ -3610,48 +3311,34 @@ class SeestarStackerGUI:
                 self.norm_label_to_key[label] = k
             self.stack_norm_combo["values"] = list(self.norm_key_to_label.values())
             current_key = self.stack_norm_method_var.get()
-            self.stack_norm_display_var.set(
-                self.norm_key_to_label.get(current_key, current_key)
-            )
+            self.stack_norm_display_var.set(self.norm_key_to_label.get(current_key, current_key))
         if hasattr(self, "stack_weight_combo"):
             self.weight_key_to_label = {}
             self.weight_label_to_key = {}
             for k in self.weight_keys:
-                label = self.tr(
-                    f"weight_method_{k}", default=k.replace("_", " ").title()
-                )
+                label = self.tr(f"weight_method_{k}", default=k.replace("_", " ").title())
                 self.weight_key_to_label[k] = label
                 self.weight_label_to_key[label] = k
             self.stack_weight_combo["values"] = list(self.weight_key_to_label.values())
             current_key = self.stack_weight_method_var.get()
-            self.stack_weight_display_var.set(
-                self.weight_key_to_label.get(current_key, current_key)
-            )
+            self.stack_weight_display_var.set(self.weight_key_to_label.get(current_key, current_key))
         if hasattr(self, "stack_final_combo"):
             self.final_key_to_label = {}
             self.final_label_to_key = {}
             for k in self.final_keys:
-                label = self.tr(
-                    f"combine_method_{k}", default=k.replace("_", " ").title()
-                )
+                label = self.tr(f"combine_method_{k}", default=k.replace("_", " ").title())
                 self.final_key_to_label[k] = label
                 self.final_label_to_key[label] = k
             self.stack_final_combo["values"] = list(self.final_key_to_label.values())
             if self.reproject_between_batches_var.get():
-                self.stack_final_display_var.set(
-                    self.final_key_to_label.get("reproject", "reproject")
-                )
+                self.stack_final_display_var.set(self.final_key_to_label.get("reproject", "reproject"))
             else:
                 current_key = self.stack_final_combine_var.get()
-                self.stack_final_display_var.set(
-                    self.final_key_to_label.get(current_key, current_key)
-                )
+                self.stack_final_display_var.set(self.final_key_to_label.get(current_key, current_key))
         # Update dynamic text variables
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
-            default_aligned_fmt = self.tr(
-                "aligned_files_label_format", default="Aligned: {count}"
-            )
+            default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
             self.aligned_files_var.set(default_aligned_fmt.format(count="--"))
             self.remaining_time_var.set("--:--:--")
         else:  # Ensure static labels are translated if processing
@@ -3666,9 +3353,7 @@ class SeestarStackerGUI:
             # Update dynamic counts using current language format string
             if hasattr(self, "queued_stacker"):
                 count = self.queued_stacker.aligned_files_count
-                default_aligned_fmt = self.tr(
-                    "aligned_files_label_format", default="Aligned: {count}"
-                )
+                default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
                 self.aligned_files_var.set(default_aligned_fmt.format(count=count))
                 self.update_remaining_files()  # Re-calculate R/T display
 
@@ -3688,9 +3373,7 @@ class SeestarStackerGUI:
 
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
-    def update_stretch_from_histogram(
-        self, black_point_from_histo, white_point_from_histo
-    ):
+    def update_stretch_from_histogram(self, black_point_from_histo, white_point_from_histo):
         """
         Met à jour les paramètres de stretch de l'aperçu (sliders 0-1)
         à partir des valeurs reçues de l'histogramme (qui peuvent être en ADU ou 0-1).
@@ -3721,38 +3404,24 @@ class SeestarStackerGUI:
                 and self.histogram_widget.data_max_for_current_plot > 1.5
             ):
                 is_histo_on_adu = True
-                data_source_for_histo_min = (
-                    self.histogram_widget.data_min_for_current_plot
-                )
-                data_source_for_histo_max = (
-                    self.histogram_widget.data_max_for_current_plot
-                )
+                data_source_for_histo_min = self.histogram_widget.data_min_for_current_plot
+                data_source_for_histo_max = self.histogram_widget.data_max_for_current_plot
                 print(
                     f"  -> Histogramme opérait sur données ADU. Plage histo: [{data_source_for_histo_min:.4g}, {data_source_for_histo_max:.4g}]"
                 )
 
         if not is_histo_on_adu:
-            print(
-                "  -> Histogramme opérait sur données 0-1 (ou plage non ADU détectée)."
-            )
+            print("  -> Histogramme opérait sur données 0-1 (ou plage non ADU détectée).")
             # Si ce n'est pas ADU, on suppose que les BP/WP de l'histo sont déjà 0-1 ou proches
-            data_source_for_histo_min = getattr(
-                self.histogram_widget, "data_min_for_current_plot", 0.0
-            )
-            data_source_for_histo_max = getattr(
-                self.histogram_widget, "data_max_for_current_plot", 1.0
-            )
+            data_source_for_histo_min = getattr(self.histogram_widget, "data_min_for_current_plot", 0.0)
+            data_source_for_histo_max = getattr(self.histogram_widget, "data_max_for_current_plot", 1.0)
 
         range_histo_data = data_source_for_histo_max - data_source_for_histo_min
         if range_histo_data < 1e-9:
             range_histo_data = 1.0
 
-        bp_ui_01 = (
-            black_point_from_histo - data_source_for_histo_min
-        ) / range_histo_data
-        wp_ui_01 = (
-            white_point_from_histo - data_source_for_histo_min
-        ) / range_histo_data
+        bp_ui_01 = (black_point_from_histo - data_source_for_histo_min) / range_histo_data
+        wp_ui_01 = (white_point_from_histo - data_source_for_histo_min) / range_histo_data
 
         bp_ui_01 = np.clip(bp_ui_01, 0.0, 1.0)
         wp_ui_01 = np.clip(wp_ui_01, 0.0, 1.0)
@@ -3761,9 +3430,7 @@ class SeestarStackerGUI:
         if bp_ui_01 >= wp_ui_01 - 1e-4:
             bp_ui_01 = max(0.0, wp_ui_01 - 1e-4)
 
-        print(
-            f"  -> Valeurs normalisées 0-1 pour UI sliders: BP_UI={bp_ui_01:.4f}, WP_UI={wp_ui_01:.4f}"
-        )
+        print(f"  -> Valeurs normalisées 0-1 pour UI sliders: BP_UI={bp_ui_01:.4f}, WP_UI={wp_ui_01:.4f}")
 
         try:
             self.preview_black_point.set(round(bp_ui_01, 4))
@@ -3773,15 +3440,9 @@ class SeestarStackerGUI:
 
         # Mettre à jour les sliders physiques (au cas où la liaison tk_var ne suffirait pas)
         try:
-            if (
-                hasattr(self, "stretch_bp_ctrls")
-                and self.stretch_bp_ctrls["slider"].winfo_exists()
-            ):
+            if hasattr(self, "stretch_bp_ctrls") and self.stretch_bp_ctrls["slider"].winfo_exists():
                 self.stretch_bp_ctrls["slider"].set(bp_ui_01)
-            if (
-                hasattr(self, "stretch_wp_ctrls")
-                and self.stretch_wp_ctrls["slider"].winfo_exists()
-            ):
+            if hasattr(self, "stretch_wp_ctrls") and self.stretch_wp_ctrls["slider"].winfo_exists():
                 self.stretch_wp_ctrls["slider"].set(wp_ui_01)
         except tk.TclError:
             pass
@@ -3790,9 +3451,7 @@ class SeestarStackerGUI:
         self._hist_range_update_pending = True
         self._debounce_refresh_preview(recalculate_histogram=False)
 
-    def _debounce_refresh_preview(
-        self, *args, recalculate_histogram=True
-    ):  # Ajout argument
+    def _debounce_refresh_preview(self, *args, recalculate_histogram=True):  # Ajout argument
         """Debounces preview refresh calls."""
         if self.debounce_timer_id:
             try:
@@ -3803,9 +3462,7 @@ class SeestarStackerGUI:
             # Passer l'argument recalculate_histogram à la fonction cible
             self.debounce_timer_id = self.root.after(
                 150,
-                lambda rh=recalculate_histogram: self.refresh_preview(
-                    recalculate_histogram=rh
-                ),
+                lambda rh=recalculate_histogram: self.refresh_preview(recalculate_histogram=rh),
             )
         except tk.TclError:
             pass
@@ -3813,9 +3470,7 @@ class SeestarStackerGUI:
     def _reset_expert_settings(self):
         """Réinitialise les paramètres de l'onglet Expert à leurs valeurs par défaut
         telles que définies dans SettingsManager.reset_to_defaults()."""
-        print(
-            "DEBUG (GUI _reset_expert_settings): Réinitialisation des paramètres Expert..."
-        )
+        print("DEBUG (GUI _reset_expert_settings): Réinitialisation des paramètres Expert...")
 
         # Créer une instance temporaire de SettingsManager pour obtenir ses valeurs par défaut
         default_settings = SettingsManager()
@@ -3860,49 +3515,31 @@ class SeestarStackerGUI:
 
             # Rognage Final
             if hasattr(self, "final_edge_crop_percent_var"):
-                self.final_edge_crop_percent_var.set(
-                    default_settings.final_edge_crop_percent
-                )
+                self.final_edge_crop_percent_var.set(default_settings.final_edge_crop_percent)
             if hasattr(self, "apply_final_crop_var"):
                 self.apply_final_crop_var.set(default_settings.apply_final_crop)
 
             # --- Réinitialiser Feathering ---
             if hasattr(self, "apply_feathering_var"):
-                self.apply_feathering_var.set(
-                    default_settings.apply_feathering
-                )  # Sera False par défaut
+                self.apply_feathering_var.set(default_settings.apply_feathering)  # Sera False par défaut
             if hasattr(self, "feather_blur_px_var"):
-                self.feather_blur_px_var.set(
-                    default_settings.feather_blur_px
-                )  # Sera 256 par défaut
+                self.feather_blur_px_var.set(default_settings.feather_blur_px)  # Sera 256 par défaut
             if hasattr(self, "apply_batch_feathering_var"):
-                self.apply_batch_feathering_var.set(
-                    default_settings.apply_batch_feathering
-                )
+                self.apply_batch_feathering_var.set(default_settings.apply_batch_feathering)
                 self._on_apply_batch_feathering_changed()
             # ---  ---
 
             # --- Réinitialiser Photutils BN ---
             if hasattr(self, "apply_photutils_bn_var"):
-                self.apply_photutils_bn_var.set(
-                    default_settings.apply_photutils_bn
-                )  # Sera False par défaut
+                self.apply_photutils_bn_var.set(default_settings.apply_photutils_bn)  # Sera False par défaut
             if hasattr(self, "photutils_bn_box_size_var"):
-                self.photutils_bn_box_size_var.set(
-                    default_settings.photutils_bn_box_size
-                )
+                self.photutils_bn_box_size_var.set(default_settings.photutils_bn_box_size)
             if hasattr(self, "photutils_bn_filter_size_var"):
-                self.photutils_bn_filter_size_var.set(
-                    default_settings.photutils_bn_filter_size
-                )
+                self.photutils_bn_filter_size_var.set(default_settings.photutils_bn_filter_size)
             if hasattr(self, "photutils_bn_sigma_clip_var"):
-                self.photutils_bn_sigma_clip_var.set(
-                    default_settings.photutils_bn_sigma_clip
-                )
+                self.photutils_bn_sigma_clip_var.set(default_settings.photutils_bn_sigma_clip)
             if hasattr(self, "photutils_bn_exclude_percentile_var"):
-                self.photutils_bn_exclude_percentile_var.set(
-                    default_settings.photutils_bn_exclude_percentile
-                )
+                self.photutils_bn_exclude_percentile_var.set(default_settings.photutils_bn_exclude_percentile)
             # ---  ---
 
             # Mettre à jour l'état des widgets après réinitialisation
@@ -3922,21 +3559,13 @@ class SeestarStackerGUI:
             # Si d'autres groupes d'options dans l'onglet expert ont des états dépendants,
             # appelez leurs méthodes _update_..._state() ici aussi.
 
-            self.update_progress_gui(
-                "ⓘ Réglages Expert réinitialisés aux valeurs par défaut.", None
-            )
-            print(
-                "DEBUG (GUI _reset_expert_settings): Paramètres Expert réinitialisés dans l'UI."
-            )
+            self.update_progress_gui("ⓘ Réglages Expert réinitialisés aux valeurs par défaut.", None)
+            print("DEBUG (GUI _reset_expert_settings): Paramètres Expert réinitialisés dans l'UI.")
 
         except tk.TclError as e:
-            print(
-                f"ERREUR (GUI _reset_expert_settings): Erreur Tcl lors de la réinitialisation des widgets: {e}"
-            )
+            print(f"ERREUR (GUI _reset_expert_settings): Erreur Tcl lors de la réinitialisation des widgets: {e}")
         except AttributeError as e:
-            print(
-                f"ERREUR (GUI _reset_expert_settings): Erreur d'attribut (widget ou variable Tk manquant?): {e}"
-            )
+            print(f"ERREUR (GUI _reset_expert_settings): Erreur d'attribut (widget ou variable Tk manquant?): {e}")
             traceback.print_exc(limit=1)  # Pour voir quel attribut manque
         except Exception as e:
             print(f"ERREUR (GUI _reset_expert_settings): Erreur inattendue: {e}")
@@ -3976,17 +3605,14 @@ class SeestarStackerGUI:
             preview_hist = preview_array
 
         if self._final_stretch_set_by_processing_finished:
-            self.logger.info(
-                "  [update_preview] Verrou final actif. Mise à jour des données uniquement."
-            )
+            self.logger.info("  [update_preview] Verrou final actif. Mise à jour des données uniquement.")
             if preview_array is not None:
                 self.current_preview_data = preview_display.copy()
                 self.current_preview_hist_data = preview_hist.copy()
-                self.current_stack_header = (
-                    stack_header.copy() if stack_header else None
-                )
+                self.current_stack_header = stack_header.copy() if stack_header else None
                 self.preview_img_count = img_count
-                self.preview_total_imgs = total_imgs
+                if getattr(self, "preview_total_imgs", 0) == 0:
+                    self.preview_total_imgs = total_imgs
                 self.preview_current_batch = current_batch
                 self.preview_total_batches = total_batches
                 self.refresh_preview(recalculate_histogram=True)
@@ -4002,7 +3628,8 @@ class SeestarStackerGUI:
         self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
-        self.preview_total_imgs = total_imgs
+        if getattr(self, "preview_total_imgs", 0) == 0:
+            self.preview_total_imgs = total_imgs
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
 
@@ -4010,20 +3637,14 @@ class SeestarStackerGUI:
             self.logger.info(
                 "  [update_preview] Première mise à jour de l'aperçu : déclenchement de l'auto-ajustement initial."
             )
-            self.update_progress_gui(
-                "ⓘ Ajustement automatique initial de l'aperçu...", None
-            )
+            self.update_progress_gui("ⓘ Ajustement automatique initial de l'aperçu...", None)
             try:
                 self.apply_auto_white_balance()
                 self.apply_auto_stretch()
                 self.initial_auto_stretch_done = True
-                self.logger.info(
-                    "  [update_preview] Flag initial_auto_stretch_done mis à True."
-                )
+                self.logger.info("  [update_preview] Flag initial_auto_stretch_done mis à True.")
             except Exception as e:
-                self.logger.error(
-                    f"  [update_preview] Échec lors de l'auto-ajustement initial : {e}"
-                )
+                self.logger.error(f"  [update_preview] Échec lors de l'auto-ajustement initial : {e}")
         else:
             self.logger.debug(
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
@@ -4038,119 +3659,50 @@ class SeestarStackerGUI:
 
         if self.current_stack_header:
             try:
-                self.root.after_idle(
-                    lambda h=self.current_stack_header: (
-                        self.update_image_info(h) if h else None
-                    )
-                )
+                self.root.after_idle(lambda h=self.current_stack_header: (self.update_image_info(h) if h else None))
             except tk.TclError:
                 pass
 
     def apply_auto_stretch(self):
-        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        """Compute auto-stretch on a worker thread."""
+
         if (
             hasattr(self, "_final_stretch_set_by_processing_finished")
             and self._final_stretch_set_by_processing_finished
         ):
             self.logger.warning(
-                f"APPLY_AUTO_STRETCH (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
-            )
-            self.logger.warning(
-                "  Pile d'appels pour cet appel ignoré à apply_auto_stretch:"
-            )
-            for line in traceback.format_stack():
-                self.logger.warning(f"    {line.strip()}")
-            return  # Sortir tôt pour ne pas modifier le stretch
-        # --- FIN DU BLOC DE VERROU ---
-
-        # Si on arrive ici, le verrou n'était pas actif OU l'attribut n'existait pas (ce dernier cas ne devrait pas arriver après __init__)
-        self.logger.debug(
-            ">>>> Début SeestarStackerGUI.apply_auto_stretch (après vérif verrou)"
-        )
-        self.logger.debug("     Pile d'appels pour apply_auto_stretch:")
-        for line in traceback.format_stack():
-            self.logger.debug(f"       {line.strip()}")
-
-        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
-        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
-        # est plus spécifique pour la phase post-traitement. Si un auto-stretch est appelé PENDANT le traitement,
-        # c'est (pour l'instant) considéré comme normal (ex: par update_preview_from_stacker).
-
-        if not _tools_available:
-            messagebox.showerror(self.tr("error"), "Stretch tools not available.")
-            self.logger.warning(
-                "apply_auto_stretch: Tentative d'utilisation alors que _tools_available est False."
+                "APPLY_AUTO_STRETCH (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
             )
             return
 
-        data_to_analyze = None
-        # Priorité 1: Données après WB du PreviewManager
-        if (
-            hasattr(self, "preview_manager")
-            and self.preview_manager.image_data_wb is not None
-        ):
-            data_to_analyze = self.preview_manager.image_data_wb
-            self.logger.debug(
-                "  apply_auto_stretch: Utilisation de self.preview_manager.image_data_wb pour l'analyse."
-            )
-        # Priorité 2: current_preview_data avec gains UI
-        elif self.current_preview_data is not None:
-            self.logger.info(
-                "  apply_auto_stretch: Fallback -> Utilisation de self.current_preview_data avec les gains UI actuels pour l'analyse."
-            )
-            if self.current_preview_data.ndim == 3:
-                try:
-                    r_gain = self.preview_r_gain.get()
-                    g_gain = self.preview_g_gain.get()
-                    b_gain = self.preview_b_gain.get()
-                    data_to_analyze = ColorCorrection.white_balance(
-                        self.current_preview_data, r_gain, g_gain, b_gain
-                    )
-                    self.logger.debug(
-                        f"    apply_auto_stretch: WB appliquée avec R={r_gain:.2f}, G={g_gain:.2f}, B={b_gain:.2f}"
-                    )
-                except (
-                    tk.TclError
-                ) as e_tcl:  # Erreur lecture des gains (fenêtre en fermeture?)
-                    self.logger.warning(
-                        f"    apply_auto_stretch: Erreur TclError lecture gains WB ({e_tcl}), utilisation current_preview_data brut."
-                    )
-                    data_to_analyze = self.current_preview_data
-                except Exception as e_wb:
-                    self.logger.error(
-                        f"    apply_auto_stretch: Erreur application WB manuelle pour auto-stretch: {e_wb}"
-                    )
-                    data_to_analyze = self.current_preview_data  # Fallback
-            else:  # Données N&B
-                data_to_analyze = self.current_preview_data
-        else:
-            self.logger.warning(
-                "apply_auto_stretch: Aucune donnée d'aperçu disponible."
-            )
-            messagebox.showwarning(
-                self.tr("warning"), self.tr("Auto Stretch requires an image preview.")
-            )
-            return
+        def _worker(data, wb_data):
+            if not _tools_available:
+                self.root.after(0, lambda: messagebox.showerror(self.tr("error"), "Stretch tools not available."))
+                return
 
-        if data_to_analyze is None:  # Double sécurité
-            self.logger.error(
-                "apply_auto_stretch: data_to_analyze est None après les tentatives de récupération."
-            )
-            messagebox.showwarning(
-                self.tr("warning"), self.tr("Auto Stretch: No data to analyze.")
-            )
-            return
+            if data is None:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        self.tr("warning"), self.tr("Auto Stretch: No data to analyze.")
+                    ),
+                )
+                return
 
-        try:
-            # calculate_auto_stretch est censé opérer sur des données déjà balancées en couleur
-            # et retourne des BP/WP normalisés à la plage des données d'entrée.
-            bp_calc, wp_calc = calculate_auto_stretch(data_to_analyze)
-            self.logger.info(
-                f"  apply_auto_stretch: calculate_auto_stretch sur données (approx range [{np.nanmin(data_to_analyze):.3f}-{np.nanmax(data_to_analyze):.3f}]) a retourné BP={bp_calc:.4f}, WP={wp_calc:.4f}"
-            )
+            try:
+                bp_calc, wp_calc = calculate_auto_stretch(data)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"
+                    ),
+                )
+                self.logger.error(f"apply_auto_stretch: {e}")
+                return
 
-            min_data_val = np.nanmin(data_to_analyze)
-            max_data_val = np.nanmax(data_to_analyze)
+            min_data_val = np.nanmin(data)
+            max_data_val = np.nanmax(data)
             range_data = max_data_val - min_data_val
             if range_data < 1e-9:
                 range_data = 1.0
@@ -4165,44 +3717,40 @@ class SeestarStackerGUI:
             if bp_ui_01 >= wp_ui_01 - 1e-4:
                 bp_ui_01 = max(0.0, wp_ui_01 - 1e-4)
 
-            self.logger.info(
-                f"  apply_auto_stretch: Valeurs pour UI (0-1): BP_UI={bp_ui_01:.4f}, WP_UI={wp_ui_01:.4f}"
-            )
-
-            self.preview_black_point.set(round(bp_ui_01, 4))
-            self.preview_white_point.set(round(wp_ui_01, 4))
-            self.preview_stretch_method.set("Asinh")
-
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.logger.debug(
-                    "  apply_auto_stretch: Appel histogram_widget.set_range."
+            def _apply():
+                self.preview_black_point.set(round(bp_ui_01, 4))
+                self.preview_white_point.set(round(wp_ui_01, 4))
+                self.preview_stretch_method.set("Asinh")
+                if hasattr(self, "histogram_widget") and self.histogram_widget:
+                    self.histogram_widget.set_range(bp_ui_01, wp_ui_01)
+                self.update_progress_gui(
+                    f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp_ui_01:.3f} WP={wp_ui_01:.3f}",
+                    None,
                 )
-                self.histogram_widget.set_range(bp_ui_01, wp_ui_01)
+                self.refresh_preview(recalculate_histogram=True)
 
-            self.update_progress_gui(
-                f"Auto Stretch (Asinh) appliqué (Aperçu): BP={bp_ui_01:.3f} WP={wp_ui_01:.3f}",
-                None,
-            )
+            self.root.after(0, _apply)
 
-            self.logger.debug(
-                "  apply_auto_stretch: Appel refresh_preview (recalculate_histogram=True)."
-            )
-            self.refresh_preview(
-                recalculate_histogram=True
-            )  # Un AutoStretch manuel doit rafraîchir l'histogramme
-        except Exception as e:
-            self.logger.error(
-                f"apply_auto_stretch: Erreur pendant calcul/application: {e}"
-            )
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('Error during Auto Stretch')}: {e}"
-            )
-            traceback.print_exc(limit=2)
-        # --- FIN DE VOTRE CODE ORIGINAL ---
+        data = None
+        if hasattr(self, "preview_manager") and self.preview_manager.image_data_wb is not None:
+            data = self.preview_manager.image_data_wb.copy()
+        elif self.current_preview_data is not None:
+            if self.current_preview_data.ndim == 3:
+                try:
+                    r_gain = self.preview_r_gain.get()
+                    g_gain = self.preview_g_gain.get()
+                    b_gain = self.preview_b_gain.get()
+                    data = ColorCorrection.white_balance(
+                        self.current_preview_data, r_gain, g_gain, b_gain
+                    )
+                except Exception:
+                    data = self.current_preview_data.copy()
+            else:
+                data = self.current_preview_data.copy()
 
-    def refresh_preview(
-        self, recalculate_histogram=True
-    ):  # <--- SIGNATURE CORRIGÉE ICI
+        threading.Thread(target=_worker, args=(data, None), daemon=True, name="AutoStretchWorker").start()
+
+    def refresh_preview(self, recalculate_histogram=True):  # <--- SIGNATURE CORRIGÉE ICI
         """
         Refreshes the preview based on current data and UI settings.
         MODIFIED: Ajout paramètre recalculate_histogram.
@@ -4226,25 +3774,13 @@ class SeestarStackerGUI:
             or not hasattr(self, "histogram_widget")
             or self.histogram_widget is None
         ):
-            print(
-                "  [RefreshPreview] No data or managers. Checking for first input image."
-            )
-            if (
-                not self.processing
-                and self.input_path.get()
-                and os.path.isdir(self.input_path.get())
-            ):
+            print("  [RefreshPreview] No data or managers. Checking for first input image.")
+            if not self.processing and self.input_path.get() and os.path.isdir(self.input_path.get()):
                 self._try_show_first_input_image()
             else:
                 if hasattr(self, "preview_manager") and self.preview_manager:
-                    self.preview_manager.clear_preview(
-                        self.tr("Select input/output folders.")
-                    )
-                if (
-                    hasattr(self, "histogram_widget")
-                    and self.histogram_widget
-                    and recalculate_histogram
-                ):
+                    self.preview_manager.clear_preview(self.tr("Select input/output folders."))
+                if hasattr(self, "histogram_widget") and self.histogram_widget and recalculate_histogram:
                     self.histogram_widget.plot_histogram(None)
             return
 
@@ -4266,77 +3802,42 @@ class SeestarStackerGUI:
             return
 
         try:
-            print("  [RefreshPreview] Calling preview_manager.update_preview...")
-            processed_pil_image, _ = (
-                self.preview_manager.update_preview(
-                    self.current_preview_data,
-                    preview_params,
+            def _worker(data_copy, params_copy):
+                pil_img, hist_data = self.preview_manager.update_preview(
+                    data_copy,
+                    params_copy,
                     stack_count=self.preview_img_count,
                     total_images=self.preview_total_imgs,
                     current_batch=self.preview_current_batch,
                     total_batches=self.preview_total_batches,
                 )
-            )
 
-            if self.current_preview_hist_data is not None:
-                data_for_histogram_analysis = self.preview_manager.color_correction.white_balance(
-                    self.current_preview_hist_data.copy(),
-                    r=preview_params["r_gain"],
-                    g=preview_params["g_gain"],
-                    b=preview_params["b_gain"],
-                )
-            else:
-                data_for_histogram_analysis = None
-            print("  [RefreshPreview] Returned from preview_manager.update_preview.")
+                def _apply():
+                    if recalculate_histogram and self.histogram_widget:
+                        self.histogram_widget.update_histogram(hist_data)
+                        try:
+                            bp_ui = self.preview_black_point.get()
+                            wp_ui = self.preview_white_point.get()
+                            self.histogram_widget.set_range(bp_ui, wp_ui)
+                        except tk.TclError:
+                            pass
 
-            if recalculate_histogram:
-                if data_for_histogram_analysis is not None:
-                    print(
-                        f"    [RefreshPreview] data_for_histogram_analysis - Shape: {data_for_histogram_analysis.shape}, Range: [{np.nanmin(data_for_histogram_analysis):.4g} - {np.nanmax(data_for_histogram_analysis):.4g}]"
-                    )
-                else:
-                    print("    [RefreshPreview] data_for_histogram_analysis is None.")
+                self.root.after(0, _apply)
 
-                if self.histogram_widget:
-                    print(
-                        "    [RefreshPreview] Calling histogram_widget.update_histogram (recalcul demandé)..."
-                    )
-                    self.histogram_widget.update_histogram(data_for_histogram_analysis)
-                    print(
-                        "    [RefreshPreview] Returned from histogram_widget.update_histogram."
-                    )
-                    try:
-                        bp_ui = self.preview_black_point.get()
-                        wp_ui = self.preview_white_point.get()
-                    except tk.TclError:
-                        bp_ui = None
-                        wp_ui = None
-                    if bp_ui is not None and wp_ui is not None:
-                        self.histogram_widget.set_range(bp_ui, wp_ui)
-            else:
-                print(
-                    "  [RefreshPreview] Recalcul de l'histogramme ignoré (recalculate_histogram=False)."
-                )
-
-            if self.histogram_widget:
-                self.histogram_widget.set_range(
-                    preview_params["black_point"], preview_params["white_point"]
-                )
+            threading.Thread(
+                target=_worker,
+                args=(self.current_preview_data.copy(), preview_params.copy()),
+                daemon=True,
+                name="PreviewWorker",
+            ).start()
+            return
 
         except Exception as e:
-            print(
-                f"  [RefreshPreview] ERREUR CRITIQUE pendant traitement aperçu/histogramme: {e}"
-            )
+            print(f"  [RefreshPreview] ERREUR CRITIQUE pendant traitement aperçu/histogramme: {e}")
             traceback.print_exc(limit=2)
-            if (
-                hasattr(self, "histogram_widget")
-                and self.histogram_widget
-                and recalculate_histogram
-            ):
+            if hasattr(self, "histogram_widget") and self.histogram_widget and recalculate_histogram:
                 self.histogram_widget.plot_histogram(None)
-        print(
-            "[DEBUG-GUI] refresh_preview V_RefreshHistoControl_1_SignatureFix: Exiting."
-        )
+        print("[DEBUG-GUI] refresh_preview V_RefreshHistoControl_1_SignatureFix: Exiting.")
 
     def update_image_info(self, header):
         if not header or not hasattr(self, "preview_manager"):
@@ -4368,9 +3869,7 @@ class SeestarStackerGUI:
                 s_value = str(value)
                 if key == "DATE-OBS":
                     s_value = s_value.split("T")[0]
-                elif key in ["EXPTIME", "CCD-TEMP", "TOTEXP"] and isinstance(
-                    value, (int, float)
-                ):
+                elif key in ["EXPTIME", "CCD-TEMP", "TOTEXP"] and isinstance(value, (int, float)):
                     try:
                         s_value = f"{float(value):.1f}"
                     except ValueError:
@@ -4388,9 +3887,7 @@ class SeestarStackerGUI:
                     else:
                         s_value = self.tr("weighting_disabled")
                 info_lines.append(f"{label}: {s_value}")
-        info_text = (
-            "\n".join(info_lines) if info_lines else self.tr("No image info available")
-        )
+        info_text = "\n".join(info_lines) if info_lines else self.tr("No image info available")
         if hasattr(self.preview_manager, "update_info_text"):
             self.preview_manager.update_info_text(info_text)
 
@@ -4402,17 +3899,11 @@ class SeestarStackerGUI:
         pour un aperçu initial.
         MODIFIED V2_TupleFix: Gère correctement le retour (tuple) de load_and_validate_fits.
         """
-        print(
-            "DEBUG GUI (_try_show_first_input_image V2_TupleFix): Tentative d'affichage de la première image."
-        )
+        print("DEBUG GUI (_try_show_first_input_image V2_TupleFix): Tentative d'affichage de la première image.")
         input_folder = self.input_path.get()
 
-        if not hasattr(self, "preview_manager") or not hasattr(
-            self, "histogram_widget"
-        ):
-            print(
-                "  WARN GUI (_try_show_first_input_image): PreviewManager ou HistogramWidget manquant."
-            )
+        if not hasattr(self, "preview_manager") or not hasattr(self, "histogram_widget"):
+            print("  WARN GUI (_try_show_first_input_image): PreviewManager ou HistogramWidget manquant.")
             return
 
         if not input_folder or not os.path.isdir(input_folder):
@@ -4420,225 +3911,204 @@ class SeestarStackerGUI:
                 f"  DEBUG GUI (_try_show_first_input_image): Dossier d'entrée non valide ou non défini ('{input_folder}'). Effacement aperçu."
             )
             if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(
-                    self.tr("Input folder not found or not set")
-                )
+                self.preview_manager.clear_preview(self.tr("Input folder not found or not set"))
             if hasattr(self, "histogram_widget") and self.histogram_widget:
                 self.histogram_widget.plot_histogram(None)
             return
 
-        try:
-            files = sorted(
-                [
-                    f
-                    for f in os.listdir(input_folder)
-                    if f.lower().endswith((".fit", ".fits"))
-                ]
-            )
-            if not files:
-                print(
-                    f"  DEBUG GUI (_try_show_first_input_image): Aucun fichier FITS trouvé dans '{input_folder}'. Effacement aperçu."
+        def _worker():
+            try:
+                files = sorted(
+                    [f for f in os.listdir(input_folder) if f.lower().endswith((".fit", ".fits"))]
                 )
-                if hasattr(self, "preview_manager") and self.preview_manager:
-                    self.preview_manager.clear_preview(
-                        self.tr("No FITS files in input folder")
-                    )
-                if hasattr(self, "histogram_widget") and self.histogram_widget:
-                    self.histogram_widget.plot_histogram(None)
-                return
-
-            first_image_filename = files[0]
-            first_image_path = os.path.join(input_folder, first_image_filename)
-            self.update_progress_gui(
-                f"{self.tr('Loading preview for', default='Loading preview')}: {first_image_filename}...",
-                None,
-            )
-            print(
-                f"  DEBUG GUI (_try_show_first_input_image): Chargement de '{first_image_path}'..."
-            )
-
-            # --- MODIFICATION ICI pour déballer le tuple ---
-            loaded_data_tuple = load_and_validate_fits(first_image_path)
-
-            img_data_from_load = None  # Doit être défini avant le if
-            header_from_load = None  # Doit être défini avant le if
-
-            if loaded_data_tuple is not None and loaded_data_tuple[0] is not None:
-                img_data_from_load, header_from_load = loaded_data_tuple  # Déballer
-                print(
-                    f"  DEBUG GUI (_try_show_first_input_image): load_and_validate_fits OK. Shape données: {img_data_from_load.shape}"
-                )
-            else:
-                raise ValueError(
-                    f"Échec chargement/validation de '{first_image_filename}' par load_and_validate_fits (retour None ou données None)."
-                )
-            # --- FIN MODIFICATION ---
-
-            img_for_preview = img_data_from_load
-
-            if img_for_preview.ndim == 2:
-                bayer_pattern_from_header = (
-                    header_from_load.get("BAYERPAT", self.settings.bayer_pattern)
-                    if header_from_load
-                    else self.settings.bayer_pattern
-                )
-                valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
-
-                if (
-                    isinstance(bayer_pattern_from_header, str)
-                    and bayer_pattern_from_header.upper() in valid_bayer_patterns
-                ):
+                if not files:
+                    def _no_files():
+                        if hasattr(self, "preview_manager") and self.preview_manager:
+                            self.preview_manager.clear_preview(self.tr("No FITS files in input folder"))
+                        if hasattr(self, "histogram_widget") and self.histogram_widget:
+                            self.histogram_widget.plot_histogram(None)
                     print(
-                        f"  DEBUG GUI (_try_show_first_input_image): Debayering aperçu initial (Pattern: {bayer_pattern_from_header.upper()})..."
+                        f"  DEBUG GUI (_try_show_first_input_image): Aucun fichier FITS trouvé dans '{input_folder}'. Effacement aperçu."
                     )
-                    try:
-                        img_for_preview = debayer_image(
-                            img_for_preview, bayer_pattern_from_header.upper()
-                        )
-                    except ValueError as debayer_err:
-                        self.update_progress_gui(
-                            f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.",
-                            None,
-                        )
-                        print(
-                            f"    WARN GUI: Erreur Debayer aperçu initial: {debayer_err}. Affichage N&B."
-                        )
+                    self.root.after(0, _no_files)
+                    return
+
+                first_image_filename = files[0]
+                first_image_path = os.path.join(input_folder, first_image_filename)
+                self.root.after(
+                    0,
+                    lambda fn=first_image_filename: self.update_progress_gui(
+                        f"{self.tr('Loading preview for', default='Loading preview')}: {fn}...",
+                        None,
+                    ),
+                )
+                print(f"  DEBUG GUI (_try_show_first_input_image): Chargement de '{first_image_path}'...")
+
+                loaded_data_tuple = load_and_validate_fits(first_image_path)
+
+                img_data_from_load = None
+                header_from_load = None
+
+                if loaded_data_tuple is not None and loaded_data_tuple[0] is not None:
+                    img_data_from_load, header_from_load = loaded_data_tuple
+                    print(
+                        f"  DEBUG GUI (_try_show_first_input_image): load_and_validate_fits OK. Shape données: {img_data_from_load.shape}"
+                    )
                 else:
-                    print(
-                        f"  DEBUG GUI (_try_show_first_input_image): Pas de debayering pour aperçu (pas de pattern Bayer valide ou image supposée déjà couleur)."
+                    raise ValueError(
+                        f"Échec chargement/validation de '{first_image_filename}' par load_and_validate_fits (retour None ou données None)."
                     )
 
-            self.current_preview_data = img_for_preview.copy()
-            self.current_preview_hist_data = img_for_preview.copy()
-            self.current_stack_header = (
-                header_from_load.copy() if header_from_load else fits.Header()
-            )
+                img_for_preview = img_data_from_load
 
-            print(
-                f"  DEBUG GUI (_try_show_first_input_image): Données prêtes pour refresh_preview. Shape: {self.current_preview_data.shape}"
-            )
-            self.refresh_preview()
+                if img_for_preview.ndim == 2:
+                    bayer_pattern_from_header = (
+                        header_from_load.get("BAYERPAT", self.settings.bayer_pattern)
+                        if header_from_load
+                        else self.settings.bayer_pattern
+                    )
+                    valid_bayer_patterns = ["GRBG", "RGGB", "GBRG", "BGGR"]
 
-            if self.current_stack_header:
-                self.update_image_info(self.current_stack_header)
+                    if (
+                        isinstance(bayer_pattern_from_header, str)
+                        and bayer_pattern_from_header.upper() in valid_bayer_patterns
+                    ):
+                        print(
+                            f"  DEBUG GUI (_try_show_first_input_image): Debayering aperçu initial (Pattern: {bayer_pattern_from_header.upper()})..."
+                        )
+                        try:
+                            img_for_preview = debayer_image(
+                                img_for_preview, bayer_pattern_from_header.upper()
+                            )
+                        except ValueError as debayer_err:
+                            self.root.after(
+                                0,
+                                lambda msg=f"⚠️ {self.tr('Error during debayering')}: {debayer_err}. Affichage N&B.": self.update_progress_gui(
+                                    msg,
+                                    None,
+                                ),
+                            )
+                            print(
+                                f"    WARN GUI: Erreur Debayer aperçu initial: {debayer_err}. Affichage N&B."
+                            )
+                    else:
+                        print(
+                            f"  DEBUG GUI (_try_show_first_input_image): Pas de debayering pour aperçu (pas de pattern Bayer valide ou image supposée déjà couleur)."
+                        )
 
-            self.update_progress_gui(
-                f"{self.tr('Preview loaded', default='Preview loaded')}: {first_image_filename}",
-                None,
-            )
+                def _update_gui(img=img_for_preview, hdr=header_from_load, fn=first_image_filename):
+                    self.current_preview_data = img.copy()
+                    self.current_preview_hist_data = img.copy()
+                    self.current_stack_header = hdr.copy() if hdr else fits.Header()
+                    print(
+                        f"  DEBUG GUI (_try_show_first_input_image): Données prêtes pour refresh_preview. Shape: {self.current_preview_data.shape}"
+                    )
+                    self.refresh_preview()
+                    if self.current_stack_header:
+                        self.update_image_info(self.current_stack_header)
+                    self.update_progress_gui(
+                        f"{self.tr('Preview loaded', default='Preview loaded')}: {fn}",
+                        None,
+                    )
 
-        except FileNotFoundError:
-            print(
-                f"  ERREUR GUI (_try_show_first_input_image): FileNotFoundError pour '{input_folder}'."
-            )
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(
-                    self.tr("Input folder not found or inaccessible")
+                self.root.after(0, _update_gui)
+
+            except FileNotFoundError:
+                def _file_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(self.tr("Input folder not found or inaccessible"))
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): FileNotFoundError pour '{input_folder}'."
                 )
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
-        except ValueError as ve:
-            self.update_progress_gui(
-                f"⚠️ {self.tr('Error loading preview image')}: {ve}", None
-            )
-            print(f"  ERREUR GUI (_try_show_first_input_image): ValueError - {ve}")
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(
-                    self.tr("Error loading preview (invalid format?)")
+                self.root.after(0, _file_err)
+            except ValueError as ve:
+                def _val_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(
+                            self.tr("Error loading preview (invalid format?)")
+                        )
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                    self.update_progress_gui(
+                        f"⚠️ {self.tr('Error loading preview image')}: {ve}", None
+                    )
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): ValueError - {ve}"
                 )
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
-        except Exception as e:
-            self.update_progress_gui(
-                f"⚠️ {self.tr('Error loading preview image')}: {e}", None
-            )
-            print(
-                f"  ERREUR GUI (_try_show_first_input_image): Exception inattendue - {type(e).__name__}: {e}"
-            )
-            traceback.print_exc(limit=2)
-            if hasattr(self, "preview_manager") and self.preview_manager:
-                self.preview_manager.clear_preview(self.tr("Error loading preview"))
-            if hasattr(self, "histogram_widget") and self.histogram_widget:
-                self.histogram_widget.plot_histogram(None)
+                self.root.after(0, _val_err)
+            except Exception as e:
+                def _unk_err():
+                    if hasattr(self, "preview_manager") and self.preview_manager:
+                        self.preview_manager.clear_preview(self.tr("Error loading preview"))
+                    if hasattr(self, "histogram_widget") and self.histogram_widget:
+                        self.histogram_widget.plot_histogram(None)
+                    self.update_progress_gui(
+                        f"⚠️ {self.tr('Error loading preview image')}: {e}", None
+                    )
+                print(
+                    f"  ERREUR GUI (_try_show_first_input_image): Exception inattendue - {type(e).__name__}: {e}"
+                )
+                traceback.print_exc(limit=2)
+                self.root.after(0, _unk_err)
+
+        threading.Thread(target=_worker, daemon=True, name="PreviewLoader").start()
 
     ################################################################################################################################################################
 
     def apply_auto_white_balance(self):
-        # --- LE VERROU DOIT ÊTRE LA TOUTE PREMIÈRE CHOSE DANS LA FONCTION ---
+        """Compute auto white balance on a worker thread."""
+
         if (
             hasattr(self, "_final_stretch_set_by_processing_finished")
             and self._final_stretch_set_by_processing_finished
         ):
             self.logger.warning(
-                f"APPLY_AUTO_WHITE_BALANCE (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
-            )
-            self.logger.warning(
-                "  Pile d'appels pour cet appel ignoré à apply_auto_white_balance:"
-            )
-            for line in traceback.format_stack():
-                self.logger.warning(f"    {line.strip()}")
-            return  # Important pour ne pas exécuter le reste de la fonction ni déclencher de refresh
-        # --- FIN DU BLOC DE VERROU ---
-
-        self.logger.debug(
-            ">>>> Début SeestarStackerGUI.apply_auto_white_balance (après vérif verrou)"
-        )
-        self.logger.debug("     Pile d'appels pour apply_auto_white_balance:")
-        for line in traceback.format_stack():
-            self.logger.debug(f"       {line.strip()}")
-
-        # --- DÉBUT DE VOTRE CODE ORIGINAL (tel que fourni dans le log/taraceback.txt et potentiellement ajusté) ---
-        # La logique de vérification self.processing a été retirée ici car le verrou _final_stretch_set_by_processing_finished
-        # est plus spécifique pour la phase post-traitement.
-
-        if not _tools_available:
-            messagebox.showerror(self.tr("error"), "Stretch/Color tools not available.")
-            self.logger.warning(
-                "apply_auto_white_balance: Tentative d'utilisation alors que _tools_available est False."
+                "APPLY_AUTO_WHITE_BALANCE (Main_Window) appelé MAIS VERROUILLÉ par _final_stretch_set_by_processing_finished. Ignoré."
             )
             return
 
-        if self.current_preview_data is None or self.current_preview_data.ndim != 3:
-            messagebox.showwarning(
-                self.tr("warning"), self.tr("Auto WB requires a color image preview.")
-            )
-            self.logger.warning(
-                "apply_auto_white_balance: Aucune donnée d'aperçu couleur disponible."
-            )
-            return
+        def _worker(data):
+            if not _tools_available:
+                self.root.after(0, lambda: messagebox.showerror(self.tr("error"), "Stretch/Color tools not available."))
+                return
 
-        try:
-            self.logger.debug(
-                "  apply_auto_white_balance: Appel de calculate_auto_wb..."
-            )
-            r_gain, g_gain, b_gain = calculate_auto_wb(self.current_preview_data)
-            self.logger.info(
-                f"  apply_auto_white_balance: calculate_auto_wb a retourné Gains R={r_gain:.3f}, G={g_gain:.3f}, B={b_gain:.3f}"
-            )
+            if data is None or data.ndim != 3:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        self.tr("warning"), self.tr("Auto WB requires a color image preview.")
+                    ),
+                )
+                return
 
-            self.preview_r_gain.set(round(r_gain, 3))
-            self.preview_g_gain.set(round(g_gain, 3))
-            self.preview_b_gain.set(round(b_gain, 3))
+            try:
+                r_gain, g_gain, b_gain = calculate_auto_wb(data)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}"
+                    ),
+                )
+                self.logger.error(f"apply_auto_white_balance: {e}")
+                return
 
-            self.update_progress_gui(
-                f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}",
-                None,
-            )
+            def _apply():
+                self.preview_r_gain.set(round(r_gain, 3))
+                self.preview_g_gain.set(round(g_gain, 3))
+                self.preview_b_gain.set(round(b_gain, 3))
+                self.update_progress_gui(
+                    f"Auto WB appliqué (Aperçu): R={r_gain:.2f} G={g_gain:.2f} B={b_gain:.2f}",
+                    None,
+                )
+                self.refresh_preview(recalculate_histogram=True)
 
-            self.logger.debug(
-                "  apply_auto_white_balance: Appel refresh_preview (recalculate_histogram=True)."
-            )
-            # Un AutoWB manuel doit rafraîchir l'histogramme car les données analysées par l'histogramme (après WB) changent.
-            self.refresh_preview(recalculate_histogram=True)
-        except Exception as e:
-            self.logger.error(
-                f"apply_auto_white_balance: Erreur pendant calcul/application: {e}"
-            )
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('Error during Auto WB')}: {e}"
-            )
-            traceback.print_exc(limit=2)
-        # --- FIN DE VOTRE CODE ORIGINAL ---
+            self.root.after(0, _apply)
+
+        data = self.current_preview_data.copy() if self.current_preview_data is not None else None
+        threading.Thread(target=_worker, args=(data,), daemon=True, name="AutoWBWorker").start()
 
     def reset_white_balance(self):
         self.preview_r_gain.set(1.0)
@@ -4674,11 +4144,7 @@ class SeestarStackerGUI:
         """
         abs_folder = os.path.abspath(folder_path)
 
-        if (
-            self.processing
-            and hasattr(self, "queued_stacker")
-            and self.queued_stacker.is_running()
-        ):
+        if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
             # Traitement actif : appeler le backend
             add_success = self.queued_stacker.add_folder(abs_folder)
             if not add_success:
@@ -4716,12 +4182,13 @@ class SeestarStackerGUI:
             try:
                 # Check if the worker thread is still active
                 if not self.queued_stacker.is_running():
-                    worker_thread = getattr(
-                        self.queued_stacker, "processing_thread", None
-                    )
+                    worker_thread = getattr(self.queued_stacker, "processing_thread", None)
                     if worker_thread and worker_thread.is_alive():
                         worker_thread.join(timeout=0.5)
-                    self.root.after(0, self._processing_finished)
+                    if hasattr(self, 'gui_event_queue'):
+                        self.gui_event_queue.put(self._processing_finished)
+                    else:
+                        self.root.after(0, self._processing_finished)
                     break
 
                 q_stacker = self.queued_stacker
@@ -4731,7 +4198,14 @@ class SeestarStackerGUI:
 
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
-                    self.time_per_image = elapsed / processed
+                    current_tpi = elapsed / processed
+                    if self.time_per_image == 0:
+                        self.time_per_image = current_tpi
+                    else:
+                        alpha = 0.1
+                        self.time_per_image = (
+                            alpha * current_tpi + (1 - alpha) * self.time_per_image
+                        )
                     remaining_estimated = max(0, total_queued - processed)
                     if self.time_per_image > 1e-6 and remaining_estimated > 0:
                         eta_seconds = remaining_estimated * self.time_per_image
@@ -4745,9 +4219,7 @@ class SeestarStackerGUI:
                 else:
                     eta_str = self.tr("eta_calculating", default="Calculating...")
 
-                default_aligned_fmt = self.tr(
-                    "aligned_files_label_format", default="Aligned: {count}"
-                )
+                default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
                 remaining = max(0, total_queued - processed)
                 total = total_queued
 
@@ -4765,17 +4237,23 @@ class SeestarStackerGUI:
                     except tk.TclError:
                         pass
 
-                self.root.after(0, _gui_update)
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(_gui_update)
+                else:
+                    self.root.after(0, _gui_update)
 
                 time.sleep(0.5)
 
             except Exception as e:
                 print(f"Error in GUI progress tracker thread loop: {e}")
                 traceback.print_exc(limit=2)
-                try:
-                    self.root.after(0, self._processing_finished)
-                except tk.TclError:
-                    pass
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(self._processing_finished)
+                else:
+                    try:
+                        self.root.after(0, self._processing_finished)
+                    except tk.TclError:
+                        pass
                 break
 
         # print("DEBUG: GUI Progress Tracker Thread Exiting.") # Keep disabled
@@ -4808,104 +4286,341 @@ class SeestarStackerGUI:
     def update_additional_folders_display(self):
         """Met à jour l'affichage du nombre de dossiers supplémentaires."""
         count = 0
-        # --- AJOUT DEBUG ---
-        print("-" * 20)
-        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
-        if hasattr(self, "queued_stacker"):
-            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
-            # VÉRIFICATION CRUCIALE :
-            has_lock = hasattr(self.queued_stacker, "folders_lock")
-            print(f"  -> self.queued_stacker a l'attribut 'folders_lock'? {has_lock}")
-            if not has_lock:
-                print("  -> !!! ATTRIBUT 'folders_lock' MANQUANT SUR L'INSTANCE !!!")
-                print(
-                    f"  -> Attributs présents: {dir(self.queued_stacker)}"
-                )  # Lister ce qui est présent
-            # --- FIN AJOUT DEBUG ---
-
-        print("-" * 20)
-        print("DEBUG MW (update_additional_folders_display): Entrée fonction.")
-        if hasattr(self, "queued_stacker"):
-            print(f"  -> self.queued_stacker existe. Type: {type(self.queued_stacker)}")
-            print(
-                f"  -> Attributs de self.queued_stacker: {dir(self.queued_stacker)}"
-            )  # AFFICHE TOUS LES ATTRIBUTS
-            has_is_running_method = hasattr(self.queued_stacker, "is_running")
-            print(
-                f"  -> self.queued_stacker a l'attribut 'is_running'? {has_is_running_method}"
-            )
-            if has_is_running_method:
-                print(
-                    f"  -> Type de self.queued_stacker.is_running: {type(self.queued_stacker.is_running)}"
-                )
-
-            # Condition originale pour lire depuis le backend
-            if (
-                self.processing and self.queued_stacker.is_running()
-            ):  # Ajout check is_running pour sécurité
+        qs = getattr(self, "queued_stacker", None)
+        if self.processing and qs and qs.is_running():
+            lock = getattr(qs, "folders_lock", None)
+            if lock and lock.acquire(blocking=False):
                 try:
-                    # L'accès problématique
-                    with self.queued_stacker.folders_lock:
-                        count = len(self.queued_stacker.additional_folders)
-                    print(
-                        f"  -> Lecture backend (processing): count={count}"
-                    )  # Si ça passe le 'with'
-                except AttributeError as ae:
-                    print(
-                        f"  -> ERREUR ATTRIBUT DANS LE 'WITH': {ae}"
-                    )  # Log spécifique si ça plante DANS le with
-                    traceback.print_exc(limit=1)  # Afficher où ça plante
-                    # Fallback pour ne pas planter l'UI
-                    count = -99  # Valeur pour indiquer une erreur
-                except Exception as e:
-                    print(f"  -> ERREUR PENDANT lecture backend: {e}")
-                    traceback.print_exc(limit=1)
-                    count = -98
+                    count = len(qs.additional_folders)
+                finally:
+                    lock.release()
             else:
-                # Lire depuis la liste GUI (traitement non actif)
-                count = len(self.additional_folders_to_process)
-                print(f"  -> Lecture GUI (non processing): count={count}")
+                return
         else:
-            print("  -> self.queued_stacker n'existe PAS.")
-            count = len(self.additional_folders_to_process)  # Fallback liste GUI
-        print("-" * 20)
+            count = len(self.additional_folders_to_process)
 
-        # Mise à jour de la variable Tkinter (inchangé)
         try:
             if count == 0:
                 self.additional_folders_var.set(self.tr("no_additional_folders"))
             elif count == 1:
                 self.additional_folders_var.set(self.tr("1 additional folder"))
-            # Gérer les comptes d'erreur négatifs pour le debug
-            elif count < 0:
-                self.additional_folders_var.set(f"ERR ({count})")
             else:
                 self.additional_folders_var.set(
-                    self.tr(
-                        "{count} additional folders", default="{count} add. folders"
-                    ).format(count=count)
+                    self.tr("{count} additional folders", default="{count} add. folders").format(count=count)
                 )
         except tk.TclError:
-            pass
-        except AttributeError:
             pass
 
     # --- FIN MÉTHODE MODIFIÉE ---
 
+    def _run_boring_stack_process(self, cmd, csv_path, out_dir):
+        """Execute ``boring_stack.py`` without blocking the GUI."""
+
+        # Reset any previous process handle
+        self.boring_proc = None
+
+        if hasattr(self, "output_path"):
+            # Ensure the GUI knows the output directory so the summary dialog can
+            # immediately enable the "Open Output" button once processing
+            # finishes.  Always update the variable so it reflects the actual
+            # path used by boring_stack.py.
+            self.output_path.set(out_dir)
+
+        def _worker():
+            total_files = 0
+            try:
+                total_files = len(read_paths(csv_path))
+            except Exception:
+                total_files = 0
+
+            def _setup_start_gui():
+                self.processing = True
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.DISABLED)
+                if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                    self.stop_button.config(state=tk.NORMAL)
+                self._set_parameter_widgets_state(tk.DISABLED)
+                if hasattr(self, "progress_manager") and self.progress_manager:
+                    self.progress_manager.reset()
+                    self.progress_manager.start_timer()
+
+            if hasattr(self, 'gui_event_queue'):
+                self.gui_event_queue.put(_setup_start_gui)
+            else:
+                self.root.after(0, _setup_start_gui)
+
+            def _gui_update(progress, eta, processed):
+                try:
+                    if hasattr(self, "progress_manager") and self.progress_manager:
+                        self.progress_manager.update_progress(f"{progress:.1f}%", progress)
+                    if hasattr(self.progress_manager, "set_remaining"):
+                        self.progress_manager.set_remaining(eta)
+
+                    # Update ETA-related counters for Threaded Boring Stack mode
+                    self.preview_img_count = processed
+                    self.preview_total_imgs = total_files
+
+                    default_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+                    self.aligned_files_var.set(default_fmt.format(count=processed))
+                    remaining = max(0, total_files - processed)
+                    self.remaining_files_var.set(f"{remaining}/{total_files}")
+
+                    # Explicitly refresh progress GUI so ETA updates correctly
+                    self.update_progress_gui(f"{progress:.1f}% completed", progress)
+                except tk.TclError:
+                    pass
+
+            def _finish(retcode, output_lines):
+                try:
+                    if hasattr(self, "progress_manager") and self.progress_manager:
+                        self.progress_manager.stop_timer()
+
+                    log_text = "\n".join(output_lines)
+                    logger.debug("boring_stack.py output:\n%s", log_text)
+
+                    if retcode == 0:
+                        final_path = os.path.join(out_dir, "final.fits")
+                        if os.path.exists(final_path):
+                            self.update_progress_gui(
+                                self.tr("stacking_finished", default="Stacking finished"),
+                                100,
+                            )
+                    else:
+                        tail = "\n".join(output_lines[-10:])
+                        err_msg = (
+                            f"boring_stack.py failed (code {retcode}).\nLast lines:\n{tail}"
+                        )
+                        print(err_msg)
+                        messagebox.showerror("Stack error", err_msg)
+                finally:
+                    self.processing = False
+                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.DISABLED)
+                    self._set_parameter_widgets_state(tk.NORMAL)
+                    self.boring_proc = None
+
+                    # --- Nouveau: afficher le resume apres un boring stack ---
+                    elapsed = time.monotonic() - start_time
+                    if hasattr(self, "tr") and hasattr(self, "localization"):
+                        tr = self.tr
+                    else:
+                        tr = lambda k, default=None: default or k
+                    summary_title = tr("processing_report_title", default="Processing Summary")
+                    status_text = (
+                        tr("stacking_finished", default="Stacking finished")
+                        if retcode == 0
+                        else tr("error", default="Error")
+                    )
+                    if (
+                        hasattr(self, "_format_duration")
+                        and hasattr(self, "tr")
+                        and hasattr(self, "localization")
+                    ):
+                        duration_str = self._format_duration(elapsed)
+                    else:
+                        duration_str = f"{int(round(elapsed))} s"
+                    summary_lines = [
+                        f"{tr('Status', default='Status')}: {status_text}",
+                        f"{tr('Total Processing Time', default='Total Processing Time')}: {duration_str}",
+                        f"{tr('Files Attempted', default='Files Attempted')}: {total_files}",
+                    ]
+                    final_path = os.path.join(out_dir, "final.fits")
+                    images_stacked = total_files
+                    total_exposure = 0.0
+                    if os.path.exists(final_path):
+                        try:
+                            hdr = fits.getheader(final_path)
+                            images_stacked = int(hdr.get("NIMAGES", images_stacked))
+                            total_exposure = float(hdr.get("TOTEXP", 0.0))
+                        except Exception:
+                            pass
+                        summary_lines.append(
+                            f"{tr('Final Stack File', default='Final Stack File')}:\n  {final_path}"
+                        )
+                    elif retcode == 0:
+                        summary_lines.append(
+                            f"{tr('Final Stack File', default='Final Stack File')}: {final_path} ({tr('Not Found!', default='Not Found!')})"
+                        )
+                    summary_lines.append(
+                        f"{tr('Images in Final Stack', default='Images in Final Stack')}: {images_stacked}"
+                    )
+                    if (
+                        hasattr(self, "_format_duration")
+                        and hasattr(self, "tr")
+                        and hasattr(self, "localization")
+                    ):
+                        exposure_str = self._format_duration(total_exposure)
+                    else:
+                        exposure_str = f"{int(round(total_exposure))} s"
+                    summary_lines.append(
+                        f"{tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {exposure_str}"
+                    )
+                    full_summary = "\n".join(summary_lines)
+                    if hasattr(self, "output_path"):
+                        # Ensure the variable points to the folder used during
+                        # processing so the button opens the correct location.
+                        self.output_path.set(out_dir)
+                        try:
+                            can_open_output = bool(
+                                out_dir and os.path.isdir(out_dir) and retcode == 0
+                            )
+                        except Exception:
+                            can_open_output = False
+                    else:
+                        can_open_output = bool(out_dir and os.path.isdir(out_dir) and retcode == 0)
+
+                    if (
+                        hasattr(self, "_show_summary_dialog")
+                        and getattr(self, "root", None) is not None
+                        and hasattr(self.root, "tk")
+                    ):
+                        self._show_summary_dialog(summary_title, full_summary, can_open_output)
+                    if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists():
+                        self.open_output_button.config(
+                            state=tk.NORMAL if can_open_output else tk.DISABLED
+                        )
+
+            start_time = time.monotonic()
+            output_lines = []
+            log_path = os.path.join(out_dir, "boring_stack.log")
+            aligned_files = 0
+            time_per_image = 0.0
+            try:
+                log_file = open(log_path, "w", encoding="utf-8")
+                self.boring_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+
+                for line in self.boring_proc.stdout:
+                    if not line:
+                        continue
+                    text = line.strip()
+                    log_file.write(text + "\n")
+                    log_file.flush()
+                    output_lines.append(text)
+
+                    aligned_match = re.search(r"Aligned:\s*(\d+)", text)
+                    pct_match = re.search(r"(?:\[(\d+(?:\.\d+)?)%\]|(\d+(?:\.\d+)?)%)", text)
+
+                    if aligned_match:
+                        try:
+                            new_aligned = int(aligned_match.group(1))
+                        except ValueError:
+                            new_aligned = aligned_files
+                        if new_aligned > aligned_files:
+                            aligned_files = new_aligned
+                        progress_pct = aligned_files / total_files * 100 if total_files else 0
+
+                        elapsed = time.monotonic() - start_time
+                        if aligned_files > 0:
+                            current_tpi = elapsed / aligned_files
+                            if time_per_image == 0:
+                                time_per_image = current_tpi
+                            else:
+                                alpha = 0.1
+                                time_per_image = (
+                                    alpha * current_tpi + (1 - alpha) * time_per_image
+                                )
+                            remaining_files = max(0, total_files - aligned_files)
+                            eta_sec = remaining_files * time_per_image
+                            h, r = divmod(int(eta_sec), 3600)
+                            m, s = divmod(r, 60)
+                            eta = f"{h:02}:{m:02}:{s:02}"
+                        else:
+                            eta = self.tr("eta_calculating", default="Calculating...")
+
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda p=progress_pct, e=eta, pr=aligned_files: _gui_update(p, e, pr)
+                            )
+                        else:
+                            self.root.after(0, _gui_update, progress_pct, eta, aligned_files)
+                    elif pct_match:
+                        try:
+                            progress_pct = float(next(filter(None, pct_match.groups())))
+                        except (ValueError, StopIteration):
+                            continue
+
+                        elapsed = time.monotonic() - start_time
+                        if aligned_files > 0:
+                            current_tpi = elapsed / aligned_files
+                            if time_per_image == 0:
+                                time_per_image = current_tpi
+                            else:
+                                alpha = 0.1
+                                time_per_image = (
+                                    alpha * current_tpi + (1 - alpha) * time_per_image
+                                )
+                            remaining_files = max(0, total_files - aligned_files)
+                            eta_sec = remaining_files * time_per_image
+                            h, r = divmod(int(eta_sec), 3600)
+                            m, s = divmod(r, 60)
+                            eta = f"{h:02}:{m:02}:{s:02}"
+                        else:
+                            eta = self.tr("eta_calculating", default="Calculating...")
+
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda p=progress_pct, e=eta, pr=aligned_files: _gui_update(p, e, pr)
+                            )
+                        else:
+                            self.root.after(0, _gui_update, progress_pct, eta, aligned_files)
+                    else:
+                        if hasattr(self, 'gui_event_queue'):
+                            self.gui_event_queue.put(
+                                lambda t=text: self.update_progress_gui(t, None)
+                            )
+                        else:
+                            self.root.after(0, self.update_progress_gui, text, None)
+
+                retcode = self.boring_proc.wait()
+                log_file.close()
+            except Exception as e:
+                retcode = -1
+                try:
+                    log_file.write(f"Error running boring_stack: {e}\n")
+                    log_file.close()
+                except Exception:
+                    pass
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(
+                        lambda err=e: self.update_progress_gui(f"Error running boring_stack: {err}", None)
+                    )
+                else:
+                    self.root.after(0, self.update_progress_gui, f"Error running boring_stack: {e}", None)
+            finally:
+                if hasattr(self, 'gui_event_queue'):
+                    self.gui_event_queue.put(lambda r=retcode, o=output_lines: _finish(r, o))
+                else:
+                    self.root.after(0, _finish, retcode, output_lines)
+
+        threading.Thread(target=_worker, daemon=True, name="BoringStackWorker").start()
+
+
     def stop_processing(self):
-        if (
-            self.processing
-            and hasattr(self, "queued_stacker")
-            and self.queued_stacker.is_running()
-        ):
+        if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
             self.update_progress_gui(self.tr("stacking_stopping"), None)
             self.queued_stacker.stop()
             if hasattr(self, "stop_button"):
                 self.stop_button.config(state=tk.DISABLED)
+        elif self.processing and getattr(self, "boring_proc", None):
+            self.update_progress_gui(self.tr("stacking_stopping"), None)
+            try:
+                self.boring_proc.terminate()
+            except Exception:
+                pass
+            if hasattr(self, "stop_button"):
+                self.stop_button.config(state=tk.DISABLED)
         elif self.processing:
-            self.update_progress_gui(
-                "Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None
-            )
+            self.update_progress_gui("Tentative d'arrêt, mais worker inactif ou déjà arrêté.", None)
             self._processing_finished()
 
     def _format_duration(self, seconds):
@@ -4994,17 +4709,11 @@ class SeestarStackerGUI:
 
         preview_widgets = []
         if hasattr(self, "wb_r_ctrls"):
-            preview_widgets.extend(
-                [self.wb_r_ctrls["slider"], self.wb_r_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.wb_r_ctrls["slider"], self.wb_r_ctrls["spinbox"]])
         if hasattr(self, "wb_g_ctrls"):
-            preview_widgets.extend(
-                [self.wb_g_ctrls["slider"], self.wb_g_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.wb_g_ctrls["slider"], self.wb_g_ctrls["spinbox"]])
         if hasattr(self, "wb_b_ctrls"):
-            preview_widgets.extend(
-                [self.wb_b_ctrls["slider"], self.wb_b_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.wb_b_ctrls["slider"], self.wb_b_ctrls["spinbox"]])
         if hasattr(self, "auto_wb_button"):
             preview_widgets.append(self.auto_wb_button)
         if hasattr(self, "reset_wb_button"):
@@ -5012,13 +4721,9 @@ class SeestarStackerGUI:
         if hasattr(self, "stretch_combo"):
             preview_widgets.append(self.stretch_combo)
         if hasattr(self, "stretch_bp_ctrls"):
-            preview_widgets.extend(
-                [self.stretch_bp_ctrls["slider"], self.stretch_bp_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.stretch_bp_ctrls["slider"], self.stretch_bp_ctrls["spinbox"]])
         if hasattr(self, "stretch_wp_ctrls"):
-            preview_widgets.extend(
-                [self.stretch_wp_ctrls["slider"], self.stretch_wp_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.stretch_wp_ctrls["slider"], self.stretch_wp_ctrls["spinbox"]])
         if hasattr(self, "stretch_gamma_ctrls"):
             preview_widgets.extend(
                 [
@@ -5031,17 +4736,11 @@ class SeestarStackerGUI:
         if hasattr(self, "reset_stretch_button"):
             preview_widgets.append(self.reset_stretch_button)
         if hasattr(self, "brightness_ctrls"):
-            preview_widgets.extend(
-                [self.brightness_ctrls["slider"], self.brightness_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.brightness_ctrls["slider"], self.brightness_ctrls["spinbox"]])
         if hasattr(self, "contrast_ctrls"):
-            preview_widgets.extend(
-                [self.contrast_ctrls["slider"], self.contrast_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.contrast_ctrls["slider"], self.contrast_ctrls["spinbox"]])
         if hasattr(self, "saturation_ctrls"):
-            preview_widgets.extend(
-                [self.saturation_ctrls["slider"], self.saturation_ctrls["spinbox"]]
-            )
+            preview_widgets.extend([self.saturation_ctrls["slider"], self.saturation_ctrls["spinbox"]])
         if hasattr(self, "reset_bcs_button"):
             preview_widgets.append(self.reset_bcs_button)
         if hasattr(self, "hist_reset_btn"):
@@ -5049,9 +4748,7 @@ class SeestarStackerGUI:
 
         widgets_to_set = []
         if state == tk.NORMAL:
-            print(
-                "DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets..."
-            )
+            print("DEBUG (GUI _set_parameter_widgets_state): Activation de tous les widgets...")
             # Activer TOUS les widgets (traitement + preview) quand le traitement finit
             widgets_to_set = processing_widgets + preview_widgets
             # S'assurer que les options Drizzle sont dans le bon état initial
@@ -5101,9 +4798,27 @@ class SeestarStackerGUI:
             except tk.TclError:
                 pass
         try:
-            self._after_id_resize = self.root.after(
-                300, self._refresh_preview_on_resize
-            )
+            self._after_id_resize = self.root.after(300, self._refresh_preview_on_resize)
+        except tk.TclError:
+            pass
+
+    def _poll_gui_events(self):
+        """Process queued GUI events from worker threads."""
+        if hasattr(self, "gui_event_queue"):
+            processed = 0
+            try:
+                while processed < 100:
+                    cb = self.gui_event_queue.get_nowait()
+                    try:
+                        if callable(cb):
+                            cb()
+                    finally:
+                        self.gui_event_queue.task_done()
+                    processed += 1
+            except Empty:
+                pass
+        try:
+            self.root.after(50, self._poll_gui_events)
         except tk.TclError:
             pass
 
@@ -5114,9 +4829,7 @@ class SeestarStackerGUI:
         l'aperçu PreviewManager ne soient mis à jour.
         Version: V_FinalRefreshOrder_1
         """
-        print(
-            "DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Appel."
-        )
+        print("DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Appel.")
 
         # S'assurer que les données temporaires pour l'histogramme existent
         current_data_for_histo = getattr(self, "_temp_data_for_final_histo", None)
@@ -5130,9 +4843,7 @@ class SeestarStackerGUI:
             current_data_for_histo = self.current_preview_data
 
         if current_data_for_histo is None:
-            print(
-                "  -> Aucune donnée disponible pour l'histogramme final. Annulation refresh."
-            )
+            print("  -> Aucune donnée disponible pour l'histogramme final. Annulation refresh.")
             return
 
         try:
@@ -5152,17 +4863,13 @@ class SeestarStackerGUI:
             #    set_range convertira ces BP/WP UI (0-1) en l'échelle des données de l'histogramme
             #    et DESSINERA les lignes.
             if hasattr(self, "histogram_widget") and self.histogram_widget:
-                print(
-                    f"  -> Appel histogram_widget.set_range avec BP_UI={bp_ui:.4f}, WP_UI={wp_ui:.4f}"
-                )
+                print(f"  -> Appel histogram_widget.set_range avec BP_UI={bp_ui:.4f}, WP_UI={wp_ui:.4f}")
                 self.histogram_widget.set_range(bp_ui, wp_ui)
         except tk.TclError as e:
             print(f"  Erreur TclError pendant la mise à jour de l'histogramme: {e}")
             # Continuer pour essayer de rafraîchir l'aperçu
         except Exception as e_histo:
-            print(
-                f"  Erreur inattendue pendant la mise à jour de l'histogramme: {e_histo}"
-            )
+            print(f"  Erreur inattendue pendant la mise à jour de l'histogramme: {e_histo}")
             traceback.print_exc(limit=1)
 
         # 4. Mettre à jour l'aperçu visuel (PreviewManager)
@@ -5174,9 +4881,7 @@ class SeestarStackerGUI:
         if hasattr(self, "_temp_data_for_final_histo"):
             self._temp_data_for_final_histo = None  # Nettoyer la donnée temporaire
 
-        print(
-            "DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Fin."
-        )
+        print("DEBUG GUI (_refresh_final_preview_and_histo V_FinalRefreshOrder_1): Fin.")
 
     def _refresh_preview_on_resize(self):
         if hasattr(self, "preview_manager"):
@@ -5189,9 +4894,7 @@ class SeestarStackerGUI:
 
     def _on_closing(self):
         if self.processing:
-            if messagebox.askokcancel(
-                self.tr("quit"), self.tr("quit_while_processing")
-            ):
+            if messagebox.askokcancel(self.tr("quit"), self.tr("quit_while_processing")):
                 print("Arrêt demandé via fermeture fenêtre...")
                 self.stop_processing()
                 if self.thread and self.thread.is_alive():
@@ -5218,21 +4921,13 @@ class SeestarStackerGUI:
                 if getattr(self.settings, "astap_data_dir", ""):
                     env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
                 if getattr(self.settings, "local_ansvr_path", ""):
-                    env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(
-                        self.settings.local_ansvr_path
-                    )
+                    env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
                 if getattr(self.settings, "astrometry_api_key", ""):
-                    env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(
-                        self.settings.astrometry_api_key
-                    )
+                    env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
                 if getattr(self.settings, "astrometry_solve_field_dir", ""):
-                    env["ZEMOSAIC_ASTROMETRY_DIR"] = str(
-                        self.settings.astrometry_solve_field_dir
-                    )
+                    env["ZEMOSAIC_ASTROMETRY_DIR"] = str(self.settings.astrometry_solve_field_dir)
                 if getattr(self.settings, "local_solver_preference", ""):
-                    env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(
-                        self.settings.local_solver_preference
-                    )
+                    env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
             if self.settings.use_third_party_solver:
                 try:
                     radius_val = float(getattr(self.settings, "astap_search_radius", 0))
@@ -5285,9 +4980,7 @@ class SeestarStackerGUI:
             # Passer 'self' (l'instance SeestarStackerGUI) à la fenêtre enfant
             # pour qu'elle puisse mettre à jour le flag mosaic_mode_active etc.
             mosaic_window = MosaicSettingsWindow(parent_gui=self)
-            self._mosaic_settings_window_instance = (
-                mosaic_window  # Stocker référence (optionnel)
-            )
+            self._mosaic_settings_window_instance = mosaic_window  # Stocker référence (optionnel)
             print("DEBUG (GUI): Instance MosaicSettingsWindow créée.")
             # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.
 
@@ -5313,9 +5006,7 @@ class SeestarStackerGUI:
         """
         Ouvre la fenêtre modale pour configurer les options des solveurs locaux.
         """
-        print(
-            "DEBUG (GUI): Clic sur bouton 'Local Solvers...' - Appel de _open_local_solver_settings_window."
-        )
+        print("DEBUG (GUI): Clic sur bouton 'Local Solvers...' - Appel de _open_local_solver_settings_window.")
 
         # Optionnel: Vérifier si une instance existe déjà (pourrait être utile pour le développement)
         if (
@@ -5323,9 +5014,7 @@ class SeestarStackerGUI:
             and self._local_solver_settings_window_instance
             and self._local_solver_settings_window_instance.winfo_exists()
         ):
-            print(
-                "DEBUG (GUI): Fenêtre de paramètres des solveurs locaux déjà ouverte. Mise au premier plan."
-            )
+            print("DEBUG (GUI): Fenêtre de paramètres des solveurs locaux déjà ouverte. Mise au premier plan.")
             try:
                 self._local_solver_settings_window_instance.lift()
                 self._local_solver_settings_window_instance.focus_force()
@@ -5339,28 +5028,18 @@ class SeestarStackerGUI:
         try:
             print("DEBUG (GUI): Création de l'instance LocalSolverSettingsWindow...")
             solver_window = LocalSolverSettingsWindow(parent_gui=self)
-            self._local_solver_settings_window_instance = (
-                solver_window  # Stocker référence (optionnel)
-            )
+            self._local_solver_settings_window_instance = solver_window  # Stocker référence (optionnel)
             print("DEBUG (GUI): Instance LocalSolverSettingsWindow créée.")
             # La fenêtre est modale (grab_set dans son __init__), donc l'exécution attend ici.
 
         except Exception as e:
-            error_msg_key = (
-                "local_solver_window_create_error"  # Nouvelle clé de traduction
-            )
+            error_msg_key = "local_solver_window_create_error"  # Nouvelle clé de traduction
             error_default_text = "Could not open Local Solvers settings window."
-            full_error_msg = (
-                self.tr(error_msg_key, default=error_default_text) + f"\n{e}"
-            )
+            full_error_msg = self.tr(error_msg_key, default=error_default_text) + f"\n{e}"
 
-            print(
-                f"ERREUR (GUI): Erreur création fenêtre paramètres solveurs locaux: {e}"
-            )
+            print(f"ERREUR (GUI): Erreur création fenêtre paramètres solveurs locaux: {e}")
             traceback.print_exc(limit=2)
-            messagebox.showerror(
-                self.tr("error", default="Error"), full_error_msg, parent=self.root
-            )
+            messagebox.showerror(self.tr("error", default="Error"), full_error_msg, parent=self.root)
             self._local_solver_settings_window_instance = None
 
     ##################################################################################################################################
@@ -5372,9 +5051,7 @@ class SeestarStackerGUI:
         except tk.TclError:
             pass
         self.settings.update_from_ui(self)
-        print(
-            f"VÉRIF GUI: self.settings.astap_path AVANT save_settings = '{self.settings.astap_path}'"
-        )  # <-- AJOUTER
+        print(f"VÉRIF GUI: self.settings.astap_path AVANT save_settings = '{self.settings.astap_path}'")  # <-- AJOUTER
         self.settings.save_settings()
         print("Fermeture de l'application.")
         self.root.destroy()
@@ -5386,9 +5063,7 @@ class SeestarStackerGUI:
             log_content = self.status_text.get(1.0, tk.END)
             self.root.clipboard_clear()
             self.root.clipboard_append(log_content)
-            self.update_progress_gui(
-                "ⓘ Contenu du log copié dans le presse-papiers.", None
-            )
+            self.update_progress_gui("ⓘ Contenu du log copié dans le presse-papiers.", None)
         except tk.TclError as e:
             print(f"Erreur Tcl lors de la copie du log: {e}")
         except Exception as e:
@@ -5400,9 +5075,7 @@ class SeestarStackerGUI:
         """Ouvre le dossier de sortie dans l'explorateur de fichiers système."""
         output_folder = self.output_path.get()
         if not output_folder:
-            messagebox.showwarning(
-                self.tr("warning"), "Le chemin du dossier de sortie n'est pas défini."
-            )
+            messagebox.showwarning(self.tr("warning"), "Le chemin du dossier de sortie n'est pas défini.")
             return
         if not os.path.isdir(output_folder):
             messagebox.showerror(
@@ -5426,9 +5099,7 @@ class SeestarStackerGUI:
             )
         except Exception as e:
             print(f"Erreur ouverture dossier: {e}")
-            messagebox.showerror(
-                self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}"
-            )
+            messagebox.showerror(self.tr("error"), f"Impossible d'ouvrir le dossier:\n{e}")
             self.update_progress_gui(f"❌ Erreur ouverture dossier: {e}", None)
 
     #############################################################################################################################################
@@ -5519,9 +5190,7 @@ class SeestarStackerGUI:
         # --- ROUTAGE VERS LE THREAD GUI ---
         if threading.current_thread() is not threading.main_thread():
             # Planifie l'exécution dans la boucle d'événements Tkinter et sort.
-            self.root.after(
-                0, lambda m=message, p=progress: self.update_progress_gui(m, p)
-            )
+            self.root.after(0, lambda m=message, p=progress: self.update_progress_gui(m, p))
             return
 
         # --- CODE EXISTANT (garde intact le reste) ------------------------------
@@ -5548,19 +5217,13 @@ class SeestarStackerGUI:
             return
 
         actual_message_to_log = message
-        log_level_for_pm = (
-            None  # Sera "WARN" pour notre message spécial, sinon None (par défaut)
-        )
+        log_level_for_pm = None  # Sera "WARN" pour notre message spécial, sinon None (par défaut)
 
         # --- NOUVEAU : Gérer le message d'information sur les fichiers non alignés ---
         unaligned_info_prefix = "UNALIGNED_INFO:"
         if isinstance(message, str) and message.startswith(unaligned_info_prefix):
-            actual_message_to_log = message[
-                len(unaligned_info_prefix) :
-            ].strip()  # Extraire le message réel
-            log_level_for_pm = (
-                "WARN"  # Utiliser "WARN" pour que ProgressManager puisse le distinguer
-            )
+            actual_message_to_log = message[len(unaligned_info_prefix) :].strip()  # Extraire le message réel
+            log_level_for_pm = "WARN"  # Utiliser "WARN" pour que ProgressManager puisse le distinguer
             print(
                 f"DEBUG GUI [update_progress_gui]: Message UNALIGNED_INFO détecté: '{actual_message_to_log}' (niveau WARN)"
             )
@@ -5576,11 +5239,12 @@ class SeestarStackerGUI:
                     # Le préfixe emoji est déjà dans le message original du backend
                     # actual_message_to_log = "⏳ " + actual_message_to_log
 
+            if isinstance(actual_message_to_log, str) and "terminé" in actual_message_to_log.lower():
+                progress = 100
+
             # Mettre à jour la barre et le log texte via ProgressManager
             # On passe le message (potentiellement modifié) et le niveau de log déterminé
-            self.progress_manager.update_progress(
-                actual_message_to_log, progress, level=log_level_for_pm
-            )
+            self.progress_manager.update_progress(actual_message_to_log, progress, level=log_level_for_pm)
 
             # Gérer le mode indéterminé de la barre de progression (inchangé)
             try:
@@ -5595,9 +5259,7 @@ class SeestarStackerGUI:
                         pb.config(mode="determinate")
                         if progress is not None:
                             try:
-                                pb.configure(
-                                    value=max(0.0, min(100.0, float(progress)))
-                                )
+                                pb.configure(value=max(0.0, min(100.0, float(progress))))
                             except ValueError:
                                 pass
             except (tk.TclError, AttributeError):
@@ -5608,9 +5270,7 @@ class SeestarStackerGUI:
     ###################################################################################################################################################
 
     def _execute_final_auto_stretch(self, original_lock_state_before_after):
-        self.logger.info(
-            ">>>> Entrée dans _execute_final_auto_stretch (appelé par after depuis _processing_finished)"
-        )
+        self.logger.info(">>>> Entrée dans _execute_final_auto_stretch (appelé par after depuis _processing_finished)")
         # Le verrou est _final_stretch_set_by_processing_finished (mis à True à la fin de _processing_finished)
         # On s'assure qu'il est bien False pour que apply_auto_stretch s'exécute
         # Puis on le remet à True.
@@ -5649,9 +5309,7 @@ class SeestarStackerGUI:
         if hasattr(self, "_auto_stretch_after_id") and self._auto_stretch_after_id:
             try:
                 self.root.after_cancel(self._auto_stretch_after_id)
-                self.logger.info(
-                    "     _processing_finished: Appel différé _auto_stretch_after_id ANNULÉ."
-                )
+                self.logger.info("     _processing_finished: Appel différé _auto_stretch_after_id ANNULÉ.")
             except tk.TclError:
                 self.logger.warning(
                     "     _processing_finished: Erreur TclError lors de l'annulation de _auto_stretch_after_id (déjà exécuté ou invalide?)."
@@ -5665,9 +5323,7 @@ class SeestarStackerGUI:
         if hasattr(self, "_auto_wb_after_id") and self._auto_wb_after_id:
             try:
                 self.root.after_cancel(self._auto_wb_after_id)
-                self.logger.info(
-                    "     _processing_finished: Appel différé _auto_wb_after_id ANNULÉ."
-                )
+                self.logger.info("     _processing_finished: Appel différé _auto_wb_after_id ANNULÉ.")
             except tk.TclError:
                 self.logger.warning(
                     "     _processing_finished: Erreur TclError lors de l'annulation de _auto_wb_after_id (déjà exécuté ou invalide?)."
@@ -5689,15 +5345,10 @@ class SeestarStackerGUI:
 
         # --- Section 1: Finalisation Barre de Progression et Timer ---
         try:
-            self.logger.info(
-                "  [PF_S1] _processing_finished: Finalisation Barre de Progression et Timer..."
-            )
+            self.logger.info("  [PF_S1] _processing_finished: Finalisation Barre de Progression et Timer...")
             if hasattr(self, "progress_manager") and self.progress_manager:
                 self.progress_manager.stop_timer()
-                if (
-                    hasattr(self.progress_manager, "progress_bar")
-                    and self.progress_manager.progress_bar.winfo_exists()
-                ):
+                if hasattr(self.progress_manager, "progress_bar") and self.progress_manager.progress_bar.winfo_exists():
                     pb = self.progress_manager.progress_bar
                     if pb["mode"] == "indeterminate":
                         pb.stop()
@@ -5705,15 +5356,12 @@ class SeestarStackerGUI:
                     is_error_backend = (
                         hasattr(self, "queued_stacker")
                         and self.queued_stacker
-                        and getattr(self.queued_stacker, "processing_error", None)
-                        is not None
+                        and getattr(self.queued_stacker, "processing_error", None) is not None
                     )
                     is_stopped_early_backend = (
                         hasattr(self, "queued_stacker")
                         and self.queued_stacker
-                        and getattr(
-                            self.queued_stacker, "stop_processing_flag_for_gui", False
-                        )
+                        and getattr(self.queued_stacker, "stop_processing_flag_for_gui", False)
                     )
                     if not is_error_backend and not is_stopped_early_backend:
                         pb.configure(value=100)
@@ -5724,9 +5372,7 @@ class SeestarStackerGUI:
             )
 
         # --- Section 2: Récupération des informations du backend ---
-        self.logger.info(
-            "  [PF_S2] _processing_finished: Récupération des informations du backend..."
-        )
+        self.logger.info("  [PF_S2] _processing_finished: Récupération des informations du backend...")
         final_stack_path = None
         processing_error_details = None
         images_stacked = 0
@@ -5740,62 +5386,32 @@ class SeestarStackerGUI:
 
         if q_stacker is not None:
             final_stack_path = getattr(q_stacker, "final_stacked_path", None)
-            drizzle_active_session_backend = getattr(
-                q_stacker, "drizzle_active_session", False
-            )
+            drizzle_active_session_backend = getattr(q_stacker, "drizzle_active_session", False)
             drizzle_mode_backend = getattr(q_stacker, "drizzle_mode", "Final")
-            was_stopped_by_user = getattr(
-                q_stacker, "stop_processing_flag_for_gui", False
-            )
+            was_stopped_by_user = getattr(q_stacker, "stop_processing_flag_for_gui", False)
             processing_error_details = getattr(q_stacker, "processing_error", None)
-            source_folders_with_unaligned_in_run = getattr(
-                q_stacker, "warned_unaligned_source_folders", set()
-            )
-            images_in_cumulative_from_backend = getattr(
-                q_stacker, "images_in_cumulative_stack", 0
-            )
+            source_folders_with_unaligned_in_run = getattr(q_stacker, "warned_unaligned_source_folders", set())
+            images_in_cumulative_from_backend = getattr(q_stacker, "images_in_cumulative_stack", 0)
             aligned_count = getattr(q_stacker, "aligned_files_count", 0)
             failed_align_count = getattr(q_stacker, "failed_align_count", 0)
             failed_stack_count = getattr(q_stacker, "failed_stack_count", 0)
             skipped_count = getattr(q_stacker, "skipped_files_count", 0)
             processed_files_count = getattr(q_stacker, "processed_files_count", 0)
             total_exposure = getattr(q_stacker, "total_exposure_seconds", 0.0)
-            photutils_applied_this_run_backend = getattr(
-                q_stacker, "photutils_bn_applied_in_session", False
-            )
-            bn_globale_applied_this_run_backend = getattr(
-                q_stacker, "bn_globale_applied_in_session", False
-            )
-            cb_applied_in_session_backend = getattr(
-                q_stacker, "cb_applied_in_session", False
-            )
-            scnr_applied_this_run_backend = getattr(
-                q_stacker, "scnr_applied_in_session", False
-            )
-            crop_applied_this_run_backend = getattr(
-                q_stacker, "crop_applied_in_session", False
-            )
-            feathering_applied_this_run_backend = getattr(
-                q_stacker, "feathering_applied_in_session", False
-            )
-            low_wht_mask_applied_this_run_backend = getattr(
-                q_stacker, "low_wht_mask_applied_in_session", False
-            )
-            photutils_params_used_backend = getattr(
-                q_stacker, "photutils_params_used_in_session", {}
-            ).copy()
-            raw_adu_data_for_histo_from_backend = getattr(
-                q_stacker, "raw_adu_data_for_ui_histogram", None
-            )
+            photutils_applied_this_run_backend = getattr(q_stacker, "photutils_bn_applied_in_session", False)
+            bn_globale_applied_this_run_backend = getattr(q_stacker, "bn_globale_applied_in_session", False)
+            cb_applied_in_session_backend = getattr(q_stacker, "cb_applied_in_session", False)
+            scnr_applied_this_run_backend = getattr(q_stacker, "scnr_applied_in_session", False)
+            crop_applied_this_run_backend = getattr(q_stacker, "crop_applied_in_session", False)
+            feathering_applied_this_run_backend = getattr(q_stacker, "feathering_applied_in_session", False)
+            low_wht_mask_applied_this_run_backend = getattr(q_stacker, "low_wht_mask_applied_in_session", False)
+            photutils_params_used_backend = getattr(q_stacker, "photutils_params_used_in_session", {}).copy()
+            raw_adu_data_for_histo_from_backend = getattr(q_stacker, "raw_adu_data_for_ui_histogram", None)
             cosmetic_01_data_for_preview_from_backend = getattr(
                 q_stacker, "last_saved_data_for_preview", None
             )  # Devrait être [0,1] NON-stretché
-            final_header_for_ui_preview = getattr(
-                q_stacker, "current_stack_header", fits.Header()
-            )
-            save_as_float32_backend_setting = getattr(
-                q_stacker, "save_final_as_float32", False
-            )
+            final_header_for_ui_preview = getattr(q_stacker, "current_stack_header", fits.Header())
+            save_as_float32_backend_setting = getattr(q_stacker, "save_final_as_float32", False)
             is_drizzle_result = (
                 drizzle_active_session_backend
                 and not was_stopped_by_user
@@ -5833,9 +5449,7 @@ class SeestarStackerGUI:
         if was_stopped_by_user:
             status_text_for_log = self.tr("processing_stopped")
         elif processing_error_details:
-            status_text_for_log = (
-                f"{self.tr('stacking_error_msg')} {processing_error_details}"
-            )
+            status_text_for_log = f"{self.tr('stacking_error_msg')} {processing_error_details}"
             final_stack_type_for_summary = "Erreur"
         elif not (final_stack_path and os.path.exists(final_stack_path)):
             status_text_for_log = self.tr(
@@ -5857,18 +5471,12 @@ class SeestarStackerGUI:
             )
         else:
             final_stack_type_for_summary = "Classique"
-            status_text_for_log = self.tr(
-                "stacking_classic_complete", default="Classic Stacking Complete"
-            )
+            status_text_for_log = self.tr("stacking_classic_complete", default="Classic Stacking Complete")
         try:
             if hasattr(self, "progress_manager") and self.progress_manager:
                 self.progress_manager.update_progress(
                     status_text_for_log,
-                    (
-                        100
-                        if not processing_error_details
-                        else self.progress_manager.progress_bar["value"]
-                    ),
+                    (100 if not processing_error_details else self.progress_manager.progress_bar["value"]),
                 )
         except Exception as e_s3:
             self.logger.error(
@@ -5879,122 +5487,127 @@ class SeestarStackerGUI:
         self.logger.info(
             "  [PF_S4 - MODIFIÉ FINAL AUTOSTRETCH] _processing_finished: Préparation données pour aperçu/histogramme final..."
         )
-        try:
-            data_final = None
-            header_final = None
-            preview_load_error_msg = None
+        preview_load_error_msg = None
+        def _load_final_preview():
+            nonlocal processing_error_details, preview_load_error_msg
+            try:
+                data_final = None
+                header_final = None
+                preview_load_error_msg = None
 
-            if cosmetic_01_data_for_preview_from_backend is not None:
-                self.logger.info(
-                    "    [PF_S4] Utilisation des données de prévisualisation fournies par le backend."
-                )
-                data_final = cosmetic_01_data_for_preview_from_backend
-                header_final = (
-                    final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
-                )
-            elif final_stack_path and os.path.exists(final_stack_path):
-                try:
-                    data_final, header_final = load_and_validate_fits(final_stack_path)
+                if cosmetic_01_data_for_preview_from_backend is not None:
                     self.logger.info(
-                        f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
+                        "    [PF_S4] Utilisation des données de prévisualisation fournies par le backend."
                     )
-                except Exception as e_load:
-                    preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
-                    self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
-            else:
-                preview_load_error_msg = "Fichier FITS final introuvable."
-                self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
-
-            if data_final is not None:
-                try:
-                    data_final_ds = downsample_image(data_final, factor=2)
-                except Exception:
-                    data_final_ds = data_final
-                self.current_preview_data = data_final_ds
-                self.current_preview_hist_data = data_final_ds
-                self._temp_data_for_final_histo = data_final_ds
-                self.current_stack_header = (
-                    header_final if header_final else fits.Header()
-                )
-
-                if hasattr(self, "preview_manager") and self.preview_manager:
-                    linear_params = {
-                        "stretch_method": "Linear",
-                        "black_point": 0.0,
-                        "white_point": 1.0,
-                        "gamma": 1.0,
-                        "r_gain": 1.0,
-                        "g_gain": 1.0,
-                        "b_gain": 1.0,
-                        "brightness": 1.0,
-                        "contrast": 1.0,
-                        "saturation": 1.0,
-                    }
-                    self.preview_manager.update_preview(
-                        self.current_preview_data,
-                        linear_params,
-                        stack_count=images_stacked,
-                        total_images=images_stacked,
-                        current_batch=self.preview_current_batch,
-                        total_batches=self.preview_total_batches,
+                    data_final = cosmetic_01_data_for_preview_from_backend
+                    header_final = (
+                        final_header_for_ui_preview if final_header_for_ui_preview else fits.Header()
                     )
-
-                    if hasattr(self, "histogram_widget") and self.histogram_widget:
-                        self.histogram_widget.update_histogram(
-                            self.current_preview_data
+                elif final_stack_path and os.path.exists(final_stack_path):
+                    try:
+                        data_final, header_final = load_and_validate_fits(final_stack_path)
+                        self.logger.info(
+                            f"    [PF_S4] FITS final chargé. Shape: {data_final.shape if data_final is not None else 'None'}"
                         )
-                        # Ensure the BP/WP range lines persist on the final histogram
-                        try:
-                            bp_ui = self.preview_black_point.get()
-                            wp_ui = self.preview_white_point.get()
-                        except tk.TclError:
-                            bp_ui = None
-                            wp_ui = None
-                        if bp_ui is not None and wp_ui is not None:
-                            self.histogram_widget.set_range(bp_ui, wp_ui)
-                        # Redraw the preview using existing histogram data
-                        self.refresh_preview(recalculate_histogram=False)
+                    except Exception as e_load:
+                        preview_load_error_msg = f"Erreur chargement FITS final: {e_load}"
+                        self.logger.error(f"    [PF_S4] {preview_load_error_msg}")
+                else:
+                    preview_load_error_msg = "Fichier FITS final introuvable."
+                    self.logger.warning(f"    [PF_S4] {preview_load_error_msg}")
 
-                if self.current_stack_header:
-                    self.update_image_info(self.current_stack_header)
-            else:
-                if hasattr(self, "preview_manager"):
-                    self.preview_manager.clear_preview(
-                        preview_load_error_msg or "Preview load error"
-                    )
-                if hasattr(self, "histogram_widget"):
-                    self.histogram_widget.plot_histogram(None)
+                if data_final is not None:
+                    try:
+                        data_final_ds = downsample_image(data_final, factor=2)
+                    except Exception:
+                        data_final_ds = data_final
 
-            self.logger.info(
-                f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
-            )
-        except Exception as e_s4:
-            self.logger.error(
-                f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
-            )
-            if hasattr(self, "preview_manager"):
-                self.preview_manager.clear_preview(
-                    f"Erreur MAJEURE mise a jour apercu final: {e_s4}"
+                    def _apply_gui_updates(df=data_final_ds, hdr=header_final):
+                        self.current_preview_data = df
+                        self.current_preview_hist_data = df
+                        self._temp_data_for_final_histo = df
+                        self.current_stack_header = hdr if hdr else fits.Header()
+
+                        if hasattr(self, "preview_manager") and self.preview_manager:
+                            linear_params = {
+                                "stretch_method": "Linear",
+                                "black_point": 0.0,
+                                "white_point": 1.0,
+                                "gamma": 1.0,
+                                "r_gain": 1.0,
+                                "g_gain": 1.0,
+                                "b_gain": 1.0,
+                                "brightness": 1.0,
+                                "contrast": 1.0,
+                                "saturation": 1.0,
+                            }
+                            self.preview_manager.update_preview(
+                                self.current_preview_data,
+                                linear_params,
+                                stack_count=images_stacked,
+                                total_images=images_stacked,
+                                current_batch=self.preview_current_batch,
+                                total_batches=self.preview_total_batches,
+                            )
+
+                            if hasattr(self, "histogram_widget") and self.histogram_widget:
+                                self.histogram_widget.update_histogram(self.current_preview_data)
+                                try:
+                                    bp_ui = self.preview_black_point.get()
+                                    wp_ui = self.preview_white_point.get()
+                                except tk.TclError:
+                                    bp_ui = None
+                                    wp_ui = None
+                                if bp_ui is not None and wp_ui is not None:
+                                    self.histogram_widget.set_range(bp_ui, wp_ui)
+                                self.refresh_preview(recalculate_histogram=False)
+
+                        if self.current_stack_header:
+                            self.update_image_info(self.current_stack_header)
+
+                        self.logger.info(
+                            f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+                        )
+
+                    self.root.after(0, _apply_gui_updates)
+                else:
+                    def _no_data():
+                        if hasattr(self, "preview_manager"):
+                            self.preview_manager.clear_preview(preview_load_error_msg or "Preview load error")
+                        if hasattr(self, "histogram_widget"):
+                            self.histogram_widget.plot_histogram(None)
+                        self.logger.info(
+                            f"  [PF_S4] _processing_finished: Préparation données aperçu/histo OK. Erreur chargement: {preview_load_error_msg}"
+                        )
+
+                    self.root.after(0, _no_data)
+            except Exception as e_s4:
+                def _err_handler():
+                    if hasattr(self, "preview_manager"):
+                        self.preview_manager.clear_preview(
+                            f"Erreur MAJEURE mise a jour apercu final: {e_s4}"
+                        )
+                    if hasattr(self, "histogram_widget"):
+                        self.histogram_widget.plot_histogram(None)
+                self.logger.error(
+                    f"  [PF_S4] _processing_finished: ERREUR CRITIQUE Aperçu/Histo: {e_s4}\n{traceback.format_exc(limit=2)}"
                 )
-            if hasattr(self, "histogram_widget"):
-                self.histogram_widget.plot_histogram(None)
-            processing_error_details = (
-                f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
-            )
+                self.root.after(0, _err_handler)
+                processing_error_details = (
+                    f"{processing_error_details or ''} Erreur UI Preview/Histo: {e_s4}"
+                )
+
+        threading.Thread(target=_load_final_preview, daemon=True, name="FinalPreviewLoader").start()
 
         # --- Section 5: Génération et Affichage du Résumé ---
         # (Code original repris du log - ce bloc reste inchangé)
-        self.logger.info(
-            "  [PF_S5] _processing_finished: Génération et Affichage du Résumé..."
-        )
+        self.logger.info("  [PF_S5] _processing_finished: Génération et Affichage du Résumé...")
         # ... (toute la logique de création de summary_lines) ...
         # ... (jusqu'à l'appel à self.root.after(150, lambda: self._show_summary_dialog(...))) ...
         try:
             summary_lines = []
             summary_title = self.tr("processing_report_title")
-            summary_lines.append(
-                f"{self.tr('Status', default='Status')}: {status_text_for_log}"
-            )
+            summary_lines.append(f"{self.tr('Status', default='Status')}: {status_text_for_log}")
             elapsed_total_seconds = 0
             if self.global_start_time:
                 elapsed_total_seconds = time.monotonic() - self.global_start_time
@@ -6004,9 +5617,7 @@ class SeestarStackerGUI:
             summary_lines.append(
                 f"{self.tr('Final Stack Type', default='Final Stack Type')}: {final_stack_type_for_summary}"
             )
-            summary_lines.append(
-                f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}"
-            )
+            summary_lines.append(f"{self.tr('Files Attempted', default='Files Attempted')}: {processed_files_count}")
             total_rejected = failed_align_count + failed_stack_count + skipped_count
             summary_lines.append(
                 f"{self.tr('Files Rejected (Total)', default='Files Rejected (Total)')}: {total_rejected} ({self.tr('Align', default='Align')}: {failed_align_count}, {self.tr('Stack Err', default='Stack Err')}: {failed_stack_count}, {self.tr('Other', default='Other')}: {skipped_count})"
@@ -6017,9 +5628,7 @@ class SeestarStackerGUI:
             summary_lines.append(
                 f"{self.tr('Total Exposure (Final Stack)', default='Total Exposure (Final Stack)')}: {self._format_duration(total_exposure)}"
             )
-            summary_lines.append(
-                f"\n--- {self.tr('Post-Processing Applied', default='Post-Processing Applied')} ---"
-            )
+            summary_lines.append(f"\n--- {self.tr('Post-Processing Applied', default='Post-Processing Applied')} ---")
             summary_lines.append(
                 f"  - {self.tr('Global Background Neutralization (BN)', default='Global Background Neutralization (BN)')}: {'Yes' if bn_globale_applied_this_run_backend else 'No'}"
             )
@@ -6044,13 +5653,9 @@ class SeestarStackerGUI:
                             .title()
                         )
                         params_str_list.append(
-                            f"{p_name_short}={val:.1f}"
-                            if isinstance(val, float)
-                            else f"{p_name_short}={val}"
+                            f"{p_name_short}={val:.1f}" if isinstance(val, float) else f"{p_name_short}={val}"
                         )
-                params_str = (
-                    ", ".join(params_str_list) if params_str_list else "Defaults"
-                )
+                params_str = ", ".join(params_str_list) if params_str_list else "Defaults"
                 summary_lines.append(
                     f"  - {self.tr('Photutils 2D Background', default='Photutils 2D Background')}: {self.tr('Yes', default='Yes')} ({params_str})"
                 )
@@ -6061,46 +5666,24 @@ class SeestarStackerGUI:
             summary_lines.append(
                 f"  - {self.tr('Edge/Chroma Correction (CB)', default='Edge/Chroma Correction (CB)')}: {'Yes' if cb_applied_in_session_backend else 'No'}"
             )
-            summary_lines.append(
-                f"  - Feathering: {'Yes' if feathering_applied_this_run_backend else 'No'}"
-            )
-            summary_lines.append(
-                f"  - Low WHT Mask: {'Yes' if low_wht_mask_applied_this_run_backend else 'No'}"
-            )
-            scnr_target_sum = (
-                getattr(q_stacker, "final_scnr_target_channel", "?")
-                if q_stacker
-                else "?"
-            )
-            scnr_amount_sum = (
-                getattr(q_stacker, "final_scnr_amount", 0.0) if q_stacker else 0.0
-            )
-            scnr_lum_sum = (
-                getattr(q_stacker, "final_scnr_preserve_luminosity", "?")
-                if q_stacker
-                else "?"
-            )
-            crop_perc_decimal_sum = (
-                getattr(q_stacker, "final_edge_crop_percent_decimal", 0.0)
-                if q_stacker
-                else 0.0
-            )
+            summary_lines.append(f"  - Feathering: {'Yes' if feathering_applied_this_run_backend else 'No'}")
+            summary_lines.append(f"  - Low WHT Mask: {'Yes' if low_wht_mask_applied_this_run_backend else 'No'}")
+            scnr_target_sum = getattr(q_stacker, "final_scnr_target_channel", "?") if q_stacker else "?"
+            scnr_amount_sum = getattr(q_stacker, "final_scnr_amount", 0.0) if q_stacker else 0.0
+            scnr_lum_sum = getattr(q_stacker, "final_scnr_preserve_luminosity", "?") if q_stacker else "?"
+            crop_perc_decimal_sum = getattr(q_stacker, "final_edge_crop_percent_decimal", 0.0) if q_stacker else 0.0
             scnr_info_summary = (
                 f"{self.tr('Yes', default='Yes')} (Cible: {scnr_target_sum}, Force: {scnr_amount_sum:.2f}, Pres.Lum: {scnr_lum_sum})"
                 if scnr_applied_this_run_backend
                 else self.tr("No", default="No")
             )
-            summary_lines.append(
-                f"  - {self.tr('Final SCNR', default='Final SCNR')}: {scnr_info_summary}"
-            )
+            summary_lines.append(f"  - {self.tr('Final SCNR', default='Final SCNR')}: {scnr_info_summary}")
             crop_info_summary = (
                 f"{self.tr('Yes', default='Yes')} ({crop_perc_decimal_sum*100.0:.1f}%)"
                 if crop_applied_this_run_backend
                 else self.tr("No", default="No")
             )
-            summary_lines.append(
-                f"  - {self.tr('Final Edge Crop', default='Final Edge Crop')}: {crop_info_summary}"
-            )
+            summary_lines.append(f"  - {self.tr('Final Edge Crop', default='Final Edge Crop')}: {crop_info_summary}")
             summary_lines.append("-------------------------------")
             if final_stack_path and os.path.exists(final_stack_path):
                 summary_lines.append(
@@ -6123,34 +5706,21 @@ class SeestarStackerGUI:
             can_open_output_folder_button = (
                 self.output_path.get()
                 and os.path.isdir(self.output_path.get())
-                and (
-                    (final_stack_path and os.path.exists(final_stack_path))
-                    or not processing_error_details
-                )
+                and ((final_stack_path and os.path.exists(final_stack_path)) or not processing_error_details)
             )
             show_summary = True
-            if was_stopped_by_user and not (
-                final_stack_path and os.path.exists(final_stack_path)
-            ):
+            if was_stopped_by_user and not (final_stack_path and os.path.exists(final_stack_path)):
                 show_summary = False
-                self.logger.info(
-                    "--- Processing Stopped by User, No Final File (Summary Dialog Skipped) ---"
-                )
-            elif processing_error_details and not (
-                final_stack_path and os.path.exists(final_stack_path)
-            ):
+                self.logger.info("--- Processing Stopped by User, No Final File (Summary Dialog Skipped) ---")
+            elif processing_error_details and not (final_stack_path and os.path.exists(final_stack_path)):
                 show_summary = False
                 self.root.after(
                     100,
-                    lambda: messagebox.showerror(
-                        self.tr("error"), f"{status_text_for_log}", parent=self.root
-                    ),
+                    lambda: messagebox.showerror(self.tr("error"), f"{status_text_for_log}", parent=self.root),
                 )
 
             if show_summary:
-                self.logger.info(
-                    "    [PF_S5] Planification affichage dialogue résumé..."
-                )
+                self.logger.info("    [PF_S5] Planification affichage dialogue résumé...")
                 # --- CORRECTION FINALE ET SIMPLIFIÉE ---
                 self.root.after(
                     150,
@@ -6176,14 +5746,10 @@ class SeestarStackerGUI:
                 f"Erreur majeure lors de la generation du resume:\n{e_s5}",
                 parent=self.root,
             )
-            processing_error_details = (
-                f"{processing_error_details or ''} Erreur UI Resume: {e_s5}"
-            )
+            processing_error_details = f"{processing_error_details or ''} Erreur UI Resume: {e_s5}"
 
         # --- Section 6: Réinitialisation de l'état de l'UI ---
-        self.logger.info(
-            "  [PF_S6] _processing_finished: Réinitialisation de l'état de l'UI..."
-        )
+        self.logger.info("  [PF_S6] _processing_finished: Réinitialisation de l'état de l'UI...")
         # ... (Code de _set_parameter_widgets_state(tk.NORMAL) etc. - reste inchangé) ...
         try:
             self._set_parameter_widgets_state(tk.NORMAL)
@@ -6199,13 +5765,8 @@ class SeestarStackerGUI:
                     or (not processing_error_details and not was_stopped_by_user)
                 )
             )
-            if (
-                hasattr(self, "open_output_button")
-                and self.open_output_button.winfo_exists()
-            ):
-                self.open_output_button.config(
-                    state=tk.NORMAL if can_open_output_final else tk.DISABLED
-                )
+            if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists():
+                self.open_output_button.config(state=tk.NORMAL if can_open_output_final else tk.DISABLED)
             if hasattr(self, "remaining_time_var"):
                 self.remaining_time_var.set("00:00:00")
             self.additional_folders_to_process = []
@@ -6229,9 +5790,7 @@ class SeestarStackerGUI:
 
         # Nettoyer _temp_data_for_final_histo si elle a été utilisée
         if hasattr(self, "_temp_data_for_final_histo"):
-            self.logger.info(
-                "     _processing_finished: Nettoyage _temp_data_for_final_histo après utilisation."
-            )
+            self.logger.info("     _processing_finished: Nettoyage _temp_data_for_final_histo après utilisation.")
             self._temp_data_for_final_histo = None
 
         if "gc" in globals() or "gc" in locals():
@@ -6308,9 +5867,7 @@ class SeestarStackerGUI:
 
         # Nettoyer la donnée temporaire après utilisation
         if hasattr(self, "_temp_data_for_final_histo"):
-            self.logger.info(
-                "     _refresh_final_preview_and_histo_direct: Nettoyage de _temp_data_for_final_histo."
-            )
+            self.logger.info("     _refresh_final_preview_and_histo_direct: Nettoyage de _temp_data_for_final_histo.")
             self._temp_data_for_final_histo = None
 
         # --- FIN DU CODE MODIFIÉ ---
@@ -6341,9 +5898,7 @@ class SeestarStackerGUI:
 
         # Icon and main summary text
         try:
-            icon_label = ttk.Label(
-                content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0)
-            )
+            icon_label = ttk.Label(content_frame, image="::tk::icons::information", padding=(0, 0, 10, 0))
         except tk.TclError:
             icon_label = ttk.Label(
                 content_frame,
@@ -6353,21 +5908,14 @@ class SeestarStackerGUI:
             )
         icon_label.grid(row=0, column=0, sticky="nw", pady=(0, 10))
 
-        summary_label = ttk.Label(
-            content_frame, text=summary_text, justify=tk.LEFT, wraplength=450
-        )
+        summary_label = ttk.Label(content_frame, text=summary_text, justify=tk.LEFT, wraplength=450)
         summary_label.grid(row=0, column=1, sticky="nw", padx=(0, 10))
 
         # --- Variables pour la disposition des éléments suivants ---
-        current_grid_row_for_next_elements = (
-            1  # Démarre à la ligne 1 pour le message non aligné
-        )
+        current_grid_row_for_next_elements = 1  # Démarre à la ligne 1 pour le message non aligné
 
         # --- BLOC POUR LE MESSAGE FICHIERS NON ALIGNÉS ---
-        if (
-            source_folders_with_unaligned_in_run
-            and len(source_folders_with_unaligned_in_run) > 0
-        ):
+        if source_folders_with_unaligned_in_run and len(source_folders_with_unaligned_in_run) > 0:
             unaligned_message_text_prefix = self.tr(
                 "unaligned_files_message_prefix",
                 default="Des images n'ont pas pu être alignées. Elles se trouvent dans :",
@@ -6378,16 +5926,12 @@ class SeestarStackerGUI:
             for folder_path in sorted(
                 list(source_folders_with_unaligned_in_run)
             ):  # Trier les chemins pour un affichage ordonné
-                unaligned_paths_list.append(
-                    os.path.join(folder_path, "unaligned_by_stacker")
-                )
+                unaligned_paths_list.append(os.path.join(folder_path, "unaligned_by_stacker"))
 
             full_unaligned_display_text = f"{unaligned_message_text_prefix}\n"
             # Ajouter un formatage simple pour la liste des chemins
             for i, path_example in enumerate(unaligned_paths_list):
-                full_unaligned_display_text += (
-                    f"• {path_example}\n"  # Utilisez "• " pour des puces simples
-                )
+                full_unaligned_display_text += f"• {path_example}\n"  # Utilisez "• " pour des puces simples
 
             # Créer un Label pour le message non aligné
             self.unaligned_info_label = ttk.Label(
@@ -6399,16 +5943,12 @@ class SeestarStackerGUI:
 
             # Appliquer le style rouge et gras
             try:
-                self.unaligned_info_label.config(
-                    foreground="red", font=("TkDefaultFont", 9, "bold")
-                )
+                self.unaligned_info_label.config(foreground="red", font=("TkDefaultFont", 9, "bold"))
             except Exception as e_style:
                 print(
                     f"DEBUG GUI: Erreur application style/couleur label unaligned: {e_style}. Utilisation gras simple."
                 )
-                self.unaligned_info_label.config(
-                    font=("TkDefaultFont", 9, "bold")
-                )  # Juste gras en dernier recours
+                self.unaligned_info_label.config(font=("TkDefaultFont", 9, "bold"))  # Juste gras en dernier recours
 
             # Placer le label dans la grille. Il se trouve sur la ligne 'current_grid_row_for_next_elements'.
             self.unaligned_info_label.grid(
@@ -6420,9 +5960,7 @@ class SeestarStackerGUI:
                 pady=(10, 10),
             )
 
-            current_grid_row_for_next_elements += (
-                1  # Incrémenter la ligne pour les boutons
-            )
+            current_grid_row_for_next_elements += 1  # Incrémenter la ligne pour les boutons
         # --- FIN BLOC POUR LE MESSAGE FICHIERS NON ALIGNÉS ---
 
         # --- Cadre pour les boutons ---
@@ -6442,11 +5980,7 @@ class SeestarStackerGUI:
             button_frame,
             text="OK",
             command=dialog.destroy,
-            style=(
-                "Accent.TButton"
-                if "Accent.TButton" in ttk.Style().element_names()
-                else "TButton"
-            ),
+            style=("Accent.TButton" if "Accent.TButton" in ttk.Style().element_names() else "TButton"),
         )
         ok_button.pack(side=tk.RIGHT)
         ok_button.focus_set()
@@ -6460,9 +5994,7 @@ class SeestarStackerGUI:
                 dialog.after(
                     1500,
                     lambda: (
-                        copy_button.config(
-                            text=self.tr("Copy Summary", default="Copy Summary")
-                        )
+                        copy_button.config(text=self.tr("Copy Summary", default="Copy Summary"))
                         if copy_button.winfo_exists()
                         else None
                     ),
@@ -6484,29 +6016,18 @@ class SeestarStackerGUI:
             command=self._open_output_folder,
             state=tk.NORMAL if can_open_output else tk.DISABLED,
         )
-        open_button.pack(
-            side=tk.RIGHT, padx=(5, 10)
-        )  # Plus grand padx pour séparer du groupe droit
+        open_button.pack(side=tk.RIGHT, padx=(5, 10))  # Plus grand padx pour séparer du groupe droit
 
         # 4. NOUVEAU BOUTON "OPEN UNALIGNED" (tout à gauche du groupe)
-        if (
-            source_folders_with_unaligned_in_run
-            and len(source_folders_with_unaligned_in_run) > 0
-        ):
-            unaligned_target_path = os.path.join(
-                input_folder_path_for_unaligned_button, "unaligned_by_stacker"
-            )
+        if source_folders_with_unaligned_in_run and len(source_folders_with_unaligned_in_run) > 0:
+            unaligned_target_path = os.path.join(input_folder_path_for_unaligned_button, "unaligned_by_stacker")
 
             open_unaligned_btn = ttk.Button(
                 button_frame,
                 text=self.tr("open_unaligned_button_text", default="Open Unaligned"),
-                command=lambda p=unaligned_target_path: self._open_unaligned_folder_from_summary(
-                    p
-                ),
+                command=lambda p=unaligned_target_path: self._open_unaligned_folder_from_summary(p),
             )
-            open_unaligned_btn.pack(
-                side=tk.RIGHT, padx=(5, 10)
-            )  # Plus grand padx pour séparer du groupe droit
+            open_unaligned_btn.pack(side=tk.RIGHT, padx=(5, 10))  # Plus grand padx pour séparer du groupe droit
         # --- FIN NOUVEAU BOUTON ---
 
         # --- FIN DE LA CRÉATION DES WIDGETS ---
@@ -6532,6 +6053,123 @@ class SeestarStackerGUI:
 
     # --- DANS LA CLASSE SeestarStackerGUI DANS seestar/gui/main_window.py ---
 
+    def _prepare_single_batch_if_needed(self) -> bool:
+        """Check for ``stack_plan.csv`` when ``batch_size`` equals 1.
+
+        Files from the CSV are queued in order and winsorized–sigma clipping is
+        forced while drizzle and reprojection are disabled. The entire sequence
+        is then stacked as one batch. Missing CSV falls back to multi-batch
+        behaviour. CSV files can optionally include an index column (``1,file``)
+        which will be ignored. Returns ``True`` when this special mode
+        activates.
+
+        """
+
+        if getattr(self.settings, "batch_size", 0) != 1:
+            return False
+
+        csv_path = os.path.join(self.settings.input_folder, "stack_plan.csv")
+
+        if not os.path.isfile(csv_path):
+            self.logger.warning("Batch size 1 without CSV – aborting")
+            self.settings.batch_size = 0
+            self.settings.order_csv_path = ""
+            self.settings.order_file_list = []
+            raise FileNotFoundError(csv_path)
+
+        self.logger.info(f"Stack plan CSV detected at '{csv_path}'. Preparing single batch")
+
+        ordered_files: list[str] = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        if not rows:
+            self.logger.warning("Stack plan CSV is empty")
+            return False
+
+        header = [c.strip().lower() for c in rows[0]]
+        file_idx = None
+        data_rows = rows
+
+        if "file_path" in header:
+            file_idx = header.index("file_path")
+            data_rows = rows[1:]
+        else:
+            has_header = any(h in {"order", "file", "filename", "path", "index"} for h in header)
+            if has_header:
+                data_rows = rows[1:]
+
+        for row in data_rows:
+            if not row:
+                continue
+            if file_idx is not None:
+                if len(row) <= file_idx:
+                    continue
+                cell = row[file_idx].strip()
+            else:
+                cell = row[0].strip()
+                if cell.isdigit() and len(row) > 1:
+                    cell = row[1].strip()
+
+            if not cell or cell.lower() in {
+                "order",
+                "file",
+                "filename",
+                "path",
+                "index",
+                "file_path",
+            }:
+                continue
+
+            if not os.path.isabs(cell):
+                cell = os.path.join(self.settings.input_folder, cell)
+
+            ordered_files.append(os.path.abspath(cell))
+
+        missing = [p for p in ordered_files if not os.path.isfile(p)]
+        if missing:
+            raise FileNotFoundError(missing[0])
+
+        if getattr(self.settings, "stack_final_combine", "mean") != "mean":
+            self.logger.info("stack_final_combine -> mean")
+        setattr(self.settings, "stack_final_combine", "mean")
+        if hasattr(self, "stack_final_combine_var"):
+            try:
+                self.stack_final_combine_var.set("mean")
+                if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
+                    label = self.final_key_to_label.get("mean", "mean")
+                    self.stack_final_display_var.set(label)
+            except Exception:
+                pass
+
+        batch_len = len(ordered_files)
+        if batch_len <= 0:
+            return False
+
+        # keep ``batch_size`` at 1 so ``start_processing`` triggers its
+        # special CSV mode which will enqueue ``ordered_files`` itself.
+        self.settings.batch_size = 1
+        self.settings.order_csv_path = csv_path
+        self.settings.order_file_list = ordered_files
+        self.logger.info("batch_size -> 1 (single batch via plan)")
+
+        return True
+
+    def _get_auto_chunk_size(self) -> int:
+        """Return an automatic chunk size based on system RAM."""
+        if not _psutil_available:
+            return 50
+        try:
+            total_gb = psutil.virtual_memory().total / (1024 ** 3)
+        except Exception:
+            return 50
+        if total_gb >= 64:
+            return 100
+        if total_gb >= 32:
+            return 50
+        if total_gb >= 16:
+            return 25
+        return 10
+
     def start_processing(self):
         """
         Démarre le traitement. Ordre crucial pour la gestion des paramètres :
@@ -6546,9 +6184,9 @@ class SeestarStackerGUI:
         8. Lancer le thread de traitement du backend.
         MODIFIED: Ajout d'un CRITICAL CHECK pour vérifier mosaic_settings avant l'envoi au backend.
         """
-        print(
-            "DEBUG (GUI start_processing): Début tentative démarrage du traitement..."
-        )
+        if self.settings.batch_size == 1:
+            self.settings.enable_preview = False
+        print("DEBUG (GUI start_processing): Début tentative démarrage du traitement...")
 
         if hasattr(self, "start_button"):
             try:
@@ -6567,18 +6205,14 @@ class SeestarStackerGUI:
                 self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(input_folder):
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}"
-            )
+            messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             if hasattr(self, "start_button") and self.start_button.winfo_exists():
                 self.start_button.config(state=tk.NORMAL)
             return
         if not os.path.isdir(output_folder):
             try:
                 os.makedirs(output_folder, exist_ok=True)
-                self.update_progress_gui(
-                    f"{self.tr('Output folder created')}: {output_folder}", None
-                )
+                self.update_progress_gui(f"{self.tr('Output folder created')}: {output_folder}", None)
             except Exception as e:
                 messagebox.showerror(
                     self.tr("error"),
@@ -6588,33 +6222,22 @@ class SeestarStackerGUI:
                     self.start_button.config(state=tk.NORMAL)
                 return
         try:
-            has_initial_fits = any(
-                f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder)
-            )
+            has_initial_fits = any(f.lower().endswith((".fit", ".fits")) for f in os.listdir(input_folder))
             has_additional_listed = bool(self.additional_folders_to_process)
             if not has_initial_fits and not has_additional_listed:
-                if not messagebox.askyesno(
-                    self.tr("warning"), self.tr("no_fits_found")
-                ):
-                    if (
-                        hasattr(self, "start_button")
-                        and self.start_button.winfo_exists()
-                    ):
+                if not messagebox.askyesno(self.tr("warning"), self.tr("no_fits_found")):
+                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
                         self.start_button.config(state=tk.NORMAL)
                     return
         except Exception as e:
-            messagebox.showerror(
-                self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}"
-            )
+            messagebox.showerror(self.tr("error"), f"{self.tr('Error reading input folder')}:\n{e}")
             if hasattr(self, "start_button") and self.start_button.winfo_exists():
                 self.start_button.config(state=tk.NORMAL)
             return
         print("DEBUG (GUI start_processing): Phase 1 - Validation des chemins OK.")
 
         # --- 2. Avertissement Drizzle/Mosaïque (si activé) ---
-        print(
-            "DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle/Mosaïque..."
-        )
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement Drizzle/Mosaïque...")
         drizzle_globally_enabled_ui = self.use_drizzle_var.get()
         # Lire mosaic_mode_active depuis self.settings, qui devrait avoir été mis à jour par MosaicSettingsWindow
         is_mosaic_mode_ui = getattr(self.settings, "mosaic_mode_active", False)
@@ -6623,9 +6246,7 @@ class SeestarStackerGUI:
             warning_title = self.tr("drizzle_warning_title")
             base_text_tuple_or_str = self.tr("drizzle_warning_text")
             base_warning_text = (
-                "".join(base_text_tuple_or_str)
-                if isinstance(base_text_tuple_or_str, tuple)
-                else base_text_tuple_or_str
+                "".join(base_text_tuple_or_str) if isinstance(base_text_tuple_or_str, tuple) else base_text_tuple_or_str
             )
             full_warning_text = base_warning_text
             if is_mosaic_mode_ui and not drizzle_globally_enabled_ui:
@@ -6637,25 +6258,16 @@ class SeestarStackerGUI:
             print(
                 f"DEBUG (GUI start_processing): Avertissement Drizzle/Mosaïque nécessaire. is_mosaic_mode_ui={is_mosaic_mode_ui}"
             )
-            continue_processing = messagebox.askyesno(
-                warning_title, full_warning_text, parent=self.root
-            )
+            continue_processing = messagebox.askyesno(warning_title, full_warning_text, parent=self.root)
             if not continue_processing:
-                self.update_progress_gui(
-                    "ⓘ Démarrage annulé par l'utilisateur après avertissement.", None
-                )
+                self.update_progress_gui("ⓘ Démarrage annulé par l'utilisateur après avertissement.", None)
                 if hasattr(self, "start_button") and self.start_button.winfo_exists():
                     self.start_button.config(state=tk.NORMAL)
                 return
-        print(
-            "DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable)."
-        )
+        print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable).")
 
         # --- Additional check: reproject modes require a configured local solver ---
-        if (
-            self.reproject_between_batches_var.get()
-            or getattr(self, "reproject_coadd_var", tk.BooleanVar()).get()
-        ):
+        if self.reproject_between_batches_var.get() or getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
             use_solver = self.use_third_party_solver_var.get()
             solver_pref = getattr(self.settings, "local_solver_preference", "none")
             astap_path = getattr(self.settings, "astap_path", "").strip()
@@ -6674,26 +6286,67 @@ class SeestarStackerGUI:
                 solver_configured = any([astap_path, ansvr_path, astrometry_dir, api_key])
 
             if not (use_solver and solver_configured):
+                messagebox.showerror(self.tr("error"), self.tr("reproject_solver_required_error"))
+                if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                    self.start_button.config(state=tk.NORMAL)
+                return
+
+        # When the batch size equals 1, process the CSV using boring_stack.py
+        if int(getattr(self.batch_size, "get", lambda: 0)()) == 1:
+            # Sync settings now to read latest options
+            if hasattr(self, "settings") and hasattr(self.settings, "update_from_ui"):
+                try:
+                    self.settings.update_from_ui(self)
+                except Exception:
+                    pass
+
+            csv_path = os.path.join(self.settings.input_folder, "stack_plan.csv")
+            if not os.path.isfile(csv_path):
                 messagebox.showerror(
                     self.tr("error"),
-                    self.tr("reproject_solver_required_error")
+                    self.tr(
+                        "stack_plan_missing_file_error",
+                        default="File listed in stack_plan.csv not found:\n{path}",
+                    ).format(path=csv_path),
                 )
                 if hasattr(self, "start_button") and self.start_button.winfo_exists():
                     self.start_button.config(state=tk.NORMAL)
                 return
 
+            script = os.path.join(os.path.dirname(__file__), "boring_stack.py")
+            cmd = [
+                sys.executable,
+                script,
+                "--csv",
+                csv_path,
+                "--out",
+                self.settings.output_folder,
+                "--batch-size",
+                "1",
+                "--max-mem",
+                str(getattr(self.settings, "max_hq_mem_gb", 8)),
+                "--chunk-size",
+                str(self._get_auto_chunk_size()),
+                "--log-dir",
+                os.path.join(self.settings.output_folder, "logs"),
+            ]
+            final_combine_slug = _to_slug(self.stack_final_combine_var.get())
+            cmd += ["--final-combine", final_combine_slug]
+            self.logger.info(
+                "Launching boring_stack with final_combine=%s, batch_size=1",
+                final_combine_slug,
+            )
+            self._run_boring_stack_process(cmd, csv_path, self.settings.output_folder)
+            return
+
         # --- 3. Initialisation de l'état de traitement du GUI ---
-        print(
-            "DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI..."
-        )
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI...")
         self.processing = True
         self.initial_auto_stretch_done = False
         self.time_per_image = 0
         self.global_start_time = time.monotonic()
         self.batches_processed_for_preview_refresh = 0
-        default_aligned_fmt = self.tr(
-            "aligned_files_label_format", default="Aligned: {count}"
-        )
+        default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
         self.aligned_files_var.set(default_aligned_fmt.format(count=0))
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
         self.additional_folders_to_process = []
@@ -6701,10 +6354,7 @@ class SeestarStackerGUI:
         self._set_parameter_widgets_state(tk.DISABLED)
         if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
             self.stop_button.config(state=tk.NORMAL)
-        if (
-            hasattr(self, "open_output_button")
-            and self.open_output_button.winfo_exists()
-        ):
+        if hasattr(self, "open_output_button") and self.open_output_button.winfo_exists():
             self.open_output_button.config(state=tk.DISABLED)
         if hasattr(self, "progress_manager"):
             self.progress_manager.reset()
@@ -6714,14 +6364,10 @@ class SeestarStackerGUI:
             self.status_text.delete(1.0, tk.END)
             self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n")
             self.status_text.config(state=tk.DISABLED)
-        print(
-            "DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK."
-        )
+        print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK.")
 
         # --- 4. Synchronisation et Validation des Settings ---
-        print(
-            "DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings..."
-        )
+        print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")
         print("  -> (4A) Appel self.settings.update_from_ui(self)...")
         self.settings.update_from_ui(self)
         # ... (logs de vérification des settings après update_from_ui) ...
@@ -6747,294 +6393,187 @@ class SeestarStackerGUI:
             self._update_photutils_bn_options_state()
             self._update_feathering_options_state()
             self._update_low_wht_mask_options_state()  # S'assurer d'appeler ceci aussi
-        print(
-            "DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés."
-        )
+        print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
-        # --- 5. Préparation des arguments pour le backend (inchangée, lit depuis self.settings) ---
-        print(
-            "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments pour le backend depuis self.settings..."
-        )
-        # ... (log de tous les paramètres envoyés au backend, inchangé) ...
-        print("  --- VALEURS ENVOYÉES AU BACKEND (depuis self.settings) ---")
-        params_to_log_for_backend = [
-            "input_folder",
-            "output_folder",
-            "reference_image_path",
-            "stacking_mode",
-            "kappa",
-            "batch_size",
-            "correct_hot_pixels",
-            "hot_pixel_threshold",
-            "neighborhood_size",
-            "bayer_pattern",
-            "cleanup_temp",
-            "use_quality_weighting",
-            "weight_by_snr",
-            "weight_by_stars",
-            "snr_exponent",
-            "stars_exponent",
-            "min_weight",
-            "use_drizzle",
-            "drizzle_scale",
-            "drizzle_wht_threshold",
-            "drizzle_mode",
-            "drizzle_kernel",
-            "drizzle_pixfrac",
-            "apply_chroma_correction",
-            "apply_final_scnr",
-            "final_scnr_target_channel",
-            "final_scnr_amount",
-            "final_scnr_preserve_luminosity",
-            "bn_grid_size_str",
-            "bn_perc_low",
-            "bn_perc_high",
-            "bn_std_factor",
-            "bn_min_gain",
-            "bn_max_gain",
-            "cb_border_size",
-            "cb_blur_radius",
-            "cb_min_b_factor",
-            "cb_max_b_factor",
-            "final_edge_crop_percent",
-            "apply_photutils_bn",
-            "photutils_bn_box_size",
-            "photutils_bn_filter_size",
-            "photutils_bn_sigma_clip",
-            "photutils_bn_exclude_percentile",
-            "apply_feathering",
-            "feather_blur_px",
-            "apply_batch_feathering",
-            "apply_low_wht_mask",
-            "low_wht_percentile",
-            "low_wht_soften_px",
-            "mosaic_mode_active",
-            "astrometry_api_key",
-            "mosaic_settings",
-            "astap_search_radius",
-        ]
-        for param_name in params_to_log_for_backend:
-            value = getattr(self.settings, param_name, f"ERREUR_ATTR_{param_name}")
-            if param_name == "astrometry_api_key":
-                print(
-                    f"    {param_name}: {'Présente' if value else 'Absente'} (longueur: {len(str(value))})"
-                )
-            elif param_name == "mosaic_settings":
-                print(f"    {param_name}: {value}")  # Afficher le dict complet
-            else:
-                print(f"    {param_name}: {value}")
-        print("  --- FIN VALEURS ENVOYÉES AU BACKEND ---")
-        print(
-            "DEBUG (GUI start_processing): Phase 5 - Préparation des arguments terminée."
-        )
+        # Heavy work is delegated to a starter thread to keep Tk responsive.
 
-        # Sauvegarde d'un fichier .cfg résumant ce run
-        try:
-            cfg_name = f"{self.settings.output_filename}_stack_{time.strftime('%Y%m%d_%H%M%S')}.cfg"
-            cfg_path = os.path.join(self.settings.output_folder, cfg_name)
-            self.settings.export_run_settings(cfg_path)
-            self.logger.info(f"Configuration du run sauvegardée dans {cfg_path}")
-        except Exception as e_cfg:
-            self.logger.warning(f"Échec sauvegarde fichier cfg: {e_cfg}")
-        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
-        valeur_a_passer_pour_float32_gui = getattr(
-            self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START"
-        )
-        print(
-            f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32_gui} (type: {type(valeur_a_passer_pour_float32_gui)})"
-        )
-        # === FIN AJOUT ===
-        # --- AJOUT DU BLOC DE VÉRIFICATION CRITIQUE ---
-        print(
-            "DEBUG (GUI start_processing): Phase 5.5 - Vérification critique avant appel backend..."
-        )
-        final_mosaic_settings_for_backend = self.settings.mosaic_settings.copy()
-        alignment_mode_to_backend = final_mosaic_settings_for_backend.get(
-            "alignment_mode", "NON_DÉFINI_DANS_DICT_BACKEND"
-        )
-        print(
-            f"  CRITICAL CHECK (GUI start_processing): mosaic_settings QUI SERA ENVOYÉ: {final_mosaic_settings_for_backend}"
-        )
-        print(
-            f"  CRITICAL CHECK (GUI start_processing): alignment_mode DANS CE DICT: '{alignment_mode_to_backend}'"
-        )
-        # --- FIN AJOUT ---
-        # === AJOUTER CE LOG SPÉCIFIQUE ICI ===
-        valeur_a_passer_pour_float32 = getattr(
-            self.settings, "save_final_as_float32", "ERREUR_ATTR_DANS_GUI_START"
-        )
-        print(
-            f"  >>> CRITICAL GUI CHECK (JUSTE AVANT APPEL BACKEND): self.settings.save_final_as_float32 = {valeur_a_passer_pour_float32} (type: {type(valeur_a_passer_pour_float32)})"
-        )
-        # === FIN AJOUT ===
-
-        if not self.settings.use_third_party_solver:
-            self.settings.local_solver_preference = "none"
-            self.settings.reproject_between_batches = False
-            # Clear solver-specific settings to ensure no external solver is used
-            self.settings.astrometry_api_key = ""
-            self.settings.local_ansvr_path = ""
-            self.settings.astap_path = ""
-            self.settings.astap_data_dir = ""
-            self.settings.astrometry_solve_field_dir = ""
-
-        # --- 6. Appel à queued_stacker.start_processing ---
-        print(
-            "DEBUG (GUI start_processing): Phase 6 - Appel à queued_stacker.start_processing..."
-        )
-
-        # Propager l'option GPU au backend
-        try:
-            import cv2
-
-            self.queued_stacker.use_gpu = bool(self.settings.use_gpu)
-            self.queued_stacker.use_cuda = bool(
-                self.settings.use_gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0
-            )
-            if hasattr(self.queued_stacker, "aligner") and self.queued_stacker.aligner:
-                self.queued_stacker.aligner.use_cuda = self.queued_stacker.use_cuda
-        except Exception:
-            self.queued_stacker.use_gpu = False
-            self.queued_stacker.use_cuda = False
-
-        start_proc_kwargs = {
-            "input_dir": self.settings.input_folder,
-            "output_dir": self.settings.output_folder,
-            "temp_folder": self.settings.temp_folder,
-            "output_filename": self.settings.output_filename,
-            "reference_path_ui": self.settings.reference_image_path,
-            "initial_additional_folders": folders_to_pass_to_backend,
-            "stacking_mode": self.settings.stacking_mode,
-            "kappa": self.settings.kappa,
-            "stack_kappa_low": self.settings.stack_kappa_low,
-            "stack_kappa_high": self.settings.stack_kappa_high,
-            "winsor_limits": (
-                tuple(
-                    float(x.strip())
-                    for x in str(self.settings.stack_winsor_limits).split(",")
-                )
-                if isinstance(self.settings.stack_winsor_limits, str)
-                else (0.05, 0.05)
-            ),
-            "normalize_method": self.settings.stack_norm_method,
-            "weighting_method": self.settings.stack_weight_method,
-            "batch_size": self.settings.batch_size,
-            "correct_hot_pixels": self.settings.correct_hot_pixels,
-            "hot_pixel_threshold": self.settings.hot_pixel_threshold,
-            "neighborhood_size": self.settings.neighborhood_size,
-            "bayer_pattern": self.settings.bayer_pattern,
-            "perform_cleanup": self.settings.cleanup_temp,
-            "use_weighting": self.settings.stack_weight_method == "quality",
-            "weight_by_snr": self.settings.weight_by_snr,
-            "weight_by_stars": self.settings.weight_by_stars,
-            "snr_exp": self.settings.snr_exponent,
-            "stars_exp": self.settings.stars_exponent,
-            "min_w": self.settings.min_weight,
-            "use_drizzle": self.settings.use_drizzle,
-            "drizzle_scale": float(self.settings.drizzle_scale),
-            "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
-            "drizzle_mode": self.settings.drizzle_mode,
-            "drizzle_kernel": self.settings.drizzle_kernel,
-            "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-            "apply_chroma_correction": self.settings.apply_chroma_correction,
-            "apply_final_scnr": self.settings.apply_final_scnr,
-            "final_scnr_target_channel": self.settings.final_scnr_target_channel,
-            "final_scnr_amount": self.settings.final_scnr_amount,
-            "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
-            "bn_grid_size_str": self.settings.bn_grid_size_str,
-            "bn_perc_low": self.settings.bn_perc_low,
-            "bn_perc_high": self.settings.bn_perc_high,
-            "bn_std_factor": self.settings.bn_std_factor,
-            "bn_min_gain": self.settings.bn_min_gain,
-            "bn_max_gain": self.settings.bn_max_gain,
-            "cb_border_size": self.settings.cb_border_size,
-            "cb_blur_radius": self.settings.cb_blur_radius,
-            "cb_min_b_factor": self.settings.cb_min_b_factor,
-            "cb_max_b_factor": self.settings.cb_max_b_factor,
-            "apply_master_tile_crop": self.settings.apply_master_tile_crop,
-            "master_tile_crop_percent": self.settings.master_tile_crop_percent,
-            "final_edge_crop_percent": self.settings.final_edge_crop_percent,
-            "apply_photutils_bn": self.settings.apply_photutils_bn,
-            "photutils_bn_box_size": self.settings.photutils_bn_box_size,
-            "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
-            "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
-            "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
-            "apply_feathering": self.settings.apply_feathering,
-            "feather_blur_px": self.settings.feather_blur_px,
-            "apply_batch_feathering": self.settings.apply_batch_feathering,
-            "apply_low_wht_mask": self.settings.apply_low_wht_mask,
-            "low_wht_percentile": self.settings.low_wht_percentile,
-            "low_wht_soften_px": self.settings.low_wht_soften_px,
-            "is_mosaic_run": self.settings.mosaic_mode_active,
-            "api_key": self.settings.astrometry_api_key,
-            "mosaic_settings": self.settings.mosaic_settings,
-            "astap_path": self.settings.astap_path,
-            "astap_data_dir": self.settings.astap_data_dir,
-            "local_ansvr_path": self.settings.local_ansvr_path,
-            "local_solver_preference": self.settings.local_solver_preference,
-            "astap_search_radius": self.settings.astap_search_radius,
-            "astap_downsample": self.settings.astap_downsample,
-            "astap_sensitivity": self.settings.astap_sensitivity,
-            "save_as_float32": self.settings.save_final_as_float32,
-            "preserve_linear_output": self.settings.preserve_linear_output,
-            "reproject_between_batches": self.settings.reproject_between_batches,
-            "reproject_coadd_final": self.settings.reproject_coadd_final,
-        }
-        import inspect
-
-        sig = inspect.signature(self.queued_stacker.start_processing)
-        for k in list(start_proc_kwargs.keys()):
-            if k not in sig.parameters:
-                start_proc_kwargs.pop(k)
-
-        def _backend_start_worker():
-            processing_started = self.queued_stacker.start_processing(
-                **start_proc_kwargs
-            )
-
-            def _on_finish():
-                self.logger.info(
-                    ">>>> Entrée dans SeestarStackerGUI.start_processing (Réinitialisation Verrou)"
-                )
-                self.logger.info(
-                    "     Réinitialisation du verrou _final_stretch_set_by_processing_finished = False."
-                )
-                self._final_stretch_set_by_processing_finished = False
-                print(
-                    f"DEBUG (GUI start_processing): Appel à queued_stacker.start_processing fait. Résultat: {processing_started}"
-                )
-
-                if processing_started:
-                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                        self.stop_button.config(state=tk.NORMAL)
-                    self.thread = threading.Thread(
-                        target=self._track_processing_progress,
-                        daemon=True,
-                        name="GUI_ProgressTracker",
-                    )
-                    self.thread.start()
-                else:
-                    if (
-                        hasattr(self, "start_button")
-                        and self.start_button.winfo_exists()
-                    ):
-                        self.start_button.config(state=tk.NORMAL)
-                    self.processing = False
-                    self.update_progress_gui(
-                        "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
-                        None,
-                    )
-                    self._set_parameter_widgets_state(tk.NORMAL)
-                print("DEBUG (GUI start_processing): Fin de la méthode.")
-
+        def _starter():
             try:
-                self.root.after(0, _on_finish)
-            except tk.TclError:
-                pass
+                self.settings.update_from_ui(self)
+                validation_messages = self.settings.validate_settings()
+                special_single = self._prepare_single_batch_if_needed()
+                try:
+                    self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
+                except Exception:
+                    self.queued_stacker.align_on_disk = False
+                if validation_messages:
+                    def _apply_valid():
+                        self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
+                        for msg in validation_messages:
+                            self.update_progress_gui(f"  - {msg}", None)
+                        self.settings.apply_to_ui(self)
+                        self._update_drizzle_options_state()
+                        self._update_final_scnr_options_state()
+                        self._update_photutils_bn_options_state()
+                        self._update_feathering_options_state()
+                        self._update_low_wht_mask_options_state()
+                    if hasattr(self, "gui_event_queue"):
+                        self.gui_event_queue.put(_apply_valid)
+                    else:
+                        self.root.after(0, _apply_valid)
+                backend_kwargs = {
+                    "input_dir": self.settings.input_folder,
+                    "output_dir": self.settings.output_folder,
+                    "temp_folder": self.settings.temp_folder,
+                    "output_filename": self.settings.output_filename,
+                    "reference_path_ui": self.settings.reference_image_path,
+                    "initial_additional_folders": folders_to_pass_to_backend,
+                    "stacking_mode": self.settings.stacking_mode,
+                    "kappa": self.settings.kappa,
+                    "stack_kappa_low": self.settings.stack_kappa_low,
+                    "stack_kappa_high": self.settings.stack_kappa_high,
+                    "winsor_limits": (
+                        tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
+                        if isinstance(self.settings.stack_winsor_limits, str)
+                        else (0.05, 0.05)
+                    ),
+                    "normalize_method": self.settings.stack_norm_method,
+                    "weighting_method": self.settings.stack_weight_method,
+                    "batch_size": self.settings.batch_size,
+                    "ordered_files": getattr(self.settings, "order_file_list", None),
+                    "correct_hot_pixels": self.settings.correct_hot_pixels,
+                    "hot_pixel_threshold": self.settings.hot_pixel_threshold,
+                    "neighborhood_size": self.settings.neighborhood_size,
+                    "bayer_pattern": self.settings.bayer_pattern,
+                    "perform_cleanup": self.settings.cleanup_temp,
+                    "use_weighting": self.settings.stack_weight_method != "none",
+                    "weight_by_snr": self.settings.weight_by_snr,
+                    "weight_by_stars": self.settings.weight_by_stars,
+                    "snr_exp": self.settings.snr_exponent,
+                    "stars_exp": self.settings.stars_exponent,
+                    "min_w": self.settings.min_weight,
+                    "use_drizzle": self.settings.use_drizzle,
+                    "drizzle_scale": float(self.settings.drizzle_scale),
+                    "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
+                    "drizzle_mode": self.settings.drizzle_mode,
+                    "drizzle_kernel": self.settings.drizzle_kernel,
+                    "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+                    "apply_chroma_correction": self.settings.apply_chroma_correction,
+                    "apply_final_scnr": self.settings.apply_final_scnr,
+                    "final_scnr_target_channel": self.settings.final_scnr_target_channel,
+                    "final_scnr_amount": self.settings.final_scnr_amount,
+                    "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
+                    "bn_grid_size_str": self.settings.bn_grid_size_str,
+                    "bn_perc_low": self.settings.bn_perc_low,
+                    "bn_perc_high": self.settings.bn_perc_high,
+                    "bn_std_factor": self.settings.bn_std_factor,
+                    "bn_min_gain": self.settings.bn_min_gain,
+                    "bn_max_gain": self.settings.bn_max_gain,
+                    "cb_border_size": self.settings.cb_border_size,
+                    "cb_blur_radius": self.settings.cb_blur_radius,
+                    "cb_min_b_factor": self.settings.cb_min_b_factor,
+                    "cb_max_b_factor": self.settings.cb_max_b_factor,
+                    "apply_master_tile_crop": self.settings.apply_master_tile_crop,
+                    "master_tile_crop_percent": self.settings.master_tile_crop_percent,
+                    "final_edge_crop_percent": self.settings.final_edge_crop_percent,
+                    "apply_photutils_bn": self.settings.apply_photutils_bn,
+                    "photutils_bn_box_size": self.settings.photutils_bn_box_size,
+                    "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
+                    "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
+                    "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
+                    "apply_feathering": self.settings.apply_feathering,
+                    "feather_blur_px": self.settings.feather_blur_px,
+                    "apply_batch_feathering": self.settings.apply_batch_feathering,
+                    "apply_low_wht_mask": self.settings.apply_low_wht_mask,
+                    "low_wht_percentile": self.settings.low_wht_percentile,
+                    "low_wht_soften_px": self.settings.low_wht_soften_px,
+                    "is_mosaic_run": self.settings.mosaic_mode_active,
+                    "api_key": self.settings.astrometry_api_key,
+                    "mosaic_settings": self.settings.mosaic_settings,
+                    "astap_path": self.settings.astap_path,
+                    "astap_data_dir": self.settings.astap_data_dir,
+                    "local_ansvr_path": self.settings.local_ansvr_path,
+                    "local_solver_preference": self.settings.local_solver_preference,
+                    "astap_search_radius": self.settings.astap_search_radius,
+                    "astap_downsample": self.settings.astap_downsample,
+                    "astap_sensitivity": self.settings.astap_sensitivity,
+                    "save_as_float32": self.settings.save_final_as_float32,
+                    "preserve_linear_output": self.settings.preserve_linear_output,
+                    "reproject_between_batches": self.settings.reproject_between_batches,
+                    "reproject_coadd_final": self.settings.reproject_coadd_final,
+                }
 
-        threading.Thread(
-            target=_backend_start_worker, daemon=True, name="BackendStarter"
-        ).start()
+                if self.settings.batch_size == 1 and not special_single:
+                    backend_kwargs["chunk_size"] = self._get_auto_chunk_size()
+
+                try:
+                    started = self.queued_stacker.start_processing(**backend_kwargs)
+                except Exception as e:
+                    started = False
+                    print(f"Backend start failed: {e}")
+
+                def _after_start(started=started, special_single=special_single):
+                    if special_single:
+                        self.batch_size.set(self.settings.batch_size)
+                        self.stacking_mode.set(self.settings.stacking_mode)
+                        self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+                        self.use_drizzle_var.set(self.settings.use_drizzle)
+                        if hasattr(self, "stack_final_combine_var"):
+                            try:
+                                self.stack_final_combine_var.set(self.settings.stack_final_combine)
+                                if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
+                                    label = self.final_key_to_label.get(self.settings.stack_final_combine, self.settings.stack_final_combine)
+                                    self.stack_final_display_var.set(label)
+                            except Exception:
+                                pass
+
+                    self._final_stretch_set_by_processing_finished = False
+                    if started:
+                        if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                            self.stop_button.config(state=tk.NORMAL)
+                        self.thread = threading.Thread(
+                            target=self._track_processing_progress,
+                            daemon=True,
+                            name="GUI_ProgressTracker",
+                        )
+                        self.thread.start()
+                    else:
+                        if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                            self.start_button.config(state=tk.NORMAL)
+                        self.processing = False
+                        self.update_progress_gui(
+                            "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
+                            None,
+                        )
+                        self._set_parameter_widgets_state(tk.NORMAL)
+
+                if hasattr(self, "gui_event_queue"):
+                    self.gui_event_queue.put(_after_start)
+                else:
+                    self.root.after(0, _after_start)
+
+            except FileNotFoundError as fnfe:
+                def _prep_error_inner(fnfe=fnfe):
+                    messagebox.showerror(
+                        self.tr("error"),
+                        self.tr(
+                            "stack_plan_missing_file_error",
+                            default="File listed in stack_plan.csv not found:\n{path}",
+                        ).format(path=str(fnfe)),
+                    )
+                    if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                        self.start_button.config(state=tk.NORMAL)
+                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                        self.stop_button.config(state=tk.DISABLED)
+                    self.processing = False
+                    self._set_parameter_widgets_state(tk.NORMAL)
+
+                if hasattr(self, "gui_event_queue"):
+                    self.gui_event_queue.put(_prep_error_inner)
+                else:
+                    self.root.after(0, _prep_error_inner)
+
+        threading.Thread(target=_starter, daemon=True, name="BackendStarter").start()
 
 
 ##############################################################################################################################################

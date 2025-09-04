@@ -3,6 +3,7 @@ Module pour gérer l'interaction avec les solveurs astrométriques,
 y compris Astrometry.net (web service), ASTAP (local), et ansvr (Astrometry.net local).
 """
 import os
+import re
 import numpy as np
 import warnings
 import time
@@ -14,6 +15,14 @@ import gc
 import logging
 import platform
 from zemosaic import zemosaic_config
+try:  # Allow running as a standalone module in tests
+    from ..core.image_processing import sanitize_header_for_wcs
+except Exception:  # pragma: no cover
+    try:
+        from seestar.core.image_processing import sanitize_header_for_wcs
+    except Exception:  # pragma: no cover
+        def sanitize_header_for_wcs(hdr):  # type: ignore
+            return hdr
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -62,17 +71,55 @@ except ImportError:
 
 try:
     from astropy.io import fits
+    from astropy.io.fits.verify import VerifyError
     from astropy.wcs import WCS, FITSFixedWarning
     from astropy.utils.exceptions import AstropyWarning
     _ASTROPY_AVAILABLE = True
     warnings.filterwarnings('ignore', category=FITSFixedWarning)
-    warnings.filterwarnings('ignore', category=AstropyWarning) # Pour d'autres avertissements astropy
-    # print("DEBUG [AstrometrySolverModule]: astropy.io.fits et astropy.wcs importés.")
+    warnings.filterwarnings('ignore', category=AstropyWarning)  # Pour d'autres avertissements astropy
 except ImportError:
     logger.error(
         "ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
 
 
+def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
+    """
+    Sanitize raw ASTAP ``.wcs`` text before parsing.
+
+    Parameters
+    ----------
+    txt : str
+        Raw text content of the ``.wcs`` sidecar produced by ASTAP.
+
+    Returns
+    -------
+    tuple
+        ``(clean_text, modified, dropped)`` where ``clean_text`` is the
+        sanitized header, ``modified`` counts ``CONTINUE`` lines that were
+        adjusted and ``dropped`` counts invalid ``CONTINUE`` lines removed.
+    """
+
+    lines = [l.rstrip() for l in txt.splitlines() if l.strip()]
+    out: list[str] = []
+    modified = 0
+    dropped = 0
+
+    for l in lines:
+        if l.lstrip().startswith('CONTINUE'):
+            m = re.match(r'^CONTINUE\s+(.*)$', l.strip())
+            if not m:
+                dropped += 1
+                continue
+            payload = m.group(1).strip()
+            if not (payload.startswith("'") or payload.startswith('"')):
+                payload = payload.replace('"', '\\"')
+                payload = f'"{payload}"'
+                modified += 1
+            out.append(f"CONTINUE {payload}")
+        else:
+            out.append(l)
+
+    return "\n".join(out) + "\n", modified, dropped
 
 
 def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default_focal_mm=250.0, solver_instance=None):
@@ -331,7 +378,17 @@ class AstrometrySolver:
         self.logger.log(log_level, full_msg)
 
 
-    def solve(self, image_path, fits_header, settings, update_header_with_solution=True):
+    def solve(
+        self,
+        image_path,
+        fits_header,
+        settings,
+        update_header_with_solution=True,
+        is_boring_stack_disk_mode=False,
+        *,
+        batch_size=None,
+        final_combine=None,
+    ):
         """
         Tente de résoudre le WCS d'une image en utilisant la stratégie configurée.
 
@@ -347,12 +404,29 @@ class AstrometrySolver:
                                            'ansvr_timeout_sec' (int), 'astap_timeout_sec' (int),
                                            'astrometry_net_timeout_sec' (int),
                                            'use_radec_hints' (bool).
-            update_header_with_solution (bool): Si True, met à jour `fits_header` avec la solution.
+            update_header_with_solution (bool): Si True, met à jour ``fits_header`` avec la solution.
+            is_boring_stack_disk_mode (bool): True uniquement pour le pipeline disque ``batch_size=1``.
 
         Returns:
             astropy.wcs.WCS or None: Objet WCS si succès, None si échec.
         """
-        self._log(f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')", "INFO")
+        if (
+            batch_size == 1
+            and str(final_combine).lower()
+            in {"reproject_and_coadd", "reproject", "coadd"}
+        ):
+            norm = image_path.replace("\\", "/").lower()
+            if "/aligned_tmp/" in norm or "/classic_batch_outputs/" in norm:
+                logger.info(
+                    "[AstrometrySolver] Skip solving intermediate aligned/batch in BS=1+Reproject mode: %s",
+                    image_path,
+                )
+                return None
+
+        self._log(
+            f"Début résolution pour: {os.path.basename(image_path)} (Utilisation de 'local_solver_preference')",
+            "INFO",
+        )
         wcs_solution = None
 
         
@@ -436,6 +510,7 @@ class AstrometrySolver:
                     astap_downsample_val,
                     astap_sensitivity_val,
                     use_radec_hints,
+                    is_boring_stack_disk_mode=is_boring_stack_disk_mode,
                 )
                 if wcs_solution:
                     dt = time.time() - t0
@@ -735,9 +810,6 @@ class AstrometrySolver:
         return None
 
 
-    # ... (méthodes _try_solve_astap, _solve_astrometry_net_web, _parse_wcs_file_content, _update_fits_header_with_wcs existantes) ...
-    # Note: la méthode _try_solve_astap est celle que tu as déjà modifiée pour le nettoyage.
-
     def _try_solve_astap(
         self,
         image_path,
@@ -752,6 +824,7 @@ class AstrometrySolver:
         astap_downsample=2,
         astap_sensitivity=100,
         use_radec_hints=False,
+        is_boring_stack_disk_mode=False,
     ):
         self._log(f"Entering _try_solve_astap for {os.path.basename(image_path)}", "DEBUG")
         self._log(f"ASTAP: Début résolution pour {os.path.basename(image_path)}", "INFO")
@@ -846,32 +919,106 @@ class AstrometrySolver:
             if result.stderr: self._log(f"ASTAP stderr (premiers 500 caractères):\n{result.stderr[:500]}", "DEBUG")
 
             if result.returncode == 0:
+                img_shape_hw_for_wcs = None
+                try:
+                    with fits.open(image_path, memmap=False) as hdul_img_shape:
+                        img_data_shape = hdul_img_shape[0].shape
+                        if len(img_data_shape) >= 2:
+                            img_shape_hw_for_wcs = img_data_shape[-2:]  # (H, W)
+                        else:
+                            raise ValueError(f"Shape image inattendue: {img_data_shape}")
+                except Exception as e_shape:
+                    self._log(
+                        f"ASTAP: Erreur lecture shape image ('{image_path}') pour WCS parsing: {e_shape}. Utilisation fallback header.",
+                        "WARN",
+                    )
+                    h_fallback = fits_header.get('NAXIS2', 1000) if fits_header else 1000
+                    w_fallback = fits_header.get('NAXIS1', 1000) if fits_header else 1000
+                    img_shape_hw_for_wcs = (int(h_fallback), int(w_fallback))
+
                 if os.path.exists(expected_wcs_file) and os.path.getsize(expected_wcs_file) > 0:
                     self._log(f"ASTAP: Résolution réussie. Fichier '{expected_wcs_file}' trouvé.", "INFO")
-                    img_shape_hw_for_wcs = None
-                    try:
-                        with fits.open(image_path, memmap=False) as hdul_img_shape:
-                            img_data_shape = hdul_img_shape[0].shape
-                            if len(img_data_shape) >= 2: img_shape_hw_for_wcs = img_data_shape[-2:] # Prendre (H, W)
-                            else: raise ValueError(f"Shape image inattendue: {img_data_shape}")
-                    except Exception as e_shape:
-                        self._log(f"ASTAP: Erreur lecture shape image ('{image_path}') pour WCS parsing: {e_shape}. Utilisation fallback header.", "WARN")
-                        h_fallback = fits_header.get('NAXIS2', 1000) if fits_header else 1000
-                        w_fallback = fits_header.get('NAXIS1', 1000) if fits_header else 1000
-                        img_shape_hw_for_wcs = (int(h_fallback), int(w_fallback))
+                    wcs_object = self._parse_wcs_file_content(
+                        expected_wcs_file, img_shape_hw_for_wcs
+                    )
 
-                    wcs_object = self._parse_wcs_file_content(expected_wcs_file, img_shape_hw_for_wcs)
+                    if not (wcs_object and wcs_object.is_celestial) and is_boring_stack_disk_mode:
+                        self._log(
+                            "[ASTAP WCS] Using FITS header fallback (batch_size=1 path)",
+                            "DEBUG",
+                        )
+                        try:
+                            with fits.open(image_path, memmap=False) as hdul:
+                                hdr_fits = hdul[0].header.copy()
+                            for card in hdr_fits.cards:
+                                if card.keyword == "CONTINUE" and not isinstance(card.value, str):
+                                    card.value = str(card.value)
+                            sanitize_header_for_wcs(hdr_fits)
+                            wcs_object = WCS(hdr_fits, naxis=2, relax=True)
+                            assert wcs_object.is_celestial
+                        except Exception as e_hdr:
+                            self._log(
+                                f"WCS parse failed from FITS header fallback: {e_hdr}",
+                                "ERROR",
+                            )
+                            wcs_object = None
 
                     if wcs_object and wcs_object.is_celestial:
-                        self._log("ASTAP: Objet WCS créé avec succès.", "INFO")
+                        wcs_object.pixel_shape = (img_shape_hw_for_wcs[1], img_shape_hw_for_wcs[0])
+                        try:
+                            wcs_object._naxis1 = img_shape_hw_for_wcs[1]
+                            wcs_object._naxis2 = img_shape_hw_for_wcs[0]
+                        except AttributeError:
+                            pass
                         if update_header_with_solution and fits_header is not None:
-                            self._update_fits_header_with_wcs(fits_header, wcs_object, solver_name="ASTAP")
+                            self._update_fits_header_with_wcs(
+                                fits_header, wcs_object, solver_name="ASTAP"
+                            )
                     else:
-                        self._log("ASTAP: Échec création objet WCS ou WCS non céleste.", "ERROR")
+                        self._log(
+                            "ASTAP: Échec création objet WCS ou WCS non céleste.",
+                            "ERROR",
+                        )
                         wcs_object = None
                 else:
-                    self._log("ASTAP: Code retour 0 mais .wcs manquant/vide. Échec.", "ERROR")
-                    wcs_object = None
+                    if is_boring_stack_disk_mode:
+                        self._log(
+                            "[ASTAP WCS] Sidecar .wcs missing, attempting FITS header fallback (batch_size=1 path)",
+                            "DEBUG",
+                        )
+                        try:
+                            with fits.open(image_path, memmap=False) as hdul:
+                                hdr_fits = hdul[0].header.copy()
+                            for card in hdr_fits.cards:
+                                if card.keyword == "CONTINUE" and not isinstance(card.value, str):
+                                    card.value = str(card.value)
+                            sanitize_header_for_wcs(hdr_fits)
+                            wcs_object = WCS(hdr_fits, naxis=2, relax=True)
+                            assert wcs_object.is_celestial
+                            wcs_object.pixel_shape = (
+                                img_shape_hw_for_wcs[1], img_shape_hw_for_wcs[0]
+                            )
+                            try:
+                                wcs_object._naxis1 = img_shape_hw_for_wcs[1]
+                                wcs_object._naxis2 = img_shape_hw_for_wcs[0]
+                            except AttributeError:
+                                pass
+                            if update_header_with_solution and fits_header is not None:
+                                self._update_fits_header_with_wcs(
+                                    fits_header, wcs_object, solver_name="ASTAP"
+                                )
+                        except Exception as e_hdr_only:
+                            self._log(
+                                f"WCS parse failed from FITS header fallback: {e_hdr_only}",
+                                "ERROR",
+                            )
+                            wcs_object = None
+                    else:
+                        self._log(
+                            "ASTAP: Code retour 0 mais .wcs manquant/vide. Échec.",
+                            "ERROR",
+                        )
+                        wcs_object = None
             else:
                 log_msg_echec = f"ASTAP: Résolution échouée (code {result.returncode}"
                 if not os.path.exists(expected_wcs_file): log_msg_echec += ", fichier .wcs NON trouvé"
@@ -1101,59 +1248,49 @@ class AstrometrySolver:
         return solved_wcs_object
 
     def _parse_wcs_file_content(self, wcs_file_path, image_shape_hw):
-        """
-        Lit un fichier .wcs (généré par ASTAP par exemple) et crée un objet astropy.wcs.WCS.
-        Un fichier .wcs typique d'ASTAP contient des mots-clés FITS.
-        """
-        self._log(f"Parsing fichier WCS: {os.path.basename(wcs_file_path)} pour image shape {image_shape_hw}", "DEBUG")
+        """Parse a ``.wcs`` file and return a :class:`~astropy.wcs.WCS` object."""
+
         if not os.path.exists(wcs_file_path) or os.path.getsize(wcs_file_path) == 0:
             self._log(f"Fichier WCS '{wcs_file_path}' non trouvé ou vide.", "ERROR")
             return None
+
+        with open(wcs_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+
+        clean, modified, dropped = _sanitize_astap_wcs_text(txt)
+        if modified or dropped:
+            self._log(
+                f"Sanitised ASTAP WCS: modified={modified}, dropped={dropped}",
+                "DEBUG",
+            )
+
+        hdr = fits.Header.fromstring(clean, sep="\n")
+
+        for k, v in list(hdr.items()):
+            if k == "CONTINUE":
+                hdr[k] = str(v)
+        while "HISTORY" in hdr:
+            del hdr["HISTORY"]
+        while "COMMENT" in hdr:
+            del hdr["COMMENT"]
+
         try:
-            # Lire le contenu du fichier .wcs
-            # Utiliser errors='replace' pour éviter les erreurs d'encodage qui
-            # pourraient être présentes dans certains fichiers ASTAP
-            with open(wcs_file_path, 'r', errors='replace') as f:
-                wcs_text_content = f.read()
-            
-            # Créer un header FITS à partir de ce texte
-            # S'assurer que les fins de ligne sont gérées (Unix vs Windows)
-            wcs_header_from_text = fits.Header.fromstring(wcs_text_content.replace('\r\n', '\n').replace('\r', '\n'), sep='\n')
-            
-            # Créer l'objet WCS
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", FITSFixedWarning)
-                wcs_obj = WCS(wcs_header_from_text, naxis=2, relax=True)  # relax=True pour accepter les mots-clés non standards
+            wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
+        except VerifyError:
+            while "CONTINUE" in hdr:
+                del hdr["CONTINUE"]
+            wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
 
-            if wcs_obj:
-                # Vérifier la présence des mots-clés essentiels et compléter si nécessaire
-                if not wcs_header_from_text.get("CTYPE1") or not wcs_header_from_text.get("CTYPE2"):
-                    wcs_obj.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-                if not wcs_header_from_text.get("CUNIT1") or not wcs_header_from_text.get("CUNIT2"):
-                    wcs_obj.wcs.cunit = ["deg", "deg"]
-                if not (wcs_header_from_text.get("CRVAL1") and wcs_header_from_text.get("CRVAL2")):
-                    self._log("CRVAL manquant dans le fichier WCS.", "WARN")
+        if wcs_obj is not None:
+            try:
+                wcs_obj.pixel_shape = (
+                    int(image_shape_hw[1]),
+                    int(image_shape_hw[0]),
+                )
+            except Exception:
+                pass
 
-            if wcs_obj and wcs_obj.is_celestial:
-                # Important: définir la taille de l'image à laquelle ce WCS s'applique
-                # wcs_obj.pixel_shape attend (nx, ny) soit (largeur, hauteur)
-                wcs_obj.pixel_shape = (image_shape_hw[1], image_shape_hw[0])
-                # Certains solveurs peuvent mettre NAXIS1/2 dans le .wcs, d'autres non.
-                # On s'assure que _naxis est aussi mis à jour si possible
-                try:
-                    wcs_obj._naxis1 = image_shape_hw[1]
-                    wcs_obj._naxis2 = image_shape_hw[0]
-                except AttributeError:
-                    pass # Pas grave si ces attributs privés ne sont pas là
-                self._log("Objet WCS parsé avec succès depuis le fichier.", "DEBUG")
-                return wcs_obj
-            else:
-                self._log("Échec création objet WCS valide ou céleste depuis fichier.", "ERROR")
-                return None
-        except Exception as e:
-            self._log(f"Erreur lors du parsing du fichier WCS '{wcs_file_path}': {e}", "ERROR")
-            traceback.print_exc(limit=1)
-            return None
+        return wcs_obj
 
     def _update_fits_header_with_wcs(self, fits_header, wcs_object, solver_name="UnknownSolver"):
         """
@@ -1199,7 +1336,16 @@ class AstrometrySolver:
             traceback.print_exc(limit=1)
 
 
-def solve_image_wcs(image_path, fits_header, settings, update_header_with_solution=True):
+def solve_image_wcs(
+    image_path,
+    fits_header,
+    settings,
+    update_header_with_solution=True,
+    is_boring_stack_disk_mode=False,
+    *,
+    batch_size=None,
+    final_combine=None,
+):
     """Convenience wrapper for :class:`AstrometrySolver`.
 
 
@@ -1214,6 +1360,8 @@ def solve_image_wcs(image_path, fits_header, settings, update_header_with_soluti
         Dictionary of solver settings taken from :class:`SettingsManager`.
     update_header_with_solution : bool, optional
         If ``True`` the provided ``fits_header`` is updated with the solved WCS.
+    is_boring_stack_disk_mode : bool, optional
+        ``True`` only when running the disk-based pipeline with ``batch_size=1``.
 
     Returns
     -------
@@ -1222,7 +1370,15 @@ def solve_image_wcs(image_path, fits_header, settings, update_header_with_soluti
     """
     try:
         solver = AstrometrySolver()
-        return solver.solve(image_path, fits_header, settings, update_header_with_solution)
+        return solver.solve(
+            image_path,
+            fits_header,
+            settings,
+            update_header_with_solution,
+            is_boring_stack_disk_mode=is_boring_stack_disk_mode,
+            batch_size=batch_size,
+            final_combine=final_combine,
+        )
     except Exception:
         return None
 

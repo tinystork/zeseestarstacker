@@ -5,7 +5,7 @@ Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
 """
 
-__version__ = "6.0.0"  # including zenalyser and hierarchical auto satcking 
+__version__ = "6.2.0 Boring"  # including zenalyser and hierarchical auto satcking 
 __author__ = "Tinystork"
 
 # Core functionalities (unchanged from your original structure)
@@ -19,6 +19,8 @@ try:
         save_preview_image,
         estimate_batch_size,
         apply_denoise,  # Keep apply_denoise available if GUI option removed
+        collect_headers,
+        compute_final_output_grid,
     )
     _CORE_AVAILABLE = True
 except Exception as e:  # pragma: no cover - optional dependency may be missing
@@ -81,6 +83,8 @@ if _CORE_AVAILABLE:
         'save_preview_image',
         'estimate_batch_size',
         'apply_denoise',
+        'collect_headers',
+        'compute_final_output_grid',
     ]
 
 if _GUI_AVAILABLE:

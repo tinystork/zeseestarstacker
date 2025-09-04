@@ -13,6 +13,33 @@ from astropy.io import fits
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
+def _ensure_hwc(img: np.ndarray) -> np.ndarray:
+    """Convert CHW arrays to HWC if needed."""
+    if img.ndim == 3 and img.shape[0] == 3 and img.shape[-1] != 3:
+        return np.moveaxis(img, 0, -1)
+    return img
+
+
+def sanitize_header_for_wcs(header: fits.Header) -> None:
+    """Remove non-string ``CONTINUE`` cards that break ``astropy.wcs.WCS``.
+
+    Astropy requires each ``CONTINUE`` card to carry a string value.  Some
+    external programs (e.g. ASTAP) may write numeric values in ``CONTINUE``
+    cards, which triggers ``astropy.io.fits.verify.VerifyError`` when a WCS
+    object is created.  This helper scans all header cards and drops any
+    ``CONTINUE`` entries whose value is not a string.  The header is modified
+    in-place and valid ``CONTINUE`` cards are preserved.
+    """
+
+    # ``Header`` may contain multiple ``CONTINUE`` cards; iterate over them
+    # explicitly so we can remove only the invalid ones.  Deleting indices in
+    # reverse order avoids offsetting subsequent positions.
+    to_delete = [idx for idx, card in enumerate(header.cards)
+                 if card.keyword == "CONTINUE" and not isinstance(card.value, str)]
+
+    for idx in reversed(to_delete):
+        del header[idx]
+
 
 def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
     """
@@ -74,6 +101,7 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
 
             data_raw = hdu_img.data
             header = hdu_img.header.copy() # Toujours prendre une copie
+            sanitize_header_for_wcs(header)
             header_for_fallback = header.copy() # Mettre à jour le fallback avec le header trouvé
             
             print(f"  DEBUG IP (load_and_validate_fits V2.1): Données image trouvées dans HDU {img_hdu_idx} pour '{filename}'. Shape brute: {data_raw.shape if data_raw is not None else 'None'}, Dtype brut: {data_raw.dtype if data_raw is not None else 'None'}")
@@ -205,95 +233,70 @@ def debayer_image(img, bayer_pattern="GRBG"):
 
 
 def save_fits_image(image, output_path, header=None, overwrite=True):
-    """
-    Enregistre une image (normalisée 0-1 float32) au format FITS (uint16).
-    Suppresses specific FITS standard VerifyWarnings about keyword length.
+    if image is None or not isinstance(image, np.ndarray):
+        raise ValueError(f"Invalid image for FITS save: {type(image)}")
 
-    Parameters:
-        image (numpy.ndarray): Image 2D (HxW) ou 3D (HxWx3) à enregistrer (float32, 0-1).
-        output_path (str): Chemin du fichier de sortie.
-        header (astropy.io.fits.Header, optional): En-tête FITS.
-        overwrite (bool): Écrase le fichier existant si True.
-    """
-    # --- (Input validation remains the same) ---
-    if image is None:
-        print(f"Error: Cannot save None image to {output_path}")
-        return
-    if not isinstance(image, np.ndarray):
-        print(f"Error: Input for save_fits_image must be a numpy array, got {type(image)}")
-        return
+    # Prépare les données (0–1 -> uint16 -> int16 décalé)
+    is_color_last = image.ndim == 3 and image.shape[-1] in (3, 4)
+    is_color_first = (
+        image.ndim == 3
+        and image.shape[0] in (1, 3, 4)
+        and image.shape[1] > 4
+        and image.shape[2] > 4
+    )
+    image_uint16 = (
+        np.clip(image.astype(np.float32), 0.0, 1.0) * 65535.0
+    ).astype(np.uint16)
+    image_int16 = (image_uint16.astype(np.int32) - 32768).astype(np.int16)
+    if is_color_last:
+        data_to_save = np.moveaxis(image_int16, -1, 0)  # HWC -> CHW
+    elif is_color_first:
+        data_to_save = image_int16  # déjà CHW
+    else:
+        data_to_save = image_int16  # mono
 
-    # --- (Header creation/copying logic remains the same) ---
-    final_header = fits.Header()
+    # Filtrer le header fourni: retirer les cartes structurelles (Astropy s’en charge)
+    filtered = fits.Header()
     if header is not None and isinstance(header, fits.Header):
-         keywords_to_remove = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3',
-                              'EXTEND', 'BSCALE', 'BZERO']
-         temp_header = header.copy()
-         for key in keywords_to_remove:
-              if key in temp_header: del temp_header[key]
-         final_header.update(temp_header)
-    elif header is not None:
-         print("Warning: Provided header is not valid astropy.io.fits.Header. Creating new one.")
+        for k, v in header.items():
+            if k not in {"SIMPLE","BITPIX","NAXIS","NAXIS1","NAXIS2","NAXIS3","EXTEND","BSCALE","BZERO"}:
+                filtered[k] = v
 
-
-    # --- (Data preparation logic remains the same) ---
-    is_color = image.ndim == 3 and image.shape[-1] == 3
-    image_float32 = image.astype(np.float32)
-    image_clipped = np.clip(image_float32, 0.0, 1.0)
-    image_uint16 = (image_clipped * 65535.0).astype(np.uint16)
-    image_int16_shifted = (image_uint16.astype(np.int32) - 32768).astype(np.int16)
-
-    if is_color:
-        image_to_save = np.moveaxis(image_int16_shifted, -1, 0)
-        final_header['NAXIS'] = 3; final_header['NAXIS1'] = image.shape[1]
-        final_header['NAXIS2'] = image.shape[0]; final_header['NAXIS3'] = 3
-        if 'CTYPE3' not in final_header: final_header['CTYPE3'] = ('RGB', 'Color Format')
-    else: # Grayscale
-        image_to_save = image_int16_shifted
-        final_header['NAXIS'] = 2; final_header['NAXIS1'] = image.shape[1]
-        final_header['NAXIS2'] = image.shape[0]
-        if 'NAXIS3' in final_header: del final_header['NAXIS3']
-        if 'CTYPE3' in final_header: del final_header['CTYPE3']
-
-    final_header['BITPIX'] = 16; final_header['BSCALE'] = 1; final_header['BZERO'] = 32768
-
-    # --- Write the FITS file WITH warning suppression ---
-    
+    tmp = f"{output_path}.tmp"
     try:
-        hdu = fits.PrimaryHDU(data=image_to_save, header=final_header)
-        hdul = fits.HDUList([hdu])
+        # 1) Créer le HDU sans cartes structurelles manuelles
+        hdu = fits.PrimaryHDU(data=data_to_save)
+        if len(filtered) > 0:
+            hdu.header.update(filtered, update=True)
 
-        # --- Start of the fix ---
+        # 2) Écriture atomique : d’abord .tmp, puis os.replace()
         with warnings.catch_warnings():
-            # Filter settings *inside* the 'with' block
-            warnings.filterwarnings(
-                'ignore',
-                category=VerifyWarning,
-                message="Keyword name.*is greater than 8 characters.*"
-            )
-            warnings.filterwarnings(
-                'ignore',
-                category=VerifyWarning,
-                message="Keyword name.*contains characters not allowed.*"
-            )
+            warnings.filterwarnings("ignore", category=VerifyWarning)
+            hdu.writeto(tmp, overwrite=True, checksum=True)
 
-            # The actual saving function call is *inside* the 'with' block
-            hdul.writeto(output_path, overwrite=overwrite, checksum=True)
-            if final_header.get('BITPIX') == 16:
-                with fits.open(output_path, mode="update", memmap=False) as hdul_fix:
-                    hd0 = hdul_fix[0]
-                    hd0.header["BSCALE"] = 1
-                    hd0.header["BZERO"] = 32768
-                    hdul_fix.flush()
-        
-    except Exception as e:
-        print(f"Error saving FITS file to {output_path}: {e}")
-        # Optional: Add traceback print here if needed for debugging save errors
-        # import traceback
-        # traceback.print_exc(limit=2)
-        # raise # Re-raise if you want saving errors to stop the process
+        # 3) Sanity check minimal FITS
+        if os.path.getsize(tmp) < 2880:
+            raise IOError("FITS too small (<2880 bytes)")
 
+        with fits.open(tmp, mode="update", memmap=False) as hdul:
+            if "SIMPLE" not in hdul[0].header:
+                raise IOError("SIMPLE missing after write")
+            # Conserver la convention unsigned via BZERO/BSCALE pour int16
+            if hdul[0].data is not None and hdul[0].data.dtype.kind == "i" and hdul[0].data.dtype.itemsize == 2:
+                hdul[0].header["BSCALE"] = 1
+                hdul[0].header["BZERO"] = 32768
+                hdul.flush()
 
+        os.replace(tmp, output_path)  # pas de fichier partiellement écrit
+        return True
+
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        finally:
+            # Laisser l’appelant logger "FITS export failure ..." et SKIP proprement.
+            raise
 
 
 # --- DANS seestar/core/image_processing.py ---
@@ -313,12 +316,12 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
     print(f"  image_data_01 (entrée) - Shape: {image_data_01.shape}, Dtype: {image_data_01.dtype}, Range: [{np.nanmin(image_data_01):.4g} - {np.nanmax(image_data_01):.4g}]")
 
     try:
-        display_data = image_data_01.astype(np.float32).copy() # Assurer float32 et copie
+        display_data = _ensure_hwc(image_data_01).astype(np.float32, copy=False)
 
-        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 : 
+        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 :
              print(f"  Warning save_preview_image: Image is flat. Saving as black for {output_path}")
              display_data = np.zeros_like(display_data)
-        
+
         stretched_data = display_data # Par défaut, si pas de stretch
 
         if apply_stretch:
@@ -351,6 +354,14 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
         else:
             print(f"  DEBUG save_preview_image: apply_stretch=False. Using data as is (expected 0-1) for {output_path}")
             # stretched_data est déjà display_data
+
+        # Simple percentile stretch to avoid overly dark PNGs
+        finite = np.isfinite(stretched_data)
+        if finite.any():
+            lo = np.nanpercentile(stretched_data[finite], 0.5)
+            hi = np.nanpercentile(stretched_data[finite], 99.5)
+            if hi > lo:
+                stretched_data = np.clip((stretched_data - lo) / (hi - lo), 0, 1)
 
         final_image_data_clipped = np.clip(stretched_data, 0.0, 1.0)
         print(f"  final_image_data_clipped (avant *255) - Range: [{np.nanmin(final_image_data_clipped):.4g} - {np.nanmax(final_image_data_clipped):.4g}]")

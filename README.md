@@ -20,6 +20,7 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
 *   **Winsorized Sigma Clip:** Rejected pixels are automatically replaced with the winsorized limits.
 *   **Quality Weighting (Optional but Recommended):** Analyzes each aligned frame based on Signal-to-Noise Ratio (SNR) and Star Count/Sharpness, assigns weights, and allows tuning via exponents and minimum weight.
 *   **Asynchronous Processing:** Performs alignment and stacking in a background thread, keeping the GUI responsive.
+*   **Thread-Safe Event Queue:** Worker threads post GUI updates to an internal queue polled on the Tk thread.
 *   **Batch Processing:** Processes images in memory-efficient batches.
 *   **Graphical User Interface (Tkinter):**
     *   Intuitive tabbed interface.
@@ -35,6 +36,12 @@ Seestar Stacker est une application graphique conçue pour aligner et empiler de
     *   SNR-based weighting
     *   Star count/sharpness analysis
 *   **Memory Optimization:** Batch processing with auto RAM management
+*   **Batch Size 0 Mode:** If a `stack_plan.csv` file is present in the input
+    folder, its `batch_id` column controls grouping when **Batch Size** is set
+    to `0`. Otherwise the backend automatically estimates a suitable size.
+*   **Threaded Boring Stack Mode:** Set **Batch Size** to `1` (or enable the
+    *Threaded Boring Stack* checkbox) to run `boring_stack.py` in a dedicated
+    worker thread for minimal memory usage.
 
 The Expert tab's **Output FITS Format** panel features a checkbox labeled
 **Preserve Linear Output**. Enabling it saves the stacked FITS directly from the
@@ -377,6 +384,48 @@ turned on automatically in this mode (unless you disable it explicitly) so the
 initial WCS is reused for every batch. Subsequent batches are reprojected using
 a new fixed-orientation grid so the image orientation stays constant and small
 rotation drifts are eliminated.
+
+### Alignment Options
+
+The aligner normally keeps intermediate arrays in memory. For very large
+images you can reduce memory usage by performing alignment on disk-backed
+``.npy`` files. Pass ``align_on_disk=True`` when using ``SeestarQueuedStacker``
+from Python or add ``--align-on-disk`` to ``boring_stack.py``. When more than
+50 images are queued and this flag is omitted, ``boring_stack.py`` now
+automatically enables disk-backed alignment to avoid running out of memory.
+
+### Command-Line Stacking
+
+Use `seestar/gui/boring_stack.py` for headless single-batch processing. Set
+`--chunk-size` to periodically flush intermediate stacks. When the GUI launches
+`boring_stack.py` with **Batch Size** set to `1`, this option is automatically
+added based on available system RAM:
+
+```bash
+python seestar/gui/boring_stack.py --csv stack_plan.csv --out OUT_DIR \
+    --batch-size 1 --chunk-size 50
+```
+
+
+When `--chunk-size` is used with `--batch-size 1`, results are combined in
+chunks of N images. Any `stack_plan.csv` present is honoured so files are
+grouped by `batch_id` before chunking.
+
+When using `--batch-size 1` together with `--align-on-disk`, aligned frames are
+written to an `aligned_tmp` directory and reused when the final stack is
+assembled. These temporary files are cleaned up automatically once processing
+finishes.
+
+### Threaded Boring Stack from the GUI
+
+Set **Batch Size** to `1` or tick the *Threaded Boring Stack* checkbox in the
+Stacking tab. The GUI launches `boring_stack.py` in a background thread using
+your `stack_plan.csv` and displays progress as it runs. A chunk size is
+automatically calculated and passed to the script so memory usage stays
+bounded. When calling `boring_stack.py` directly, specifying `--chunk-size`
+
+honours any grouping defined in `stack_plan.csv`.
+
 
 
 ---

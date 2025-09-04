@@ -5,12 +5,13 @@ Version: V_ProgressManager_ColorLog_1
 """
 
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk
 from time import monotonic as _mono
 
 _PM_LAST_UI = 0.0
-_PM_MIN_DT = 0.20   # secondes mini entre deux MAJ GUI
+_PM_MIN_DT = 0.05   # secondes mini entre deux MAJ GUI (évite flood event loop)
 
 
 class ProgressManager:
@@ -75,11 +76,16 @@ class ProgressManager:
         MODIFIED: Application des tags de couleur.
         Version: V_ProgressManager_ColorLog_ApplyTags
         """
+        now = _mono()
+
+        if now - _PM_LAST_UI < _PM_MIN_DT:
+            return
+
+        if threading.current_thread() is threading.main_thread():
+            print("Warning: ProgressManager.update_progress called from main thread")
+
         def _update_ui():
             global _PM_LAST_UI
-            now = _mono()
-            if now - _PM_LAST_UI < _PM_MIN_DT:
-                return
             _PM_LAST_UI = now
             try:
                 # Check if widgets still exist before configuring them
@@ -98,9 +104,7 @@ class ProgressManager:
                 if message:
                     original_state = self.status_text['state']
                     tag_to_apply = None # Tag par défaut (pas de couleur spéciale)
-                    # --- DEBUG LOG POUR LE NIVEAU REÇU ---
-                    print(f"DEBUG ProgressManager._update_ui: Message='{str(message)[:50]}...', Progress={progress}, Level REÇU='{level}'")
-                    # --- FIN DEBUG LOG ---
+                    # Avertissement de niveau désactivé pour éviter les sorties de debug
                     # --- Choix du tag en fonction du niveau ---
                     if level == "ERROR":
                         tag_to_apply = "error_log"
