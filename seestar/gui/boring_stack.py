@@ -1084,6 +1084,29 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
 
+            # Use the WCS of the stacking reference so the final grid matches
+            # the reference orientation (mirrors batch_size=0 behaviour).
+            ref_wcs = getattr(stacker, "reference_wcs_object", None)
+            ref_shape = getattr(stacker, "reference_shape", None)
+            if (ref_wcs is None or ref_shape is None) and getattr(
+                stacker, "output_folder", None
+            ):
+                ref_fp = os.path.join(
+                    stacker.output_folder, "temp_processing", "reference_image.fit"
+                )
+                if os.path.isfile(ref_fp):
+                    try:
+                        hdr = fits.getheader(
+                            ref_fp, memmap=False, ignore_missing_simple=True
+                        )
+                        hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+                        ref_wcs = WCS(hdr, naxis=2)
+                        h = int(hdr.get("NAXIS2", 0))
+                        w = int(hdr.get("NAXIS1", 0))
+                        if h > 0 and w > 0:
+                            ref_shape = (h, w)
+                    except Exception:
+                        pass
 
             t0 = time.monotonic()
             success = _finalize_reproject_and_coadd(
@@ -1092,6 +1115,8 @@ def _run_stack(args, progress_cb) -> int:
                 out_fp,
                 prefer_streaming_fallback=True,
                 tile_size=getattr(args, "tile", None),
+                output_wcs=ref_wcs,
+                shape_out=ref_shape,
             )
             duration = time.monotonic() - t0
             logger.info("Final reprojection+coadd done in %.2f s", duration)
