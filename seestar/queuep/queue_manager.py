@@ -2041,6 +2041,42 @@ class SeestarQueuedStacker:
             eta_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             self.update_progress(f"ETA_UPDATE:{eta_str}", None)
 
+    def _solve_astrometry_async(
+        self,
+        image_path,
+        fits_header,
+        settings,
+        update_header_with_solution=True,
+        progress_message="",
+        poll_interval=0.5,
+    ):
+        """Run astrometry solver in a background thread and poll progress.
+
+        This prevents the GUI thread from freezing when external solvers such
+        as ASTAP take a long time to return. A temporary thread is spawned to
+        execute ``self.astrometry_solver.solve`` while this method periodically
+        checks for completion and relays a progress message to the GUI.
+        """
+
+        if not self.astrometry_solver:
+            return None
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                self.astrometry_solver.solve,
+                image_path,
+                fits_header,
+                settings,
+                update_header_with_solution,
+            )
+            while True:
+                try:
+                    return future.result(timeout=poll_interval)
+                except concurrent.futures.TimeoutError:
+                    if progress_message:
+                        self.update_progress(progress_message)
+                    continue
+
     def _increment_aligned_counter(self):
         """Thread-safe increment of the aligned files counter."""
         with self.counter_lock:
@@ -3680,11 +3716,12 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "   -> Mosaïque Locale: Tentative résolution astrométrique ancre via self.astrometry_solver.solve..."
                     )
-                    temp_wcs_ancre = self.astrometry_solver.solve(
+                    temp_wcs_ancre = self._solve_astrometry_async(
                         reference_image_path_for_solver,
                         mosaic_ref_panel_header,
-                        settings=solver_settings_for_ref_anchor,
+                        solver_settings_for_ref_anchor,
                         update_header_with_solution=True,
+                        progress_message="   -> Mosaïque Locale: Résolution astrométrique en cours...",
                     )
                     if temp_wcs_ancre:
                         self.update_progress(
@@ -3811,11 +3848,12 @@ class SeestarQueuedStacker:
                         self.update_progress(
                             "   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve..."
                         )
-                        self.reference_wcs_object = self.astrometry_solver.solve(
+                        self.reference_wcs_object = self._solve_astrometry_async(
                             reference_image_path_for_solver,
                             self.reference_header_for_wcs,
-                            settings=solver_settings_for_ref_anchor,  # Utilise le même dict de settings que pour l'ancre
+                            solver_settings_for_ref_anchor,
                             update_header_with_solution=True,
+                            progress_message="   -> Drizzle Std/AstroMosaic: Résolution astrométrique en cours...",
                         )
                 else:
                     self.update_progress(
@@ -13169,11 +13207,12 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     "   [StartProcRefSolve] Tentative résolution astrométrique pour référence globale..."
                 )
-                self.reference_wcs_object = self.astrometry_solver.solve(
-                    image_path=reference_image_path_for_solving,
-                    fits_header=self.reference_header_for_wcs,
-                    settings=solver_settings_for_ref,
+                self.reference_wcs_object = self._solve_astrometry_async(
+                    reference_image_path_for_solving,
+                    self.reference_header_for_wcs,
+                    solver_settings_for_ref,
                     update_header_with_solution=True,
+                    progress_message="   [StartProcRefSolve] Résolution astrométrique en cours...",
                 )
 
                 if self.reference_wcs_object and self.reference_wcs_object.is_celestial:
