@@ -1092,7 +1092,16 @@ def _run_stack(args, progress_cb) -> int:
             # the reference orientation (mirrors batch_size=0 behaviour).
             ref_wcs = getattr(stacker, "reference_wcs_object", None)
             ref_shape = getattr(stacker, "reference_shape", None)
-            if (ref_wcs is None or ref_shape is None) and getattr(
+
+            # In ``batch_size=1`` mode we want the final reprojection grid to
+            # mirror the live-stacking behaviour (``batch_size=0``) which uses
+            # the reference frame's original dimensions.  The queue manager may
+            # carry a global mosaic shape (e.g. 3840x2160) but here we ignore it
+            # and derive the target grid from the first aligned file instead.
+            if args.batch_size == 1:
+                ref_wcs = None
+                ref_shape = None
+            elif (ref_wcs is None or ref_shape is None) and getattr(
                 stacker, "output_folder", None
             ):
                 ref_fp = os.path.join(
