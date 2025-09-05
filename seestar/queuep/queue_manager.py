@@ -2831,9 +2831,15 @@ class SeestarQueuedStacker:
         output_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
         output_wcs.wcs.crval = [center_ra, center_dec]
         # Center the mosaic so that the lower-left corner of the bounding box
-        # maps to pixel (1, 1). This avoids negative pixel coordinates once
-        # images are reprojected onto the final canvas.
-        output_wcs.wcs.crpix = [-minx + 1.0, -miny + 1.0]
+        # maps to pixel (1, 1). The PCA-derived ``minx``/``miny`` values are in
+        # degrees, so convert them into pixel units using the final pixel scale
+        # before assigning them to ``CRPIX``. This ensures that a single-frame
+        # reprojection aligns correctly on the output canvas instead of being
+        # offset to a corner.
+        output_wcs.wcs.crpix = [
+            (-minx / final_pixel_scale_deg) + 1.0,
+            (-miny / final_pixel_scale_deg) + 1.0,
+        ]
         cos_t = np.cos(np.deg2rad(theta))
         sin_t = np.sin(np.deg2rad(theta))
         output_wcs.wcs.cd = final_pixel_scale_deg * np.array(
@@ -3103,20 +3109,29 @@ class SeestarQueuedStacker:
             return False
 
         if self.reference_wcs_object is None or not self.freeze_reference_wcs:
-            if (
+            # For ``batch_size == 1`` we mimic the behaviour of live stacking
+            # (``batch_size == 0``) by adopting the first frame's WCS and
+            # dimensions as the global grid. This avoids expanding the canvas
+            # to the union of all dithered frames which previously produced a
+            # grid twice as large (e.g. 3840x2160 for 1920x1080 inputs).
+            if getattr(self, "batch_size", 0) == 1:
+                wcs_list = wcs_list[:1]
+                header_list = header_list[:1]
+                ref_wcs = wcs_list[0]
+                ref_shape = ref_wcs.pixel_shape
+            elif (
                 len(wcs_list) == 1
                 and self.reproject_between_batches
                 and not self.is_mosaic_run
             ):
                 # When doing classic stacking with reprojection of a single
                 # file, use the dynamic bounding-box logic to avoid cropping.
-                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid_dynamic(
                     wcs_list,
                     header_list,
                     scale_factor=(
                         self.drizzle_scale if self.drizzle_active_session else 1.0
                     ),
-                    auto_rotate=True,
                 )
             elif len(wcs_list) == 1:
                 ref_wcs = wcs_list[0]
