@@ -899,6 +899,107 @@ def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
     assert calls["optimal"] == 0
 
 
+def _prepare_qm_env(monkeypatch, tmp_path, batch_size):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = False
+    obj.drizzle_active_session = False
+    obj.batch_size = batch_size
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+
+    data = np.zeros((3, 3, 3), dtype=np.float32)
+    hdr = make_wcs(shape=(3, 3)).to_header()
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr, overwrite=True)
+    fits.writeto(sci2, data, hdr, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+
+    return obj, [
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ]
+
+
+def test_reproject_classic_batches_disables_match_bg_for_bs1(monkeypatch, tmp_path):
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=1)
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {}
+
+    def fake_reproject_and_coadd(*a, **k):
+        captured["match_background"] = k.get("match_background")
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches(batch_files)
+
+    assert captured.get("match_background") is False
+
+
+def test_reproject_classic_batches_keeps_match_bg_for_bs2(monkeypatch, tmp_path):
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=2)
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {}
+
+    def fake_reproject_and_coadd(*a, **k):
+        captured["match_background"] = k.get("match_background")
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches(batch_files)
+
+    assert captured.get("match_background") is True
+
+
 def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
     sys.path.insert(0, str(ROOT))
     import importlib
