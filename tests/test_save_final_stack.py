@@ -407,3 +407,24 @@ def test_save_final_stack_radec_from_reference_header(tmp_path):
     assert np.isclose(hdr["RA"], 12.34)
     assert np.isclose(hdr["DEC"], 56.78)
 
+
+def test_save_final_stack_batch1_negative_int16(tmp_path):
+    obj = _make_obj(tmp_path, False)
+    obj.batch_size = 1
+    obj.reproject_between_batches = True
+    obj.preserve_linear_output = True
+
+    data = np.array([[-2.0, -1.0], [-1.5, 0.0]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_classic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=True,
+    )
+
+    saved = fits.getdata(obj.final_stacked_path)
+    assert np.max(saved) > 0
+
