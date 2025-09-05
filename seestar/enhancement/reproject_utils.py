@@ -459,6 +459,10 @@ def reproject_and_coadd_from_paths(
 
     if match_background is not None:
         subtract_sky_median = match_background
+        # Propagate the user's preference to the underlying coadd call so that
+        # ``reproject_and_coadd`` respects explicit enable/disable requests
+        # (especially important for ``batch_size=1`` workflows).
+        kwargs["match_background"] = bool(match_background)
 
     if shape_out is not None:
         mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
