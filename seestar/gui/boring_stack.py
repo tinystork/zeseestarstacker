@@ -441,6 +441,7 @@ def _finalize_reproject_and_coadd(
             shape_out=shape_out,
             prefer_streaming_fallback=prefer_streaming_fallback,
             tile_size=tile_size,
+            match_background=False,
         )
         hdr_out = ref_wcs.to_header(relax=True)
     else:
@@ -464,6 +465,7 @@ def _finalize_reproject_and_coadd(
                 shape_out=shape_out,
                 prefer_streaming_fallback=prefer_streaming_fallback,
                 tile_size=tile_size,
+                match_background=False,
             )
             hdr_out = ref_wcs.to_header(relax=True)
         except Exception as e:
@@ -474,6 +476,7 @@ def _finalize_reproject_and_coadd(
                 paths,
                 prefer_streaming_fallback=prefer_streaming_fallback,
                 tile_size=tile_size,
+                match_background=False,
             )
             hdr_out = result.wcs.to_header(relax=True)
 
@@ -489,6 +492,7 @@ def _finalize_reproject_and_coadd(
             paths,
             prefer_streaming_fallback=prefer_streaming_fallback,
             tile_size=tile_size,
+            match_background=False,
         )
         hdr_out = result.wcs.to_header(relax=True)
 
