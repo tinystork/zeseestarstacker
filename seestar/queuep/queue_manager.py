@@ -11695,13 +11695,25 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
 
-        final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
-        self.update_progress(
-            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-        )
-        logger.debug(
-            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-        )
+        if getattr(self, "batch_size", 0) == 1:
+            # Preserve negative values in disk-based single-batch mode so the
+            # final scaling step can shift the dynamic range instead of
+            # collapsing everything to zero.
+            final_image_initial_raw = final_image_initial_raw.astype(np.float32)
+            self.update_progress(
+                f"    DEBUG QM: Conservation des valeurs négatives (batch_size=1) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            )
+            logger.debug(
+                f"    DEBUG QM: Conservation des valeurs négatives (batch_size=1) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            )
+        else:
+            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
+            self.update_progress(
+                f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            )
+            logger.debug(
+                f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            )
 
         # Appliquer le seuil WHT (si activé) aux données "ADU-like"
         if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
@@ -11997,6 +12009,16 @@ class SeestarQueuedStacker:
             )
             raw_data = self.raw_adu_data_for_ui_histogram
             max_val = np.nanmax(raw_data)
+            if getattr(self, "batch_size", 0) == 1 and max_val <= 0:
+                # In batch_size=1 mode the accumulated data can be
+                # entirely negative after background subtraction. Shift
+                # to a positive range so the stack mirrors batch_size=0
+                # behaviour instead of collapsing to black when saved as
+                # uint16.
+                min_val = np.nanmin(raw_data)
+                raw_data = raw_data - min_val
+                self.raw_adu_data_for_ui_histogram = raw_data
+                max_val = np.nanmax(raw_data)
             if not np.isfinite(max_val) or max_val <= 0:
                 data_scaled_uint16 = np.zeros_like(raw_data, dtype=np.uint16)
             elif max_val <= 65535.0 + 1e-5:
