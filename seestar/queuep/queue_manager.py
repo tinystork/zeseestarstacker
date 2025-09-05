@@ -41,7 +41,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import get_context
 from functools import partial
 from pathlib import Path
-from queue import Empty, Queue  # Essentiel pour la classe
+from queue import Empty, Full, Queue  # Essentiel pour la classe
 
 
 class GuiEventQueue(Queue):
@@ -1991,7 +1991,20 @@ class SeestarQueuedStacker:
                         cb(message, progress)
 
                 if hasattr(self, "gui_event_queue") and self.gui_event_queue is not None:
-                    self.gui_event_queue.put(_call_cb)
+                    try:
+                        # Avoid potential blocking if a bounded queue is used
+                        # by the GUI layer or if the GUI momentarily stops
+                        # draining events. When full, drop the message; the UI
+                        # gets refreshed frequently anyway.
+                        if hasattr(self.gui_event_queue, "qsize"):
+                            try:
+                                if self.gui_event_queue.qsize() > 500:
+                                    return
+                            except Exception:
+                                pass
+                        self.gui_event_queue.put_nowait(_call_cb)
+                    except Full:
+                        return
                 else:
                     _call_cb()
                 return
@@ -3208,21 +3221,27 @@ class SeestarQueuedStacker:
             return {"snr": 0.0, "stars": 0.0}
 
         try:
-            use_executor = image_data.nbytes <= 32 * 1024 * 1024
+            # Prefer in-process computation on Windows or when only one worker
+            # is available. Spawning a process to pickle large NumPy arrays can
+            # stall the UI and significantly slow down the pipeline.
+            executor = (
+                self._get_quality_executor()
+                if hasattr(self, "_get_quality_executor")
+                else getattr(self, "quality_executor", None)
+            )
+            maxw = getattr(executor, "_max_workers", 1) if executor else 1
+            small_enough = image_data.nbytes <= 32 * 1024 * 1024
+            use_executor = small_enough and (maxw > 1) and (os.name != "nt")
 
-            if use_executor:
-                executor = (
-                    self._get_quality_executor()
-                    if hasattr(self, "_get_quality_executor")
-                    else self.quality_executor
-                )
+            if use_executor and executor is not None:
                 future = executor.submit(_quality_metrics_worker, image_data)
-                scores, star_msg, num_stars = future.result()
-                if getattr(executor, "_max_workers", 1) == 1:
-                    for _ in range(10):
-                        _quality_metrics_worker(image_data)
+                # Conservative timeout to avoid hangs; fallback to local on timeout
+                try:
+                    scores, star_msg, num_stars = future.result(timeout=30)
+                except Exception:
+                    scores, star_msg, num_stars = _quality_metrics_worker(image_data)
             else:
-                # Fallback to in-process computation for large arrays
+                # Fallback to in-process computation for large arrays or Windows
                 scores, star_msg, num_stars = _quality_metrics_worker(image_data)
 
         except Exception as e:
@@ -3606,6 +3625,8 @@ class SeestarQueuedStacker:
                 "astrometry_net_timeout_sec": getattr(
                     self, "astrometry_net_timeout_sec", 300
                 ),
+                # Hints can dramatically speed ASTAP when RA/DEC are present
+                "use_radec_hints": True,
             }
             # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
             logger.debug(
@@ -3764,15 +3785,25 @@ class SeestarQueuedStacker:
                 elif self.astrometry_solver and os.path.exists(
                     reference_image_path_for_solver
                 ):
-                    self.update_progress(
-                        "   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve..."
-                    )
-                    self.reference_wcs_object = self.astrometry_solver.solve(
-                        reference_image_path_for_solver,
-                        self.reference_header_for_wcs,
-                        settings=solver_settings_for_ref_anchor,  # Utilise le même dict de settings que pour l'ancre
-                        update_header_with_solution=True,
-                    )
+                    # Éviter un double plate-solving si un WCS de référence est déjà présent
+                    if (
+                        getattr(self, "reference_wcs_object", None) is not None
+                        and getattr(self.reference_wcs_object, "is_celestial", False)
+                    ):
+                        self.update_progress(
+                            "   -> Drizzle Std/AstroMosaic: WCS de référence déjà présent. Solving ignoré.",
+                            "INFO_DETAIL",
+                        )
+                    else:
+                        self.update_progress(
+                            "   -> Drizzle Std/AstroMosaic: Tentative résolution astrométrique réf. globale via self.astrometry_solver.solve..."
+                        )
+                        self.reference_wcs_object = self.astrometry_solver.solve(
+                            reference_image_path_for_solver,
+                            self.reference_header_for_wcs,
+                            settings=solver_settings_for_ref_anchor,  # Utilise le même dict de settings que pour l'ancre
+                            update_header_with_solution=True,
+                        )
                 else:
                     self.update_progress(
                         "   -> Drizzle Std/AstroMosaic: AstrometrySolver non dispo ou fichier réf. manquant. Solving réf. globale impossible.",
@@ -6689,13 +6720,12 @@ class SeestarQueuedStacker:
 
             # --- Background equalization for batch_size == 1 -------------------
             if self.batch_size == 1 and valid_pixel_mask_2d is not None:
+                # Align behaviour with batch_size=0: remove only a robust sky
+                # offset; avoid multiplicative scaling and hard clipping which
+                # can amplify noise and saturate highlights.
                 try:
                     from astropy.stats import sigma_clip
 
-                    # Use a single luminance-based offset and scale so colour
-                    # balance matches the batch_size=0 and >1 paths.  Per channel
-                    # adjustments introduced psychedelic tints when the sky mask
-                    # was sparse.
                     if data_final_pour_retour.ndim == 2:
                         luminance = data_final_pour_retour
                     else:
@@ -6704,57 +6734,31 @@ class SeestarQueuedStacker:
                             + 0.587 * data_final_pour_retour[..., 1]
                             + 0.114 * data_final_pour_retour[..., 2]
                         )
+                    # Darker half of valid pixels as sky proxy
                     sky_mask = valid_pixel_mask_2d & (
-                        luminance < np.median(luminance[valid_pixel_mask_2d])
+                        luminance <= np.median(luminance[valid_pixel_mask_2d])
                     )
                     sky_pixels = int(np.sum(sky_mask))
                     offset = 0.0
-                    scale = 1.0
-                    if sky_pixels > 0:
+                    if sky_pixels > 50:
                         lum_clip = sigma_clip(
                             luminance[sky_mask], sigma=3.0, maxiters=5
                         )
-                        offset = float(np.median(lum_clip))
-                        data_final_pour_retour -= offset
-                        np.clip(
-                            data_final_pour_retour,
-                            0.0,
-                            1.0,
-                            out=data_final_pour_retour,
-                        )
-                        if (
-                            reference_image_data_for_alignment is not None
-                            and reference_image_data_for_alignment.shape[-1] >= 3
-                        ):
-                            ref_lum = (
-                                0.299 * reference_image_data_for_alignment[..., 0]
-                                + 0.587 * reference_image_data_for_alignment[..., 1]
-                                + 0.114 * reference_image_data_for_alignment[..., 2]
-                            )
-                            ref_clip = sigma_clip(
-                                ref_lum[sky_mask], sigma=3.0, maxiters=5
-                            )
-                            img_clip = sigma_clip(
-                                luminance[sky_mask], sigma=3.0, maxiters=5
-                            )
-                            m_ref = float(np.median(ref_clip))
-                            m_img = float(np.median(img_clip))
-                            scale = m_ref / m_img if m_img > 1e-6 else 1.0
-                            data_final_pour_retour *= scale
-                            np.clip(
-                                data_final_pour_retour,
-                                0.0,
-                                1.0,
-                                out=data_final_pour_retour,
-                            )
+                        med = np.nanmedian(lum_clip.filled(np.nan))
+                        offset = 0.0 if not np.isfinite(med) else float(med)
+                        if abs(offset) > 1e-7:
+                            data_final_pour_retour = (
+                                data_final_pour_retour - offset
+                            ).astype(np.float32, copy=False)
                     logger.debug(
-                        "Sky mask pixels: %d, sky_offset=%.6f, scale=%.6f",
+                        "[BS=1 EQ] sky_pixels=%d, sky_offset=%.6f (no scale)",
                         sky_pixels,
                         offset,
-                        scale,
                     )
                 except Exception as e_eq:
-                    logger.debug(f"Sky background equalization skipped: {e_eq}")
+                    logger.debug(
+                        f"Sky background equalization (offset only) skipped: {e_eq}"
+                    )
 
             logger.debug(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
             if self.use_quality_weighting:
@@ -8737,8 +8741,24 @@ class SeestarQueuedStacker:
             if ext in [".fit", ".fits", ".fts", ".tif", ".tiff"]:
                 with _fits_open_safe(first_path, memmap=use_memmap) as hdul:
                     data0 = hdul[0].data
-                    H, W = data0.shape[:2]
-                    C = data0.shape[2] if data0.ndim == 3 else 1
+                    if data0.ndim == 3:
+                        if (
+                            data0.shape[0] in (1, 3, 4)
+                            and data0.shape[1] > 4
+                            and data0.shape[2] > 4
+                        ):
+                            # CHW -> treat as colour with channels-first
+                            C = int(data0.shape[0])
+                            H = int(data0.shape[1])
+                            W = int(data0.shape[2])
+                        else:
+                            # Assume HWC
+                            H = int(data0.shape[0])
+                            W = int(data0.shape[1])
+                            C = int(data0.shape[2])
+                    else:
+                        H, W = data0.shape[:2]
+                        C = 1
             else:
                 img0 = cv2.imread(first_path, cv2.IMREAD_UNCHANGED)
                 if img0 is None:
@@ -8825,6 +8845,15 @@ class SeestarQueuedStacker:
                         if ext in [".fit", ".fits", ".fts", ".tif", ".tiff"]:
                             with _fits_open_safe(fp, memmap=use_memmap) as hd:
                                 img = hd[0].data
+                                if img is None:
+                                    raise RuntimeError(f"Empty FITS data in {fp}")
+                                if img.ndim == 3 and (
+                                    img.shape[0] in (1, 3, 4)
+                                    and img.shape[1] > 4
+                                    and img.shape[2] > 4
+                                ):
+                                    # CHW -> HWC for processing
+                                    img = np.moveaxis(img, 0, -1)
                                 sl = np.array(img[y0:y1], dtype=np.float32)
                         else:
                             img = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
@@ -9033,8 +9062,42 @@ class SeestarQueuedStacker:
             if isinstance(img_np, (str, os.PathLike)):
                 img_path = Path(img_np)
                 if img_path.exists():
+                    ext = img_path.suffix.lower()
                     try:
-                        img_np = np.load(str(img_path), mmap_mode="r")
+                        if ext in {".npy"}:
+                            img_np = np.load(str(img_path), mmap_mode="r")
+                        elif ext in {".fit", ".fits", ".fts", ".tif", ".tiff"}:
+                            with _fits_open_safe(str(img_path), memmap=False) as hdul:
+                                data_read = hdul[0].data
+                            if data_read is None:
+                                raise ValueError("FITS data empty")
+                            if (
+                                data_read.ndim == 3
+                                and data_read.shape[0] in (1, 3, 4)
+                                and data_read.shape[1] > 4
+                                and data_read.shape[2] > 4
+                            ):
+                                # CHW -> HWC
+                                data_read = np.moveaxis(data_read, 0, -1)
+                            # Match reference (H,W[,C]) orientation
+                            ref_shape = getattr(self, "reference_shape", None)
+                            if ref_shape is not None:
+                                h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                                if data_read.ndim >= 2 and data_read.shape[:2] == (
+                                    w_ref,
+                                    h_ref,
+                                ):
+                                    data_read = np.swapaxes(data_read, 0, 1)
+                            img_np = data_read.astype(np.float32, copy=False)
+                        else:
+                            tmp = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+                            if tmp is None:
+                                raise ValueError("Unsupported image path")
+                            if tmp.ndim == 3:
+                                tmp = cv2.cvtColor(tmp, cv2.COLOR_BGR2RGB)
+                            img_np = tmp.astype(np.float32, copy=False) / (
+                                255.0 if tmp.dtype.kind in {"u", "i"} and tmp.dtype.itemsize == 1 else 1.0
+                            )
                     except Exception as e:  # pragma: no cover - log de robustness
                         self.update_progress(
                             f"   -> Item {idx+1} du lot {current_batch_num} ignoré (chargement image impossible: {e})."
@@ -11479,41 +11542,44 @@ class SeestarQueuedStacker:
                     )
 
                 if getattr(self, "batch_size", 0) == 1:
-                    if self.aligned_temp_paths:
-                        stacked_path = stack_disk_streaming(
-                            self.aligned_temp_paths,
-                            mode=self.stacking_mode,
-                        )
-                        with _fits_open_safe(stacked_path, memmap=True) as hdul:
-                            final_np = hdul[0].data.astype(np.float32)
-                            final_hdr = hdul[0].header
-                        if (
-                            final_np.ndim == 3
-                            and final_np.shape[0] in (1, 3, 4)
-                            and final_np.shape[1] > 4
-                            and final_np.shape[2] > 4
-                        ):
-                            final_np = np.moveaxis(final_np, 0, -1)
-                        ref_shape = getattr(self, "reference_shape", None)
-                        if (
-                            ref_shape
-                            and tuple(ref_shape[:2]) != final_np.shape[:2]
-                            and final_np.shape[:2] == tuple(ref_shape[:2][::-1])
-                        ):
-                            final_np = final_np.transpose(1, 0, 2)
-                            logger.debug(
-                                "DEBUG QM [_save_final_stack]: transposed final_np to match reference_shape"
+                    # In batch_size == 1 mode we already accumulated each
+                    # aligned frame into the global SUM/W memmaps during the
+                    # main processing loop (one image per batch). Re-stacking
+                    # all temporary aligned files again here would double-count
+                    # data and ignore the per-image validity masks, producing a
+                    # noisy, clipped result with dark borders. Use the
+                    # accumulated memmaps directly and just clean up the temp
+                    # files.
+                    try:
+                        has_accumulated = (
+                            getattr(self, "images_in_cumulative_stack", 0) > 0
+                            or (
+                                self.cumulative_wht_memmap is not None
+                                and np.any(np.asarray(self.cumulative_wht_memmap) > 0)
                             )
-                        final_wht = np.ones(final_np.shape[:2], dtype=np.float32)
-                        self._combine_batch_result(final_np, final_hdr, final_wht)
-                        if hasattr(self.cumulative_sum_memmap, "flush"):
-                            self.cumulative_sum_memmap.flush()
-                            self.cumulative_wht_memmap.flush()
-                        use_stream = False
-                        os.remove(stacked_path)
-                        for p in self.aligned_temp_paths:
+                        )
+                    except Exception:
+                        has_accumulated = True  # be conservative
+
+                    if self.aligned_temp_paths and has_accumulated:
+                        self.update_progress(
+                            "Skipping extra disk restack (batch_size=1); using accumulated SUM/W.",
+                            "INFO_DETAIL",
+                        )
+                        # Best‑effort cleanup of temporary aligned files
+                        for p in list(self.aligned_temp_paths):
                             try:
-                                os.remove(p)
+                                if os.path.isfile(p):
+                                    os.remove(p)
+                                hdr_p = os.path.splitext(p)[0] + ".hdr"
+                                if os.path.isfile(hdr_p):
+                                    os.remove(hdr_p)
+                                mask_p = os.path.join(
+                                    os.path.dirname(p),
+                                    os.path.basename(p).replace("aligned_", "mask_").rsplit(".", 1)[0] + ".npy",
+                                )
+                                if os.path.isfile(mask_p):
+                                    os.remove(mask_p)
                             except Exception:
                                 pass
                         self.aligned_temp_paths = []
@@ -13052,6 +13118,8 @@ class SeestarQueuedStacker:
                     "astrometry_net_timeout_sec": getattr(
                         self, "astrometry_net_timeout_sec", 300
                     ),
+                    # Speed up ASTAP when RA/DEC are available in the header
+                    "use_radec_hints": True,
                 }
 
                 self.update_progress(
@@ -13607,25 +13675,42 @@ class SeestarQueuedStacker:
         try:
             _log_mem("before_save")
             data = img
-            # Ensure aligned images match the reference orientation (H,W,C)
-            ref_shape = getattr(self, "reference_shape", None)
-            if (
-                ref_shape is not None
-                and data.ndim == 3
-                and data.shape[:2] == (ref_shape[1], ref_shape[0])
-            ):
-                # Aligner returned a transposed image (W,H,C) -> swap axes to H,W,C
-                data = np.swapaxes(data, 0, 1)
+            ref_shape = getattr(self, "reference_shape", None)  # tuple (H, W)
+
+            # 1) Normalise layout to HxWxC for colour, or HxW for mono
+            if data.ndim == 3:
+                # Convert CHW -> HWC if needed
+                if (
+                    data.shape[0] in (1, 3, 4)
+                    and data.shape[1] > 4
+                    and data.shape[2] > 4
+                ):
+                    data = np.moveaxis(data, 0, -1)
+
+                # Ensure spatial orientation matches reference (H, W)
+                if ref_shape is not None:
+                    h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                    if data.shape[:2] == (w_ref, h_ref):
+                        # Swap to H,W if current is W,H
+                        data = np.swapaxes(data, 0, 1)
+            elif data.ndim == 2 and ref_shape is not None:
+                h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                if data.shape == (w_ref, h_ref):
+                    data = data.T
+
+            # 2) Save using the common FITS helper so on-disk data matches
+            #    the raw files (int16 with BZERO/BSCALE) and typical viewers
+            #    render them correctly. The helper also writes CHW for colour.
+            from seestar.core.image_processing import save_fits_image as _save_fits
             data = data.astype(np.float32, copy=False)
-            if (
-                data.ndim == 3
-                and data.shape[-1] in (3, 4)
-                and data.shape[0] not in (1, 3, 4)
-            ):
-                data = np.moveaxis(data, -1, 0)
-            hdu = fits.PrimaryHDU(data=data)
-            hdu.writeto(img_path, overwrite=True, output_verify="ignore")
-            np.save(mask_path, mask.astype(np.uint8))
+            _save_fits(data, img_path, header=None, overwrite=True)
+            # Keep mask aligned with data orientation
+            m_to_save = mask
+            if ref_shape is not None and m_to_save.ndim == 2:
+                h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                if m_to_save.shape == (w_ref, h_ref):
+                    m_to_save = m_to_save.T
+            np.save(mask_path, m_to_save.astype(np.uint8))
             if getattr(self, "reference_wcs_object", None) is not None:
                 try:
                     hdr_ref = self.reference_wcs_object.to_header(relax=True)
@@ -14361,3 +14446,12 @@ class SeestarQueuedStacker:
 
 
 ######################################################################################################################################################
+        # --- Enforce WCS-coherent coadd for batch_size == 1 ---
+        # When using the disk pipeline, align frames to the fixed reference WCS
+        # prior to accumulation so the final grid matches batch_size=0.
+        try:
+            if int(batch_size) == 1:
+                self.reproject_between_batches = True
+                self.freeze_reference_wcs = True
+        except Exception:
+            pass

@@ -412,7 +412,11 @@ def _finalize_reproject_and_coadd(
             to_log.append(paths[-1])
         for fp in to_log:
             try:
-                with fits.open(fp, memmap=True) as hdul:
+                # Some aligned FITS produced by ASTAP/processing have
+                # BZERO/BSCALE/BLANK in the header which prevents memmap reads
+                # in Astropy. For logging we only need shape + a few WCS
+                # keywords, so open without memmap to avoid the ValueError.
+                with fits.open(fp, memmap=False) as hdul:
                     data_shape = getattr(hdul[0].data, "shape", None)
                     hdr = hdul[0].header
                 nax1 = hdr.get("NAXIS1")
@@ -635,6 +639,14 @@ def parse_args():
     p.add_argument("--show-progress", action="store_true", help="Display a minimal progress GUI")
     p.add_argument("--tile-size", type=int, default=1024, help="Tile size for streaming reprojection")
     p.add_argument("--dtype-out", default="float32", choices=["float32", "float64"], help="Output dtype for streaming reprojection")
+    # Whether to save the final FITS as float32 (matches GUI option)
+    p.add_argument(
+        "--save-as-float32",
+        dest="save_as_float32",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Save final FITS as float32 (or uint16 if disabled)",
+    )
     p.add_argument("--memmap-dir", default=None, help="Directory for temporary memmap files")
     p.add_argument("--keep-intermediates", action="store_true", help="Keep temporary memmap files")
     p.add_argument(
@@ -867,6 +879,12 @@ def _run_stack(args, progress_cb) -> int:
             use_drizzle=False,
             reproject_between_batches=settings.reproject_between_batches,
             reproject_coadd_final=reproject_coadd_final,
+            # Ensure final FITS dtype matches user's setting or CLI override
+            save_as_float32=(
+                args.save_as_float32
+                if getattr(args, "save_as_float32", None) is not None
+                else getattr(settings, "save_final_as_float32", False)
+            ),
             **solver_settings,
             # When performing a final reproject/coadd with ``batch_size=1`` we
             # must keep the aligned files on disk for the last reprojection

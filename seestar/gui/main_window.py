@@ -6330,6 +6330,14 @@ class SeestarStackerGUI:
                 "--log-dir",
                 os.path.join(self.settings.output_folder, "logs"),
             ]
+            # Propagate normalization and final FITS dtype to boring_stack
+            try:
+                norm_method = getattr(self.settings, "stack_norm_method", "none")
+            except Exception:
+                norm_method = "none"
+            cmd += ["--norm", str(norm_method)]
+            save_f32 = bool(getattr(self.settings, "save_final_as_float32", False))
+            cmd.append("--save-as-float32" if save_f32 else "--no-save-as-float32")
             final_combine_slug = _to_slug(self.stack_final_combine_var.get())
             cmd += ["--final-combine", final_combine_slug]
             self.logger.info(
