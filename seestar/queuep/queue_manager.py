@@ -3644,9 +3644,23 @@ class SeestarQueuedStacker:
                 logger.debug(
                     "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
                 )
-            if not (self.reproject_between_batches and self.freeze_reference_wcs):
+            # Éviter d'écraser un WCS déjà déterminé. On se contente de
+            # réinitialiser si aucun WCS valide n'est présent.
+            if not (
+                self.reproject_between_batches and self.freeze_reference_wcs
+            ) and not (
+                self.reference_wcs_object
+                and getattr(self.reference_wcs_object, "is_celestial", False)
+            ):
                 self.reference_wcs_object = None
-            temp_wcs_ancre = None  # Spécifique pour la logique mosaïque locale
+            # Temporaire pour la logique mosaïque locale ; peut être prérempli
+            # avec un WCS existant si disponible.
+            temp_wcs_ancre = (
+                self.reference_wcs_object
+                if self.reference_wcs_object
+                and getattr(self.reference_wcs_object, "is_celestial", False)
+                else None
+            )
 
             logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
             logger.debug(f"    self.is_mosaic_run = {self.is_mosaic_run}")
@@ -3712,7 +3726,12 @@ class SeestarQueuedStacker:
                         "Base name of this mosaic ref panel source",
                     )
 
-                if self.astrometry_solver and os.path.exists(
+                if temp_wcs_ancre is not None:
+                    self.update_progress(
+                        "   -> Mosaïque Locale: WCS de référence déjà présent. Solving ignoré.",
+                        "INFO_DETAIL",
+                    )
+                elif self.astrometry_solver and os.path.exists(
                     reference_image_path_for_solver
                 ):
                     self.update_progress(
