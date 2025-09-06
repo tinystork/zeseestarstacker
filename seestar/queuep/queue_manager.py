@@ -5048,50 +5048,31 @@ class SeestarQueuedStacker:
                         self.final_stacked_path = None
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
-                    if getattr(self, "batch_size", 1) == 1:
-                        # --- Batch size = 1 : reprojection finale en streaming ---
-                        # Déterminer le chemin de sortie final (similaire à _save_final_stack)
-                        if getattr(self, "output_filename", ""):
-                            base_name = self.output_filename.strip()
-                            if not base_name.lower().endswith(".fit"):
-                                base_name += ".fit"
-                            out_final_path = os.path.join(self.output_folder, base_name)
-                        else:
-                            out_final_path = os.path.join(
-                                self.output_folder, "stack_final_classic_reproject.fit"
-                            )
-
-                        ok = self._finalize_reproject_and_coadd_streaming(
-                            aligned_dir=self.aligned_temp_dir,
-                            out_fp=out_final_path,
-                            auto_rotate=False,
-                            wht_mode="mean",
-                            memmap_dir=self.aligned_temp_dir if self.aligned_temp_dir else None,
-                        )
-                        if not ok:
-                            self.update_progress(
-                                "   [BS=1] Reproject+Coadd streaming a échoué.",
-                                level="ERROR",
-                            )
-                            return False
-                        self.final_stacked_path = out_final_path
-                        self.update_progress(
-                            f"Chemin FITS final: {os.path.basename(out_final_path)}"
-                        )
-                    elif self.intermediate_classic_batch_files:
-                        if len(self.intermediate_classic_batch_files) == 1:
-                            self._finalize_single_classic_batch(
-                                self.intermediate_classic_batch_files[0]
-                            )
-                        elif not self._reproject_classic_batches_zm(
-                            self.intermediate_classic_batch_files
-                        ):
-                            self._reproject_classic_batches(
-                                self.intermediate_classic_batch_files
-                            )
+                    solved_batches = [
+                        bf
+                        for bf in self.intermediate_classic_batch_files
+                        if bf[0]
+                        not in getattr(self, "unsolved_classic_batch_files", set())
+                    ]
+                    if solved_batches:
+                        if len(solved_batches) == 1:
+                            self._finalize_single_classic_batch(solved_batches[0])
+                        elif not self._reproject_classic_batches_zm(solved_batches):
+                            if self._reproject_classic_batches(solved_batches):
+                                self._save_final_stack(
+                                    "_classic_reproject",
+                                    drizzle_final_sci_data=self.current_stack,
+                                    drizzle_final_wht_data=self.current_coverage,
+                                    preserve_linear_output=True,
+                                )
+                            else:
+                                self.update_progress(
+                                    "   Reprojection finale échouée.", "WARN"
+                                )
+                                self.final_stacked_path = None
                     else:
                         self.update_progress(
-                            "   Aucune batch sauvegardé pour reproject&coadd."
+                            "   Aucune batch sauvegardé pour reproject&coadd.",
                         )
                         self.final_stacked_path = None
                 else:
@@ -10616,7 +10597,7 @@ class SeestarQueuedStacker:
 
         return sci_fits, wht_paths
 
-    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> None:
+    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> bool:
         """Reproject saved *classic* batches to a common grid and merge them.
 
         This variant first aligns **every batch** onto ``self.reference_wcs_object``
@@ -10627,10 +10608,16 @@ class SeestarQueuedStacker:
         « Reproject + Co‑add ».
         """
 
-        from seestar.enhancement.reproject_utils import (
-            reproject_and_coadd,
-            reproject_interp,
-        )
+        try:
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
+            )
+        except Exception as e:
+            self.update_progress(
+                f"⚠️ Outils de reprojection indisponibles: {e}", "WARN"
+            )
+            return False
 
         # --- 1. Containers -------------------------------------------------------
         channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
@@ -10692,7 +10679,7 @@ class SeestarQueuedStacker:
                 f"⚠️ Reprojection ignorée : seulement {len(wcs_for_grid)} WCS valides.",
                 "WARN",
             )
-            return
+            return False
 
         # --- 4. Determine output grid -------------------------------------------
         if self.reference_wcs_object is not None and self.reference_shape is not None:
@@ -10715,7 +10702,7 @@ class SeestarQueuedStacker:
                 "⚠️ Reprojection ignorée : échec du calcul de la grille finale.",
                 "WARN",
             )
-            return
+            return False
 
         # --- 5. Combine per‑channel stacks --------------------------------------
         final_channels = []
@@ -10754,6 +10741,7 @@ class SeestarQueuedStacker:
         self.current_stack_header.update(out_wcs.to_header(relax=True))
 
         # Caller will take care of saving the FITS file / updating GUI, etc.
+        return True
 
     def _finalize_reproject_and_coadd_streaming(
         self,
