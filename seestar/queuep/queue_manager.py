@@ -3691,7 +3691,7 @@ class SeestarQueuedStacker:
                     self, "astrometry_net_timeout_sec", 300
                 ),
                 # Hints can dramatically speed ASTAP when RA/DEC are present
-                "use_radec_hints": True,
+                "use_radec_hints": False,
             }
             # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
             logger.debug(
@@ -13224,7 +13224,7 @@ class SeestarQueuedStacker:
                         self, "astrometry_net_timeout_sec", 300
                     ),
                     # Speed up ASTAP when RA/DEC are available in the header
-                    "use_radec_hints": True,
+                    "use_radec_hints": False,
                 }
 
                 self.update_progress(
