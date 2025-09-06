@@ -3691,7 +3691,7 @@ class SeestarQueuedStacker:
                     self, "astrometry_net_timeout_sec", 300
                 ),
                 # Hints can dramatically speed ASTAP when RA/DEC are present
-                "use_radec_hints": True,
+                "use_radec_hints": False,
             }
             # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
             logger.debug(
@@ -5048,6 +5048,7 @@ class SeestarQueuedStacker:
                         self.final_stacked_path = None
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
+
                     solved_batches = [
                         bf
                         for bf in self.intermediate_classic_batch_files
@@ -5070,6 +5071,7 @@ class SeestarQueuedStacker:
                                     "   Reprojection finale échouée.", "WARN"
                                 )
                                 self.final_stacked_path = None
+
                     else:
                         self.update_progress(
                             "   Aucune batch sauvegardé pour reproject&coadd.",
@@ -13212,7 +13214,7 @@ class SeestarQueuedStacker:
                         self, "astrometry_net_timeout_sec", 300
                     ),
                     # Speed up ASTAP when RA/DEC are available in the header
-                    "use_radec_hints": True,
+                    "use_radec_hints": False,
                 }
 
                 self.update_progress(
