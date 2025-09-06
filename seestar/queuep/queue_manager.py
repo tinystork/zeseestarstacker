@@ -5048,37 +5048,7 @@ class SeestarQueuedStacker:
                         self.final_stacked_path = None
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
-                    if getattr(self, "batch_size", 1) == 1:
-                        # --- Batch size = 1 : reprojection finale en streaming ---
-                        # Déterminer le chemin de sortie final (similaire à _save_final_stack)
-                        if getattr(self, "output_filename", ""):
-                            base_name = self.output_filename.strip()
-                            if not base_name.lower().endswith(".fit"):
-                                base_name += ".fit"
-                            out_final_path = os.path.join(self.output_folder, base_name)
-                        else:
-                            out_final_path = os.path.join(
-                                self.output_folder, "stack_final_classic_reproject.fit"
-                            )
-
-                        ok = self._finalize_reproject_and_coadd_streaming(
-                            aligned_dir=self.aligned_temp_dir,
-                            out_fp=out_final_path,
-                            auto_rotate=False,
-                            wht_mode="mean",
-                            memmap_dir=self.aligned_temp_dir if self.aligned_temp_dir else None,
-                        )
-                        if not ok:
-                            self.update_progress(
-                                "   [BS=1] Reproject+Coadd streaming a échoué.",
-                                level="ERROR",
-                            )
-                            return False
-                        self.final_stacked_path = out_final_path
-                        self.update_progress(
-                            f"Chemin FITS final: {os.path.basename(out_final_path)}"
-                        )
-                    elif self.intermediate_classic_batch_files:
+                    if self.intermediate_classic_batch_files:
                         if len(self.intermediate_classic_batch_files) == 1:
                             self._finalize_single_classic_batch(
                                 self.intermediate_classic_batch_files[0]
@@ -5089,9 +5059,15 @@ class SeestarQueuedStacker:
                             self._reproject_classic_batches(
                                 self.intermediate_classic_batch_files
                             )
+                            self._save_final_stack(
+                                "_classic_reproject",
+                                drizzle_final_sci_data=self.current_stack,
+                                drizzle_final_wht_data=self.current_coverage,
+                                preserve_linear_output=True,
+                            )
                     else:
                         self.update_progress(
-                            "   Aucune batch sauvegardé pour reproject&coadd."
+                            "   Aucune batch sauvegardé pour reproject&coadd.",
                         )
                         self.final_stacked_path = None
                 else:
