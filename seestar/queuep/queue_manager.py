@@ -2068,6 +2068,8 @@ class SeestarQueuedStacker:
                 fits_header,
                 settings,
                 update_header_with_solution,
+                batch_size=getattr(self, "batch_size", None),
+                final_combine=getattr(self, "stack_final_combine", None),
             )
             while True:
                 try:
@@ -3095,6 +3097,8 @@ class SeestarQueuedStacker:
                         hdr_local,
                         solver_settings,
                         update_header_with_solution=False,
+                        batch_size=getattr(self, "batch_size", None),
+                        final_combine=getattr(self, "stack_final_combine", None),
                     )
                 else:
                     wcs_obj_local = solve_image_wcs(
@@ -3102,6 +3106,8 @@ class SeestarQueuedStacker:
                         hdr_local,
                         solver_settings,
                         update_header_with_solution=False,
+                        batch_size=getattr(self, "batch_size", None),
+                        final_combine=getattr(self, "stack_final_combine", None),
                     )
                 return path, hdr_local, wcs_obj_local, None
             except Exception as exc:
@@ -6553,6 +6559,8 @@ class SeestarQueuedStacker:
                                 header_final_pour_retour,
                                 solver_settings_for_panel_fallback,
                                 True,
+                                batch_size=getattr(self, "batch_size", None),
+                                final_combine=getattr(self, "stack_final_combine", None),
                             )
                         except Exception as e_s:
                             align_method_log_msg += f"_SolveError_{type(e_s).__name__}"
@@ -6620,6 +6628,8 @@ class SeestarQueuedStacker:
                         header_final_pour_retour,
                         solver_settings_for_this_panel,
                         True,
+                        batch_size=getattr(self, "batch_size", None),
+                        final_combine=getattr(self, "stack_final_combine", None),
                     )
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
                         align_method_log_msg = "Astrometry_Per_Panel_Success"
@@ -6660,6 +6670,8 @@ class SeestarQueuedStacker:
                         header_final_pour_retour,
                         solver_settings_for_file,
                         True,
+                        batch_size=getattr(self, "batch_size", None),
+                        final_combine=getattr(self, "stack_final_combine", None),
                     )
                     if wcs_final_pour_retour and wcs_final_pour_retour.is_celestial:
                         align_method_log_msg = "Astrometry_Single_Success"
