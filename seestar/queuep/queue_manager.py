@@ -10693,56 +10693,65 @@ class SeestarQueuedStacker:
             # ``batch_size=0`` runs already stored the reference WCS in the batch
             # header, so avoid re-solving when these keywords are present.
             if getattr(self, "reproject_coadd_final", False):
-                try:
-                    hdr = fits.getheader(sci_path, memmap=False)
-                    has_wcs = all(
-                        k in hdr
-                        for k in (
-                            "CRVAL1",
-                            "CRVAL2",
-                            "CD1_1",
-                            "CD1_2",
-                            "CD2_1",
-                            "CD2_2",
-                        )
-                    )
-                except Exception:
-                    hdr = None
-                    has_wcs = False
-                if not has_wcs:
-                    if getattr(self, "reference_header_for_wcs", None) is not None:
-                        # Inject the reference WCS to mirror previous batch_size=0 behaviour
-                        try:
-                            hdr = hdr or fits.Header()
+                if (
+                    getattr(self, "batch_size", 0) == 0
+                    and getattr(self, "reference_header_for_wcs", None) is not None
+                ):
+                    # In ``batch_size=0`` mode always force the reference WCS so
+                    # that aligned batches share identical astrometric metadata.
+                    hdr = self.reference_header_for_wcs.copy()
+                    has_wcs = True
+                else:
+                    try:
+                        hdr = fits.getheader(sci_path, memmap=False)
+                        has_wcs = all(
+                            k in hdr
                             for k in (
-                                "CRPIX1",
-                                "CRPIX2",
-                                "CDELT1",
-                                "CDELT2",
+                                "CRVAL1",
+                                "CRVAL2",
                                 "CD1_1",
                                 "CD1_2",
                                 "CD2_1",
                                 "CD2_2",
-                                "CTYPE1",
-                                "CTYPE2",
-                                "CRVAL1",
-                                "CRVAL2",
-                            ):
-                                if k in self.reference_header_for_wcs:
-                                    hdr[k] = self.reference_header_for_wcs[k]
-                            data = fits.getdata(sci_path, memmap=False)
-                            fits.PrimaryHDU(data=data, header=hdr).writeto(
-                                sci_path, overwrite=True, output_verify="ignore"
                             )
-                            has_wcs = True
-                        except Exception:
-                            has_wcs = False
-                    if not has_wcs and getattr(self, "batch_size", 0) != 0:
-                        try:
-                            self._run_astap_and_update_header(sci_path)
-                            hdr = fits.getheader(sci_path, memmap=False)
-                        except Exception:
-                            hdr = None
+                        )
+                    except Exception:
+                        hdr = None
+                        has_wcs = False
+                    if not has_wcs:
+                        if getattr(self, "reference_header_for_wcs", None) is not None:
+                            # Inject the reference WCS to mirror previous batch_size=0 behaviour
+                            try:
+                                hdr = hdr or fits.Header()
+                                for k in (
+                                    "CRPIX1",
+                                    "CRPIX2",
+                                    "CDELT1",
+                                    "CDELT2",
+                                    "CD1_1",
+                                    "CD1_2",
+                                    "CD2_1",
+                                    "CD2_2",
+                                    "CTYPE1",
+                                    "CTYPE2",
+                                    "CRVAL1",
+                                    "CRVAL2",
+                                ):
+                                    if k in self.reference_header_for_wcs:
+                                        hdr[k] = self.reference_header_for_wcs[k]
+                                data = fits.getdata(sci_path, memmap=False)
+                                fits.PrimaryHDU(data=data, header=hdr).writeto(
+                                    sci_path, overwrite=True, output_verify="ignore"
+                                )
+                                has_wcs = True
+                            except Exception:
+                                has_wcs = False
+                        if not has_wcs and getattr(self, "batch_size", 0) != 0:
+                            try:
+                                self._run_astap_and_update_header(sci_path)
+                                hdr = fits.getheader(sci_path, memmap=False)
+                            except Exception:
+                                hdr = None
 
             # 2.1 Load science cube + WCS
             try:
@@ -10750,9 +10759,13 @@ class SeestarQueuedStacker:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     if hdr is None:
                         hdr = hdul[0].header
-                batch_wcs = WCS(hdr, naxis=2)
                 h, w = data_cxhxw.shape[-2:]
-                batch_wcs.pixel_shape = (w, h)
+                if getattr(self, "batch_size", 0) == 0 and self.reference_wcs_object is not None:
+                    batch_wcs = self.reference_wcs_object
+                    batch_wcs.pixel_shape = (w, h)
+                else:
+                    batch_wcs = WCS(hdr, naxis=2)
+                    batch_wcs.pixel_shape = (w, h)
             except Exception:
                 continue  # silently skip unreadable batch
 
