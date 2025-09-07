@@ -637,6 +637,110 @@ def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
     assert called["grid"]
 
 
+def test_reproject_coadd_skips_solver_when_wcs_present(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+    import os
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = True
+    obj.reproject_coadd_final = True
+    obj.reproject_between_batches = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    paths = []
+    for i in range(2):
+        p = tmp_path / f"f{i}.fits"
+        fits.writeto(p, data, hdr, overwrite=True)
+        paths.append(p)
+
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, data, hdr, overwrite=True)
+            hdr_local = fits.getheader(out_path)
+            self.reference_image_path = out_path
+            return np.dstack([data] * 3), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        for p in paths:
+            obj.queue.put(str(p))
+        obj.all_input_filepaths = [str(p) for p in paths]
+        obj.files_in_queue = len(paths)
+        return len(paths)
+
+    obj._add_files_to_queue = fake_add_files
+
+    def fail_solver(*a, **k):
+        raise AssertionError("solver should not be called")
+
+    monkeypatch.setattr(obj, "_run_astap_and_update_header", fail_solver)
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    ok = obj.start_processing(
+        str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True
+    )
+    assert ok
+
+
 def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
     sys.path.insert(0, str(ROOT))
     import importlib
