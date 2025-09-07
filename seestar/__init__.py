@@ -8,6 +8,8 @@ d'améliorer le rapport signal-bruit des observations astrophotographiques.
 __version__ = "6.3.0 Boring"  # including zenalyser and hierarchical auto satcking 
 __author__ = "Tinystork"
 
+import sys
+
 # Core functionalities (unchanged from your original structure)
 try:
     from seestar.core import (
@@ -53,6 +55,7 @@ try:
 except BaseException as e:  # pragma: no cover - GUI might not be present
     import logging
 
+    sys.modules.pop("seestar.gui", None)
     logging.getLogger(__name__).warning(
         "Seestar GUI not available (%s). Running in headless mode.", e
     )

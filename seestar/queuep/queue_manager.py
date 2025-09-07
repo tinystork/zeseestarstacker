@@ -10299,9 +10299,31 @@ class SeestarQueuedStacker:
             self.update_progress(f"Re-init memmaps → new shape {self.memmap_shape[:2]}")
 
     def finalize_continuous_stack(self):
-        wht_safe = np.maximum(self.cumulative_wht_memmap, 1e-9)
-        avg = self.cumulative_sum_memmap / wht_safe[..., None]
-        avg = np.nan_to_num(avg, nan=0.0)
+        wht = self.cumulative_wht_memmap
+        sum_ = self.cumulative_sum_memmap
+
+        mask = wht > 0
+        avg = np.zeros_like(sum_, dtype=np.float32)
+        if np.any(mask):
+            avg[mask] = (sum_[mask] / wht[mask][..., None]).astype(np.float32)
+
+            ys, xs = np.where(mask)
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+
+            avg = avg[y0:y1, x0:x1, :]
+            if self.reference_header_for_wcs is not None:
+                hdr = self.reference_header_for_wcs.copy()
+                if "CRPIX1" in hdr:
+                    hdr["CRPIX1"] -= x0
+                if "CRPIX2" in hdr:
+                    hdr["CRPIX2"] -= y0
+                self.reference_header_for_wcs = hdr
+            if getattr(self, "reference_wcs_object", None) is not None:
+                hdr = self.reference_wcs_object.to_header()
+                hdr["CRPIX1"] -= x0
+                hdr["CRPIX2"] -= y0
+                self.reference_wcs_object = WCS(hdr)
 
         hdu = fits.PrimaryHDU(
             data=avg.astype(np.float32), header=self.reference_header_for_wcs
@@ -11764,7 +11786,9 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
 
-        final_image_initial_raw = np.clip(final_image_initial_raw.astype(np.float32), 0.0, None)
+        final_image_initial_raw = final_image_initial_raw.astype(np.float32)
+        if not preserve_linear_output_setting:
+            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
         self.update_progress(
             f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
         )

@@ -21,7 +21,10 @@ if __package__ in (None, ""):
     from pathlib import Path
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from seestar import reproject_utils
+try:  # Allow tests to stub core package without providing reproject_utils
+    from seestar import reproject_utils
+except Exception:  # pragma: no cover - missing during certain tests
+    reproject_utils = None  # type: ignore
 
 try:  # Optional during tests that stub core modules
     from seestar.core.reprojection_utils import (
