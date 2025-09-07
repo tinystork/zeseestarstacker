@@ -10710,11 +10710,39 @@ class SeestarQueuedStacker:
                     hdr = None
                     has_wcs = False
                 if not has_wcs:
-                    try:
-                        self._run_astap_and_update_header(sci_path)
-                        hdr = fits.getheader(sci_path, memmap=False)
-                    except Exception:
-                        hdr = None
+                    if getattr(self, "reference_header_for_wcs", None) is not None:
+                        # Inject the reference WCS to mirror previous batch_size=0 behaviour
+                        try:
+                            hdr = hdr or fits.Header()
+                            for k in (
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ):
+                                if k in self.reference_header_for_wcs:
+                                    hdr[k] = self.reference_header_for_wcs[k]
+                            data = fits.getdata(sci_path, memmap=False)
+                            fits.PrimaryHDU(data=data, header=hdr).writeto(
+                                sci_path, overwrite=True, output_verify="ignore"
+                            )
+                            has_wcs = True
+                        except Exception:
+                            has_wcs = False
+                    if not has_wcs:
+                        try:
+                            self._run_astap_and_update_header(sci_path)
+                            hdr = fits.getheader(sci_path, memmap=False)
+                        except Exception:
+                            hdr = None
 
             # 2.1 Load science cube + WCS
             try:
