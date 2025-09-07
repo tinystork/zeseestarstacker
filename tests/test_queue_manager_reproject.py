@@ -1288,3 +1288,83 @@ def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
 
     assert counts == []
 
+
+def test_reproject_classic_batches_forces_reference_wcs_bs0(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = False
+    obj.reproject_coadd_final = True
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+    obj.reference_header_for_wcs = obj.reference_wcs_object.to_header(relax=True)
+    obj.reference_shape = (4, 4)
+
+    # Create two classic batch files with different WCS headers
+    data = np.zeros((3, 4, 4), dtype=np.float32)
+    hdr1 = make_wcs(shape=(4, 4)).to_header()
+    hdr2 = make_wcs(shape=(4, 4)).to_header()
+    hdr2["CRVAL1"] += 10  # shift to ensure headers differ
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr1, overwrite=True)
+    fits.writeto(sci2, data, hdr2, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((4, 4), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((4, 4), dtype=np.float32), overwrite=True)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    captured: list[list] = []
+
+    def fake_reproject_and_coadd(data_list, *a, **k):
+        captured.append([w for _, w in data_list])
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        return np.zeros(k.get("shape_out"), dtype=np.float32), np.ones(k.get("shape_out"), dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches([
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ])
+
+    # reproject_and_coadd is called once per channel; every wcs should be the reference
+    assert captured
+    for w_list in captured:
+        assert all(w is obj.reference_wcs_object for w in w_list)
+
