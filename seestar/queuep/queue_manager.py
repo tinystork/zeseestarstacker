@@ -11735,12 +11735,7 @@ class SeestarQueuedStacker:
             f"  DEBUG QM [SaveFinalStack] final_image_initial_raw (AVANT post-traitements) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}], Shape: {final_image_initial_raw.shape}, Dtype: {final_image_initial_raw.dtype}"
         )
 
-        if final_wht_map_for_postproc is not None and (
-            is_classic_reproject_mode
-            or is_reproject_mosaic_mode
-            or is_true_incremental_drizzle_from_objects
-            or is_drizzle_final_mode_with_data
-        ):
+        if final_wht_map_for_postproc is not None:
             rows, cols = np.where(final_wht_map_for_postproc > 0)
             if rows.size and cols.size:
                 y0, y1 = rows.min(), rows.max() + 1
@@ -11769,25 +11764,13 @@ class SeestarQueuedStacker:
                     except Exception:
                         pass
 
-        if getattr(self, "batch_size", 0) == 1:
-            # Preserve negative values in disk-based single-batch mode so the
-            # final scaling step can shift the dynamic range instead of
-            # collapsing everything to zero.
-            final_image_initial_raw = final_image_initial_raw.astype(np.float32)
-            self.update_progress(
-                f"    DEBUG QM: Conservation des valeurs négatives (batch_size=1) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-            )
-            logger.debug(
-                f"    DEBUG QM: Conservation des valeurs négatives (batch_size=1) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-            )
-        else:
-            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
-            self.update_progress(
-                f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-            )
-            logger.debug(
-                f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
-            )
+        final_image_initial_raw = np.clip(final_image_initial_raw.astype(np.float32), 0.0, None)
+        self.update_progress(
+            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+        )
+        logger.debug(
+            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+        )
 
         # Appliquer le seuil WHT (si activé) aux données "ADU-like"
         if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
