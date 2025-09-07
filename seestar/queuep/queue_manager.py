@@ -10683,21 +10683,45 @@ class SeestarQueuedStacker:
         for sci_path, wht_paths in batch_files:
             if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
                 self.update_progress(
-                    f"   -> Batch ignor\xe9 (non r\xe9solu) {sci_path}",
+                    f"   -> Batch ignoré (non résolu) {sci_path}",
                     "WARN",
                 )
                 continue
-            # Ensure a valid WCS is present when using reproject+coadd
+
+            hdr = None
+            # Ensure a valid WCS is present when using reproject+coadd. Older
+            # ``batch_size=0`` runs already stored the reference WCS in the batch
+            # header, so avoid re-solving when these keywords are present.
             if getattr(self, "reproject_coadd_final", False):
                 try:
-                    self._run_astap_and_update_header(sci_path)
+                    hdr = fits.getheader(sci_path, memmap=False)
+                    has_wcs = all(
+                        k in hdr
+                        for k in (
+                            "CRVAL1",
+                            "CRVAL2",
+                            "CD1_1",
+                            "CD1_2",
+                            "CD2_1",
+                            "CD2_2",
+                        )
+                    )
                 except Exception:
-                    pass
+                    hdr = None
+                    has_wcs = False
+                if not has_wcs:
+                    try:
+                        self._run_astap_and_update_header(sci_path)
+                        hdr = fits.getheader(sci_path, memmap=False)
+                    except Exception:
+                        hdr = None
+
             # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
-                    hdr = hdul[0].header
+                    if hdr is None:
+                        hdr = hdul[0].header
                 batch_wcs = WCS(hdr, naxis=2)
                 h, w = data_cxhxw.shape[-2:]
                 batch_wcs.pixel_shape = (w, h)
