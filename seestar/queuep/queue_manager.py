@@ -62,6 +62,10 @@ from seestar.utils.wcs_utils import (
     write_wcs_to_fits_inplace,
     _sanitize_continue_as_string,
 )
+try:
+    from ..enhancement.reproject_utils import ensure_wcs_pixel_shape
+except Exception:  # pragma: no cover - fallback when package context missing
+    from seestar.enhancement.reproject_utils import ensure_wcs_pixel_shape
 
 from ..tools.file_ops import move_to_stacked
 
@@ -309,6 +313,11 @@ def _reproject_worker(
             if hdr_fixed is not None:
                 hdr = hdr_fixed
                 input_wcs = WCS(hdr, naxis=2)
+                ensure_wcs_pixel_shape(
+                    input_wcs,
+                    int(hdr.get("NAXIS2")),
+                    int(hdr.get("NAXIS1")),
+                )
         except Exception as e:
             logger.warning("[B1] inject_sanitized_wcs failed for %s: %s", os.path.basename(fits_path), e)
 
@@ -4353,6 +4362,11 @@ class SeestarQueuedStacker:
                                         batch_wcs = None
                                         try:
                                             batch_wcs = WCS(hdr, naxis=2)
+                                            ensure_wcs_pixel_shape(
+                                                batch_wcs,
+                                                int(hdr.get("NAXIS2")),
+                                                int(hdr.get("NAXIS1")),
+                                            )
                                         except Exception:
                                             batch_wcs = None
 
@@ -4976,6 +4990,11 @@ class SeestarQueuedStacker:
                         batch_wcs = None
                         try:
                             batch_wcs = WCS(hdr, naxis=2)
+                            ensure_wcs_pixel_shape(
+                                batch_wcs,
+                                int(hdr.get("NAXIS2")),
+                                int(hdr.get("NAXIS1")),
+                            )
                         except Exception:
                             batch_wcs = None
 
@@ -7153,6 +7172,11 @@ class SeestarQueuedStacker:
             batch_wcs = None
             try:
                 batch_wcs = WCS(hdr, naxis=2)
+                ensure_wcs_pixel_shape(
+                    batch_wcs,
+                    int(hdr.get("NAXIS2")),
+                    int(hdr.get("NAXIS1")),
+                )
             except Exception:
                 batch_wcs = None
 
@@ -10188,9 +10212,10 @@ class SeestarQueuedStacker:
 
         try:
             new_wcs = WCS(hdr, naxis=2)
-            new_wcs.pixel_shape = (
-                stack.shape[1],
-                stack.shape[0],
+            ensure_wcs_pixel_shape(
+                new_wcs,
+                int(hdr.get("NAXIS2")),
+                int(hdr.get("NAXIS1")),
             )
         except Exception:
             new_wcs = None
@@ -10209,6 +10234,11 @@ class SeestarQueuedStacker:
         hdr = fits.getheader(fits_path)
         try:
             input_wcs = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(
+                input_wcs,
+                int(hdr.get("NAXIS2")),
+                int(hdr.get("NAXIS1")),
+            )
         except Exception:
             input_wcs = None
         if data.ndim == 2:
@@ -10777,7 +10807,7 @@ class SeestarQueuedStacker:
                     batch_wcs.pixel_shape = (w, h)
                 else:
                     batch_wcs = WCS(hdr, naxis=2)
-                    batch_wcs.pixel_shape = (w, h)
+                    ensure_wcs_pixel_shape(batch_wcs, h, w)
             except Exception:
                 continue  # silently skip unreadable batch
 
@@ -11178,6 +11208,11 @@ class SeestarQueuedStacker:
                 try:
                     hdr = inject_sanitized_wcs(hdr, fp) or hdr
                     wcs_in = WCS(hdr, naxis=2)
+                    ensure_wcs_pixel_shape(
+                        wcs_in,
+                        int(hdr.get("NAXIS2")),
+                        int(hdr.get("NAXIS1")),
+                    )
                     if not wcs_in.is_celestial:
                         raise ValueError("WCS non céleste.")
                 except Exception as e:
@@ -11261,7 +11296,12 @@ class SeestarQueuedStacker:
             try:
                 hdr = fits.getheader(fp, memmap=False)
                 hdr = ru.sanitize_header_for_wcs(hdr)
-                WCS(hdr, naxis=2)
+                _w = WCS(hdr, naxis=2)
+                ensure_wcs_pixel_shape(
+                    _w,
+                    int(hdr.get("NAXIS2")),
+                    int(hdr.get("NAXIS1")),
+                )
                 ok = True
             except Exception:
                 pass
@@ -11269,7 +11309,12 @@ class SeestarQueuedStacker:
                 try:
                     hdr = fits.getheader(fp, memmap=False)
                     hdr = inject_sanitized_wcs(hdr, fp) or hdr
-                    WCS(hdr, naxis=2)
+                    _w = WCS(hdr, naxis=2)
+                    ensure_wcs_pixel_shape(
+                        _w,
+                        int(hdr.get("NAXIS2")),
+                        int(hdr.get("NAXIS1")),
+                    )
                     ok = True
                 except Exception:
                     logger.warning("Header-WCS invalid -> skip: %s", fp)
@@ -11511,7 +11556,7 @@ class SeestarQueuedStacker:
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
-                wcs.pixel_shape = (w, h)
+                ensure_wcs_pixel_shape(wcs, h, w)
 
                 try:
                     cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(
@@ -14276,8 +14321,7 @@ class SeestarQueuedStacker:
                 hdr["NAXIS2"] = h
                 try:
                     wcs_obj = WCS(hdr, naxis=2)
-                    if wcs_obj.pixel_shape is None:
-                        wcs_obj.pixel_shape = (w, h)
+                    ensure_wcs_pixel_shape(wcs_obj, h, w)
                     hdr.update(wcs_obj.to_header(relax=True))
                     try:
                         wcs_obj._naxis1 = w
