@@ -1210,12 +1210,14 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
         # Internal flag to allow bypassing aligned_*.fits when classic batches
+
         # are available for the final co-add in batch_size==1 mode. Ensure modes
         # with ``batch_size!=1`` behave exactly as before.
         self.use_classic_batches_for_final_coadd = (
             bool(getattr(settings, "use_classic_batches_for_final_coadd", True))
             if getattr(self, "batch_size", 0) == 1
             else False
+
         )
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
