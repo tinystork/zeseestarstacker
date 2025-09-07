@@ -1209,6 +1209,14 @@ class SeestarQueuedStacker:
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
+        # Internal flag to allow bypassing aligned_*.fits when classic batches
+        # are available for the final co-add in batch_size==1 mode. Ensure modes
+        # with ``batch_size!=1`` behave exactly as before.
+        self.use_classic_batches_for_final_coadd = (
+            bool(getattr(settings, "use_classic_batches_for_final_coadd", True))
+            if getattr(self, "batch_size", 0) == 1
+            else False
+        )
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
         # Batches that failed astrometric solving
@@ -10807,13 +10815,209 @@ class SeestarQueuedStacker:
             compute_final_output_grid,
         )
         from seestar.utils.wcs_utils import inject_sanitized_wcs
-        from seestar.enhancement.reproject_utils import reproject_interp
+        from seestar.enhancement.reproject_utils import (
+            reproject_interp,
+            reproject_and_coadd_from_paths,
+            subtract_sigma_clipped_median,
+        )
 
         def _safe_progress(msg, prog=None, level=None):
             try:
                 self.update_progress(msg, prog, level)
             except Exception:
                 pass
+
+        # --- New classic-batch path for batch_size == 1 ---------------------
+        if (
+            getattr(self, "batch_size", 0) == 1
+            and getattr(self, "use_classic_batches_for_final_coadd", True)
+        ):
+            import time
+
+            job_dir = os.path.abspath(os.path.join(aligned_dir, os.pardir))
+            classic_files = sorted(
+                glob.glob(os.path.join(job_dir, "classic_batch*.fit*"))
+                + glob.glob(os.path.join(aligned_dir, "classic_batch*.fit*"))
+            )
+            classic_files = [p for p in classic_files if os.path.isfile(p)]
+            if len(classic_files) >= 2:
+                _safe_progress(
+                    f"BS=1 → classic-batch coadd choisi ({len(classic_files)} fichiers)",
+                    level="DEBUG",
+                )
+                t_start = time.time()
+
+                def _extract_params(hdr):
+                    keys = [
+                        "NAXIS1",
+                        "NAXIS2",
+                        "CRPIX1",
+                        "CRPIX2",
+                        "CRVAL1",
+                        "CRVAL2",
+                        "CTYPE1",
+                        "CTYPE2",
+                    ]
+                    params = {k: hdr.get(k) for k in keys}
+                    if "CD1_1" in hdr:
+                        for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2"):
+                            params[k] = hdr.get(k)
+                    else:
+                        for k in ("PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2"):
+                            params[k] = hdr.get(k)
+                    return params
+
+                def _params_close(p1, p2, tol=1e-6):
+                    for k, v1 in p1.items():
+                        v2 = p2.get(k)
+                        if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                            if not np.isfinite(v1) or not np.isfinite(v2):
+                                return False
+                            if abs(v1 - v2) > tol:
+                                return False
+                        else:
+                            if v1 != v2:
+                                return False
+                    return True
+
+                try:
+                    ref_hdr = fits.getheader(classic_files[0], memmap=False)
+                    ref_params = _extract_params(ref_hdr)
+                    same_grid = True
+                    for fp in classic_files[1:]:
+                        try:
+                            hdr = fits.getheader(fp, memmap=False)
+                            if not _params_close(ref_params, _extract_params(hdr)):
+                                same_grid = False
+                                break
+                        except Exception:
+                            same_grid = False
+                            break
+                except Exception:
+                    same_grid = False
+
+                if same_grid:
+                    def _fast_coadd(paths, hdr_ref):
+                        C = None
+                        sum_arr = wht_arr = None
+                        for fp in paths:
+                            with fits.open(fp, memmap=True) as hdul:
+                                data = np.asarray(hdul[0].data, dtype=np.float32)
+                                if data.ndim == 2:
+                                    arr = data[np.newaxis, ...]
+                                elif data.ndim == 3 and data.shape[0] in (1, 3, 4):
+                                    arr = data[:3]
+                                else:
+                                    arr = np.moveaxis(data, -1, 0)[:3]
+                            C = arr.shape[0] if C is None else C
+                            if sum_arr is None:
+                                sum_arr = np.zeros_like(arr, dtype=np.float32)
+                                wht_arr = np.zeros(arr.shape[1:], dtype=np.float32)
+                            mask = np.mean(arr, axis=0)
+                            w = (mask != 0).astype(np.float32)
+                            for c in range(C):
+                                ch, _med = subtract_sigma_clipped_median(
+                                    arr[c], min_valid=100
+                                )
+                                sum_arr[c] += ch * w
+                            wht_arr += w
+                        if sum_arr is None or not np.any(wht_arr > 0):
+                            return False
+                        eps = 1e-6
+                        res = sum_arr / np.maximum(wht_arr, eps)
+                        ys, xs = np.nonzero(wht_arr > 0)
+                        y0, y1 = ys.min(), ys.max() + 1
+                        x0, x1 = xs.min(), xs.max() + 1
+                        res = res[:, y0:y1, x0:x1]
+                        wht_crop = wht_arr[y0:y1, x0:x1]
+                        hdr_out = hdr_ref.copy()
+                        hdr_out["NAXIS1"] = x1 - x0
+                        hdr_out["NAXIS2"] = y1 - y0
+                        if "CRPIX1" in hdr_out:
+                            hdr_out["CRPIX1"] -= x0
+                        if "CRPIX2" in hdr_out:
+                            hdr_out["CRPIX2"] -= y0
+                        fits.HDUList(
+                            [
+                                fits.PrimaryHDU(res.astype(np.float32), header=hdr_out),
+                                fits.ImageHDU(wht_crop.astype(np.float32), name="WHT"),
+                            ]
+                        ).writeto(out_fp, overwrite=True)
+                        logger.debug(
+                            "fast-path classic-batch: sum range [%.4g, %.4g], wht range [%.4g, %.4g]",
+                            float(np.nanmin(res)),
+                            float(np.nanmax(res)),
+                            float(np.nanmin(wht_crop)),
+                            float(np.nanmax(wht_crop)),
+                        )
+                        logger.debug(
+                            "fast-path classic-batch: dims %dx%d -> %dx%d, CRPIX shift (-%d,-%d)",
+                            ref_hdr.get("NAXIS1", 0),
+                            ref_hdr.get("NAXIS2", 0),
+                            x1 - x0,
+                            y1 - y0,
+                            x0,
+                            y0,
+                        )
+                        return True
+
+                    ok = _fast_coadd(classic_files, ref_hdr)
+                    _safe_progress(
+                        f"fast-path", level="DEBUG"
+                    )
+                    _safe_progress(
+                        f"temps: {time.time()-t_start:.2f}s", level="DEBUG"
+                    )
+                    return ok
+                else:
+                    def _reproj(paths):
+                        try:
+                            result = reproject_and_coadd_from_paths(
+                                paths,
+                                match_background=True,
+                                crop_to_footprint=True,
+                                prefer_streaming_fallback=True,
+                            )
+                        except Exception:
+                            return False
+                        img_hwc = result.image.astype(np.float32)
+                        cov_hw = result.weight.astype(np.float32)
+                        wcs_obj = result.wcs
+                        h0, w0 = img_hwc.shape[:2]
+                        img_hwc, cov_hw, wcs_obj = self._crop_to_wht_bbox(
+                            img_hwc, cov_hw, wcs_obj
+                        )
+                        h1, w1 = img_hwc.shape[:2]
+                        hdr_out = wcs_obj.to_header(relax=True)
+                        fits.HDUList(
+                            [
+                                fits.PrimaryHDU(
+                                    np.moveaxis(img_hwc, -1, 0).astype(np.float32),
+                                    header=hdr_out,
+                                ),
+                                fits.ImageHDU(cov_hw.astype(np.float32), name="WHT"),
+                            ]
+                        ).writeto(out_fp, overwrite=True)
+                        logger.debug(
+                            "reprojection-fallback: sum range [%.4g, %.4g], wht range [%.4g, %.4g]",
+                            float(np.nanmin(img_hwc)),
+                            float(np.nanmax(img_hwc)),
+                            float(np.nanmin(cov_hw)),
+                            float(np.nanmax(cov_hw)),
+                        )
+                        logger.debug(
+                            "reprojection-fallback: dims %dx%d -> %dx%d", w0, h0, w1, h1
+                        )
+                        return True
+
+                    ok = _reproj(classic_files)
+                    _safe_progress(
+                        f"reprojection-fallback", level="DEBUG"
+                    )
+                    _safe_progress(
+                        f"temps: {time.time()-t_start:.2f}s", level="DEBUG"
+                    )
+                    return ok
 
         files = sorted(glob.glob(os.path.join(aligned_dir, "aligned_*.fits")))
         if not files:
@@ -13028,7 +13232,10 @@ class SeestarQueuedStacker:
             )
 
         requested_batch_size = batch_size
-        if requested_batch_size <= 0:
+        if requested_batch_size == 0:
+            # Mode "batch size 0" explicite : aucun lot, tout en RAM
+            self.batch_size = 0
+        elif requested_batch_size < 0:
             sample_img_path_for_bsize = None
             if input_dir and os.path.isdir(input_dir):
                 fits_files_bsize = [
@@ -13572,7 +13779,8 @@ class SeestarQueuedStacker:
                 plan_path, self.current_folder
             )
             logger.debug("Batching: using stacking plan from stack_plan.csv")
-            self.batch_size = 999999999
+            # En mode batch_size=0, ne pas surcharger la valeur; conserver 0
+            self.batch_size = 0
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
