@@ -10737,7 +10737,7 @@ class SeestarQueuedStacker:
                             has_wcs = True
                         except Exception:
                             has_wcs = False
-                    if not has_wcs:
+                    if not has_wcs and getattr(self, "batch_size", 0) != 0:
                         try:
                             self._run_astap_and_update_header(sci_path)
                             hdr = fits.getheader(sci_path, memmap=False)
