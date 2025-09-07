@@ -13843,6 +13843,22 @@ class SeestarQueuedStacker:
             if self.drizzle_active_session:
                 self.drizzle_output_wcs = self.reference_wcs_object
                 self.drizzle_output_shape_hw = self.reference_shape
+        elif (
+            self.freeze_reference_wcs
+            and (
+                self.drizzle_active_session
+                or self.reproject_between_batches
+                or self.reproject_coadd_final
+            )
+        ):
+            ok_grid = self._prepare_global_reprojection_grid()
+            if not ok_grid:
+                return False
+            self.fixed_output_wcs = self.reference_wcs_object
+            self.fixed_output_shape = self.reference_shape
+            if self.drizzle_active_session:
+                self.drizzle_output_wcs = self.reference_wcs_object
+                self.drizzle_output_shape_hw = self.reference_shape
 
         self.aligner.reference_image_path = reference_path_ui or None
 

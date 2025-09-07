@@ -5,6 +5,7 @@ from astropy.io import fits
 import importlib.util
 import sys
 from pathlib import Path
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -522,6 +523,118 @@ def test_freeze_reference_wcs(monkeypatch, tmp_path):
     obj._solve_cumulative_stack()
 
     assert np.allclose(obj.reference_wcs_object.wcs.crval, [0, 0])
+
+
+def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = True
+    obj.reproject_coadd_final = True
+    obj.reproject_between_batches = False
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+
+    # Create a minimal FITS file for reference
+    from astropy.io import fits
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    ref_path = tmp_path / "ref.fits"
+    fits.writeto(ref_path, data, hdr, overwrite=True)
+
+    # Dummy aligner providing reference image and header
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            hdr_local = fits.getheader(os.path.join(folder, files[0]))
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, np.zeros((4, 4), dtype=np.float32), hdr_local, overwrite=True)
+            self.reference_image_path = out_path
+            return np.zeros((4, 4, 3), dtype=np.float32), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        obj.queue.put(str(ref_path))
+        obj.all_input_filepaths = [str(ref_path)]
+        obj.files_in_queue = 1
+        return 1
+
+    obj._add_files_to_queue = fake_add_files
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    called = {"grid": False}
+
+    def fake_prepare():
+        obj.reference_wcs_object = wcs
+        obj.reference_shape = (4, 4)
+        obj.reference_header_for_wcs = wcs.to_header(relax=True)
+        called["grid"] = True
+        return True
+
+    monkeypatch.setattr(obj, "_prepare_global_reprojection_grid", fake_prepare)
+
+    obj._worker = lambda: None
+
+    ok = obj.start_processing(str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True)
+
+    assert ok
+    assert called["grid"]
 
 
 def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
