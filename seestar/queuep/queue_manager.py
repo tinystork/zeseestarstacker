@@ -3818,21 +3818,23 @@ class SeestarQueuedStacker:
                     )
                 self.reference_wcs_object = temp_wcs_ancre
 
-                if self.reference_wcs_object and hasattr(
-                    self.reference_wcs_object, "pixel_scale_matrix"
-                ):  # Mettre à jour l'échelle globale
+                if self.reference_wcs_object:
                     try:
-                        self.reference_pixel_scale_arcsec = (
-                            np.sqrt(
-                                np.abs(
-                                    np.linalg.det(
-                                        self.reference_wcs_object.pixel_scale_matrix
-                                    )
-                                )
+                        scale_deg = np.mean(
+                            np.abs(
+                                proj_plane_pixel_scales(self.reference_wcs_object)
                             )
-                            * 3600.0
                         )
-                    except:
+                        arcsec_raw = scale_deg * 3600.0
+                        if arcsec_raw < 0.1 or arcsec_raw > 30.0:
+                            logger.warning(
+                                "Reference WCS pixel scale %.3f arcsec/pix outside [0.1, 30.0]; clipping.",
+                                arcsec_raw,
+                            )
+                        self.reference_pixel_scale_arcsec = float(
+                            np.clip(arcsec_raw, 0.1, 30.0)
+                        )
+                    except Exception:
                         pass  # Ignorer si erreur de calcul
 
                 if self.reference_wcs_object:
@@ -3958,21 +3960,23 @@ class SeestarQueuedStacker:
                         int(ny_ref_hdr),
                     )
 
-                if hasattr(
-                    self.reference_wcs_object, "pixel_scale_matrix"
-                ):  # Mettre à jour l'échelle globale
+                if self.reference_wcs_object:
                     try:
-                        self.reference_pixel_scale_arcsec = (
-                            np.sqrt(
-                                np.abs(
-                                    np.linalg.det(
-                                        self.reference_wcs_object.pixel_scale_matrix
-                                    )
-                                )
+                        scale_deg = np.mean(
+                            np.abs(
+                                proj_plane_pixel_scales(self.reference_wcs_object)
                             )
-                            * 3600.0
                         )
-                    except:
+                        arcsec_raw = scale_deg * 3600.0
+                        if arcsec_raw < 0.1 or arcsec_raw > 30.0:
+                            logger.warning(
+                                "Reference WCS pixel scale %.3f arcsec/pix outside [0.1, 30.0]; clipping.",
+                                arcsec_raw,
+                            )
+                        self.reference_pixel_scale_arcsec = float(
+                            np.clip(arcsec_raw, 0.1, 30.0)
+                        )
+                    except Exception:
                         pass
 
                 logger.debug(
@@ -13660,15 +13664,20 @@ class SeestarQueuedStacker:
                         )
 
                     try:
-                        scales_deg_per_pix = proj_plane_pixel_scales(
-                            self.reference_wcs_object
-                        )
-                        avg_scale_deg_per_pix = np.mean(np.abs(scales_deg_per_pix))
-
-                        if avg_scale_deg_per_pix > 1e-9:
-                            self.reference_pixel_scale_arcsec = (
-                                avg_scale_deg_per_pix * 3600.0
+                        scale_deg = np.mean(
+                            np.abs(
+                                proj_plane_pixel_scales(self.reference_wcs_object)
                             )
+                        )
+                        if scale_deg > 0:
+                            arcsec_raw = scale_deg * 3600.0
+                            if arcsec_raw < 0.1 or arcsec_raw > 30.0:
+                                logger.warning(
+                                    "Reference WCS pixel scale %.3f arcsec/pix outside [0.1, 30.0]; clipping.",
+                                    arcsec_raw,
+                                )
+                            arcsec = np.clip(arcsec_raw, 0.1, 30.0)
+                            self.reference_pixel_scale_arcsec = float(arcsec)
                             self.update_progress(
                                 f"   [StartProcRefSolve] Échelle image de référence estimée à: {self.reference_pixel_scale_arcsec:.2f} arcsec/pix.",
                                 "INFO",
