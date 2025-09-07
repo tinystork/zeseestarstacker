@@ -1210,9 +1210,14 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
         # Internal flag to allow bypassing aligned_*.fits when classic batches
-        # are available for the final co-add in batch_size==1 mode.
-        self.use_classic_batches_for_final_coadd = bool(
-            getattr(settings, "use_classic_batches_for_final_coadd", True)
+
+        # are available for the final co-add in batch_size==1 mode. Ensure modes
+        # with ``batch_size!=1`` behave exactly as before.
+        self.use_classic_batches_for_final_coadd = (
+            bool(getattr(settings, "use_classic_batches_for_final_coadd", True))
+            if getattr(self, "batch_size", 0) == 1
+            else False
+
         )
         # Liste des fichiers intermédiaires en mode Classic avec reprojection
         self.intermediate_classic_batch_files = []
@@ -10333,9 +10338,13 @@ class SeestarQueuedStacker:
         hdu = fits.PrimaryHDU(
             data=avg.astype(np.float32), header=self.reference_header_for_wcs
         )
-        fits.writeto(
-            "master_stack_classic_nodriz.fits", hdu.data, hdu.header, overwrite=True
+        # Save inside the configured output folder so batch_size=0 behaves like
+        # before the classic-batch additions.
+        out_fp = os.path.join(
+            getattr(self, "output_folder", ""), "master_stack_classic_nodriz.fits"
         )
+        fits.writeto(out_fp, hdu.data, hdu.header, overwrite=True)
+        self.final_stacked_path = out_fp
 
     def _final_reproject_cached_files(self, cache_list):
         """Reproject cached solved images and accumulate them."""
