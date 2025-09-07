@@ -11401,7 +11401,51 @@ class SeestarQueuedStacker:
                 )
                 continue
             try:
-                solved_ok = self._run_astap_and_update_header(sci_path)
+                hdr = None
+                try:
+                    hdr = fits.getheader(sci_path, memmap=False)
+                    has_wcs = all(
+                        k in hdr
+                        for k in ("CRVAL1", "CRVAL2", "CD1_1", "CD1_2", "CD2_1", "CD2_2")
+                    )
+                except Exception:
+                    hdr = None
+                    has_wcs = False
+                if not has_wcs:
+                    if getattr(self, "reference_header_for_wcs", None) is not None:
+                        try:
+                            hdr = hdr or fits.Header()
+                            for k in (
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ):
+                                if k in self.reference_header_for_wcs:
+                                    hdr[k] = self.reference_header_for_wcs[k]
+                            data_tmp = fits.getdata(sci_path, memmap=False)
+                            fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
+                                sci_path, overwrite=True, output_verify="ignore"
+                            )
+                            has_wcs = True
+                        except Exception:
+                            has_wcs = False
+                solved_ok = True
+                if not has_wcs:
+                    if getattr(self, "batch_size", 0) != 0:
+                        solved_ok = self._run_astap_and_update_header(sci_path)
+                        if solved_ok:
+                            hdr = fits.getheader(sci_path, memmap=False)
+                    else:
+                        solved_ok = False
                 if not solved_ok:
                     self.update_progress(
                         f"   -> Batch ignor\xe9 (astrom\xe9trie \xe9chou\xe9e) {sci_path}",
@@ -11409,6 +11453,7 @@ class SeestarQueuedStacker:
                     )
                     self.unsolved_classic_batch_files.add(sci_path)
                     continue
+
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
