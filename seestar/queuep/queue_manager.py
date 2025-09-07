@@ -4299,12 +4299,14 @@ class SeestarQueuedStacker:
                                 )
                                 self._current_batch_paths.append(file_path)
 
-                                trigger = (
-                                    getattr(self, "chunk_size", None)
-                                    if self.batch_size == 1
-                                    and getattr(self, "chunk_size", None)
-                                    else max(1, self.batch_size)
-                                )
+                                if self.batch_size == 0:
+                                    trigger = float("inf")
+                                elif self.batch_size == 1 and getattr(
+                                    self, "chunk_size", None
+                                ):
+                                    trigger = getattr(self, "chunk_size")
+                                else:
+                                    trigger = max(1, self.batch_size)
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
@@ -4536,12 +4538,14 @@ class SeestarQueuedStacker:
                                             classic_stack_item
                                         )
 
-                                trigger = (
-                                    getattr(self, "chunk_size", None)
-                                    if self.batch_size == 1
-                                    and getattr(self, "chunk_size", None)
-                                    else max(1, self.batch_size)
-                                )
+                                if self.batch_size == 0:
+                                    trigger = float("inf")
+                                elif self.batch_size == 1 and getattr(
+                                    self, "chunk_size", None
+                                ):
+                                    trigger = getattr(self, "chunk_size")
+                                else:
+                                    trigger = max(1, self.batch_size)
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
