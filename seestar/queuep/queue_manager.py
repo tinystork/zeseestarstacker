@@ -13238,7 +13238,10 @@ class SeestarQueuedStacker:
             )
 
         requested_batch_size = batch_size
-        if requested_batch_size <= 0:
+        if requested_batch_size == 0:
+            # Mode "batch size 0" explicite : aucun lot, tout en RAM
+            self.batch_size = 0
+        elif requested_batch_size < 0:
             sample_img_path_for_bsize = None
             if input_dir and os.path.isdir(input_dir):
                 fits_files_bsize = [
@@ -13782,7 +13785,8 @@ class SeestarQueuedStacker:
                 plan_path, self.current_folder
             )
             logger.debug("Batching: using stacking plan from stack_plan.csv")
-            self.batch_size = 999999999
+            # En mode batch_size=0, ne pas surcharger la valeur; conserver 0
+            self.batch_size = 0
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
