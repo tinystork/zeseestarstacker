@@ -104,9 +104,10 @@ def compute_final_output_grid(headers, auto_rotate=True):
     for hdr in headers:
         try:
             hdr = sanitize_header_for_wcs(hdr)
-            w = WCS(hdr, naxis=2)
             h = int(hdr.get("NAXIS2"))
             w_pix = int(hdr.get("NAXIS1"))
+            w = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(w, h, w_pix)
             wcs_list.append(w)
             shapes.append((h, w_pix))
         except Exception:
