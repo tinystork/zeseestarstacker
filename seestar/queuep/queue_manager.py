@@ -1822,21 +1822,27 @@ class SeestarQueuedStacker:
                     self.drizzle_output_wcs is None
                     or self.drizzle_output_shape_hw is None
                 ):
-                    (
-                        self.drizzle_output_wcs,
-                        self.drizzle_output_shape_hw,
-                    ) = self._create_drizzle_output_wcs(
-                        self.reference_wcs_object,
-                        ref_shape_hw_for_grid,
-                        self.drizzle_scale,
-                    )
-                    if (
-                        self.drizzle_output_wcs is None
-                        or self.drizzle_output_shape_hw is None
-                    ):
-                        raise RuntimeError(
-                            "Échec _create_drizzle_output_wcs pour Drizzle Incrémental."
+                    use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
+                    if use_drizzle:
+                        (
+                            self.drizzle_output_wcs,
+                            self.drizzle_output_shape_hw,
+                        ) = self._create_drizzle_output_wcs(
+                            self.reference_wcs_object,
+                            ref_shape_hw_for_grid,
+                            self.drizzle_scale,
                         )
+                        if (
+                            self.drizzle_output_wcs is None
+                            or self.drizzle_output_shape_hw is None
+                        ):
+                            raise RuntimeError(
+                                "Échec _create_drizzle_output_wcs pour Drizzle Incrémental."
+                            )
+                    else:
+                        logger.info("Drizzle OFF -> output grid = reference grid")
+                        self.drizzle_output_wcs = self.reference_wcs_object
+                        self.drizzle_output_shape_hw = ref_shape_hw_for_grid
                 current_output_shape_hw_for_accum_or_driz = self.drizzle_output_shape_hw
                 logger.debug(
                     f"  -> Grille Drizzle Incrémental: Shape={current_output_shape_hw_for_accum_or_driz}, WCS CRVAL={self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs.wcs else 'N/A'}"
@@ -3985,21 +3991,27 @@ class SeestarQueuedStacker:
                             self.drizzle_output_wcs is None
                             or self.drizzle_output_shape_hw is None
                         ):
-                            (
-                                self.drizzle_output_wcs,
-                                self.drizzle_output_shape_hw,
-                            ) = self._create_drizzle_output_wcs(
-                                self.reference_wcs_object,
-                                ref_shape_for_drizzle_grid_hw,
-                                self.drizzle_scale,
-                            )
-                            if (
-                                self.drizzle_output_wcs is None
-                                or self.drizzle_output_shape_hw is None
-                            ):
-                                raise RuntimeError(
-                                    "Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard."
+                            use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
+                            if use_drizzle:
+                                (
+                                    self.drizzle_output_wcs,
+                                    self.drizzle_output_shape_hw,
+                                ) = self._create_drizzle_output_wcs(
+                                    self.reference_wcs_object,
+                                    ref_shape_for_drizzle_grid_hw,
+                                    self.drizzle_scale,
                                 )
+                                if (
+                                    self.drizzle_output_wcs is None
+                                    or self.drizzle_output_shape_hw is None
+                                ):
+                                    raise RuntimeError(
+                                        "Échec de _create_drizzle_output_wcs (retourne None) pour Drizzle Standard."
+                                    )
+                            else:
+                                logger.info("Drizzle OFF -> output grid = reference grid")
+                                self.drizzle_output_wcs = self.reference_wcs_object
+                                self.drizzle_output_shape_hw = ref_shape_for_drizzle_grid_hw
                         logger.debug(
                             f"DEBUG QM [_worker]: Grille de sortie Drizzle Standard initialisée: Shape={self.drizzle_output_shape_hw}"
                         )
@@ -11113,8 +11125,12 @@ class SeestarQueuedStacker:
             )
             return False
 
+        use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
         try:
-            if (
+            if not use_drizzle:
+                out_wcs, shape_out = self.reference_wcs_object, self.reference_shape
+                auto_rotate = False
+            elif (
                 getattr(self, "reference_wcs_object", None) is not None
                 and getattr(self, "reference_shape", None) is not None
             ):
@@ -11275,7 +11291,12 @@ class SeestarQueuedStacker:
                     auto_rot = False
             except Exception:
                 pass
-            out_wcs, shape_out = ru.compute_final_output_grid(headers, auto_rotate=auto_rot)
+            use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
+            if not use_drizzle:
+                out_wcs, shape_out = self.reference_wcs_object, self.reference_shape
+                auto_rot = False
+            else:
+                out_wcs, shape_out = ru.compute_final_output_grid(headers, auto_rotate=auto_rot)
             logger.info("Using global WCS (no fallback)")
             result = ru.reproject_and_coadd_from_paths(
                 valid_paths,
@@ -13711,15 +13732,24 @@ class SeestarQueuedStacker:
         if self.reference_wcs_object and self.fixed_output_wcs is None:
             try:
                 ref_hw = ref_shape_hwc[:2]
-                (
-                    self.fixed_output_wcs,
-                    self.fixed_output_shape,
-                ) = self._create_drizzle_output_wcs(
-                    self.reference_wcs_object, ref_hw, self.drizzle_scale
-                )
-                self.drizzle_output_wcs = self.fixed_output_wcs
-                self.drizzle_output_shape_hw = self.fixed_output_shape
-                self.reference_shape = self.fixed_output_shape
+                use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
+                if use_drizzle:
+                    (
+                        self.fixed_output_wcs,
+                        self.fixed_output_shape,
+                    ) = self._create_drizzle_output_wcs(
+                        self.reference_wcs_object, ref_hw, self.drizzle_scale
+                    )
+                    self.drizzle_output_wcs = self.fixed_output_wcs
+                    self.drizzle_output_shape_hw = self.fixed_output_shape
+                    self.reference_shape = self.fixed_output_shape
+                else:
+                    logger.info("Drizzle OFF -> output grid = reference grid")
+                    self.fixed_output_wcs = self.reference_wcs_object
+                    self.fixed_output_shape = ref_hw
+                    self.drizzle_output_wcs = self.reference_wcs_object
+                    self.drizzle_output_shape_hw = ref_hw
+                    self.reference_shape = ref_hw
             except Exception as e_fix:
                 logger.debug(
                     f"WARN start_processing: erreur creation grille fixe: {e_fix}"
