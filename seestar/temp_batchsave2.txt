@@ -1,0 +1,161 @@
+                            "CRPIX2",
+                            "CDELT1",
+                            "CDELT2",
+                            "CD1_1",
+                            "CD1_2",
+                            "CD2_1",
+                            "CD2_2",
+                            "CTYPE1",
+                            "CTYPE2",
+                            "CRVAL1",
+                            "CRVAL2",
+                        ]
+                        if k in self.reference_header_for_wcs
+                    }
+                )
+                header["NAXIS1"] = final_stacked.shape[1]
+                header["NAXIS2"] = final_stacked.shape[0]
+                data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+                fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+                    sci_fits, overwrite=True, output_verify="ignore"
+                )
+                for i, wht_path in enumerate(wht_paths):
+                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                        wht_path, overwrite=True, output_verify="ignore"
+                    )
+
+        self._last_classic_batch_solved = solved_ok
+
+        if self.reproject_coadd_final:
+            # Simply store the batch for the final reproject+coadd pass
+            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+        elif not solved_ok:
+            self.unsolved_classic_batch_files.add(sci_fits)
+
+        return sci_fits, wht_paths
+
+    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> bool:
+        """Reproject saved *classic* batches to a common grid and merge them.
+
+        This variant first aligns **every batch** onto ``self.reference_wcs_object``
+        (when provided), ensuring that the subsequent call to
+        :pyfunc:`reproject_and_coadd` only has to *combine* images that are already
+        pixel‑perfectly registered.  This reproduces the behaviour of the simple
+        « Reproject » mode and prevents the blur previously observed in
+        « Reproject + Co‑add ».
+        """
+
+        try:
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
+            )
+        except Exception as e:
+            self.update_progress(
+                f"⚠️ Outils de reprojection indisponibles: {e}", "WARN"
+            )
+            return False
+
+        # --- 1. Containers -------------------------------------------------------
+        channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
+        channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
+        wcs_for_grid: List[WCS] = []
+        headers_for_grid = []
+
+        # --- 2. Loop over saved batch FITS --------------------------------------
+        for sci_path, wht_paths in batch_files:
+            if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                self.update_progress(
+                    f"   -> Batch ignor\xe9 (non r\xe9solu) {sci_path}",
+                    "WARN",
+                )
+                continue
+            # Ensure a valid WCS is present when using reproject+coadd
+            if getattr(self, "reproject_coadd_final", False):
+                try:
+                    self._run_astap_and_update_header(sci_path)
+                except Exception:
+                    pass
+            # 2.1 Load science cube + WCS
+            try:
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
+                batch_wcs = WCS(hdr, naxis=2)
+                h, w = data_cxhxw.shape[-2:]
+                batch_wcs.pixel_shape = (w, h)
+            except Exception:
+                continue  # silently skip unreadable batch
+
+            # 2.2 Load coverage / weight map (or fallback)
+            try:
+                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                    np.float32, copy=False
+                )
+                np.nan_to_num(coverage, copy=False)
+                coverage *= make_radial_weight_map(*coverage.shape)
+            except Exception:
+                coverage = np.ones((h, w), dtype=np.float32)
+
+            # ------------------------------------------------------------------
+            # 2.3 Prepare batch data
+            # ------------------------------------------------------------------
+            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+
+            # 2.4 Feed per‑channel lists -------------------------------------
+            wcs_for_grid.append(batch_wcs)
+            headers_for_grid.append(hdr)
+
+            for ch in range(3):
+                channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
+                channel_footprints[ch].append(coverage)
+
+        # --- 3. Sanity checks ----------------------------------------------------
+        if len(wcs_for_grid) < 2:
+            self.update_progress(
+                f"⚠️ Reprojection ignorée : seulement {len(wcs_for_grid)} WCS valides.",
+                "WARN",
+            )
+            return False
+
+        # --- 4. Determine output grid -------------------------------------------
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+        else:
+            out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                wcs_for_grid,
+                headers_for_grid,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                auto_rotate=True,
+            )
+        if out_wcs is None or out_shape is None:
+            self.update_progress(
+                "⚠️ Reprojection ignorée : échec du calcul de la grille finale.",
+                "WARN",
+            )
+            return False
+
+        # --- 5. Combine per‑channel stacks --------------------------------------
+        final_channels = []
+        final_cov = None
+        for ch in range(3):
+            # When stacking classic batches in ``batch_size == 1`` mode, images
+            # are already background normalised during the disk-based pipeline.
+            # Passing ``match_background=True`` to ``reproject_and_coadd`` would
+            # attempt another background matching step, which can result in NaNs
+            # when some inputs have no overlap, producing an empty final image.
+            # Keep the previous behaviour for other batch sizes.
+            try:  # [B1-MATCH-BG-FIX]
+                match_bg = getattr(self, "batch_size", 0) != 1
+            except Exception:
+                match_bg = True
+
+            sci, cov = reproject_and_coadd(
+                channel_arrays_wcs[ch],
+                output_projection=out_wcs,

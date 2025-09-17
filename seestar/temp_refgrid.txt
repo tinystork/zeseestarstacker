@@ -1,0 +1,41 @@
+                ref_shape = ref_wcs.pixel_shape
+            else:
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    header_list,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
+                    auto_rotate=True,
+                )
+                if ref_wcs is None:
+                    self.update_progress(
+                        "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
+                    )
+                    return False
+
+            # Store the computed grid for subsequent batches. Whether the
+            # reference WCS remains fixed is decided by ``freeze_reference_wcs``
+            # which may be controlled by the caller.
+            self.reference_wcs_object = ref_wcs
+            self.reference_shape = ref_shape
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+            self.ref_wcs_header = self.reference_header_for_wcs
+        else:
+            ref_wcs = self.reference_wcs_object
+            ref_shape = (
+                int(self.reference_header_for_wcs["NAXIS2"]),
+                int(self.reference_header_for_wcs["NAXIS1"]),
+            )
+
+        self.reference_wcs_object = ref_wcs
+        self.reference_shape = ref_shape
+        if self.reference_header_for_wcs is None:
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        self.ref_wcs_header = self.reference_header_for_wcs
+        try:
+            self.reference_wcs_object.pixel_shape = (
+                self.reference_shape[1],
+                self.reference_shape[0],
+            )
+            self.reference_wcs_object._naxis1 = self.reference_shape[1]

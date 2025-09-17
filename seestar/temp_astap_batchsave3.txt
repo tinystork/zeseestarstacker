@@ -1,0 +1,191 @@
+        fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+            sci_fits, overwrite=True, output_verify="ignore"
+        )
+
+        # If we have a reference WCS for the session, persist it on the batch
+        # FITS now to avoid any astrometric re-solving later on this file.
+        try:
+            if getattr(self, "reference_wcs_object", None) is not None:
+                hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                    if k in hdr_ref:
+                        del hdr_ref[k]
+                _sanitize_continue_as_string(hdr_ref)
+                write_wcs_to_fits_inplace(sci_fits, hdr_ref)
+                input_wcs = WCS(hdr_ref, naxis=2)
+        except Exception:
+            pass
+
+        for ch_i in range(final_stacked.shape[2]):
+            wht_path = os.path.join(
+                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+            )
+            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                wht_path, overwrite=True, output_verify="ignore"
+            )
+            wht_paths.append(wht_path)
+
+        # In reproject+coadd mode we postpone solving until all batches are
+        # stacked. Only run the solver here when explicitly requested via
+        # ``solve_batches``.
+        run_astap = self.solve_batches and not self.reproject_coadd_final
+        # Do not attempt solving if we already injected a valid reference WCS
+        try:
+            if getattr(self, "reference_wcs_object", None) is not None:
+                run_astap = False
+        except Exception:
+            pass
+        solved_ok = True
+
+        if run_astap:
+            solved_ok = self._run_astap_and_update_header(sci_fits)
+            if solved_ok:
+                header = fits.getheader(sci_fits)
+            else:
+                if (
+                    self.reference_header_for_wcs is not None
+                    and not self.reproject_coadd_final
+                ):
+                    if (
+                        input_wcs is not None
+                        and self.reference_wcs_object is not None
+                        and self.reference_shape is not None
+                    ):
+                        try:
+                            final_stacked = reproject_to_reference_wcs(
+                                final_stacked,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                            final_wht = reproject_to_reference_wcs(
+                                final_wht,
+                                input_wcs,
+                                self.reference_wcs_object,
+                                self.reference_shape,
+                            )
+                        except Exception:
+                            pass
+                    header.update(
+                        {
+                            k: self.reference_header_for_wcs[k]
+                            for k in [
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ]
+                            if k in self.reference_header_for_wcs
+                        }
+                    )
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+                    data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+                    fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+                        sci_fits, overwrite=True, output_verify="ignore"
+                    )
+                    for i, wht_path in enumerate(wht_paths):
+                        fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                            wht_path, overwrite=True, output_verify="ignore"
+                        )
+                else:
+                    os.remove(sci_fits)
+                    for p in wht_paths:
+                        os.remove(p)
+                    self._last_classic_batch_solved = False
+                    return None, None
+        else:
+            if self.reference_header_for_wcs is not None:
+                if (
+                    input_wcs is not None
+                    and self.reference_wcs_object is not None
+                    and self.reference_shape is not None
+                ):
+                    try:
+                        final_stacked = reproject_to_reference_wcs(
+                            final_stacked,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                        final_wht = reproject_to_reference_wcs(
+                            final_wht,
+                            input_wcs,
+                            self.reference_wcs_object,
+                            self.reference_shape,
+                        )
+                    except Exception:
+                        pass
+                header.update(
+                    {
+                        k: self.reference_header_for_wcs[k]
+                        for k in [
+                            "CRPIX1",
+                            "CRPIX2",
+                            "CDELT1",
+                            "CDELT2",
+                            "CD1_1",
+                            "CD1_2",
+                            "CD2_1",
+                            "CD2_2",
+                            "CTYPE1",
+                            "CTYPE2",
+                            "CRVAL1",
+                            "CRVAL2",
+                        ]
+                        if k in self.reference_header_for_wcs
+                    }
+                )
+                header["NAXIS1"] = final_stacked.shape[1]
+                header["NAXIS2"] = final_stacked.shape[0]
+                data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+                fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+                    sci_fits, overwrite=True, output_verify="ignore"
+                )
+                for i, wht_path in enumerate(wht_paths):
+                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                        wht_path, overwrite=True, output_verify="ignore"
+                    )
+
+        self._last_classic_batch_solved = solved_ok
+
+        if self.reproject_coadd_final:
+            # Simply store the batch for the final reproject+coadd pass
+            self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
+        elif not solved_ok:
+            self.unsolved_classic_batch_files.add(sci_fits)
+
+        return sci_fits, wht_paths
+
+    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> bool:
+        """Reproject saved *classic* batches to a common grid and merge them.
+
+        This variant first aligns **every batch** onto ``self.reference_wcs_object``
+        (when provided), ensuring that the subsequent call to
+        :pyfunc:`reproject_and_coadd` only has to *combine* images that are already
+        pixel‑perfectly registered.  This reproduces the behaviour of the simple
+        « Reproject » mode and prevents the blur previously observed in
+        « Reproject + Co‑add ».
+        """
+
+        try:
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
+            )
+        except Exception as e:
+            self.update_progress(
+                f"⚠️ Outils de reprojection indisponibles: {e}", "WARN"
+            )
+            return False
+
+        # --- 1. Containers -------------------------------------------------------
+        channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs

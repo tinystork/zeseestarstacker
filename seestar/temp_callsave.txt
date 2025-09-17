@@ -1,0 +1,71 @@
+                                self.drizzle_output_shape_hw,
+                            ),
+                        )
+                        (
+                            final_drizzle_sci_hxwxc,
+                            final_drizzle_wht_hxwxc,
+                        ) = fut.result()
+                        if final_drizzle_sci_hxwxc is not None:
+                            self.update_progress(
+                                "   Drizzle Final combiné. Préparation sauvegarde..."
+                            )
+                            self._save_final_stack(
+                                output_filename_suffix="_drizzle_final",  # Suffixe correct
+                                drizzle_final_sci_data=final_drizzle_sci_hxwxc,
+                                drizzle_final_wht_data=final_drizzle_wht_hxwxc,
+                            )
+                        else:
+                            self.update_progress(
+                                "   ❌ Échec combinaison finale des lots Drizzle (résultat vide).",
+                                None,
+                            )
+                            self.processing_error = "Échec combinaison Drizzle Final"
+                            self.final_stacked_path = None
+
+            # --- MODE STACKING CLASSIQUE (NON-MOSAÏQUE, NON-DRIZZLE) ---
+            elif not self.is_mosaic_run and not self.drizzle_active_session:
+                logger.debug(
+                    "DEBUG QM [_worker Finalize]: Finalisation Stacking Classique (ou Reprojection)."
+                )
+
+                if (
+                    self.reproject_between_batches
+                    and current_batch_items_with_masks_for_stack_batch
+                ):
+                    self.stacked_batches_count += 1
+                    self._send_eta_update()
+                    num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
+                    self.update_progress(
+                        f"⚙️ Traitement classique du dernier lot partiel ({num_in_batch} images)..."
+                    )
+
+                    stacked_np, hdr, wht_2d = self._stack_batch(
+                        current_batch_items_with_masks_for_stack_batch,
+                        self.stacked_batches_count,
+                        self.total_batches_estimated,
+                    )
+                    if stacked_np is not None:
+                        solved_path, _ = self._save_and_solve_classic_batch(
+                            stacked_np, wht_2d, hdr, self.stacked_batches_count
+                        )
+                        batch_wcs = None
+                        try:
+                            batch_wcs = WCS(hdr, naxis=2)
+                        except Exception:
+                            batch_wcs = None
+
+                        if (
+                            not (
+                                self.reproject_between_batches
+                                or self.reproject_coadd_final
+                            )
+                            or self._last_classic_batch_solved
+                        ):
+                            self._combine_batch_result(
+                                stacked_np,
+                                hdr,
+                                wht_2d,
+                                batch_wcs=batch_wcs,
+                            )
+                        else:
+                            self.update_progress(

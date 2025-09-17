@@ -10468,8 +10468,9 @@ class SeestarQueuedStacker:
                     ),
                 )
 
-        # Save the batch to disk before solving so the WCS can be written
-        # directly to the final FITS file.
+        # Save the batch to disk. If a reference WCS is already known for this
+        # session, inject it immediately so that downstream steps do not try to
+        # re-solve astrometry on intermediate classic batches.
         data_cxhxw = np.moveaxis(final_stacked, -1, 0)
         header["NAXIS"] = 3
         header["NAXIS1"] = data_cxhxw.shape[2]
@@ -10490,6 +10491,20 @@ class SeestarQueuedStacker:
             sci_fits, overwrite=True, output_verify="ignore"
         )
 
+        # If we have a reference WCS for the session, persist it on the batch
+        # FITS now to avoid any astrometric re-solving later on this file.
+        try:
+            if getattr(self, "reference_wcs_object", None) is not None:
+                hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                    if k in hdr_ref:
+                        del hdr_ref[k]
+                _sanitize_continue_as_string(hdr_ref)
+                write_wcs_to_fits_inplace(sci_fits, hdr_ref)
+                input_wcs = WCS(hdr_ref, naxis=2)
+        except Exception:
+            pass
+
         for ch_i in range(final_stacked.shape[2]):
             wht_path = os.path.join(
                 out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
@@ -10503,6 +10518,12 @@ class SeestarQueuedStacker:
         # stacked. Only run the solver here when explicitly requested via
         # ``solve_batches``.
         run_astap = self.solve_batches and not self.reproject_coadd_final
+        # Do not attempt solving if we already injected a valid reference WCS
+        try:
+            if getattr(self, "reference_wcs_object", None) is not None:
+                run_astap = False
+        except Exception:
+            pass
         solved_ok = True
 
         if run_astap:
@@ -10669,10 +10690,21 @@ class SeestarQueuedStacker:
                     "WARN",
                 )
                 continue
-            # Ensure a valid WCS is present when using reproject+coadd
+            # Ensure a valid WCS is present when using reproject+coadd.
+            # Prefer injecting the already-known reference WCS instead of
+            # launching a new solve on each intermediate batch.
             if getattr(self, "reproject_coadd_final", False):
                 try:
-                    self._run_astap_and_update_header(sci_path)
+                    if getattr(self, "reference_wcs_object", None) is not None:
+                        hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                        for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                            if k in hdr_ref:
+                                del hdr_ref[k]
+                        _sanitize_continue_as_string(hdr_ref)
+                        write_wcs_to_fits_inplace(sci_path, hdr_ref)
+                    else:
+                        # Fallback: attempt solve only when no reference is available
+                        self._run_astap_and_update_header(sci_path)
                 except Exception:
                     pass
             # 2.1 Load science cube + WCS
@@ -11135,14 +11167,20 @@ class SeestarQueuedStacker:
                 )
                 continue
             try:
-                solved_ok = self._run_astap_and_update_header(sci_path)
-                if not solved_ok:
-                    self.update_progress(
-                        f"   -> Batch ignor\xe9 (astrom\xe9trie \xe9chou\xe9e) {sci_path}",
-                        "WARN",
-                    )
-                    self.unsolved_classic_batch_files.add(sci_path)
-                    continue
+                # Inject reference WCS on intermediate batch files to avoid any
+                # astrometric solving. This assumes classic batches are already
+                # pixel-aligned to the session reference grid.
+                if getattr(self, "reference_wcs_object", None) is not None:
+                    try:
+                        hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                        for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                            if k in hdr_ref:
+                                del hdr_ref[k]
+                        _sanitize_continue_as_string(hdr_ref)
+                        write_wcs_to_fits_inplace(sci_path, hdr_ref)
+                    except Exception:
+                        pass
+
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
