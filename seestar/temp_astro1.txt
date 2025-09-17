@@ -1,0 +1,31 @@
+            if result.stdout and result.returncode != 0: self._log(f"LocalAnsvr stdout (échec):\n{result.stdout[:1000]}", "DEBUG")
+            if result.stderr: self._log(f"LocalAnsvr stderr:\n{result.stderr[:1000]}", "DEBUG")
+
+            if result.returncode == 0:
+                if os.path.exists(output_fits_path) and os.path.getsize(output_fits_path) > 0:
+                    self._log(f"LocalAnsvr: Résolution RÉUSSIE pour '{base_img_name_for_log}'. Fichier solution: '{os.path.basename(output_fits_path)}'.", "INFO")
+                    try:
+                        with fits.open(output_fits_path,memmap=False) as h_sol: solved_header=h_sol[0].header
+                        with warnings.catch_warnings(): warnings.simplefilter("ignore",FITSFixedWarning); wcs_object=WCS(solved_header,naxis=2)
+                        if wcs_object and wcs_object.is_celestial:
+                            nx=solved_header.get('NAXIS1',fits_header.get('NAXIS1') if fits_header else None) 
+                            ny=solved_header.get('NAXIS2',fits_header.get('NAXIS2') if fits_header else None)
+                            if nx and ny: wcs_object.pixel_shape=(int(nx),int(ny)) 
+                            if update_header_with_solution and fits_header is not None: self._update_fits_header_with_wcs(fits_header,wcs_object,solver_name="LocalAnsvr_GuessDirect") # Nom du solveur mis à jour
+                        else: self._log(f"LocalAnsvr: ERREUR - WCS non céleste depuis '{os.path.basename(output_fits_path)}'.", "ERROR"); wcs_object=None
+                    except Exception as e_p: self._log(f"LocalAnsvr: ERREUR parsing FITS solution '{os.path.basename(output_fits_path)}': {e_p}","ERROR"); wcs_object=None
+                else: self._log(f"LocalAnsvr: ERREUR - solve-field code 0 mais FITS solution '{os.path.basename(output_fits_path)}' manquant/vide.", "ERROR"); wcs_object=None
+            else: self._log(f"LocalAnsvr: WARN - solve-field a échoué pour '{base_img_name_for_log}' (code: {result.returncode}).", "WARN"); wcs_object=None
+        except RuntimeError as rte_internal: self._log(f"LocalAnsvr: ERREUR (Runtime) interne: {rte_internal}", "ERROR"); wcs_object=None
+        except subprocess.TimeoutExpired: self._log(f"LocalAnsvr: ERREUR - Timeout ({timeout_sec}s) pour '{base_img_name_for_log}'.", "ERROR"); wcs_object=None
+        except FileNotFoundError: self._log(f"LocalAnsvr: ERREUR - Exécutable '{solve_field_exe_final_path}' non trouvé par subprocess.", "ERROR"); wcs_object=None
+        except Exception as e: self._log(f"LocalAnsvr: ERREUR inattendue: {e}", "ERROR"); traceback.print_exc(limit=1); wcs_object=None
+        finally:
+            if temp_dir_ansvr_solve and os.path.isdir(temp_dir_ansvr_solve):
+                try: shutil.rmtree(temp_dir_ansvr_solve, ignore_errors=True); self._log(f"LocalAnsvr: Répertoire temp '{temp_dir_ansvr_solve}' supprimé.", "DEBUG")
+                except Exception as e_cl: self._log(f"LocalAnsvr: WARN - Erreur nettoyage dir temp '{temp_dir_ansvr_solve}': {e_cl}", "WARN")
+            self._log(f"LocalAnsvr: Fin traitement pour '{base_img_name_for_log}'.", "DEBUG")
+
+        self._log(f"LocalAnsvr: Fin résolution pour {base_img_name_for_log}. Solution trouvée: {'Oui' if wcs_object else 'Non'}", "INFO")
+        return wcs_object
+

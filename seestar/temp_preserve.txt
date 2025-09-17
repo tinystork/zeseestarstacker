@@ -1,0 +1,81 @@
+            Indique si le traitement s'est arrêté prématurément.
+        drizzle_final_sci_data : ndarray, optional
+            Données science fournies pour les modes Drizzle/Mosaïque.
+        drizzle_final_wht_data : ndarray, optional
+            Carte de poids correspondante.
+        preserve_linear_output : bool, optional
+            Si ``True``, saute la normalisation par percentiles et conserve la
+            dynamique linéaire de ``final_image_initial_raw``.
+
+        Version: V_SaveFinal_CorrectedDataFlow_1
+        """
+        logger.debug("\n" + "=" * 80)
+        self.update_progress(
+            f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}"
+        )
+        logger.debug(
+            f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}"
+        )
+
+        # Ensure all background drizzle processes have completed before finalising
+        getattr(self, "_wait_drizzle_processes", lambda: None)()
+
+        save_as_float32_setting = getattr(self, "save_final_as_float32", False)
+        preserve_linear_output_setting = getattr(self, "preserve_linear_output", False)
+        # Retro-compatibilité : certaines versions utilisaient le nom
+        # `preserve_linear_output_flag`. On crée un alias pour éviter
+        # un NameError si d'anciens appels ou du code externe s'y réfèrent.
+        preserve_linear_output_flag = preserve_linear_output_setting
+        self.update_progress(
+            f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}"
+        )
+        logger.debug(
+            f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}"
+        )
+        logger.debug(
+            f"  DEBUG QM: preserve_linear_output active?: {preserve_linear_output_setting}"
+        )
+
+        is_reproject_mosaic_mode = (
+            output_filename_suffix == "_mosaic_reproject"
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+        )
+        is_drizzle_final_mode_with_data = (
+            self.drizzle_active_session
+            and self.drizzle_mode == "Final"
+            and not self.is_mosaic_run
+            and not self.reproject_between_batches
+            and not getattr(self, "reproject_coadd_final", False)
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+            and not is_reproject_mosaic_mode
+        )
+        is_true_incremental_drizzle_from_objects = (
+            self.drizzle_active_session
+            and self.drizzle_mode == "Incremental"
+            and not self.is_mosaic_run
+            and drizzle_final_sci_data is None
+        )
+        is_classic_reproject_mode = (
+            (
+                self.reproject_between_batches
+                or getattr(self, "reproject_coadd_final", False)
+            )
+            and drizzle_final_sci_data is not None
+            and drizzle_final_wht_data is not None
+        )
+        is_classic_stacking_mode = (
+            self.cumulative_sum_memmap is not None
+            and self.cumulative_wht_memmap is not None
+            and not (
+                is_reproject_mosaic_mode
+                or is_drizzle_final_mode_with_data
+                or is_true_incremental_drizzle_from_objects
+                or is_classic_reproject_mode
+            )
+        )
+
+        current_operation_mode_log_desc = "Unknown"
+        current_operation_mode_log_fits = "Unknown"
+

@@ -37,13 +37,35 @@ except Exception:  # pragma: no cover
 
 
 def sanitize_header_for_wcs(hdr):
+    # Ensure CONTINUE are strings so astropy accepts the header
     for k, v in list(hdr.items()):
         if k == "CONTINUE":
             hdr[k] = str(v)
+    # Drop verbose cards that can confuse parsers
     while "HISTORY" in hdr:
         del hdr["HISTORY"]
     while "COMMENT" in hdr:
         del hdr["COMMENT"]
+
+    # Ensure "-SIP" suffix when SIP coefficients are present
+    try:
+        has_sip = any(k in hdr for k in ("A_ORDER", "B_ORDER"))
+        if not has_sip:
+            for k in list(hdr.keys()):
+                uk = k.upper()
+                if uk.startswith("A_") or uk.startswith("B_") or uk.startswith("AP_") or uk.startswith("BP_"):
+                    has_sip = True
+                    break
+        if has_sip:
+            for key in ("CTYPE1", "CTYPE2"):
+                if key not in hdr:
+                    continue
+                val = str(hdr.get(key, ""))
+                if "-SIP" not in val.upper():
+                    hdr[key] = f"{val}-SIP"
+    except Exception:
+        pass
+
     return hdr
 
 

@@ -1,0 +1,269 @@
+            right = min(right, img_hwc.shape[1] - 1)
+            bottom = min(bottom, img_hwc.shape[0] - 1)
+            cropped_img = img_hwc[top : bottom + 1, left : right + 1]
+            cropped_cov = None
+            if cov_hw is not None and cov_hw.shape == img_hwc.shape[:2]:
+                cropped_cov = cov_hw[top : bottom + 1, left : right + 1]
+            new_wcs = mosaic_wcs.deepcopy()
+            if hasattr(new_wcs.wcs, "crpix"):
+                new_wcs.wcs.crpix = [
+                    new_wcs.wcs.crpix[0] - left,
+                    new_wcs.wcs.crpix[1] - top,
+                ]
+            new_wcs.pixel_shape = (cropped_img.shape[1], cropped_img.shape[0])
+            try:
+                new_wcs._naxis1 = cropped_img.shape[1]
+                new_wcs._naxis2 = cropped_img.shape[0]
+            except Exception:
+                pass
+            return cropped_img, cropped_cov, new_wcs
+        except Exception as e:
+            self.update_progress(f"⚠️ crop_to_reference_wcs: {e}", "WARN")
+            return img_hwc, cov_hw, mosaic_wcs
+
+    def _reproject_classic_batches_zm(self, batch_files):
+        """Reproject and co-add all classic batches in one final pass.
+
+        This mirrors the approach used in ZeMosaic: each stacked batch is
+        optionally cropped and solved again before being combined with
+        ``reproject_and_coadd``.  The clustering phase present in ZeMosaic is
+        omitted here.
+        """
+
+        try:
+            from seestar.enhancement.reproject_utils import (
+                reproject_and_coadd,
+                reproject_interp,
+            )
+            from seestar.core.reprojection import reproject_to_reference_wcs
+        except Exception as e:
+            self.update_progress(f"⚠️ Outils de reprojection indisponibles: {e}", "WARN")
+            return False
+
+        data_pairs = []
+        weight_maps = []
+        wcs_list = []
+        headers = []
+
+        crop_tiles = getattr(self, "apply_master_tile_crop", False)
+        crop_frac = getattr(self, "master_tile_crop_percent_decimal", 0.0)
+        for sci_path, _wht_paths in batch_files:
+            if sci_path in getattr(self, "unsolved_classic_batch_files", set()):
+                self.update_progress(
+                    f"   -> Batch ignor\xe9 (non r\xe9solu) {sci_path}",
+                    "WARN",
+                )
+                continue
+            try:
+                hdr = None
+                try:
+                    hdr = fits.getheader(sci_path, memmap=False)
+                    has_wcs = all(
+                        k in hdr
+                        for k in ("CRVAL1", "CRVAL2", "CD1_1", "CD1_2", "CD2_1", "CD2_2")
+                    )
+                except Exception:
+                    hdr = None
+                    has_wcs = False
+                if not has_wcs:
+                    if getattr(self, "reference_header_for_wcs", None) is not None:
+                        try:
+                            hdr = hdr or fits.Header()
+                            for k in (
+                                "CRPIX1",
+                                "CRPIX2",
+                                "CDELT1",
+                                "CDELT2",
+                                "CD1_1",
+                                "CD1_2",
+                                "CD2_1",
+                                "CD2_2",
+                                "CTYPE1",
+                                "CTYPE2",
+                                "CRVAL1",
+                                "CRVAL2",
+                            ):
+                                if k in self.reference_header_for_wcs:
+                                    hdr[k] = self.reference_header_for_wcs[k]
+                            data_tmp = fits.getdata(sci_path, memmap=False)
+                            fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
+                                sci_path, overwrite=True, output_verify="ignore"
+                            )
+                            has_wcs = True
+                        except Exception:
+                            has_wcs = False
+                solved_ok = True
+                if not has_wcs:
+                    if getattr(self, "batch_size", 0) != 0:
+                        solved_ok = self._run_astap_and_update_header(sci_path)
+                        if solved_ok:
+                            hdr = fits.getheader(sci_path, memmap=False)
+                    else:
+                        solved_ok = False
+                if not solved_ok:
+                    self.update_progress(
+                        f"   -> Batch ignor\xe9 (astrom\xe9trie \xe9chou\xe9e) {sci_path}",
+                        "WARN",
+                    )
+                    self.unsolved_classic_batch_files.add(sci_path)
+                    continue
+
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
+
+                if crop_tiles and crop_frac > 0.0:
+                    dh = int(data_cxhxw.shape[1] * crop_frac)
+                    dw = int(data_cxhxw.shape[2] * crop_frac)
+                    if dh or dw:
+                        end_h = -dh if dh else None
+                        end_w = -dw if dw else None
+                        data_cxhxw = data_cxhxw[:, dh:end_h, dw:end_w]
+                        hdr["CRPIX1"] = hdr.get("CRPIX1", 0) - dw
+                        hdr["CRPIX2"] = hdr.get("CRPIX2", 0) - dh
+                        hdr["NAXIS1"] = data_cxhxw.shape[2]
+                        hdr["NAXIS2"] = data_cxhxw.shape[1]
+                        fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
+                            sci_path, overwrite=True
+                        )
+                hdr = fits.getheader(sci_path)
+
+                wcs = WCS(hdr, naxis=2)
+                h = int(hdr.get("NAXIS2"))
+                w = int(hdr.get("NAXIS1"))
+                ensure_wcs_pixel_shape(wcs, h, w)
+
+                try:
+                    cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(
+                        np.float32, copy=False
+                    )
+                    np.nan_to_num(cov, copy=False)
+                    cov *= make_radial_weight_map(h, w)
+                except Exception:
+                    cov = np.ones((h, w), dtype=np.float32)
+
+                img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+
+                data_pairs.append((img_hwc, wcs))
+                weight_maps.append(cov)
+                wcs_list.append(wcs)
+                headers.append(hdr)
+            except Exception as e:
+                self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
+
+        if len(data_pairs) < 2:
+            return False
+
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+        else:
+            out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                wcs_list,
+                headers,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                auto_rotate=True,
+            )
+            if out_wcs is None:
+                return False
+
+        if out_wcs.pixel_shape is not None:
+            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            if out_shape != expected_hw:
+                if out_shape == expected_hw[::-1]:
+                    self.update_progress(
+                        "⚠️ Final grid shape transposée, correction automatique.",
+                        "WARN",
+                    )
+                    out_shape = expected_hw
+                else:
+                    self.update_progress(
+                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
+                        "ERROR",
+                    )
+                    return False
+
+        final_channels = []
+        final_cov = None
+        for ch in range(data_pairs[0][0].shape[2]):
+            inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
+            sci, cov = reproject_and_coadd(
+                inputs_ch,
+                output_projection=out_wcs,
+                shape_out=out_shape,
+                input_weights=weight_maps,
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=True,
+            )
+            final_channels.append(sci.astype(np.float32))
+            if final_cov is None:
+                final_cov = cov.astype(np.float32)
+
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
+
+        data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(
+            data_hwc, cov_hw, out_wcs
+        )
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
+            data_hwc, cov_hw, out_wcs
+        )
+
+        if (
+            self.reference_wcs_object is not None
+            and out_wcs is not self.reference_wcs_object
+            and self.reference_shape is not None
+        ):
+            try:
+                data_hwc = reproject_to_reference_wcs(
+                    data_hwc,
+                    out_wcs,
+                    self.reference_wcs_object,
+                    self.reference_shape,
+                )
+                if cov_hw is not None:
+                    cov_hw = reproject_to_reference_wcs(
+                        cov_hw,
+                        out_wcs,
+                        self.reference_wcs_object,
+                        self.reference_shape,
+                    )
+                out_wcs = self.reference_wcs_object
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Reprojection finale échouée: {e}",
+                    "WARN",
+                )
+
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        self._save_final_stack(
+            "_classic_reproject_zm",
+            drizzle_final_sci_data=data_hwc,
+            drizzle_final_wht_data=cov_hw,
+            preserve_linear_output=True,
+        )
+        return True
+
+    def _finalize_single_classic_batch(self, batch_file_tuple):
+        """Save the single stacked batch as the final stack."""
+        sci_path, wht_paths = batch_file_tuple
+        try:
+            with fits.open(sci_path, memmap=False) as hdul:
+                data = np.moveaxis(hdul[0].data.astype(np.float32), 0, -1)
+                hdr = hdul[0].header
+        except Exception as e:
+            self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
+            return
+        try:
+            cov = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                np.float32, copy=False
+            )
+            np.nan_to_num(cov, copy=False)

@@ -1,0 +1,321 @@
+        # --- Début du Pipeline de Post-Traitement (identique à votre version précédente) ---
+        # Ici nous n'implémentons que le Feathering et le Low WHT Mask pour
+        # démontrer la connexion avec les réglages de l'onglet Expert.
+        if (
+            hasattr(self, "apply_feathering")
+            and self.apply_feathering
+            and final_wht_map_for_postproc is not None
+        ):
+            if _FEATHERING_AVAILABLE:
+                self.update_progress("   [Feathering] Application au stack final...")
+                data_after_postproc = feather_by_weight_map(
+                    data_after_postproc,
+                    final_wht_map_for_postproc.astype(np.float32),
+                    blur_px=getattr(self, "feather_blur_px", 256),
+                )
+                self.feathering_applied_in_session = True
+            else:
+                self.update_progress(
+                    "   [Feathering] Fonction non disponible.",
+                    None,
+                )
+
+        if (
+            hasattr(self, "apply_low_wht_mask")
+            and self.apply_low_wht_mask
+            and final_wht_map_for_postproc is not None
+        ):
+            if _LOW_WHT_MASK_AVAILABLE:
+                self.update_progress("   [LowWHTMask] Application au stack final...")
+                data_after_postproc = apply_low_wht_mask(
+                    data_after_postproc,
+                    final_wht_map_for_postproc.astype(np.float32),
+                    percentile=getattr(self, "low_wht_percentile", 5),
+                    soften_px=getattr(self, "low_wht_soften_px", 128),
+                    progress_callback=self.update_progress,
+                )
+                self.low_wht_mask_applied_in_session = True
+            else:
+                self.update_progress(
+                    "   [LowWHTMask] Fonction non disponible.",
+                    None,
+                )
+        # --- Fin du Pipeline de Post-Traitement ---
+        self.update_progress(
+            f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}"
+        )
+        logger.debug(
+            f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}"
+        )
+
+        # Les données post-traitées 0-1 seront utilisées pour l'aperçu UI
+        self.last_saved_data_for_preview = data_after_postproc.copy()
+        logger.debug(
+            "DEBUG QM [_save_final_stack]: self.last_saved_data_for_preview = DONNÉES 0-1 POST-TRAITÉES (pour l'aperçu UI)."
+        )
+
+        # --- ÉTAPE 4: Préparation du header FITS final et du nom de fichier ---
+        # (Logique identique)
+        effective_image_count = (
+            self.images_in_cumulative_stack
+            if self.images_in_cumulative_stack > 0
+            else (
+                getattr(self, "aligned_files_count", 1)
+                if (is_drizzle_final_mode_with_data or is_reproject_mosaic_mode)
+                else 1
+            )
+        )
+        final_header = (
+            self.current_stack_header.copy()
+            if self.current_stack_header
+            else fits.Header()
+        )
+        if (
+            is_true_incremental_drizzle_from_objects
+            or is_drizzle_final_mode_with_data
+            or is_reproject_mosaic_mode
+        ):
+            if self.drizzle_output_wcs and not is_reproject_mosaic_mode:
+                final_header.update(self.drizzle_output_wcs.to_header(relax=True))
+            elif (
+                is_reproject_mosaic_mode
+                and self.current_stack_header
+                and self.current_stack_header.get("CTYPE1")
+            ):
+                pass
+        final_header["NIMAGES"] = (
+            effective_image_count,
+            "Effective images/Total Weight for final stack",
+        )
+        final_header["TOTEXP"] = (
+            round(self.total_exposure_seconds, 2),
+            "[s] Approx total exposure",
+        )
+        # Propagate basic pointing information if absent
+
+        if "RA" not in final_header:
+            if "CRVAL1" in final_header:
+                final_header["RA"] = (
+                    float(final_header["CRVAL1"]),
+                    "[deg] Approx pointing RA from WCS",
+                )
+            elif (
+                getattr(self, "reference_header_for_wcs", None) is not None
+                and "RA" in self.reference_header_for_wcs
+            ):
+                final_header["RA"] = (
+                    float(self.reference_header_for_wcs["RA"]),
+                    (
+                        self.reference_header_for_wcs.comments["RA"]
+                        if "RA" in self.reference_header_for_wcs.comments
+                        else "[deg] Pointing RA from reference header"
+                    ),
+                )
+        if "DEC" not in final_header:
+            if "CRVAL2" in final_header:
+                final_header["DEC"] = (
+                    float(final_header["CRVAL2"]),
+                    "[deg] Approx pointing DEC from WCS",
+                )
+            elif (
+                getattr(self, "reference_header_for_wcs", None) is not None
+                and "DEC" in self.reference_header_for_wcs
+            ):
+                final_header["DEC"] = (
+                    float(self.reference_header_for_wcs["DEC"]),
+                    (
+                        self.reference_header_for_wcs.comments["DEC"]
+                        if "DEC" in self.reference_header_for_wcs.comments
+                        else "[deg] Pointing DEC from reference header"
+                    ),
+                )
+
+        final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
+        if getattr(self, "output_filename", ""):
+            base_name = self.output_filename.strip()
+            if not base_name.lower().endswith(".fit"):
+                base_name += ".fit"
+            fits_path = os.path.join(self.output_folder, base_name)
+            preview_path = os.path.splitext(fits_path)[0] + ".png"
+        else:
+            base_name = "stack_final"
+            run_type_suffix = (
+                output_filename_suffix if output_filename_suffix else "_unknown_mode"
+            )
+            if stopped_early:
+                run_type_suffix += "_stopped"
+            elif self.processing_error:
+                run_type_suffix += "_error"
+            fits_path = os.path.join(
+                self.output_folder, f"{base_name}{run_type_suffix}.fit"
+            )
+            preview_path = os.path.splitext(fits_path)[0] + ".png"
+        self.final_stacked_path = fits_path
+        self.update_progress(f"Chemin FITS final: {os.path.basename(fits_path)}")
+
+        # --- ÉTAPE 5: Préparation des données pour la SAUVEGARDE FITS ---
+        data_for_primary_hdu_save = None
+        if save_as_float32_setting:
+            self.update_progress(
+                "   DEBUG QM: Preparation sauvegarde FITS en float32 (brut ADU-like)..."
+            )
+            logger.debug(
+                "   DEBUG QM: Preparation sauvegarde FITS en float32 (brut ADU-like)..."
+            )
+            data_for_primary_hdu_save = (
+                self.raw_adu_data_for_ui_histogram
+            )  # Utilise les données "ADU-like" (non-normalisées 0-1 cosmétiquement)
+            self.update_progress(
+                f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]"
+            )
+            logger.debug(
+                f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]"
+            )
+            final_header["BITPIX"] = -32
+            if "BSCALE" in final_header:
+                del final_header["BSCALE"]
+            if "BZERO" in final_header:
+                del final_header["BZERO"]
+        else:  # Sauvegarde en int16 décalé (représentation FITS "unsigned")
+            self.update_progress(
+                "   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)..."
+            )
+            logger.debug(
+                "   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)..."
+            )
+            raw_data = self.raw_adu_data_for_ui_histogram
+            max_val = np.nanmax(raw_data)
+            if getattr(self, "batch_size", 0) == 1 and max_val <= 0:
+                # In batch_size=1 mode the accumulated data can be
+                # entirely negative after background subtraction. Shift
+                # to a positive range so the stack mirrors batch_size=0
+                # behaviour instead of collapsing to black when saved as
+                # uint16.
+                min_val = np.nanmin(raw_data)
+                raw_data = raw_data - min_val
+                self.raw_adu_data_for_ui_histogram = raw_data
+                max_val = np.nanmax(raw_data)
+            if not np.isfinite(max_val) or max_val <= 0:
+                data_scaled_uint16 = np.zeros_like(raw_data, dtype=np.uint16)
+            elif max_val <= 65535.0 + 1e-5:
+                # Scale the maximum value to 65535 to utilise the full
+                # uint16 range. Prevent extremely small max_val from
+                # collapsing to all zeros.
+                effective_max = max(max_val, 1.0 / 65535.0)
+                scale = 65535.0 / effective_max
+                data_scaled_uint16 = (np.clip(raw_data, 0.0, None) * scale).astype(
+                    np.uint16
+                )
+            else:
+                data_scaled_uint16 = np.clip(raw_data, 0.0, 65535.0).astype(np.uint16)
+            # Convertir en int16 décalé pour conformité FITS
+            data_for_primary_hdu_save = (
+                data_scaled_uint16.astype(np.int32) - 32768
+            ).astype(np.int16)
+            self.update_progress(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
+            logger.debug(
+                f"     DEBUG QM: -> FITS int16: Utilisation données ADU. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save)}, {np.max(data_for_primary_hdu_save)}]"
+            )
+            final_header["BITPIX"] = 16
+            final_header["BSCALE"] = 1
+            final_header["BZERO"] = 32768
+
+        if getattr(self, "batch_size", 0) == 1:
+            arr = data_for_primary_hdu_save
+            if arr.ndim == 3:
+                if arr.shape[-1] in (3, 4):
+                    arr = np.moveaxis(arr, -1, 0)
+                elif arr.shape[0] in (1, 3, 4):
+                    pass
+                else:
+                    raise ValueError(
+                        f"Unexpected 3D shape for final stack (BS=1): {arr.shape}"
+                    )
+                data_for_primary_hdu_save = arr
+            logger.debug(
+                "DEBUG QM [SaveFinalStack BS=1]: will write CHW shape=%s",
+                getattr(data_for_primary_hdu_save, "shape", None),
+            )
+            data_for_primary_hdu_save_cxhxw = data_for_primary_hdu_save
+        else:
+            if (
+                data_for_primary_hdu_save.ndim == 3
+                and data_for_primary_hdu_save.shape[2] == 3
+            ):
+                data_for_primary_hdu_save_cxhxw = np.moveaxis(
+                    data_for_primary_hdu_save, -1, 0
+                )
+            else:
+                data_for_primary_hdu_save_cxhxw = data_for_primary_hdu_save
+        self.update_progress(
+            f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})"
+        )
+        logger.debug(
+            f"     DEBUG QM: Données FITS prêtes (Shape HDU: {data_for_primary_hdu_save_cxhxw.shape}, Dtype: {data_for_primary_hdu_save_cxhxw.dtype})"
+        )
+
+        # --- ÉTAPE 6: Sauvegarde FITS effective ---
+        try:
+            primary_hdu = fits.PrimaryHDU(
+                data=data_for_primary_hdu_save_cxhxw, header=final_header
+            )
+            hdus_list = [primary_hdu]
+            # ... (logique HDU background_model si besoin) ...
+            fits.HDUList(hdus_list).writeto(
+                fits_path, overwrite=True, checksum=True, output_verify="ignore"
+            )
+            # Astropy peut retirer BSCALE/BZERO lorsque des données int16 sont
+            # fournies. Les rétablir uniquement dans ce cas.
+            if not save_as_float32_setting:
+                with fits.open(fits_path, mode="update", memmap=False) as hdul_fix:
+                    hd0 = hdul_fix[0]
+                    hd0.header["BSCALE"] = 1
+                    hd0.header["BZERO"] = 32768
+                    hdul_fix.flush()
+            self.update_progress(
+                f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee."
+            )
+        except Exception as save_err:
+            self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}")
+            self.final_stacked_path = None
+
+        # --- ÉTAPE 7: Sauvegarde preview PNG ---
+        # Utiliser data_after_postproc (qui est l'image [0,1] après tous les post-traitements)
+        # et laisser save_preview_image appliquer son propre stretch par défaut.
+        if data_after_postproc is not None:
+            self.update_progress(
+                f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
+            )
+            logger.debug(
+                f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
+            )
+            try:
+                save_preview_image(
+                    data_after_postproc, preview_path, enhanced_stretch=False
+                )  # ou True si vous préférez le stretch "enhanced" pour le PNG
+                self.update_progress("     ✅ Sauvegarde Preview PNG terminee.")
+            except Exception as prev_err:
+                self.update_progress(
+                    f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}."
+                )
+        else:
+            self.update_progress(
+                "ⓘ Aucune image a sauvegarder pour preview PNG (data_after_postproc est None)."
+            )
+
+        self.update_progress(
+            f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."
+        )
+        logger.debug("\n" + "=" * 80)
+        logger.debug(
+            f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."
+        )
+        logger.debug("=" * 80 + "\n")
+
+    #############################################################################################################################################################
+
+    # Le message de Pylance "is not accessed" concerne uniquement les variables locales closed_sum et closed_wht à l'intérieur
+    # de la méthode _close_memmaps() elle-même. Ces variables sont définies, mais leur valeur n'est jamais lue par le code de cette méthode
+    # après leur assignation. Elles sont donc inutiles et peuvent être supprimées.

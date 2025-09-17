@@ -1,0 +1,41 @@
+                h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                if data.shape == (w_ref, h_ref):
+                    data = data.T
+
+            # 2) Save using the common FITS helper so on-disk data matches
+            #    the raw files (int16 with BZERO/BSCALE) and typical viewers
+            #    render them correctly. The helper also writes CHW for colour.
+            from seestar.core.image_processing import save_fits_image as _save_fits
+            data = data.astype(np.float32, copy=False)
+            _save_fits(data, img_path, header=None, overwrite=True)
+            # Keep mask aligned with data orientation
+            m_to_save = mask
+            if ref_shape is not None and m_to_save.ndim == 2:
+                h_ref, w_ref = int(ref_shape[0]), int(ref_shape[1])
+                if m_to_save.shape == (w_ref, h_ref):
+                    m_to_save = m_to_save.T
+            np.save(mask_path, m_to_save.astype(np.uint8))
+            if getattr(self, "reference_wcs_object", None) is not None:
+                try:
+                    hdr_ref = self.reference_wcs_object.to_header(relax=True)
+                    for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                        if k in hdr_ref:
+                            del hdr_ref[k]
+                    _sanitize_continue_as_string(hdr_ref)
+                    write_wcs_to_fits_inplace(img_path, hdr_ref)
+                except Exception as e_wcs:
+                    self.update_progress(
+                        f"⚠️ Échec écriture WCS temp: {e_wcs}", "WARN"
+                    )
+            _log_mem("after_save")
+            return img_path, mask_path
+        except Exception as e:
+            self.update_progress(f"❌ Save aligned temp failed: {e}", "WARN")
+            return None, None
+
+    def _ensure_wcs_on_aligned_fits(
+        self,
+        aligned_fp: str,
+        *,
+        src_fp: str | None = None,
+        ref_wcs_header: fits.Header | None = None,

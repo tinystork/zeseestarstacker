@@ -1,0 +1,36 @@
+                        luminance <= np.median(luminance[valid_pixel_mask_2d])
+                    )
+                    sky_pixels = int(np.sum(sky_mask))
+                    offset = 0.0
+                    if sky_pixels > 50:
+                        lum_clip = sigma_clip(
+                            luminance[sky_mask], sigma=3.0, maxiters=5
+                        )
+                        med = np.nanmedian(lum_clip.filled(np.nan))
+                        offset = 0.0 if not np.isfinite(med) else float(med)
+                        if abs(offset) > 1e-7:
+                            data_final_pour_retour = (
+                                data_final_pour_retour - offset
+                            ).astype(np.float32, copy=False)
+                    logger.debug(
+                        "[BS=1 EQ] sky_pixels=%d, sky_offset=%.6f (no scale)",
+                        sky_pixels,
+                        offset,
+                    )
+                except Exception as e_eq:
+                    logger.debug(
+                        f"Sky background equalization (offset only) skipped: {e_eq}"
+                    )
+
+            logger.debug(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
+            if self.use_quality_weighting:
+                quality_scores = self._calculate_quality_metrics(
+                    prepared_img_after_initial_proc
+                )
+            else:
+                logger.debug(f"     - Pondération qualité désactivée.")
+
+            if data_final_pour_retour is None:
+                raise RuntimeError(
+                    "data_final_pour_retour est None à la fin de _process_file."
+                )

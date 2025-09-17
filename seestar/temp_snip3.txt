@@ -1,0 +1,46 @@
+                    data_final_pour_retour.shape[:2], dtype=bool
+                )
+                logger.debug(f"     - Masque (tous valides, shape inattendue).")
+
+            if "valid_pixel_mask_2d" not in locals() or valid_pixel_mask_2d is None:
+                logger.debug(
+                    f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]"
+                )
+                max_lum_val = np.nanmax(luminance_mask_src)
+                if max_lum_val <= 1e-5:
+                    valid_pixel_mask_2d = np.ones(luminance_mask_src.shape, dtype=bool)
+                    logger.debug(
+                        "     - Luminance très faible, masque par défaut tout True."
+                    )
+                else:
+                    mask_threshold = (
+                        1.0
+                        if (is_drizzle_or_mosaic_mode and max_lum_val > 1.5 + 1e-5)
+                        else 1e-5
+                    )  # +1e-5 pour float
+                    valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(
+                        bool
+                    )
+                    logger.debug(
+                        f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
+                    )
+
+            # --- Background equalization for batch_size == 1 -------------------
+            if self.batch_size == 1 and valid_pixel_mask_2d is not None:
+                # Align behaviour with batch_size=0: remove only a robust sky
+                # offset; avoid multiplicative scaling and hard clipping which
+                # can amplify noise and saturate highlights.
+                try:
+                    from astropy.stats import sigma_clip
+
+                    if data_final_pour_retour.ndim == 2:
+                        luminance = data_final_pour_retour
+                    else:
+                        luminance = (
+                            0.299 * data_final_pour_retour[..., 0]
+                            + 0.587 * data_final_pour_retour[..., 1]
+                            + 0.114 * data_final_pour_retour[..., 2]
+                        )
+                    # Darker half of valid pixels as sky proxy
+                    sky_mask = valid_pixel_mask_2d & (
+                        luminance <= np.median(luminance[valid_pixel_mask_2d])

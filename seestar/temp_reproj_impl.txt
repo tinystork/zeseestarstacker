@@ -1,0 +1,61 @@
+    for (img, wcs_in), weight in zip(input_data, weights_iter):
+        wcs_obj = WCS(wcs_in) if not isinstance(wcs_in, WCS) else wcs_in
+        if ref_wcs.has_celestial and not getattr(wcs_obj, "has_celestial", False):
+            logger.warning("Skipping input without celestial WCS")
+            continue
+        filtered_pairs.append((img, wcs_obj))
+        filtered_weights.append(weight)
+
+    if not filtered_pairs:
+        raise ValueError("No compatible input WCS for reprojection")
+
+    use_astropy = _astropy_reproject_and_coadd is not None
+
+    if use_astropy:
+        mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+        mem_required = np.prod(shape_out) * 2 * 8 / 1024**3
+        if mem_required > mem_threshold:
+            logger.info(
+                "Disabling astropy reproject_and_coadd (%.1f GiB required > %.1f GiB)",
+                mem_required,
+                mem_threshold,
+            )
+            use_astropy = False
+
+    if use_astropy:
+        # Use the reference implementation when possible but gracefully
+        # fall back to the local implementation if it fails (e.g. due to
+        # WCS incompatibilities). Older versions of ``reproject`` may
+        # raise different exception types depending on the failure so we
+        # simply catch ``Exception`` and only re-raise if it doesn't look
+        # like a projection mismatch.
+        try:
+            return _astropy_reproject_and_coadd(
+                filtered_pairs,
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                input_weights=filtered_weights if input_weights is not None else None,
+                reproject_function=reproject_function,
+                combine_function=combine_function,
+                match_background=match_background,
+                **kwargs,
+            )
+        except Exception as exc:  # pragma: no cover - depends on reproject version
+            msg = str(exc)
+            if "different number of world coordinates" not in msg.lower() and "output" not in msg.lower():
+                raise
+
+    sum_image = np.zeros(shape_out, dtype=np.float64)  # [B1-COADD-FIX]
+    cov_image = np.zeros(shape_out, dtype=np.float64)  # [B1-COADD-FIX]
+
+    kept = 0  # [B1-COADD-FIX]
+    total = 0  # [B1-COADD-FIX]
+
+    for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
+        total += 1  # [B1-COADD-FIX]
+        img2d = _ensure_2d(np.asarray(img))  # [B1-COADD-FIX]
+
+        proj_img, footprint = reproject_function(
+            (img2d, wcs_in),
+            output_projection=ref_wcs,
+            shape_out=shape_out,

@@ -1,0 +1,181 @@
+            shape_out=shape_out,
+            return_footprint=True,
+            **kwargs,
+        )  # [B1-COADD-FIX]
+
+        proj_img = np.nan_to_num(
+            proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+        footprint = np.nan_to_num(
+            footprint, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+
+        if total == 1:
+            try:
+                logger.debug(
+                    "[BS=1][COADD] first reprojection min/max(img)=(%.3g,%.3g) min/max(fp)=(%.3g,%.3g)",
+                    float(np.nanmin(proj_img)),
+                    float(np.nanmax(proj_img)),
+                    float(np.nanmin(footprint)),
+                    float(np.nanmax(footprint)),
+                )
+            except Exception:
+                pass
+
+        if weight is None:  # [B1-COADD-FIX]
+            weight_proj = footprint  # [B1-COADD-FIX]
+        elif np.isscalar(weight):  # [B1-COADD-FIX]
+            weight_proj = footprint * float(weight)  # [B1-COADD-FIX]
+        else:
+            weight = np.asarray(weight)  # [B1-COADD-FIX]
+            if weight.shape != img2d.shape:  # [B1-COADD-FIX]
+                raise ValueError("[B1-COADD-FIX] weight shape mismatch")  # [B1-COADD-FIX]
+            w_reproj, w_fp = reproject_function(
+                (weight, wcs_in),
+                output_projection=ref_wcs,
+                shape_out=shape_out,
+                return_footprint=True,
+                **kwargs,
+            )  # [B1-COADD-FIX]
+            weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
+
+        weight_proj = np.nan_to_num(
+            weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )  # [B1-COADD-FIX]
+
+        if np.any(footprint > 0):  # [B1-COADD-FIX]
+            proj_img = np.nan_to_num(
+                proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+            )
+            weight_proj = np.nan_to_num(
+                weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+            )
+            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
+            cov_image += weight_proj  # [B1-COADD-FIX]
+            kept += 1  # [B1-COADD-FIX]
+        else:
+            logger.debug("[B1-COADD-FIX] Skipped entry (zero footprint).")  # [B1-COADD-FIX]
+
+        del proj_img, footprint, weight_proj  # [B1-COADD-FIX]
+
+    out = np.divide(
+        sum_image,
+        cov_image,
+        out=np.zeros_like(sum_image, dtype=np.float32),
+        where=(cov_image > 0),
+    )  # [B1-COADD-FIX]
+    np.nan_to_num(out, copy=False, nan=0.0, posinf=0.0, neginf=0.0)  # [B1-COADD-FIX]
+
+    try:
+        logger.info(
+            "[B1-COADD-FIX] coadd stats: kept=%d/%d, cov>0=%d, cov_sum=%.3f, sum_min=%.3g, sum_max=%.3g",
+            kept,
+            total,
+            int(np.count_nonzero(valid)),
+            float(cov_image.sum()),
+            float(np.nanmin(sum_image)),
+            float(np.nanmax(sum_image)),
+        )
+    except Exception:  # [B1-COADD-FIX]
+        pass  # [B1-COADD-FIX]
+
+    return out, cov_image.astype(np.float32)  # [B1-COADD-FIX]
+
+
+def reproject_and_coadd_from_paths(
+    paths,
+    output_projection=None,
+    shape_out=None,
+    match_background=True,
+    tile_size=None,
+    prefer_streaming_fallback=False,
+    subtract_sky_median=True,
+    **kwargs,
+):
+    """Load FITS files from ``paths`` then call :func:`reproject_and_coadd`.
+
+    Parameters
+    ----------
+    paths : iterable of str
+        FITS file paths containing valid WCS information.
+    output_projection : astropy.wcs.WCS or FITS header, optional
+        Target projection. When ``None`` the WCS of all files are combined.
+    shape_out : tuple, optional
+        Output shape ``(H, W)``. When ``None`` it is derived from the input
+        headers.
+    match_background : bool, optional
+        Deprecated alias for ``subtract_sky_median``.
+    prefer_streaming_fallback : bool, optional
+        If ``True`` and the required memory exceeds the threshold, fall back to
+        :func:`streaming_reproject_and_coadd`.
+    subtract_sky_median : bool, optional
+        If ``True`` subtract a sigma-clipped median from each image prior to
+        reprojection.
+    tile_size : int, optional
+        Forwarded to :func:`streaming_reproject_and_coadd` when used.
+    **kwargs : dict
+        Forwarded to :func:`reproject_and_coadd`.
+    """
+
+    kwargs = dict(kwargs)
+    kwargs.pop("return_footprint", None)
+    crop_to_footprint = kwargs.pop("crop_to_footprint", False)
+
+    if match_background is not None:
+        subtract_sky_median = match_background
+        # Propagate the user's preference to the underlying coadd call so that
+        # ``reproject_and_coadd`` respects explicit enable/disable requests
+        # (especially important for ``batch_size=1`` workflows).
+        kwargs["match_background"] = bool(match_background)
+
+    if shape_out is not None:
+        mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
+        mem_gb = _estimate_mem_gb(shape_out, n_maps=2)
+        if mem_gb > mem_threshold and not prefer_streaming_fallback:
+            raise MemoryError(
+                f"Requested output grid {shape_out} requires {mem_gb:.1f} GiB (> {mem_threshold:.1f} GiB)."
+            )
+
+    if output_projection is None or shape_out is None:
+        if _collect_headers is not None:
+            infos = _collect_headers(paths)
+            shape_list = [sh for sh, _ in infos]
+            wcs_list = [w for _, w in infos]
+        else:  # pragma: no cover - fallback when core utils missing
+            wcs_list = []
+            shape_list = []
+            for fp in paths:
+                try:
+                    hdr = fits.getheader(fp, memmap=False)
+                    w = WCS(hdr, naxis=2)
+                    shape_list.append((int(hdr.get("NAXIS2")), int(hdr.get("NAXIS1"))))
+                    wcs_list.append(w)
+                except Exception:
+                    continue
+
+        try:
+            out_wcs, shape_out, dropped = compute_final_output_grid_from_wcs(
+                wcs_list, shape_list, auto_rotate=True
+            )
+        except RuntimeError:
+            logger.warning(
+                "[Reproject] No valid WCS – falling back to streaming with internal grid"
+            )
+            return streaming_reproject_and_coadd(
+                paths,
+                output_wcs=None,
+                shape_out=None,
+                subtract_sky_median=subtract_sky_median,
+                tile_size=tile_size or 1024,
+                crop_to_footprint=crop_to_footprint,
+            )
+
+    else:
+        out_wcs = output_projection if isinstance(output_projection, WCS) else WCS(output_projection)
+        dropped = 0
+
+    shape_out = tuple(int(round(x)) for x in shape_out)
+    if shape_out[0] <= 0 or shape_out[1] <= 0:
+        raise ValueError(f"invalid shape_out: {shape_out}")
+
+    mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))

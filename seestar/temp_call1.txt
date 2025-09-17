@@ -1,0 +1,41 @@
+            self.failed_stack_count += batch_n_error_acc
+
+    ################################################################################################################################################
+    def _save_intermediate_stack(self):
+        if self.current_stack_data is None or self.output_folder is None:
+            return
+        stack_path = os.path.join(self.output_folder, "stack_cumulative.fit")
+        preview_path = os.path.join(self.output_folder, "stack_cumulative.png")
+        try:
+            header_to_save = (
+                self.current_stack_header.copy()
+                if self.current_stack_header
+                else fits.Header()
+            )
+            try:
+                if "HISTORY" in header_to_save:
+                    history_entries = list(header_to_save["HISTORY"])
+                    filtered_history = [
+                        h for h in history_entries if "Intermediate save" not in str(h)
+                    ]
+                    while "HISTORY" in header_to_save:
+                        del header_to_save["HISTORY"]
+                    for entry in filtered_history:
+                        header_to_save.add_history(entry)
+            except Exception:
+                pass
+            header_to_save.add_history(
+                f"Intermediate save after combining {self.images_in_cumulative_stack} images"
+            )
+            save_fits_image(
+                self.current_stack_data, stack_path, header_to_save, overwrite=True
+            )
+            save_preview_image(
+                self.current_stack_data, preview_path, apply_stretch=False
+            )
+        except Exception as e:
+            logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
+
+    def _move_to_stacked(self, paths: list[str]):
+        """Déplace chaque fichier vers un sous-dossier 'stacked'."""
+        for p in paths:
