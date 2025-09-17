@@ -635,6 +635,7 @@ def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
 
     assert ok
     assert called["grid"]
+    assert obj.stack_final_combine == "reproject_coadd"
 
 
 def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path):
@@ -742,6 +743,7 @@ def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path)
 
     assert ok
     assert obj.reproject_coadd_final is True
+    assert obj.stack_final_combine == "reproject_coadd"
 
 
 def test_reproject_coadd_skips_solver_when_wcs_present(monkeypatch, tmp_path):
