@@ -13563,6 +13563,15 @@ class SeestarQueuedStacker:
         if requested_batch_size == 0:
             # Mode "batch size 0" explicite : aucun lot, tout en RAM
             self.batch_size = 0
+            if reproject_coadd_final is None and not self.reproject_coadd_final:
+                self.reproject_coadd_final = True
+                self.update_progress(
+                    "ⓘ batch_size=0 : activation automatique de Reproject&Coadd (comportement WIP).",
+                    None,
+                )
+                logger.debug(
+                    "  -> batch_size=0: reproject_coadd_final forcé à True pour reproduire le workflow WIP."
+                )
         elif requested_batch_size < 0:
             sample_img_path_for_bsize = None
             if input_dir and os.path.isdir(input_dir):
