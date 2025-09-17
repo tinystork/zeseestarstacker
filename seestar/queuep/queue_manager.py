@@ -13473,6 +13473,8 @@ class SeestarQueuedStacker:
 
         if reproject_coadd_final is not None:
             self.reproject_coadd_final = bool(reproject_coadd_final)
+            if self.reproject_coadd_final:
+                self.stack_final_combine = "reproject_coadd"
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
@@ -13565,6 +13567,7 @@ class SeestarQueuedStacker:
             self.batch_size = 0
             if reproject_coadd_final is None and not self.reproject_coadd_final:
                 self.reproject_coadd_final = True
+                self.stack_final_combine = "reproject_coadd"
                 self.update_progress(
                     "ⓘ batch_size=0 : activation automatique de Reproject&Coadd (comportement WIP).",
                     None,
@@ -13572,6 +13575,8 @@ class SeestarQueuedStacker:
                 logger.debug(
                     "  -> batch_size=0: reproject_coadd_final forcé à True pour reproduire le workflow WIP."
                 )
+            elif self.reproject_coadd_final and getattr(self, "stack_final_combine", "").lower() != "reproject_coadd":
+                self.stack_final_combine = "reproject_coadd"
         elif requested_batch_size < 0:
             sample_img_path_for_bsize = None
             if input_dir and os.path.isdir(input_dir):
