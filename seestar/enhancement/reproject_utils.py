@@ -309,6 +309,11 @@ def reproject_and_coadd(
         raise ValueError("No compatible input WCS for reprojection")
 
     use_astropy = _astropy_reproject_and_coadd is not None
+    # Allow forcing the local accumulator to avoid astropy's internal
+    # normalization/background steps which may be undesirable for some
+    # pipelines (e.g. classic reproject of already stacked batches).
+    if str(os.environ.get("REPROJECT_FORCE_LOCAL", "0")) == "1":
+        use_astropy = False
 
     if use_astropy:
         mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))

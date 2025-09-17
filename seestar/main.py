@@ -353,6 +353,20 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    # Also log to a file at project root so users always get a seestar.txt
+    try:
+        log_dir = project_root_dir if 'project_root_dir' in globals() else os.getcwd()
+        log_path = os.path.join(log_dir, 'seestar.txt')
+        fh = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+        fh.setLevel(logging.DEBUG if args.debug else logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root_logger = logging.getLogger()
+        # Avoid duplicate handlers on repeated runs in the same interpreter
+        if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '') == fh.baseFilename for h in root_logger.handlers):
+            root_logger.addHandler(fh)
+        logger.info("Log file initialised at %s", log_path)
+    except Exception as e:
+        print(f"WARN: unable to initialise file logger: {e}")
     print(f"DEBUG (seestar/main.py): Arguments parsés: {args}")
 
     input_dir_from_args = None

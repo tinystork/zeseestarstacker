@@ -11473,6 +11473,9 @@ class SeestarQueuedStacker:
         weight_maps = []
         wcs_list = []
         headers = []
+        # Reference dynamic range (percentiles) from the first valid classic batch
+        ref_p1 = None
+        ref_p99 = None
 
         crop_tiles = getattr(self, "apply_master_tile_crop", False)
         crop_frac = getattr(self, "master_tile_crop_percent_decimal", 0.0)
@@ -11573,6 +11576,22 @@ class SeestarQueuedStacker:
 
                 img_hwc = np.moveaxis(data_cxhxw, 0, -1)
 
+                # Capture reference percentiles on the first valid image to
+                # preserve the overall photometric scale after reprojection.
+                if ref_p1 is None or ref_p99 is None:
+                    try:
+                        base = img_hwc.astype(np.float32, copy=False)
+                        if base.ndim == 3:
+                            lum = 0.299 * base[..., 0] + 0.587 * base[..., 1] + 0.114 * base[..., 2]
+                        else:
+                            lum = base
+                        finite = np.isfinite(lum)
+                        if np.count_nonzero(finite) > 50:
+                            ref_p1 = float(np.nanpercentile(lum[finite], 1.0))
+                            ref_p99 = float(np.nanpercentile(lum[finite], 99.0))
+                    except Exception:
+                        ref_p1, ref_p99 = None, None
+
                 data_pairs.append((img_hwc, wcs))
                 weight_maps.append(cov)
                 wcs_list.append(wcs)
@@ -11619,20 +11638,30 @@ class SeestarQueuedStacker:
 
         final_channels = []
         final_cov = None
-        for ch in range(data_pairs[0][0].shape[2]):
-            inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
-            sci, cov = reproject_and_coadd(
-                inputs_ch,
-                output_projection=out_wcs,
-                shape_out=out_shape,
-                input_weights=weight_maps,
-                reproject_function=reproject_interp,
-                combine_function="mean",
-                match_background=True,
-            )
-            final_channels.append(sci.astype(np.float32))
-            if final_cov is None:
-                final_cov = cov.astype(np.float32)
+        import os as _os
+        _prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
+        _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+        try:
+            for ch in range(data_pairs[0][0].shape[2]):
+                inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
+                sci, cov = reproject_and_coadd(
+                    inputs_ch,
+                    output_projection=out_wcs,
+                    shape_out=out_shape,
+                    input_weights=weight_maps,
+                    reproject_function=reproject_interp,
+                    combine_function="mean",
+                    match_background=False,
+                )
+                final_channels.append(sci.astype(np.float32))
+                if final_cov is None:
+                    final_cov = cov.astype(np.float32)
+        finally:
+            if _prev_force is None:
+                try: del _os.environ["REPROJECT_FORCE_LOCAL"]
+                except Exception: pass
+            else:
+                _os.environ["REPROJECT_FORCE_LOCAL"] = _prev_force
 
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
@@ -11654,9 +11683,7 @@ class SeestarQueuedStacker:
         try:
             arr = data_hwc.astype(np.float32, copy=False)
             if arr.ndim == 3:
-                luminance = (
-                    0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
-                )
+                luminance = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
             else:
                 luminance = arr
             finite = np.isfinite(luminance)
@@ -11665,21 +11692,29 @@ class SeestarQueuedStacker:
                 p99 = float(np.nanpercentile(luminance[finite], 99.0))
                 rng = p99 - p1
                 mean_val = float(np.nanmean(luminance[finite]))
-                # Trigger only when image is nearly flat and pushed to the top
-                if (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98):
+                triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
+                if triggered and (ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1):
+                    # Rescale to match the first classic batch dynamic range
                     self.update_progress(
-                        f"[Reproject White-Fix] auto-rescale enabled (p1={p1:.6f}, p99={p99:.6f}, mean={mean_val:.6f}).",
+                        f"[Reproject White-Fix] rescale to reference (cur p1/p99={p1:.6f}/{p99:.6f} → ref {ref_p1:.3f}/{ref_p99:.3f}).",
                         "WARN",
                     )
-                    scale = max(rng, 1e-6)
-                    arr = (arr - p1) / scale
-                    arr = np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
-                    data_hwc = arr
+                    cur_scale = max(rng, 1e-6)
+                    ref_scale = max(ref_p99 - ref_p1, 1e-6)
+                    arr = (arr - p1) / cur_scale  # 0..1
+                    arr = arr * ref_scale + ref_p1
+                    data_hwc = arr.astype(np.float32, copy=False)
+                elif triggered:
+                    # Fallback to normalized 0..1 if we lack a valid reference
+                    self.update_progress(
+                        f"[Reproject White-Fix] fallback normalization (no valid reference).",
+                        "WARN",
+                    )
+                    cur_scale = max(rng, 1e-6)
+                    data_hwc = ((arr - p1) / cur_scale).clip(0.0, 1.0).astype(np.float32, copy=False)
         except Exception as _e_fix:
             try:
-                self.update_progress(
-                    f"[Reproject White-Fix] skipped due to error: {_e_fix}", "DEBUG"
-                )
+                self.update_progress(f"[Reproject White-Fix] skipped due to error: {_e_fix}", "DEBUG")
             except Exception:
                 pass
         # --------------------------------------------------------------------------
