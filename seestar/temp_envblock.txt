@@ -1,0 +1,51 @@
+            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            if out_shape != expected_hw:
+                if out_shape == expected_hw[::-1]:
+                    self.update_progress(
+                        "⚠️ Final grid shape transposée, correction automatique.",
+                        "WARN",
+                    )
+                    out_shape = expected_hw
+                else:
+                    self.update_progress(
+                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
+                        "ERROR",
+                    )
+                    return False
+
+        final_channels = []
+        final_cov = None
+        import os as _os
+        _prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
+        _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+        try:
+            for ch in range(data_pairs[0][0].shape[2]):
+                inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
+                sci, cov = reproject_and_coadd(
+                    inputs_ch,
+                    output_projection=out_wcs,
+                    shape_out=out_shape,
+                    input_weights=weight_maps,
+                    reproject_function=reproject_interp,
+                    combine_function="mean",
+                    match_background=False,
+                )
+                final_channels.append(sci.astype(np.float32))
+                if final_cov is None:
+                    final_cov = cov.astype(np.float32)
+        finally:
+            if _prev_force is None:
+                try: del _os.environ["REPROJECT_FORCE_LOCAL"]
+                except Exception: pass
+            else:
+                _os.environ["REPROJECT_FORCE_LOCAL"] = _prev_force
+
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
+
+        data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(
+            data_hwc, cov_hw, out_wcs
+        )
+        data_hwc, cov_hw, out_wcs = self._crop_to_reference_wcs(
+            data_hwc, cov_hw, out_wcs
+        )

@@ -1,0 +1,141 @@
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    self.update_progress(
+                        f"⚠️ Erreur suppression ancien stack: {e}", "WARN"
+                    )
+
+        self.update_progress(f"💾 Saved {os.path.basename(out_path)}")
+
+        if hasattr(self, "gui") and getattr(self.gui, "last_stack_path", None):
+            try:
+                self.gui.last_stack_path.set(out_path)
+            except Exception:
+                pass
+
+    ################################################################################################################################################
+
+    def cleanup_temp_reference(self):
+        if self.output_folder is None:  # <--- AJOUTER CETTE VÉRIFICATION
+            logger.debug(
+                "WARN QM [cleanup_temp_reference]: self.output_folder non défini, nettoyage référence annulé."
+            )
+            return
+        try:
+            aligner_temp_folder = os.path.join(self.output_folder, "temp_processing")
+            if os.path.isdir(aligner_temp_folder):
+                ref_fit = os.path.join(aligner_temp_folder, "reference_image.fit")
+                ref_png = os.path.join(aligner_temp_folder, "reference_image.png")
+                deleted_ref = 0
+                if os.path.exists(ref_fit):
+                    try:
+                        os.remove(ref_fit)
+                        deleted_ref += 1
+                    except Exception:
+                        pass
+                if os.path.exists(ref_png):
+                    try:
+                        os.remove(ref_png)
+                        deleted_ref += 1
+                    except Exception:
+                        pass
+                if deleted_ref > 0:
+                    self.update_progress(
+                        f"🧹 Fichier(s) référence temporaire(s) supprimé(s)."
+                    )
+                try:
+                    os.rmdir(aligner_temp_folder)
+                except OSError:
+                    pass
+        except Exception as e:
+            self.update_progress(f"⚠️ Erreur nettoyage référence temp: {e}")
+
+    ############################################################################
+    ####################################################################
+
+    def _cleanup_memmap_files(self):
+        """Supprime le dossier memmap_accumulators en fin de traitement."""
+        if self.output_folder is None:
+            logger.debug(
+                "WARN QM [_cleanup_memmap_files]: self.output_folder non défini, nettoyage annulé."
+            )
+            return
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        if os.path.isdir(memmap_dir):
+            try:
+                shutil.rmtree(memmap_dir)
+                self.update_progress(
+                    f"🧹 Dossier memmap supprimé: {os.path.basename(memmap_dir)}"
+                )
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Erreur suppression dossier memmap ({os.path.basename(memmap_dir)}): {e}"
+                )
+        reproject_dir = os.path.join(
+            self.temp_folder or self.output_folder, "reproject_memmap"
+        )
+        if os.path.isdir(reproject_dir):
+            try:
+                shutil.rmtree(reproject_dir)
+                self.update_progress(
+                    f"🧹 Dossier memmap supprimé: {os.path.basename(reproject_dir)}"
+                )
+            except Exception:
+                pass
+
+    ################################################################################################################################################
+
+    def add_folder(self, folder_path):
+        if not self.processing_active:
+            self.update_progress(
+                "ⓘ Impossible d'ajouter un dossier, traitement non actif."
+            )
+            return False
+        if self.reproject_between_batches:
+            self.update_progress("⚠️ Reprojection active : ajout de dossier désactivé")
+            return False
+        abs_path = os.path.abspath(folder_path)
+        if not os.path.isdir(abs_path):
+            self.update_progress(f"❌ Dossier non trouvé: {folder_path}")
+            return False
+        output_abs = os.path.abspath(self.output_folder) if self.output_folder else None
+        if output_abs:
+            norm_abs_path = os.path.normcase(abs_path)
+            norm_output_path = os.path.normcase(output_abs)
+            if norm_abs_path == norm_output_path or norm_abs_path.startswith(
+                norm_output_path + os.sep
+            ):
+                self.update_progress(
+                    f"⚠️ Impossible d'ajouter le dossier de sortie: {os.path.basename(folder_path)}"
+                )
+                return False
+        with self.folders_lock:
+            current_abs = (
+                os.path.abspath(self.current_folder) if self.current_folder else None
+            )
+            existing_abs = [os.path.abspath(p) for p in self.additional_folders]
+            if (current_abs and abs_path == current_abs) or abs_path in existing_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en cours ou ajouté: {os.path.basename(folder_path)}"
+                )
+                return False
+            self.additional_folders.append(abs_path)
+            folder_count = len(self.additional_folders)
+        self.update_progress(
+            f"✅ Dossier ajouté à la file d'attente : {os.path.basename(folder_path)}"
+        )
+        self.update_progress(f"folder_count_update:{folder_count}")
+        return True
+
+    ################################################################################################################################################
+
+    def _add_files_to_queue(self, folder_path):
+        count_added = 0
+        try:
+            abs_folder_path = os.path.abspath(folder_path)
+            # ---> AJOUTER CETTE LIGNE <---
+            logger.debug(
+                f"DEBUG [_add_files_to_queue]: Scanning absolute path: '{abs_folder_path}'"
+            )
+            # ------------------------------
+            self.update_progress(

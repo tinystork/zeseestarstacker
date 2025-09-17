@@ -4912,6 +4912,52 @@ class SeestarQueuedStacker:
 
                     current_batch_items_with_masks_for_stack_batch = []
 
+                # Prefer Reproject&Coadd when batch_size==0 (align behaviour with WIP)
+                if getattr(self, "batch_size", 0) == 0 and self.reproject_coadd_final:
+                    self.update_progress("�Y?? Finalisation Reproject&Coadd...")
+
+                    solved_batches = [
+                        bf
+                        for bf in self.intermediate_classic_batch_files
+                        if bf[0]
+                        not in getattr(self, "unsolved_classic_batch_files", set())
+                    ]
+                    if solved_batches:
+                        if len(solved_batches) == 1:
+                            self._finalize_single_classic_batch(solved_batches[0])
+                        elif not self._reproject_classic_batches_zm(solved_batches):
+                            if self._reproject_classic_batches(solved_batches):
+                                self._save_final_stack(
+                                    "_classic_reproject",
+                                    drizzle_final_sci_data=self.current_stack,
+                                    drizzle_final_wht_data=self.current_coverage,
+                                    preserve_linear_output=True,
+                                )
+                            else:
+                                self.update_progress(
+                                    "   Reprojection finale ǸchouǸe.", "WARN"
+                                )
+                                self.final_stacked_path = None
+
+                    else:
+                        self.update_progress(
+                            "   Aucune image accumulǸe pour sauvegarde."
+                        )
+                        self.final_stacked_path = None
+                elif self.reproject_between_batches:
+                    self.update_progress("�Y?? Finalisation Stacking (Reprojection)...")
+                    if self.images_in_cumulative_stack > 0 or (
+                        hasattr(self, "cumulative_sum_memmap")
+                        and self.cumulative_sum_memmap is not None
+                    ):
+                        self._save_final_stack(
+                            output_filename_suffix="_classic_reproject"
+                        )
+                    else:
+                        self.update_progress(
+                            "   Aucune image accumulée pour sauvegarde."
+                        )
+                        self.final_stacked_path = None
                 # --- Sauvegarde finale spécifique au mode Drizzle ---
                 if self.drizzle_mode == "Incremental":
                     self.update_progress(
@@ -11639,8 +11685,15 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
         import os as _os
+        # Reproduce WIP behaviour:
+        # - For batch_size == 0: let astropy.reproject_and_coadd run (no force),
+        #   keep match_background=True (default) to harmonise backgrounds.
+        # - For batch_size == 1: force local accumulator and disable background
+        #   matching to prevent washing out the stack.
         _prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
-        _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+        bs = int(getattr(self, "batch_size", 0) or 0)
+        if bs == 1:
+            _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
         try:
             for ch in range(data_pairs[0][0].shape[2]):
                 inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
@@ -11651,17 +11704,20 @@ class SeestarQueuedStacker:
                     input_weights=weight_maps,
                     reproject_function=reproject_interp,
                     combine_function="mean",
-                    match_background=False,
+                    match_background=(bs == 0),
                 )
                 final_channels.append(sci.astype(np.float32))
                 if final_cov is None:
                     final_cov = cov.astype(np.float32)
         finally:
-            if _prev_force is None:
-                try: del _os.environ["REPROJECT_FORCE_LOCAL"]
-                except Exception: pass
-            else:
-                _os.environ["REPROJECT_FORCE_LOCAL"] = _prev_force
+            if bs == 1:
+                if _prev_force is None:
+                    try:
+                        del _os.environ["REPROJECT_FORCE_LOCAL"]
+                    except Exception:
+                        pass
+                else:
+                    _os.environ["REPROJECT_FORCE_LOCAL"] = _prev_force
 
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
@@ -11681,6 +11737,13 @@ class SeestarQueuedStacker:
         # robust percentiles so the result mirrors the dynamic range of the
         # original classic batches.
         try:
+            bs = int(getattr(self, "batch_size", 0) or 0)
+            # Apply the white-fix only for the batch_size==1 workflow where
+            # astropy's normalisation is disabled and some cameras can still
+            # produce near-flat outputs. For batch_size==0 we mirror WIP and
+            # leave the photometric scale to the coadd routine.
+            if bs == 0:
+                raise RuntimeError("skip white-fix for bs=0")
             arr = data_hwc.astype(np.float32, copy=False)
             if arr.ndim == 3:
                 luminance = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]

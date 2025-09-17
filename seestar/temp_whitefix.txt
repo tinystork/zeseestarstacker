@@ -1,0 +1,61 @@
+        )
+
+        # --- [REPROJECT WHITE-FIX] -------------------------------------------------
+        # In some environments, the astropy `reproject_and_coadd` path may return
+        # arrays that are numerically very close to 1 everywhere (e.g. range
+        # ~[0.991, 1.0]) which renders the FITS/PNG "all white". This block
+        # detects such near-flat high-valued outputs and rescales them using
+        # robust percentiles so the result mirrors the dynamic range of the
+        # original classic batches.
+        try:
+            arr = data_hwc.astype(np.float32, copy=False)
+            if arr.ndim == 3:
+                luminance = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+            else:
+                luminance = arr
+            finite = np.isfinite(luminance)
+            if np.count_nonzero(finite) > 50:
+                p1 = float(np.nanpercentile(luminance[finite], 1.0))
+                p99 = float(np.nanpercentile(luminance[finite], 99.0))
+                rng = p99 - p1
+                mean_val = float(np.nanmean(luminance[finite]))
+                triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
+                if triggered and (ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1):
+                    # Rescale to match the first classic batch dynamic range
+                    self.update_progress(
+                        f"[Reproject White-Fix] rescale to reference (cur p1/p99={p1:.6f}/{p99:.6f} → ref {ref_p1:.3f}/{ref_p99:.3f}).",
+                        "WARN",
+                    )
+                    cur_scale = max(rng, 1e-6)
+                    ref_scale = max(ref_p99 - ref_p1, 1e-6)
+                    arr = (arr - p1) / cur_scale  # 0..1
+                    arr = arr * ref_scale + ref_p1
+                    data_hwc = arr.astype(np.float32, copy=False)
+                elif triggered:
+                    # Fallback to normalized 0..1 if we lack a valid reference
+                    self.update_progress(
+                        f"[Reproject White-Fix] fallback normalization (no valid reference).",
+                        "WARN",
+                    )
+                    cur_scale = max(rng, 1e-6)
+                    data_hwc = ((arr - p1) / cur_scale).clip(0.0, 1.0).astype(np.float32, copy=False)
+        except Exception as _e_fix:
+            try:
+                self.update_progress(f"[Reproject White-Fix] skipped due to error: {_e_fix}", "DEBUG")
+            except Exception:
+                pass
+        # --------------------------------------------------------------------------
+
+        if (
+            self.reference_wcs_object is not None
+            and out_wcs is not self.reference_wcs_object
+            and self.reference_shape is not None
+        ):
+            try:
+                data_hwc = reproject_to_reference_wcs(
+                    data_hwc,
+                    out_wcs,
+                    self.reference_wcs_object,
+                    self.reference_shape,
+                )
+                if cov_hw is not None:
