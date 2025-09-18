@@ -11759,6 +11759,7 @@ class SeestarQueuedStacker:
 
         final_channels = []
         final_cov = None
+        local_fallback_used = False
         import os as _os
 
         def _restore_env(prev):
@@ -11832,6 +11833,7 @@ class SeestarQueuedStacker:
                             combine_function="mean",
                             match_background=(bs > 1),
                         )
+                        local_fallback_used = True
                     finally:
                         _restore_env(_prev_force)
 
@@ -11859,50 +11861,57 @@ class SeestarQueuedStacker:
         # detects such near-flat high-valued outputs and rescales them using
         # robust percentiles so the result mirrors the dynamic range of the
         # original classic batches.
-        try:
-            bs = int(getattr(self, "batch_size", 0) or 0)
-            # Apply the white-fix only for the batch_size==1 workflow where
-            # astropy's normalisation is disabled and some cameras can still
-            # produce near-flat outputs. For batch_size==0 we mirror WIP and
-            # leave the photometric scale to the coadd routine.
-            if bs == 0:
-                raise RuntimeError("skip white-fix for bs=0")
-            arr = data_hwc.astype(np.float32, copy=False)
-            if arr.ndim == 3:
-                luminance = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
-            else:
-                luminance = arr
-            finite = np.isfinite(luminance)
-            if np.count_nonzero(finite) > 50:
-                p1 = float(np.nanpercentile(luminance[finite], 1.0))
-                p99 = float(np.nanpercentile(luminance[finite], 99.0))
-                rng = p99 - p1
-                mean_val = float(np.nanmean(luminance[finite]))
-                triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
-                if triggered and (ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1):
-                    # Rescale to match the first classic batch dynamic range
-                    self.update_progress(
-                        f"[Reproject White-Fix] rescale to reference (cur p1/p99={p1:.6f}/{p99:.6f} → ref {ref_p1:.3f}/{ref_p99:.3f}).",
-                        "WARN",
-                    )
-                    cur_scale = max(rng, 1e-6)
-                    ref_scale = max(ref_p99 - ref_p1, 1e-6)
-                    arr = (arr - p1) / cur_scale  # 0..1
-                    arr = arr * ref_scale + ref_p1
-                    data_hwc = arr.astype(np.float32, copy=False)
-                elif triggered:
-                    # Fallback to normalized 0..1 if we lack a valid reference
-                    self.update_progress(
-                        f"[Reproject White-Fix] fallback normalization (no valid reference).",
-                        "WARN",
-                    )
-                    cur_scale = max(rng, 1e-6)
-                    data_hwc = ((arr - p1) / cur_scale).clip(0.0, 1.0).astype(np.float32, copy=False)
-        except Exception as _e_fix:
+        bs = int(getattr(self, "batch_size", 0) or 0)
+        apply_white_fix = True
+        if bs == 0 and local_fallback_used:
+            apply_white_fix = False
             try:
-                self.update_progress(f"[Reproject White-Fix] skipped due to error: {_e_fix}", "DEBUG")
+                self.update_progress(
+                    "[Reproject White-Fix] ignoré (fallback local utilisé pour bs=0).",
+                    "DEBUG",
+                )
             except Exception:
                 pass
+
+        if apply_white_fix:
+            try:
+                arr = data_hwc.astype(np.float32, copy=False)
+                if arr.ndim == 3:
+                    luminance = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+                else:
+                    luminance = arr
+                finite = np.isfinite(luminance)
+                if np.count_nonzero(finite) > 50:
+                    p1 = float(np.nanpercentile(luminance[finite], 1.0))
+                    p99 = float(np.nanpercentile(luminance[finite], 99.0))
+                    rng = p99 - p1
+                    mean_val = float(np.nanmean(luminance[finite]))
+                    triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
+                    if triggered and (ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1):
+                        self.update_progress(
+                            f"[Reproject White-Fix] rescale to reference (cur p1/p99={p1:.6f}/{p99:.6f} → ref {ref_p1:.3f}/{ref_p99:.3f}).",
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        ref_scale = max(ref_p99 - ref_p1, 1e-6)
+                        arr = (arr - p1) / cur_scale
+                        arr = arr * ref_scale + ref_p1
+                        if bs == 0:
+                            arr = np.clip(arr, ref_p1 - 5 * ref_scale, ref_p99 + 5 * ref_scale)
+                        data_hwc = arr.astype(np.float32, copy=False)
+                    elif triggered:
+                        self.update_progress(
+                            f"[Reproject White-Fix] fallback normalization (no valid reference).",
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        arr = ((arr - p1) / cur_scale).clip(0.0, 1.0)
+                        data_hwc = arr.astype(np.float32, copy=False)
+            except Exception as _e_fix:
+                try:
+                    self.update_progress(f"[Reproject White-Fix] skipped due to error: {_e_fix}", "DEBUG")
+                except Exception:
+                    pass
         # --------------------------------------------------------------------------
 
         if (
