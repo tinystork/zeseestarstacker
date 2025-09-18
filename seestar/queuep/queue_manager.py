@@ -11749,7 +11749,11 @@ class SeestarQueuedStacker:
                             return True
                         if not np.any(np.nan_to_num(cov_arr, nan=0.0) > 0):
                             return True
-                        if np.nanmax(np.abs(sci_arr)) <= 1e-7:
+                        max_abs = float(np.nanmax(np.abs(sci_arr)))
+                        if max_abs <= 1e-7:
+                            return True
+                        range_val = float(np.nanmax(sci_arr) - np.nanmin(sci_arr))
+                        if range_val <= 5e-5:
                             return True
                     except Exception:
                         return False
