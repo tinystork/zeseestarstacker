@@ -1594,3 +1594,52 @@ def test_reproject_classic_batches_forces_reference_wcs_bs0(monkeypatch, tmp_pat
     for w_list in captured:
         assert all(w is obj.reference_wcs_object for w in w_list)
 
+
+def test_reproject_classic_batches_bs0_fallback_to_local(monkeypatch, tmp_path):
+    import os
+
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    obj.reproject_coadd_final = True
+    obj.reference_header_for_wcs = obj.reference_wcs_object.to_header(relax=True)
+    obj.reference_shape = (4, 4)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {"astropy_calls": 0}
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        if os.environ.get("REPROJECT_FORCE_LOCAL") == "1":
+            return (
+                np.full(shape_out, 5.0, dtype=np.float32),
+                np.ones(shape_out, dtype=np.float32),
+            )
+        captured["astropy_calls"] += 1
+        return (
+            np.zeros(shape_out, dtype=np.float32),
+            np.zeros(shape_out, dtype=np.float32),
+        )
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+
+    saved = {}
+
+    def fake_save_final_stack(*args, drizzle_final_sci_data=None, drizzle_final_wht_data=None, **kwargs):
+        saved["data"] = drizzle_final_sci_data
+        saved["cov"] = drizzle_final_wht_data
+
+    monkeypatch.setattr(obj, "_save_final_stack", fake_save_final_stack)
+
+    obj._reproject_classic_batches_zm(batch_files)
+
+    assert captured["astropy_calls"] > 0
+    assert "data" in saved
+    assert np.nanmax(saved["data"]) > 1.0
+    assert np.all(saved["cov"] > 0)
+    assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
+

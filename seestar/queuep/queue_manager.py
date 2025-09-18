@@ -11706,11 +11706,20 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
         import os as _os
-        # Reproduce WIP behaviour:
-        # - For batch_size == 0: let astropy.reproject_and_coadd run (no force),
-        #   keep match_background=True (default) to harmonise backgrounds.
-        # - For batch_size == 1: force local accumulator and disable background
-        #   matching to prevent washing out the stack.
+
+        def _restore_env(prev):
+            if prev is None:
+                try:
+                    del _os.environ["REPROJECT_FORCE_LOCAL"]
+                except Exception:
+                    pass
+            else:
+                _os.environ["REPROJECT_FORCE_LOCAL"] = prev
+
+        # Reproduce WIP behaviour while guarding against the astropy path
+        # returning a "blank" frame (all zeros / invalid coverage) in batch
+        # size 0 mode. When that happens we automatically retry with the local
+        # accumulator which mirrors the historical workflow.
         _prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
         bs = int(getattr(self, "batch_size", 0) or 0)
         if bs == 1:
@@ -11718,6 +11727,7 @@ class SeestarQueuedStacker:
         try:
             for ch in range(data_pairs[0][0].shape[2]):
                 inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
+
                 sci, cov = reproject_and_coadd(
                     inputs_ch,
                     output_projection=out_wcs,
@@ -11727,18 +11737,52 @@ class SeestarQueuedStacker:
                     combine_function="mean",
                     match_background=(bs == 0),
                 )
-                final_channels.append(sci.astype(np.float32))
+
+                def _is_blank(_sci, _cov):
+                    try:
+                        if _sci is None or _cov is None:
+                            return True
+                        sci_arr = np.asarray(_sci, dtype=np.float32)
+                        cov_arr = np.asarray(_cov, dtype=np.float32)
+                        if not np.any(np.isfinite(sci_arr)):
+                            return True
+                        if not np.any(np.nan_to_num(cov_arr, nan=0.0) > 0):
+                            return True
+                        if np.nanmax(np.abs(sci_arr)) <= 1e-7:
+                            return True
+                    except Exception:
+                        return False
+                    return False
+
+                if (
+                    bs == 0
+                    and _prev_force != "1"
+                    and _is_blank(sci, cov)
+                ):
+                    self.update_progress(
+                        "   ⚠️ Reproject (astropy) a renvoyé une image vide – bascule sur l'accumulateur local.",
+                        "WARN",
+                    )
+                    _restore_env("1")
+                    try:
+                        sci, cov = reproject_and_coadd(
+                            inputs_ch,
+                            output_projection=out_wcs,
+                            shape_out=out_shape,
+                            input_weights=weight_maps,
+                            reproject_function=reproject_interp,
+                            combine_function="mean",
+                            match_background=True,
+                        )
+                    finally:
+                        _restore_env(_prev_force)
+
+                final_channels.append(np.asarray(sci, dtype=np.float32))
                 if final_cov is None:
-                    final_cov = cov.astype(np.float32)
+                    final_cov = np.asarray(cov, dtype=np.float32)
         finally:
             if bs == 1:
-                if _prev_force is None:
-                    try:
-                        del _os.environ["REPROJECT_FORCE_LOCAL"]
-                    except Exception:
-                        pass
-                else:
-                    _os.environ["REPROJECT_FORCE_LOCAL"] = _prev_force
+                _restore_env(_prev_force)
 
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
