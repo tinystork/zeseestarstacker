@@ -11535,6 +11535,7 @@ class SeestarQueuedStacker:
                 continue
             try:
                 hdr = None
+                bs_local = int(getattr(self, "batch_size", 0) or 0)
                 try:
                     hdr = fits.getheader(sci_path, memmap=False)
                     has_wcs = all(
@@ -11545,7 +11546,10 @@ class SeestarQueuedStacker:
                     hdr = None
                     has_wcs = False
                 if not has_wcs:
-                    if getattr(self, "reference_header_for_wcs", None) is not None:
+                    # WIP parity: for bs=0 do NOT inject reference WCS here; let
+                    # each batch be solved individually so the global grid uses
+                    # the true dither/rotation. For other modes, reuse reference.
+                    if bs_local != 0 and getattr(self, "reference_header_for_wcs", None) is not None:
                         try:
                             hdr = hdr or fits.Header()
                             for k in (
@@ -11573,10 +11577,11 @@ class SeestarQueuedStacker:
                             has_wcs = False
                 solved_ok = True
                 if not has_wcs:
-                    if getattr(self, "batch_size", 0) != 0:
-                        solved_ok = self._run_astap_and_update_header(sci_path)
-                        if solved_ok:
-                            hdr = fits.getheader(sci_path, memmap=False)
+                    # Always attempt solving when WCS is missing; in bs=0 this
+                    # is essential to build the optimal mosaic grid.
+                    solved_ok = self._run_astap_and_update_header(sci_path)
+                    if solved_ok:
+                        hdr = fits.getheader(sci_path, memmap=False)
                     else:
                         solved_ok = False
                 if not solved_ok:
@@ -11651,15 +11656,9 @@ class SeestarQueuedStacker:
         if len(data_pairs) < 2:
             return False
 
-        if self.reference_wcs_object is not None and self.reference_shape is not None:
-            out_wcs = self.reference_wcs_object
-            out_shape = self.reference_shape
-        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
-            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
-                self.reference_wcs_object,
-                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-            )
-        else:
+        bs = int(getattr(self, "batch_size", 0) or 0)
+        if bs == 0:
+            # Parité WIP: grille optimale calculée sur tous les WCS
             out_wcs, out_shape = self._calculate_final_mosaic_grid(
                 wcs_list,
                 headers,
@@ -11668,6 +11667,24 @@ class SeestarQueuedStacker:
             )
             if out_wcs is None:
                 return False
+        else:
+            if self.reference_wcs_object is not None and self.reference_shape is not None:
+                out_wcs = self.reference_wcs_object
+                out_shape = self.reference_shape
+            elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+                out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                    self.reference_wcs_object,
+                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                )
+            else:
+                out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    headers,
+                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                    auto_rotate=True,
+                )
+                if out_wcs is None:
+                    return False
 
         if out_wcs.pixel_shape is not None:
             expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
@@ -11786,7 +11803,8 @@ class SeestarQueuedStacker:
         # --------------------------------------------------------------------------
 
         if (
-            self.reference_wcs_object is not None
+            int(getattr(self, "batch_size", 0) or 0) != 0
+            and self.reference_wcs_object is not None
             and out_wcs is not self.reference_wcs_object
             and self.reference_shape is not None
         ):
