@@ -1395,6 +1395,30 @@ def _prepare_qm_env(monkeypatch, tmp_path, batch_size):
     ]
 
 
+def test_reproject_classic_batches_disables_match_bg_for_bs0(monkeypatch, tmp_path):
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {}
+
+    def fake_reproject_and_coadd(*a, **k):
+        captured["match_background"] = k.get("match_background")
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches(batch_files)
+
+    assert captured.get("match_background") is False
+
+
 def test_reproject_classic_batches_disables_match_bg_for_bs1(monkeypatch, tmp_path):
     obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=1)
     import seestar.enhancement.reproject_utils as ru

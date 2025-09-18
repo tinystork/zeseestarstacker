@@ -10920,14 +10920,15 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
         for ch in range(3):
-            # When stacking classic batches in ``batch_size == 1`` mode, images
+            # When stacking classic batches in ``batch_size in {0, 1}`` mode, images
             # are already background normalised during the disk-based pipeline.
             # Passing ``match_background=True`` to ``reproject_and_coadd`` would
             # attempt another background matching step, which can result in NaNs
             # when some inputs have no overlap, producing an empty final image.
-            # Keep the previous behaviour for other batch sizes.
+            # Keep the previous behaviour for larger batch sizes only.
             try:  # [B1-MATCH-BG-FIX]
-                match_bg = getattr(self, "batch_size", 0) != 1
+                bs_local = int(getattr(self, "batch_size", 0) or 0)
+                match_bg = bs_local > 1
             except Exception:
                 match_bg = True
 
@@ -11735,7 +11736,7 @@ class SeestarQueuedStacker:
                     input_weights=weight_maps,
                     reproject_function=reproject_interp,
                     combine_function="mean",
-                    match_background=(bs == 0),
+                    match_background=(bs > 1),
                 )
 
                 def _is_blank(_sci, _cov):
@@ -11772,7 +11773,7 @@ class SeestarQueuedStacker:
                             input_weights=weight_maps,
                             reproject_function=reproject_interp,
                             combine_function="mean",
-                            match_background=True,
+                            match_background=(bs > 1),
                         )
                     finally:
                         _restore_env(_prev_force)
