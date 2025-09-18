@@ -11634,8 +11634,9 @@ class SeestarQueuedStacker:
                         np.float32, copy=False
                     )
                     np.nan_to_num(cov, copy=False)
-                    # WIP parity: do not apply additional radial weighting for bs=0
-                    if int(getattr(self, "batch_size", 0) or 0) == 1:
+                    if getattr(self, "reproject_coadd_final", False):
+                        cov *= make_radial_weight_map(h, w)
+                    elif int(getattr(self, "batch_size", 0) or 0) == 1:
                         cov *= make_radial_weight_map(h, w)
                 except Exception:
                     cov = np.ones((h, w), dtype=np.float32)
@@ -11668,9 +11669,15 @@ class SeestarQueuedStacker:
         if len(data_pairs) < 2:
             return False
 
-        bs = int(getattr(self, "batch_size", 0) or 0)
-        if bs == 0:
-            # Parité WIP: grille optimale calculée sur tous les WCS
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+        else:
             out_wcs, out_shape = self._calculate_final_mosaic_grid(
                 wcs_list,
                 headers,
@@ -11679,24 +11686,6 @@ class SeestarQueuedStacker:
             )
             if out_wcs is None:
                 return False
-        else:
-            if self.reference_wcs_object is not None and self.reference_shape is not None:
-                out_wcs = self.reference_wcs_object
-                out_shape = self.reference_shape
-            elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
-                out_wcs, out_shape = self._calculate_fixed_orientation_grid(
-                    self.reference_wcs_object,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-                )
-            else:
-                out_wcs, out_shape = self._calculate_final_mosaic_grid(
-                    wcs_list,
-                    headers,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-                    auto_rotate=True,
-                )
-                if out_wcs is None:
-                    return False
 
         if out_wcs.pixel_shape is not None:
             expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
@@ -11815,8 +11804,7 @@ class SeestarQueuedStacker:
         # --------------------------------------------------------------------------
 
         if (
-            int(getattr(self, "batch_size", 0) or 0) != 0
-            and self.reference_wcs_object is not None
+            self.reference_wcs_object is not None
             and out_wcs is not self.reference_wcs_object
             and self.reference_shape is not None
         ):
