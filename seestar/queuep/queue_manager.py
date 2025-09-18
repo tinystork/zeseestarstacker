@@ -11545,40 +11545,52 @@ class SeestarQueuedStacker:
                 except Exception:
                     hdr = None
                     has_wcs = False
-                if not has_wcs:
-                    # WIP parity: for bs=0 do NOT inject reference WCS here; let
-                    # each batch be solved individually so the global grid uses
-                    # the true dither/rotation. For other modes, reuse reference.
-                    if bs_local != 0 and getattr(self, "reference_header_for_wcs", None) is not None:
-                        try:
-                            hdr = hdr or fits.Header()
-                            for k in (
-                                "CRPIX1",
-                                "CRPIX2",
-                                "CDELT1",
-                                "CDELT2",
-                                "CD1_1",
-                                "CD1_2",
-                                "CD2_1",
-                                "CD2_2",
-                                "CTYPE1",
-                                "CTYPE2",
-                                "CRVAL1",
-                                "CRVAL2",
-                            ):
-                                if k in self.reference_header_for_wcs:
-                                    hdr[k] = self.reference_header_for_wcs[k]
+                if not has_wcs and getattr(self, "reference_header_for_wcs", None) is not None:
+                    try:
+                        hdr = hdr or fits.Header()
+                        ref_hdr = self.reference_header_for_wcs
+                        for key in (
+                            "CRPIX1",
+                            "CRPIX2",
+                            "CDELT1",
+                            "CDELT2",
+                            "CD1_1",
+                            "CD1_2",
+                            "CD2_1",
+                            "CD2_2",
+                            "CTYPE1",
+                            "CTYPE2",
+                            "CRVAL1",
+                            "CRVAL2",
+                        ):
+                            if key in ref_hdr:
+                                hdr[key] = ref_hdr[key]
+                        # When ``batch_size`` equals 0 the classic batches should
+                        # inherit the reference astrometry directly, mirroring the
+                        # historical WIP workflow where no additional solving was
+                        # performed. For other batch sizes we keep the previous
+                        # behaviour of pre-populating the reference WCS so the
+                        # solver has a sensible starting point.
+                        if bs_local == 0 and getattr(self, "reproject_coadd_final", False):
                             data_tmp = fits.getdata(sci_path, memmap=False)
                             fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
                                 sci_path, overwrite=True, output_verify="ignore"
                             )
                             has_wcs = True
-                        except Exception:
-                            has_wcs = False
+                        elif bs_local != 0:
+                            data_tmp = fits.getdata(sci_path, memmap=False)
+                            fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
+                                sci_path, overwrite=True, output_verify="ignore"
+                            )
+                            has_wcs = True
+                    except Exception:
+                        has_wcs = False
                 solved_ok = True
                 if not has_wcs:
-                    # Always attempt solving when WCS is missing; in bs=0 this
-                    # is essential to build the optimal mosaic grid.
+                    # Always attempt solving when WCS is missing. In the
+                    # ``batch_size=0`` + reproject path the reference WCS above
+                    # already avoids this branch, but other scenarios still rely
+                    # on ASTAP to recover the astrometry.
                     solved_ok = self._run_astap_and_update_header(sci_path)
                     if solved_ok:
                         hdr = fits.getheader(sci_path, memmap=False)
