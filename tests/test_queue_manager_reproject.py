@@ -1714,3 +1714,59 @@ def test_reproject_classic_batches_bs0_detects_low_range_blank(monkeypatch, tmp_
     assert np.all(saved["cov"] > 0)
     assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
 
+
+def test_reproject_classic_batches_bs0_rescales_near_white(monkeypatch, tmp_path):
+    import os
+
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    obj.reproject_coadd_final = True
+
+    shape = (64, 64)
+    ref_wcs = make_wcs(shape=shape)
+    obj.reference_wcs_object = ref_wcs
+    obj.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+    obj.reference_shape = shape
+
+    base = np.linspace(0.005, 0.05, num=shape[0] * shape[1], dtype=np.float32).reshape(shape)
+    rgb = np.stack([base, base * 1.1, base * 0.9], axis=0)
+    hdr = make_wcs(shape=shape).to_header()
+    for sci_path, wht_paths in batch_files:
+        fits.writeto(sci_path, rgb, hdr, overwrite=True)
+        fits.writeto(wht_paths[0], np.ones(shape, dtype=np.float32), overwrite=True)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        yy = np.linspace(0.0, 1.0, shape_out[0], dtype=np.float32)
+        xx = np.linspace(0.0, 1.0, shape_out[1], dtype=np.float32)
+        grid = 0.994 + 0.002 * ((yy[:, None] + xx[None, :]) / 2.0)
+        return grid.astype(np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+
+    saved = {}
+
+    def fake_save_final_stack(*args, drizzle_final_sci_data=None, drizzle_final_wht_data=None, **kwargs):
+        saved["data"] = drizzle_final_sci_data
+        saved["cov"] = drizzle_final_wht_data
+
+    monkeypatch.setattr(obj, "_save_final_stack", fake_save_final_stack)
+
+    obj._reproject_classic_batches_zm(batch_files)
+
+    assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
+    assert "data" in saved and "cov" in saved
+    data = saved["data"]
+    cov = saved["cov"]
+    assert data is not None and cov is not None
+    assert float(np.nanmax(data)) < 0.5
+    assert float(np.nanmax(data) - np.nanmin(data)) > 1e-3
+    assert np.all(np.isfinite(data))
+    assert np.all(cov > 0)
+
