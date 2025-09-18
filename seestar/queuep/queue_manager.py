@@ -10867,7 +10867,8 @@ class SeestarQueuedStacker:
                     np.float32, copy=False
                 )
                 np.nan_to_num(coverage, copy=False)
-                coverage *= make_radial_weight_map(*coverage.shape)
+                if int(getattr(self, "batch_size", 0) or 0) == 1:
+                    coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
@@ -11616,7 +11617,9 @@ class SeestarQueuedStacker:
                         np.float32, copy=False
                     )
                     np.nan_to_num(cov, copy=False)
-                    cov *= make_radial_weight_map(h, w)
+                    # WIP parity: do not apply additional radial weighting for bs=0
+                    if int(getattr(self, "batch_size", 0) or 0) == 1:
+                        cov *= make_radial_weight_map(h, w)
                 except Exception:
                     cov = np.ones((h, w), dtype=np.float32)
 

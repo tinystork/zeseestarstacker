@@ -1,0 +1,25 @@
+                    batch_wcs = self.reference_wcs_object
+                    batch_wcs.pixel_shape = (w, h)
+                else:
+                    batch_wcs = WCS(hdr, naxis=2)
+                    ensure_wcs_pixel_shape(batch_wcs, h, w)
+            except Exception:
+                continue  # silently skip unreadable batch
+
+            # 2.2 Load coverage / weight map (or fallback)
+            try:
+                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                    np.float32, copy=False
+                )
+                np.nan_to_num(coverage, copy=False)
+                coverage *= make_radial_weight_map(*coverage.shape)
+            except Exception:
+                coverage = np.ones((h, w), dtype=np.float32)
+
+            # ------------------------------------------------------------------
+            # 2.3 Prepare batch data
+            # ------------------------------------------------------------------
+            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+
+            # 2.4 Feed per‑channel lists -------------------------------------
+            wcs_for_grid.append(batch_wcs)

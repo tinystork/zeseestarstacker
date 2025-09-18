@@ -1,0 +1,31 @@
+            logger.debug(
+                f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}"
+            )
+
+        requested_batch_size = batch_size
+        if requested_batch_size == 0:
+            # Mode "batch size 0" explicite : aucun lot, tout en RAM
+            self.batch_size = 0
+            if self.reproject_between_batches:
+                self.update_progress(
+                    "ⓘ batch_size=0 : désactivation de la reprojection entre lots (workflow WIP).",
+                    None,
+                )
+                logger.debug(
+                    "  -> batch_size=0: reproject_between_batches forcé à False pour reproduire WIP."
+                )
+                self.reproject_between_batches = False
+            if not self.freeze_reference_wcs:
+                logger.debug(
+                    "  -> batch_size=0: freeze_reference_wcs activé pour conserver la grille WIP."
+                )
+                self.freeze_reference_wcs = True
+            if reproject_coadd_final is None and not self.reproject_coadd_final:
+                self.reproject_coadd_final = True
+                self.stack_final_combine = "reproject_coadd"
+                self.update_progress(
+                    "ⓘ batch_size=0 : activation automatique de Reproject&Coadd (comportement WIP).",
+                    None,
+                )
+                logger.debug(
+                    "  -> batch_size=0: reproject_coadd_final forcé à True pour reproduire le workflow WIP."
