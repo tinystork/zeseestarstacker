@@ -10758,6 +10758,7 @@ class SeestarQueuedStacker:
             from seestar.enhancement.reproject_utils import (
                 reproject_and_coadd,
                 reproject_interp,
+                subtract_sigma_clipped_median,
             )
         except Exception as e:
             self.update_progress(
@@ -10926,6 +10927,7 @@ class SeestarQueuedStacker:
             # attempt another background matching step, which can result in NaNs
             # when some inputs have no overlap, producing an empty final image.
             # Keep the previous behaviour for other batch sizes.
+
             try:  # [B1-MATCH-BG-FIX]
                 match_bg = getattr(self, "batch_size", 0) != 1
             except Exception:
@@ -10941,7 +10943,9 @@ class SeestarQueuedStacker:
                 match_background=match_bg,
             )
 
+
             final_channels.append(sci.astype(np.float32))
+
             if final_cov is None:
                 final_cov = cov.astype(np.float32)
 
