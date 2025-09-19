@@ -10855,9 +10855,10 @@ class SeestarQueuedStacker:
                 h, w = data_cxhxw.shape[-2:]
                 if getattr(self, "batch_size", 0) == 0 and self.reference_wcs_object is not None:
                     batch_wcs = self.reference_wcs_object
+                    batch_wcs.pixel_shape = (w, h)
                 else:
                     batch_wcs = WCS(hdr, naxis=2)
-                ensure_wcs_pixel_shape(batch_wcs, h, w)
+                    ensure_wcs_pixel_shape(batch_wcs, h, w)
             except Exception:
                 continue  # silently skip unreadable batch
 
@@ -10919,43 +10920,6 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
 
-        import os as _os
-
-        def _set_force_local(value):
-            if value is None:
-                try:
-                    del _os.environ["REPROJECT_FORCE_LOCAL"]
-                except KeyError:
-                    pass
-            else:
-                _os.environ["REPROJECT_FORCE_LOCAL"] = value
-
-        def _is_blank(_sci, _cov):
-            try:
-                if _sci is None or _cov is None:
-                    return True
-                sci_arr = np.asarray(_sci, dtype=np.float32)
-                cov_arr = np.asarray(_cov, dtype=np.float32)
-                if not np.any(np.isfinite(sci_arr)):
-                    return True
-                if not np.any(np.nan_to_num(cov_arr, nan=0.0) > 0):
-                    return True
-                max_abs = float(np.nanmax(np.abs(sci_arr)))
-                if max_abs <= 1e-7:
-                    return True
-                range_val = float(np.nanmax(sci_arr) - np.nanmin(sci_arr))
-                if range_val <= 5e-5:
-                    return True
-            except Exception:
-                return False
-            return False
-
-        try:
-            bs_local = int(getattr(self, "batch_size", 0) or 0)
-        except Exception:
-            bs_local = 0
-        prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
-
         for ch in range(3):
             # When stacking classic batches in ``batch_size == 1`` mode, images
             # are already background normalised during the disk-based pipeline.
@@ -10963,7 +10927,11 @@ class SeestarQueuedStacker:
             # attempt another background matching step, which can result in NaNs
             # when some inputs have no overlap, producing an empty final image.
             # Keep the previous behaviour for other batch sizes.
-            match_bg = bs_local != 1
+
+            try:  # [B1-MATCH-BG-FIX]
+                match_bg = getattr(self, "batch_size", 0) != 1
+            except Exception:
+                match_bg = True
 
             sci, cov = reproject_and_coadd(
                 channel_arrays_wcs[ch],
@@ -10975,46 +10943,11 @@ class SeestarQueuedStacker:
                 match_background=match_bg,
             )
 
-            if bs_local == 0 and prev_force != "1" and _is_blank(sci, cov):
-                self.update_progress(
-                    "   ⚠️ Reproject (astropy) a renvoyé une image vide – bascule sur l'accumulateur local.",
-                    "WARN",
-                )
-                _set_force_local("1")
-                try:
-                    sci, cov = reproject_and_coadd(
-                        channel_arrays_wcs[ch],
-                        output_projection=out_wcs,
-                        shape_out=out_shape,
-                        input_weights=channel_footprints[ch],
-                        reproject_function=reproject_interp,
-                        combine_function="mean",
-                        match_background=match_bg,
-                    )
-                finally:
-                    _set_force_local(prev_force)
 
-            sci_arr = np.asarray(sci, dtype=np.float32)
-            if bs_local == 0:
-                try:
-                    sci_arr, _ = subtract_sigma_clipped_median(
-                        sci_arr, min_valid=256
-                    )
-                except Exception:
-                    finite_mask = np.isfinite(sci_arr)
-                    if np.count_nonzero(finite_mask) > 50:
-                        try:
-                            median_val = float(
-                                np.nanmedian(sci_arr[finite_mask])
-                            )
-                        except Exception:
-                            median_val = 0.0
-                        if np.isfinite(median_val):
-                            sci_arr = sci_arr - median_val
+            final_channels.append(sci.astype(np.float32))
 
-            final_channels.append(sci_arr)
             if final_cov is None:
-                final_cov = np.asarray(cov, dtype=np.float32)
+                final_cov = cov.astype(np.float32)
 
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
