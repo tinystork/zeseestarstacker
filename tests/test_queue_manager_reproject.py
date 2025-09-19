@@ -1395,7 +1395,7 @@ def _prepare_qm_env(monkeypatch, tmp_path, batch_size):
     ]
 
 
-def test_reproject_classic_batches_disables_match_bg_for_bs0(monkeypatch, tmp_path):
+def test_reproject_classic_batches_keeps_match_bg_for_bs0(monkeypatch, tmp_path):
     obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
     import seestar.enhancement.reproject_utils as ru
 
@@ -1416,7 +1416,7 @@ def test_reproject_classic_batches_disables_match_bg_for_bs0(monkeypatch, tmp_pa
 
     obj._reproject_classic_batches(batch_files)
 
-    assert captured.get("match_background") is False
+    assert captured.get("match_background") is True
 
 
 def test_reproject_classic_batches_disables_match_bg_for_bs1(monkeypatch, tmp_path):
