@@ -10758,6 +10758,7 @@ class SeestarQueuedStacker:
             from seestar.enhancement.reproject_utils import (
                 reproject_and_coadd,
                 reproject_interp,
+                subtract_sigma_clipped_median,
             )
         except Exception as e:
             self.update_progress(
@@ -10994,7 +10995,25 @@ class SeestarQueuedStacker:
                 finally:
                     _set_force_local(prev_force)
 
-            final_channels.append(np.asarray(sci, dtype=np.float32))
+            sci_arr = np.asarray(sci, dtype=np.float32)
+            if bs_local == 0:
+                try:
+                    sci_arr, _ = subtract_sigma_clipped_median(
+                        sci_arr, min_valid=256
+                    )
+                except Exception:
+                    finite_mask = np.isfinite(sci_arr)
+                    if np.count_nonzero(finite_mask) > 50:
+                        try:
+                            median_val = float(
+                                np.nanmedian(sci_arr[finite_mask])
+                            )
+                        except Exception:
+                            median_val = 0.0
+                        if np.isfinite(median_val):
+                            sci_arr = sci_arr - median_val
+
+            final_channels.append(sci_arr)
             if final_cov is None:
                 final_cov = np.asarray(cov, dtype=np.float32)
 
