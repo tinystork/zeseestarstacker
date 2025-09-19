@@ -10866,8 +10866,7 @@ class SeestarQueuedStacker:
                     np.float32, copy=False
                 )
                 np.nan_to_num(coverage, copy=False)
-                if int(getattr(self, "batch_size", 0) or 0) == 1:
-                    coverage *= make_radial_weight_map(*coverage.shape)
+                coverage *= make_radial_weight_map(*coverage.shape)
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
@@ -10957,13 +10956,13 @@ class SeestarQueuedStacker:
         prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
 
         for ch in range(3):
-            # When stacking classic batches in ``batch_size in {0, 1}`` mode, images
+            # When stacking classic batches in ``batch_size == 1`` mode, images
             # are already background normalised during the disk-based pipeline.
             # Passing ``match_background=True`` to ``reproject_and_coadd`` would
             # attempt another background matching step, which can result in NaNs
             # when some inputs have no overlap, producing an empty final image.
-            # Keep the previous behaviour for larger batch sizes only.
-            match_bg = bs_local > 1
+            # Keep the previous behaviour for other batch sizes.
+            match_bg = bs_local != 1
 
             sci, cov = reproject_and_coadd(
                 channel_arrays_wcs[ch],
