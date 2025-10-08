@@ -40,6 +40,24 @@ def sanitize_header_for_wcs(header: fits.Header) -> None:
     for idx in reversed(to_delete):
         del header[idx]
 
+    # Append "-SIP" to CTYPE when SIP coefficients are present but suffix missing
+    try:
+        has_sip = any(k in header for k in ("A_ORDER", "B_ORDER"))
+        if not has_sip:
+            for k in header.keys():
+                uk = k.upper()
+                if uk.startswith("A_") or uk.startswith("B_") or uk.startswith("AP_") or uk.startswith("BP_"):
+                    has_sip = True
+                    break
+        if has_sip:
+            for key in ("CTYPE1", "CTYPE2"):
+                if key in header:
+                    val = str(header.get(key, ""))
+                    if "-SIP" not in val.upper():
+                        header[key] = f"{val}-SIP"
+    except Exception:
+        pass
+
 
 def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
     """
@@ -360,8 +378,23 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
         if finite.any():
             lo = np.nanpercentile(stretched_data[finite], 0.5)
             hi = np.nanpercentile(stretched_data[finite], 99.5)
-            if hi > lo:
-                stretched_data = np.clip((stretched_data - lo) / (hi - lo), 0, 1)
+            # Guard against tiny dynamic ranges that would blow up contrast
+            if hi - lo > 1e-3:
+                stretched_data = np.clip((stretched_data - lo) / (hi - lo + 1e-9), 0, 1)
+            else:
+                print(f"  DEBUG save_preview_image: Skipping secondary stretch due to tiny range (hi-lo={hi-lo:.3g}).")
+
+        # If the image is still nearly flat and bright (white-out), re‑compute
+        # a conservative stretch from robust percentiles of the original data
+        rng = float(np.nanmax(stretched_data) - np.nanmin(stretched_data))
+        if rng < 5e-3 and np.nanmean(stretched_data) > 0.97:
+            base = display_data[np.isfinite(display_data) & (display_data > 0)]
+            if base.size > 50:
+                bp = np.nanpercentile(base, 0.1)
+                wp = np.nanpercentile(base, 99.9)
+                if wp > bp + 1e-7:
+                    stretched_data = np.clip((display_data - bp) / (wp - bp + 1e-9), 0, 1)
+                    print("  DEBUG save_preview_image: Applied fallback anti-white stretch.")
 
         final_image_data_clipped = np.clip(stretched_data, 0.0, 1.0)
         print(f"  final_image_data_clipped (avant *255) - Range: [{np.nanmin(final_image_data_clipped):.4g} - {np.nanmax(final_image_data_clipped):.4g}]")

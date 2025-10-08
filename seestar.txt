@@ -1,0 +1,396 @@
+2025-10-08 21:04:29,433 [INFO] __main__: Log file initialised at F:\seescan\env\zeseestarstacker\seestar.txt
+2025-10-08 21:04:58,818 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: reference_image.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:04:58,819 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:04:58,819 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour reference_image.fit
+2025-10-08 21:04:59,734 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023_out\temp_processing\reference_image.wcs' trouvé.
+2025-10-08 21:04:59,757 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 0.9s)
+2025-10-08 21:04:59,758 [WARNING] seestar.queuep.queue_manager: Reference WCS pixel scale 0.002 arcsec/pix outside [0.1, 30.0]; clipping.
+2025-10-08 21:04:59,861 [INFO] seestar.queuep.queue_manager: Drizzle OFF -> output grid = reference grid
+2025-10-08 21:05:00,085 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044434.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,085 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,087 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044434.fit
+2025-10-08 21:05:00,087 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044536.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,088 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,089 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044536.fit
+2025-10-08 21:05:00,089 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044713.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,092 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044744.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,092 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,094 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044815.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,096 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044952.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,096 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,096 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044713.fit
+2025-10-08 21:05:00,098 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-045124.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,099 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044744.fit
+2025-10-08 21:05:00,099 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-044916.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:00,099 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,099 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,100 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,101 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:00,101 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044815.fit
+2025-10-08 21:05:00,101 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044952.fit
+2025-10-08 21:05:00,101 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-045124.fit
+2025-10-08 21:05:00,102 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-044916.fit
+2025-10-08 21:05:04,073 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044713.wcs' trouvé.
+2025-10-08 21:05:04,089 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.0s)
+2025-10-08 21:05:04,092 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-045053.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,093 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,093 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-045053.fit
+2025-10-08 21:05:04,229 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044815.wcs' trouvé.
+2025-10-08 21:05:04,253 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:04,257 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-045155.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,258 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,259 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-045155.fit
+2025-10-08 21:05:04,262 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044434.wcs' trouvé.
+2025-10-08 21:05:04,288 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:04,290 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044952.wcs' trouvé.
+2025-10-08 21:05:04,292 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_30.0s_IRCUT_20250510-045023.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,301 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,313 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_30.0s_IRCUT_20250510-045023.fit
+2025-10-08 21:05:04,331 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:04,334 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-040928.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,335 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,335 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-040928.fit
+2025-10-08 21:05:04,342 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044744.wcs' trouvé.
+2025-10-08 21:05:04,366 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-045124.wcs' trouvé.
+2025-10-08 21:05:04,369 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044916.wcs' trouvé.
+2025-10-08 21:05:04,370 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-044536.wcs' trouvé.
+2025-10-08 21:05:04,405 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.3s)
+2025-10-08 21:05:04,424 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.3s)
+2025-10-08 21:05:04,425 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041051.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,426 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,427 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041051.fit
+2025-10-08 21:05:04,428 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.3s)
+2025-10-08 21:05:04,429 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041126.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,430 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,431 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041126.fit
+2025-10-08 21:05:04,433 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041103.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,434 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,434 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041103.fit
+2025-10-08 21:05:04,485 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.4s)
+2025-10-08 21:05:04,487 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041114.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:04,489 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:04,489 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041114.fit
+2025-10-08 21:05:08,198 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-045053.wcs' trouvé.
+2025-10-08 21:05:08,221 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.1s)
+2025-10-08 21:05:08,226 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041137.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:08,231 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:08,236 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041137.fit
+2025-10-08 21:05:08,491 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-040928.wcs' trouvé.
+2025-10-08 21:05:08,555 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:08,563 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041207.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:08,565 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:08,565 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041207.fit
+2025-10-08 21:05:09,349 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-045155.wcs' trouvé.
+2025-10-08 21:05:09,351 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041103.wcs' trouvé.
+2025-10-08 21:05:09,369 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041051.wcs' trouvé.
+2025-10-08 21:05:09,380 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041126.wcs' trouvé.
+2025-10-08 21:05:09,389 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.0s)
+2025-10-08 21:05:09,391 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.1s)
+2025-10-08 21:05:09,393 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041114.wcs' trouvé.
+2025-10-08 21:05:09,405 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.0s)
+2025-10-08 21:05:09,406 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20250320-041241.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,418 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240821-234421.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,418 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,418 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,419 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.0s)
+2025-10-08 21:05:09,419 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20250320-041241.fit
+2025-10-08 21:05:09,419 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240821-234421.fit
+2025-10-08 21:05:09,421 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240821-234548.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,422 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.9s)
+2025-10-08 21:05:09,423 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,424 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240821-234548.fit
+2025-10-08 21:05:09,426 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240821-234608.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,428 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,428 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-223058.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,429 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240821-234608.fit
+2025-10-08 21:05:09,429 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,431 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-223058.fit
+2025-10-08 21:05:09,507 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_30.0s_IRCUT_20250510-045023.wcs' trouvé.
+2025-10-08 21:05:09,549 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.2s)
+2025-10-08 21:05:09,552 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-223140.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:09,552 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:09,552 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-223140.fit
+2025-10-08 21:05:12,077 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041137.wcs' trouvé.
+2025-10-08 21:05:12,091 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.9s)
+2025-10-08 21:05:12,093 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-224225.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:12,094 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:12,094 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-224225.fit
+2025-10-08 21:05:12,126 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041207.wcs' trouvé.
+2025-10-08 21:05:12,138 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.6s)
+2025-10-08 21:05:12,140 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-224932.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:12,141 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:12,141 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-224932.fit
+2025-10-08 21:05:13,571 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-223058.wcs' trouvé.
+2025-10-08 21:05:13,585 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240821-234548.wcs' trouvé.
+2025-10-08 21:05:13,594 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:13,598 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:13,598 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240821-234608.wcs' trouvé.
+2025-10-08 21:05:13,600 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-224214.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,601 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20250320-041241.wcs' trouvé.
+2025-10-08 21:05:13,601 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,602 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-224214.fit
+2025-10-08 21:05:13,604 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-225245.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,611 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,619 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-225245.fit
+2025-10-08 21:05:13,621 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240821-234421.wcs' trouvé.
+2025-10-08 21:05:13,621 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:13,623 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:13,635 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-225140.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,635 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240825-225203.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,636 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,636 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,636 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-225140.fit
+2025-10-08 21:05:13,637 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.2s)
+2025-10-08 21:05:13,638 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240825-225203.fit
+2025-10-08 21:05:13,638 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-223140.wcs' trouvé.
+2025-10-08 21:05:13,642 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002401.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,652 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,652 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002401.fit
+2025-10-08 21:05:13,654 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.1s)
+2025-10-08 21:05:13,657 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002412.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:13,658 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:13,658 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002412.fit
+2025-10-08 21:05:15,546 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-224932.wcs' trouvé.
+2025-10-08 21:05:15,561 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.4s)
+2025-10-08 21:05:15,563 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002424.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:15,564 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:15,565 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002424.fit
+2025-10-08 21:05:15,898 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-224225.wcs' trouvé.
+2025-10-08 21:05:15,909 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.8s)
+2025-10-08 21:05:15,911 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002339.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:15,912 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:15,912 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002339.fit
+2025-10-08 21:05:18,383 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-225245.wcs' trouvé.
+2025-10-08 21:05:18,398 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.8s)
+2025-10-08 21:05:18,400 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002350.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,401 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,402 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002350.fit
+2025-10-08 21:05:18,417 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-224214.wcs' trouvé.
+2025-10-08 21:05:18,433 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.8s)
+2025-10-08 21:05:18,436 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002444.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,436 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,437 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002444.fit
+2025-10-08 21:05:18,487 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002412.wcs' trouvé.
+2025-10-08 21:05:18,503 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.8s)
+2025-10-08 21:05:18,503 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002401.wcs' trouvé.
+2025-10-08 21:05:18,504 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-225203.wcs' trouvé.
+2025-10-08 21:05:18,506 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002506.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,526 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,530 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.9s)
+2025-10-08 21:05:18,532 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002506.fit
+2025-10-08 21:05:18,537 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002518.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,539 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,540 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002518.fit
+2025-10-08 21:05:18,572 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.9s)
+2025-10-08 21:05:18,576 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002540.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,578 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,579 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002540.fit
+2025-10-08 21:05:18,838 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240825-225140.wcs' trouvé.
+2025-10-08 21:05:18,862 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.2s)
+2025-10-08 21:05:18,867 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002611.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:18,871 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:18,874 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002611.fit
+2025-10-08 21:05:19,539 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002339.wcs' trouvé.
+2025-10-08 21:05:19,553 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002424.wcs' trouvé.
+2025-10-08 21:05:19,567 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.0s)
+2025-10-08 21:05:19,570 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002600.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:19,571 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:19,571 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.7s)
+2025-10-08 21:05:19,571 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002600.fit
+2025-10-08 21:05:19,575 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002529.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:19,575 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:19,575 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002529.fit
+2025-10-08 21:05:23,086 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002444.wcs' trouvé.
+2025-10-08 21:05:23,102 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.7s)
+2025-10-08 21:05:23,105 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002634.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,106 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,106 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002634.fit
+2025-10-08 21:05:23,123 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002350.wcs' trouvé.
+2025-10-08 21:05:23,137 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.7s)
+2025-10-08 21:05:23,139 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002645.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,140 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,140 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002645.fit
+2025-10-08 21:05:23,145 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002518.wcs' trouvé.
+2025-10-08 21:05:23,157 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.6s)
+2025-10-08 21:05:23,160 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002750.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,161 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,162 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002750.fit
+2025-10-08 21:05:23,169 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002540.wcs' trouvé.
+2025-10-08 21:05:23,182 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.6s)
+2025-10-08 21:05:23,184 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002705.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,185 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,185 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002705.fit
+2025-10-08 21:05:23,386 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002611.wcs' trouvé.
+2025-10-08 21:05:23,400 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.5s)
+2025-10-08 21:05:23,402 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002814.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,403 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,403 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002814.fit
+2025-10-08 21:05:23,483 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002600.wcs' trouvé.
+2025-10-08 21:05:23,498 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.9s)
+2025-10-08 21:05:23,502 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Début résolution pour: Light_NGC 7023_10.0s_IRCUT_20240826-002825.fit (Utilisation de 'local_solver_preference')
+2025-10-08 21:05:23,503 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] Priorité au solveur local: ASTAP.
+2025-10-08 21:05:23,505 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Début résolution pour Light_NGC 7023_10.0s_IRCUT_20240826-002825.fit
+2025-10-08 21:05:23,505 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002506.wcs' trouvé.
+2025-10-08 21:05:23,528 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 5.0s)
+2025-10-08 21:05:23,922 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002529.wcs' trouvé.
+2025-10-08 21:05:23,938 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 4.4s)
+2025-10-08 21:05:26,709 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002634.wcs' trouvé.
+2025-10-08 21:05:26,712 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002645.wcs' trouvé.
+2025-10-08 21:05:26,719 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002750.wcs' trouvé.
+2025-10-08 21:05:26,731 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002705.wcs' trouvé.
+2025-10-08 21:05:26,744 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002814.wcs' trouvé.
+2025-10-08 21:05:26,745 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.6s)
+2025-10-08 21:05:26,754 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] ASTAP: Résolution réussie. Fichier 'C:\Users\TRISTAN\Desktop\astrophoto\NGC 7023\very quick\Light_NGC 7023_10.0s_IRCUT_20240826-002825.wcs' trouvé.
+2025-10-08 21:05:26,764 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.6s)
+2025-10-08 21:05:26,765 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.6s)
+2025-10-08 21:05:26,775 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.4s)
+2025-10-08 21:05:26,777 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.3s)
+2025-10-08 21:05:26,807 [INFO] seestar.alignment.astrometry_solver:    [AstrometrySolver] 🔭 [Solver] ASTAP OK  –  scale 0.00"/px  RMS 0.00″  (elapsed 3.6s)
+2025-10-08 21:05:28,122 [WARNING] seestar.queuep.queue_manager: Reference WCS pixel scale 0.002 arcsec/pix outside [0.1, 30.0]; clipping.
+2025-10-08 21:05:28,676 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.96° and translation (-323.1, 1719.0) px
+2025-10-08 21:05:30,002 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.96° and translation (-316.0, 1724.1) px
+2025-10-08 21:05:31,425 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.99° and translation (-275.7, 1693.2) px
+2025-10-08 21:05:32,599 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.99° and translation (-272.5, 1693.7) px
+2025-10-08 21:05:33,728 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.99° and translation (-269.6, 1694.7) px
+2025-10-08 21:05:34,916 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -108.04° and translation (-281.6, 1679.7) px
+2025-10-08 21:05:36,069 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -108.05° and translation (-274.9, 1677.5) px
+2025-10-08 21:05:37,361 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -107.99° and translation (-262.7, 1697.2) px
+2025-10-08 21:05:38,707 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -108.05° and translation (-277.1, 1677.9) px
+2025-10-08 21:05:39,868 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -108.05° and translation (-272.0, 1677.6) px
+2025-10-08 21:05:41,074 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -108.04° and translation (-278.8, 1679.2) px
+2025-10-08 21:05:43,512 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:05:43,861 [ERROR] seestar.queuep.queue_manager: Fonction feather_by_weight_map non disponible (échec import).
+2025-10-08 21:05:45,161 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.97° and translation (-522.8, 492.7) px
+2025-10-08 21:05:46,373 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.69° and translation (-483.4, 503.8) px
+2025-10-08 21:05:47,483 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.56° and translation (-482.2, 506.6) px
+2025-10-08 21:05:48,599 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.64° and translation (-483.4, 503.8) px
+2025-10-08 21:05:49,694 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.60° and translation (-482.8, 505.0) px
+2025-10-08 21:05:50,799 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.52° and translation (-482.1, 507.5) px
+2025-10-08 21:05:51,940 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.41° and translation (-507.7, 467.2) px
+2025-10-08 21:05:53,046 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation -33.29° and translation (-509.3, 466.6) px
+2025-10-08 21:05:55,174 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:05:55,515 [ERROR] seestar.queuep.queue_manager: Fonction feather_by_weight_map non disponible (échec import).
+2025-10-08 21:05:56,815 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 53.31° and translation (1012.0, -147.0) px
+2025-10-08 21:05:58,044 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 53.81° and translation (1016.9, -85.1) px
+2025-10-08 21:05:59,174 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 53.91° and translation (1068.1, -91.4) px
+2025-10-08 21:06:00,394 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:00,736 [ERROR] seestar.queuep.queue_manager: Fonction feather_by_weight_map non disponible (échec import).
+2025-10-08 21:06:01,976 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 32.35° and translation (574.5, -163.0) px
+2025-10-08 21:06:03,114 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 32.54° and translation (620.0, -138.3) px
+2025-10-08 21:06:04,209 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 36.27° and translation (675.8, -156.4) px
+2025-10-08 21:06:05,311 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 38.77° and translation (711.5, -143.3) px
+2025-10-08 21:06:06,403 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 36.21° and translation (674.3, -157.2) px
+2025-10-08 21:06:07,530 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 39.90° and translation (749.3, -155.3) px
+2025-10-08 21:06:08,657 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 39.55° and translation (694.7, -143.0) px
+2025-10-08 21:06:09,770 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 39.69° and translation (694.2, -143.2) px
+2025-10-08 21:06:10,917 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.04° and translation (1302.0, 142.1) px
+2025-10-08 21:06:12,043 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.11° and translation (1303.1, 143.1) px
+2025-10-08 21:06:13,126 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.18° and translation (1303.9, 144.7) px
+2025-10-08 21:06:14,226 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 73.89° and translation (1301.1, 141.0) px
+2025-10-08 21:06:15,356 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 73.97° and translation (1301.3, 141.2) px
+2025-10-08 21:06:16,463 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.28° and translation (1275.4, 185.7) px
+2025-10-08 21:06:17,573 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.41° and translation (1349.0, 182.5) px
+2025-10-08 21:06:18,714 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.48° and translation (1349.5, 183.9) px
+2025-10-08 21:06:19,822 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.62° and translation (1351.7, 187.0) px
+2025-10-08 21:06:21,068 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.87° and translation (1359.2, 137.2) px
+2025-10-08 21:06:22,294 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.80° and translation (1358.4, 136.0) px
+2025-10-08 21:06:23,449 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 74.55° and translation (1350.5, 185.4) px
+2025-10-08 21:06:24,563 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.01° and translation (1360.4, 139.5) px
+2025-10-08 21:06:25,698 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.08° and translation (1361.0, 141.0) px
+2025-10-08 21:06:26,844 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.49° and translation (1275.9, 168.8) px
+2025-10-08 21:06:28,007 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.23° and translation (1370.3, 117.9) px
+2025-10-08 21:06:29,123 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.59° and translation (1338.4, 203.1) px
+2025-10-08 21:06:30,294 [INFO] seestar.core.alignment: [Align] Similarity scale forced to 1.0 – keeping rotation 75.66° and translation (1339.5, 205.9) px
+2025-10-08 21:06:36,223 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:36,583 [ERROR] seestar.queuep.queue_manager: Fonction feather_by_weight_map non disponible (échec import).
+2025-10-08 21:06:37,144 [INFO] reproject.mosaicking.coadd: Output mosaic will have shape (1920, 1080)
+2025-10-08 21:06:37,144 [INFO] reproject.mosaicking.coadd: Not using on-the-fly mode for adding individual reprojected images to output array
+2025-10-08 21:06:37,145 [INFO] reproject.mosaicking.coadd: Processing input data 1 of 4
+2025-10-08 21:06:37,152 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:06:37,153 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:40,044 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:06:40,044 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:42,510 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:06:42,510 [INFO] reproject.mosaicking.coadd: Processing input data 2 of 4
+2025-10-08 21:06:42,514 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:06:42,515 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:44,960 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:06:44,961 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:47,517 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:06:47,517 [INFO] reproject.mosaicking.coadd: Processing input data 3 of 4
+2025-10-08 21:06:47,522 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:06:47,523 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:50,064 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:06:50,065 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:52,523 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:06:52,524 [INFO] reproject.mosaicking.coadd: Processing input data 4 of 4
+2025-10-08 21:06:52,528 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:06:52,529 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:55,101 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:06:55,102 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:06:57,480 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:06:57,481 [INFO] reproject.mosaicking.coadd: Match backgrounds
+2025-10-08 21:06:57,622 [INFO] reproject.mosaicking.coadd: Combining reprojected arrays with function mean
+2025-10-08 21:06:57,666 [INFO] reproject.mosaicking.coadd: Handle normalization of output array
+2025-10-08 21:06:57,668 [INFO] reproject.mosaicking.coadd: Resetting invalid pixels to 0
+2025-10-08 21:06:57,685 [INFO] reproject.mosaicking.coadd: Output mosaic will have shape (1920, 1080)
+2025-10-08 21:06:57,685 [INFO] reproject.mosaicking.coadd: Not using on-the-fly mode for adding individual reprojected images to output array
+2025-10-08 21:06:57,686 [INFO] reproject.mosaicking.coadd: Processing input data 1 of 4
+2025-10-08 21:06:57,690 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:06:57,691 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:00,124 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:00,125 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:02,543 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:02,544 [INFO] reproject.mosaicking.coadd: Processing input data 2 of 4
+2025-10-08 21:07:02,549 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:02,549 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:04,964 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:04,965 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:07,515 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:07,515 [INFO] reproject.mosaicking.coadd: Processing input data 3 of 4
+2025-10-08 21:07:07,519 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:07,520 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:09,964 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:09,964 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:12,415 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:12,416 [INFO] reproject.mosaicking.coadd: Processing input data 4 of 4
+2025-10-08 21:07:12,421 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:12,422 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:14,858 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:14,859 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:17,335 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:17,336 [INFO] reproject.mosaicking.coadd: Match backgrounds
+2025-10-08 21:07:17,483 [INFO] reproject.mosaicking.coadd: Combining reprojected arrays with function mean
+2025-10-08 21:07:17,529 [INFO] reproject.mosaicking.coadd: Handle normalization of output array
+2025-10-08 21:07:17,532 [INFO] reproject.mosaicking.coadd: Resetting invalid pixels to 0
+2025-10-08 21:07:17,545 [INFO] reproject.mosaicking.coadd: Output mosaic will have shape (1920, 1080)
+2025-10-08 21:07:17,545 [INFO] reproject.mosaicking.coadd: Not using on-the-fly mode for adding individual reprojected images to output array
+2025-10-08 21:07:17,546 [INFO] reproject.mosaicking.coadd: Processing input data 1 of 4
+2025-10-08 21:07:17,549 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:17,549 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:19,928 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:19,929 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:22,370 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:22,371 [INFO] reproject.mosaicking.coadd: Processing input data 2 of 4
+2025-10-08 21:07:22,375 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:22,376 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:24,940 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:24,941 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:27,413 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:27,413 [INFO] reproject.mosaicking.coadd: Processing input data 3 of 4
+2025-10-08 21:07:27,417 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:27,418 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:29,870 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:29,871 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:32,352 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:32,353 [INFO] reproject.mosaicking.coadd: Processing input data 4 of 4
+2025-10-08 21:07:32,357 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080)
+2025-10-08 21:07:32,357 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:34,861 [INFO] reproject.mosaicking.coadd: Calling reproject_interp with shape_out=(1920, 1080) for weights
+2025-10-08 21:07:34,862 [INFO] reproject.common: Calling _reproject_full in non-dask mode
+2025-10-08 21:07:37,451 [INFO] reproject.mosaicking.coadd: Adding reprojected array to list to combine later
+2025-10-08 21:07:37,451 [INFO] reproject.mosaicking.coadd: Match backgrounds
+2025-10-08 21:07:37,593 [INFO] reproject.mosaicking.coadd: Combining reprojected arrays with function mean
+2025-10-08 21:07:37,641 [INFO] reproject.mosaicking.coadd: Handle normalization of output array
+2025-10-08 21:07:37,644 [INFO] reproject.mosaicking.coadd: Resetting invalid pixels to 0
+2025-10-08 21:07:37,989 [ERROR] seestar.queuep.queue_manager: Fonction feather_by_weight_map non disponible (échec import).

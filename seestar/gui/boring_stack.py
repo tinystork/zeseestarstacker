@@ -21,7 +21,10 @@ if __package__ in (None, ""):
     from pathlib import Path
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from seestar import reproject_utils
+try:  # Allow tests to stub core package without providing reproject_utils
+    from seestar import reproject_utils
+except Exception:  # pragma: no cover - missing during certain tests
+    reproject_utils = None  # type: ignore
 
 try:  # Optional during tests that stub core modules
     from seestar.core.reprojection_utils import (
@@ -412,7 +415,11 @@ def _finalize_reproject_and_coadd(
             to_log.append(paths[-1])
         for fp in to_log:
             try:
-                with fits.open(fp, memmap=True) as hdul:
+                # Some aligned FITS produced by ASTAP/processing have
+                # BZERO/BSCALE/BLANK in the header which prevents memmap reads
+                # in Astropy. For logging we only need shape + a few WCS
+                # keywords, so open without memmap to avoid the ValueError.
+                with fits.open(fp, memmap=False) as hdul:
                     data_shape = getattr(hdul[0].data, "shape", None)
                     hdr = hdul[0].header
                 nax1 = hdr.get("NAXIS1")
@@ -437,6 +444,7 @@ def _finalize_reproject_and_coadd(
             shape_out=shape_out,
             prefer_streaming_fallback=prefer_streaming_fallback,
             tile_size=tile_size,
+            match_background=False,
         )
         hdr_out = ref_wcs.to_header(relax=True)
     else:
@@ -460,6 +468,7 @@ def _finalize_reproject_and_coadd(
                 shape_out=shape_out,
                 prefer_streaming_fallback=prefer_streaming_fallback,
                 tile_size=tile_size,
+                match_background=False,
             )
             hdr_out = ref_wcs.to_header(relax=True)
         except Exception as e:
@@ -470,6 +479,7 @@ def _finalize_reproject_and_coadd(
                 paths,
                 prefer_streaming_fallback=prefer_streaming_fallback,
                 tile_size=tile_size,
+                match_background=False,
             )
             hdr_out = result.wcs.to_header(relax=True)
 
@@ -485,6 +495,7 @@ def _finalize_reproject_and_coadd(
             paths,
             prefer_streaming_fallback=prefer_streaming_fallback,
             tile_size=tile_size,
+            match_background=False,
         )
         hdr_out = result.wcs.to_header(relax=True)
 
@@ -635,6 +646,14 @@ def parse_args():
     p.add_argument("--show-progress", action="store_true", help="Display a minimal progress GUI")
     p.add_argument("--tile-size", type=int, default=1024, help="Tile size for streaming reprojection")
     p.add_argument("--dtype-out", default="float32", choices=["float32", "float64"], help="Output dtype for streaming reprojection")
+    # Whether to save the final FITS as float32 (matches GUI option)
+    p.add_argument(
+        "--save-as-float32",
+        dest="save_as_float32",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Save final FITS as float32 (or uint16 if disabled)",
+    )
     p.add_argument("--memmap-dir", default=None, help="Directory for temporary memmap files")
     p.add_argument("--keep-intermediates", action="store_true", help="Keep temporary memmap files")
     p.add_argument(
@@ -867,6 +886,12 @@ def _run_stack(args, progress_cb) -> int:
             use_drizzle=False,
             reproject_between_batches=settings.reproject_between_batches,
             reproject_coadd_final=reproject_coadd_final,
+            # Ensure final FITS dtype matches user's setting or CLI override
+            save_as_float32=(
+                args.save_as_float32
+                if getattr(args, "save_as_float32", None) is not None
+                else getattr(settings, "save_final_as_float32", False)
+            ),
             **solver_settings,
             # When performing a final reproject/coadd with ``batch_size=1`` we
             # must keep the aligned files on disk for the last reprojection
@@ -1066,6 +1091,38 @@ def _run_stack(args, progress_cb) -> int:
                 )
             out_fp = os.path.join(args.out, "final.fits")
 
+            # Use the WCS of the stacking reference so the final grid matches
+            # the reference orientation (mirrors batch_size=0 behaviour).
+            ref_wcs = getattr(stacker, "reference_wcs_object", None)
+            ref_shape = getattr(stacker, "reference_shape", None)
+
+            # In ``batch_size=1`` mode we want the final reprojection grid to
+            # mirror the live-stacking behaviour (``batch_size=0``) which uses
+            # the reference frame's original dimensions.  The queue manager may
+            # carry a global mosaic shape (e.g. 3840x2160) but here we ignore it
+            # and derive the target grid from the first aligned file instead.
+            if args.batch_size == 1:
+                ref_wcs = None
+                ref_shape = None
+            elif (ref_wcs is None or ref_shape is None) and getattr(
+                stacker, "output_folder", None
+            ):
+                ref_fp = os.path.join(
+                    stacker.output_folder, "temp_processing", "reference_image.fit"
+                )
+                if os.path.isfile(ref_fp):
+                    try:
+                        hdr = fits.getheader(
+                            ref_fp, memmap=False, ignore_missing_simple=True
+                        )
+                        hdr = reproject_utils.sanitize_header_for_wcs(hdr)
+                        ref_wcs = WCS(hdr, naxis=2)
+                        h = int(hdr.get("NAXIS2", 0))
+                        w = int(hdr.get("NAXIS1", 0))
+                        if h > 0 and w > 0:
+                            ref_shape = (h, w)
+                    except Exception:
+                        pass
 
             t0 = time.monotonic()
             success = _finalize_reproject_and_coadd(
@@ -1074,6 +1131,8 @@ def _run_stack(args, progress_cb) -> int:
                 out_fp,
                 prefer_streaming_fallback=True,
                 tile_size=getattr(args, "tile", None),
+                output_wcs=ref_wcs,
+                shape_out=ref_shape,
             )
             duration = time.monotonic() - t0
             logger.info("Final reprojection+coadd done in %.2f s", duration)

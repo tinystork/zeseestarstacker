@@ -3,6 +3,7 @@ Module pour l'alignement des images astronomiques.
 Utilise astroalign pour l'enregistrement des images.
 """
 import os
+import time
 import numpy as np
 from astropy.io import fits
 import cv2
@@ -568,7 +569,25 @@ class SeestarAligner:
             save_header.set('REFRENCE', True, 'Stacking reference image')
             if self.correct_hot_pixels: save_header.set('HOTPIXCR', True, 'Hot pixel correction applied to ref')
             save_header.add_history("Reference image saved by SeestarAligner")
-            save_fits_image(reference_image, ref_output_path, save_header, overwrite=True)
+            # Robust save with short retries to avoid transient Windows locks
+            last_err = None
+            for attempt in range(6):
+                try:
+                    save_fits_image(reference_image, ref_output_path, save_header, overwrite=True)
+                    last_err = None
+                    break
+                except PermissionError as e:
+                    last_err = e
+                    time.sleep(0.2 * (2 ** attempt))
+                except Exception as e:
+                    # Some drivers return generic OSError with winerror=5
+                    if getattr(e, 'winerror', None) == 5:
+                        last_err = e
+                        time.sleep(0.2 * (2 ** attempt))
+                    else:
+                        raise
+            if last_err is not None:
+                raise last_err
             self.update_progress(f"📁 Image référence sauvegardée: {ref_output_path}")
             save_preview_image(reference_image, ref_preview_path, apply_stretch=True)
         except Exception as e:

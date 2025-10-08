@@ -37,13 +37,35 @@ except Exception:  # pragma: no cover
 
 
 def sanitize_header_for_wcs(hdr):
+    # Ensure CONTINUE are strings so astropy accepts the header
     for k, v in list(hdr.items()):
         if k == "CONTINUE":
             hdr[k] = str(v)
+    # Drop verbose cards that can confuse parsers
     while "HISTORY" in hdr:
         del hdr["HISTORY"]
     while "COMMENT" in hdr:
         del hdr["COMMENT"]
+
+    # Ensure "-SIP" suffix when SIP coefficients are present
+    try:
+        has_sip = any(k in hdr for k in ("A_ORDER", "B_ORDER"))
+        if not has_sip:
+            for k in list(hdr.keys()):
+                uk = k.upper()
+                if uk.startswith("A_") or uk.startswith("B_") or uk.startswith("AP_") or uk.startswith("BP_"):
+                    has_sip = True
+                    break
+        if has_sip:
+            for key in ("CTYPE1", "CTYPE2"):
+                if key not in hdr:
+                    continue
+                val = str(hdr.get(key, ""))
+                if "-SIP" not in val.upper():
+                    hdr[key] = f"{val}-SIP"
+    except Exception:
+        pass
+
     return hdr
 
 
@@ -104,9 +126,10 @@ def compute_final_output_grid(headers, auto_rotate=True):
     for hdr in headers:
         try:
             hdr = sanitize_header_for_wcs(hdr)
-            w = WCS(hdr, naxis=2)
             h = int(hdr.get("NAXIS2"))
             w_pix = int(hdr.get("NAXIS1"))
+            w = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(w, h, w_pix)
             wcs_list.append(w)
             shapes.append((h, w_pix))
         except Exception:
@@ -286,6 +309,11 @@ def reproject_and_coadd(
         raise ValueError("No compatible input WCS for reprojection")
 
     use_astropy = _astropy_reproject_and_coadd is not None
+    # Allow forcing the local accumulator to avoid astropy's internal
+    # normalization/background steps which may be undesirable for some
+    # pipelines (e.g. classic reproject of already stacked batches).
+    if str(os.environ.get("REPROJECT_FORCE_LOCAL", "0")) == "1":
+        use_astropy = False
 
     if use_astropy:
         mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
@@ -459,6 +487,10 @@ def reproject_and_coadd_from_paths(
 
     if match_background is not None:
         subtract_sky_median = match_background
+        # Propagate the user's preference to the underlying coadd call so that
+        # ``reproject_and_coadd`` respects explicit enable/disable requests
+        # (especially important for ``batch_size=1`` workflows).
+        kwargs["match_background"] = bool(match_background)
 
     if shape_out is not None:
         mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))

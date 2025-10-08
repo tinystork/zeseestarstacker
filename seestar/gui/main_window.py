@@ -4178,6 +4178,19 @@ class SeestarStackerGUI:
         """Monitors the QueuedStacker worker thread and updates GUI stats."""
         # print("DEBUG: GUI Progress Tracker Thread Started.") # Keep disabled unless debugging
 
+        # Wait for the backend worker to actually start. When this thread is
+        # launched before ``start_processing`` kicks off the backend worker, we
+        # would otherwise immediately think processing has finished because
+        # ``queued_stacker.is_running()`` would still be False.  Poll until the
+        # worker is running or ``self.processing`` gets cleared (e.g. because the
+        # backend failed to start).
+        while (
+            self.processing
+            and hasattr(self, "queued_stacker")
+            and not self.queued_stacker.is_running()
+        ):
+            time.sleep(0.1)
+
         while self.processing and hasattr(self, "queued_stacker"):
             try:
                 # Check if the worker thread is still active
@@ -6330,6 +6343,14 @@ class SeestarStackerGUI:
                 "--log-dir",
                 os.path.join(self.settings.output_folder, "logs"),
             ]
+            # Propagate normalization and final FITS dtype to boring_stack
+            try:
+                norm_method = getattr(self.settings, "stack_norm_method", "none")
+            except Exception:
+                norm_method = "none"
+            cmd += ["--norm", str(norm_method)]
+            save_f32 = bool(getattr(self.settings, "save_final_as_float32", False))
+            cmd.append("--save-as-float32" if save_f32 else "--no-save-as-float32")
             final_combine_slug = _to_slug(self.stack_final_combine_var.get())
             cmd += ["--final-combine", final_combine_slug]
             self.logger.info(
@@ -6506,6 +6527,15 @@ class SeestarStackerGUI:
                 if self.settings.batch_size == 1 and not special_single:
                     backend_kwargs["chunk_size"] = self._get_auto_chunk_size()
 
+                # Start progress tracking before launching backend processing so that
+                # early progress messages are not missed.
+                self.thread = threading.Thread(
+                    target=self._track_processing_progress,
+                    daemon=True,
+                    name="GUI_ProgressTracker",
+                )
+                self.thread.start()
+
                 try:
                     started = self.queued_stacker.start_processing(**backend_kwargs)
                 except Exception as e:
@@ -6522,22 +6552,15 @@ class SeestarStackerGUI:
                             try:
                                 self.stack_final_combine_var.set(self.settings.stack_final_combine)
                                 if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
-                                    label = self.final_key_to_label.get(self.settings.stack_final_combine, self.settings.stack_final_combine)
+                                    label = self.final_key_to_label.get(
+                                        self.settings.stack_final_combine, self.settings.stack_final_combine
+                                    )
                                     self.stack_final_display_var.set(label)
                             except Exception:
                                 pass
 
                     self._final_stretch_set_by_processing_finished = False
-                    if started:
-                        if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                            self.stop_button.config(state=tk.NORMAL)
-                        self.thread = threading.Thread(
-                            target=self._track_processing_progress,
-                            daemon=True,
-                            name="GUI_ProgressTracker",
-                        )
-                        self.thread.start()
-                    else:
+                    if not started:
                         if hasattr(self, "start_button") and self.start_button.winfo_exists():
                             self.start_button.config(state=tk.NORMAL)
                         self.processing = False
