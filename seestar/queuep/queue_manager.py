@@ -55,6 +55,7 @@ import csv
 # --- Standard Library Imports ---
 from astropy.io import fits
 from astropy.wcs import WCS
+from astropy.stats import sigma_clip
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
 from seestar.utils.wcs_utils import (
@@ -63,9 +64,17 @@ from seestar.utils.wcs_utils import (
     _sanitize_continue_as_string,
 )
 try:
-    from ..enhancement.reproject_utils import ensure_wcs_pixel_shape
+    from ..enhancement.reproject_utils import (
+        ensure_wcs_pixel_shape,
+        compute_overlap_median_ratio,
+        estimate_background_2d,
+    )
 except Exception:  # pragma: no cover - fallback when package context missing
-    from seestar.enhancement.reproject_utils import ensure_wcs_pixel_shape
+    from seestar.enhancement.reproject_utils import (
+        ensure_wcs_pixel_shape,
+        compute_overlap_median_ratio,
+        estimate_background_2d,
+    )
 
 from ..tools.file_ops import move_to_stacked
 
@@ -1079,6 +1088,13 @@ class SeestarQueuedStacker:
 
             reproj_data, reproj_wht = worker(fits_path)
 
+            if getattr(self, "interbatch_norm_active", False):
+                reproj_data, reproj_wht = self._apply_interbatch_normalization(
+                    reproj_data,
+                    reproj_wht,
+                    context="reproject",
+                )
+
             # continuous accumulation
             self.cumulative_sum_memmap += reproj_data * reproj_wht[..., None]
             if self.cumulative_wht_memmap.shape != reproj_wht.shape:
@@ -1099,6 +1115,395 @@ class SeestarQueuedStacker:
                 self._downsample_preview(reproj_data, reproj_wht)
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
+    def _interbatch_start_session(self) -> None:
+        """Initialise per-run inter-batch normalization state."""
+        self.interbatch_norm_active = True
+        self._ibn_ref_image = None
+        self._ibn_ref_wht = None
+        self._ibn_ref_median = None
+        self._ibn_batches_seen = 0
+        self._ibn_applied = 0
+        self._ibn_skipped = 0
+        self._ibn_last_scale = None
+        self._ibn_master_ready = False
+        self._ibn_candidate_pool = []
+        self._ibn_candidate_limit = 8
+        self._ibn_master_min = 5
+        self._ibn_counter = 0
+        self._ibn_bg_applied = 0
+        self._ibn_feather_cache = {}
+        self._ibn_min_overlap = 10000
+        self._ibn_use_percentile_ratio = True
+        self._ibn_percentile_value = 90.0
+        self._ibn_last_failure_info = {}
+        msg = "INFO: Inter-batch normalization (MASTER_REF + BG2D) enabled (auto-start)"
+        try:
+            self.update_progress(msg, "INFO")
+        except Exception:
+            pass
+        logger.info("Inter-batch normalization (MASTER_REF + BG2D) enabled (auto-start)")
+
+    def _interbatch_finalize_session(self) -> None:
+        """Log summary and release cached reference data."""
+        if not getattr(self, "interbatch_norm_active", False):
+            return
+        applied = getattr(self, "_ibn_applied", 0)
+        skipped = getattr(self, "_ibn_skipped", 0)
+        bg_applied = getattr(self, "_ibn_bg_applied", 0)
+        master_ready = getattr(self, "_ibn_master_ready", False)
+        summary = (
+            f"INFO: Inter-batch normalization summary: master_ready={master_ready}, "
+            f"applied_to={applied}, skipped={skipped} (BG2D applied={bg_applied})"
+        )
+        try:
+            self.update_progress(summary, "INFO")
+        except Exception:
+            pass
+        logger.info(
+            "Inter-batch normalization summary: master_ready=%s applied_to=%d skipped=%d bg2d=%d",
+            master_ready,
+            applied,
+            skipped,
+            bg_applied,
+        )
+        self.interbatch_norm_active = False
+        self._ibn_ref_image = None
+        self._ibn_ref_wht = None
+        self._ibn_ref_median = None
+        self._ibn_batches_seen = 0
+        self._ibn_applied = 0
+        self._ibn_skipped = 0
+        self._ibn_last_scale = None
+        self._ibn_master_ready = False
+        self._ibn_candidate_pool = []
+        self._ibn_feather_cache = {}
+        self._ibn_last_failure_info = {}
+
+    def _apply_interbatch_normalization(
+        self,
+        batch_data,
+        batch_wht,
+        *,
+        context: str = "classic",
+        batch_num: int | None = None,
+    ):
+        """Apply background removal, photometric normalization, and feathering."""
+        if not getattr(self, "interbatch_norm_active", False):
+            return batch_data, batch_wht
+        if batch_data is None:
+            return batch_data, batch_wht
+
+        data = batch_data
+        weights = batch_wht
+
+        if not isinstance(data, np.ndarray):
+            data = np.asarray(data, dtype=np.float32)
+        elif data.dtype != np.float32:
+            data = data.astype(np.float32)
+
+        if weights is not None:
+            if not isinstance(weights, np.ndarray):
+                weights = np.asarray(weights, dtype=np.float32)
+            elif weights.dtype != np.float32:
+                weights = weights.astype(np.float32)
+
+        counter = getattr(self, "_ibn_counter", 0)
+        if batch_num is not None:
+            batch_idx = int(batch_num)
+            counter = max(counter, batch_idx)
+        else:
+            counter += 1
+            batch_idx = counter
+        self._ibn_counter = counter
+        self._ibn_batches_seen = counter
+        batch_idx = counter
+
+        mask = self._interbatch_compute_mask(data, weights)
+        valid_px = int(np.count_nonzero(mask))
+
+        bg_model = estimate_background_2d(data, weights)
+        bg_rms = 0.0
+        if bg_model is not None:
+            lum_bg = self._interbatch_luminance(bg_model)
+            if valid_px > 0:
+                sample = lum_bg[mask]
+                if sample.size:
+                    bg_rms = float(np.nanstd(sample))
+            data -= bg_model
+        self._ibn_bg_applied += 1
+        bg_msg = (
+            f"INFO: Batch k={batch_idx} BG2D: gaussian blur (RMS={bg_rms:.4f}, "
+            f"valid_px={valid_px}, context={context})"
+        )
+        try:
+            self.update_progress(bg_msg, "INFO")
+        except Exception:
+            pass
+        logger.info(
+            "Batch %d background model applied: rms=%.4f valid_px=%d context=%s",
+            batch_idx,
+            bg_rms,
+            valid_px,
+            context,
+        )
+
+        candidate_weights = None if weights is None else np.array(weights, copy=True)
+        candidate_data = np.array(data, copy=True)
+
+        if not getattr(self, "_ibn_master_ready", False):
+            score = self._interbatch_quality_score(candidate_data)
+            self._interbatch_register_candidate(
+                batch_idx,
+                candidate_data,
+                candidate_weights,
+                score,
+                context,
+            )
+
+        weights = self._interbatch_apply_feather(weights)
+
+        if not getattr(self, "_ibn_master_ready", False):
+            if data.ndim == 3:
+                np.clip(data, 0.0, None, out=data)
+            else:
+                data = np.clip(data, 0.0, None)
+            return data, weights
+
+        scales_info = self._interbatch_compute_scales(data, weights)
+        if scales_info is None:
+            info = getattr(self, "_ibn_last_failure_info", {})
+            overlap = info.get("overlap")
+            if overlap is not None and overlap > 0:
+                warn_msg = (
+                    f"WARN: Batch k={batch_idx} Gain skipped (overlap too small: {overlap:.0f} px) -- BG2D applied"
+                )
+            else:
+                warn_msg = f"WARN: Batch k={batch_idx} Gain skipped (insufficient overlap) -- BG2D applied"
+            try:
+                self.update_progress(warn_msg, "WARN")
+            except Exception:
+                pass
+            logger.warning(
+                "Inter-batch normalization skipped for batch %d (context=%s, info=%s)",
+                batch_idx,
+                context,
+                info,
+            )
+            return data, weights
+
+        scales, offsets, overlap, ref_meds, batch_meds = scales_info
+        self._ibn_last_failure_info = {}
+
+        corr_offsets: list[float] = []
+        if len(scales) >= 3 and data.ndim == 3:
+            for c in range(3):
+                scale = float(scales[c])
+                corr_offset = float(ref_meds[c] - scale * batch_meds[c])
+                data[..., c] = data[..., c] * scale + corr_offset
+                corr_offsets.append(corr_offset)
+        else:
+            scale = float(scales[0])
+            corr_offset = float(ref_meds[0] - scale * batch_meds[0])
+            data = data * scale + corr_offset
+            corr_offsets.append(corr_offset)
+
+        self._ibn_applied += 1
+        self._ibn_last_scale = float(scales[-1])
+
+        if len(scales) >= 3:
+            gain_msg = (
+                f"INFO: Batch k={batch_idx} Gain RGB: overlap={overlap:.0f} px "
+                f"a={float(scales[0]):.3f}/{float(scales[1]):.3f}/{float(scales[2]):.3f} "
+                f"offset={corr_offsets[0]:.4f}/{corr_offsets[1]:.4f}/{corr_offsets[2]:.4f} "
+                f"ref_med={float(ref_meds[0]):.4f}/{float(ref_meds[1]):.4f}/{float(ref_meds[2]):.4f} "
+                f"new_med={float(batch_meds[0]):.4f}/{float(batch_meds[1]):.4f}/{float(batch_meds[2]):.4f}"
+            )
+        else:
+            gain_msg = (
+                f"INFO: Batch k={batch_idx} Gain: overlap={overlap:.0f} px "
+                f"ref_med={float(ref_meds[0]):.4f} new_med={float(batch_meds[0]):.4f} "
+                f"scale={float(scales[0]):.3f} offset={corr_offsets[0]:.4f}"
+            )
+        try:
+            self.update_progress(gain_msg, "INFO")
+        except Exception:
+            pass
+        logger.info(
+            "Inter-batch normalization applied to batch %d (context=%s): scales=%s offsets=%s overlap=%d ref_meds=%s new_meds=%s",
+            batch_idx,
+            context,
+            [float(s) for s in scales],
+            [float(o) for o in offsets],
+            overlap,
+            [float(m) for m in ref_meds],
+            [float(m) for m in batch_meds],
+        )
+        return data, weights
+
+    def _interbatch_luminance(self, arr: np.ndarray) -> np.ndarray:
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim == 3:
+            if arr.shape[2] >= 3:
+                return 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+            return arr[..., 0]
+        return arr
+
+    def _interbatch_compute_mask(self, data: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
+        if data.ndim == 3:
+            mask = np.all(np.isfinite(data), axis=2)
+        else:
+            mask = np.isfinite(data)
+        if weights is not None:
+            w = np.asarray(weights, dtype=np.float32)
+            if w.ndim == 3:
+                w = np.mean(w, axis=2)
+            mask &= w > 0
+        return mask
+
+    def _interbatch_quality_score(self, image: np.ndarray) -> float:
+        try:
+            metrics = self._calculate_quality_metrics(image)
+            snr = float(metrics.get("snr", 0.0))
+            stars = float(metrics.get("stars", 0.0))
+            return snr + 50.0 * stars
+        except Exception:
+            return 0.0
+
+    def _interbatch_register_candidate(self, batch_idx: int, data: np.ndarray, weights: np.ndarray | None, score: float, context: str) -> None:
+        if getattr(self, "_ibn_master_ready", False):
+            return
+        pool = getattr(self, "_ibn_candidate_pool", [])
+        pool.append(
+            {
+                "score": float(score),
+                "index": int(batch_idx),
+                "data": np.array(data, copy=True),
+                "weights": None if weights is None else np.array(weights, copy=True),
+                "context": context,
+            }
+        )
+        pool.sort(key=lambda item: item["score"], reverse=True)
+        limit = getattr(self, "_ibn_candidate_limit", 8)
+        pool = pool[:limit]
+        self._ibn_candidate_pool = pool
+        if len(pool) >= getattr(self, "_ibn_master_min", 5) and not getattr(self, "_ibn_master_ready", False):
+            used = self._interbatch_build_master_reference()
+            if used:
+                msg = f"INFO: MASTER_REF built from N={used} frames (weighted mean)"
+                try:
+                    self.update_progress(msg, "INFO")
+                except Exception:
+                    pass
+                logger.info(
+                    "MASTER_REF built from %d frames (first index %d)",
+                    used,
+                    pool[0]["index"] if pool else batch_idx,
+                )
+
+    def _interbatch_build_master_reference(self) -> int:
+        pool = getattr(self, "_ibn_candidate_pool", [])
+        if len(pool) < getattr(self, "_ibn_master_min", 5):
+            return 0
+        limit = getattr(self, "_ibn_candidate_limit", len(pool))
+        top = pool[:limit]
+        data_stack = np.stack([item["data"] for item in top], axis=0)
+        weights_available = all(item["weights"] is not None for item in top)
+        master = None
+        master_wht = None
+        if weights_available:
+            w_stack = np.stack([item["weights"] for item in top], axis=0)
+            weight_sum = np.sum(w_stack, axis=0)
+            eps = 1e-6
+            if data_stack.ndim == 4:
+                num = np.sum(data_stack * w_stack[..., None], axis=0)
+                master = num / np.maximum(weight_sum[..., None], eps)
+            else:
+                num = np.sum(data_stack * w_stack, axis=0)
+                master = num / np.maximum(weight_sum, eps)
+            master_wht = weight_sum.astype(np.float32)
+        else:
+            master = np.mean(data_stack, axis=0)
+        self._ibn_ref_image = np.asarray(master, dtype=np.float32)
+        self._ibn_ref_wht = None if master_wht is None else np.asarray(master_wht, dtype=np.float32)
+        self._ibn_master_ready = True
+        self._ibn_candidate_pool = []
+        return len(top)
+
+    def _interbatch_apply_feather(self, weights: np.ndarray | None) -> np.ndarray | None:
+        if weights is None:
+            return None
+        base_shape = weights.shape[:2]
+        cache = getattr(self, "_ibn_feather_cache", {})
+        radial = cache.get(base_shape)
+        if radial is None:
+            radial = make_radial_weight_map(base_shape[0], base_shape[1], feather_fraction=0.98, floor=0.10)
+            cache[base_shape] = radial
+            self._ibn_feather_cache = cache
+        if weights.ndim == 3:
+            weights *= radial[..., None]
+        else:
+            weights *= radial
+        return weights
+
+    def _interbatch_compute_scales(self, batch_data: np.ndarray, batch_wht: np.ndarray | None):
+        master = getattr(self, "_ibn_ref_image", None)
+        if master is None:
+            self._ibn_last_failure_info = {"reason": "no_master"}
+            return None
+        master_wht = getattr(self, "_ibn_ref_wht", None)
+        min_overlap = getattr(self, "_ibn_min_overlap", 10000)
+        use_percentile = getattr(self, "_ibn_use_percentile_ratio", True)
+        percentile = getattr(self, "_ibn_percentile_value", 90.0)
+
+        if master.ndim == 3 and batch_data.ndim == 3 and master.shape[2] >= 3 and batch_data.shape[2] >= 3:
+            scales = []
+            offsets = []
+            overlaps = []
+            ref_meds = []
+            batch_meds = []
+            for c in range(3):
+                scale, offset, overlap, ref_med, batch_med = compute_overlap_median_ratio(
+                    master[..., c],
+                    batch_data[..., c],
+                    master_wht,
+                    batch_wht,
+                    min_overlap=min_overlap,
+                    use_percentile_ratio=use_percentile,
+                    percentile=percentile,
+                )
+                if scale is None or offset is None:
+                    self._ibn_last_failure_info = {
+                        "overlap": overlap,
+                        "ref_med": ref_med,
+                        "batch_med": batch_med,
+                        "channel": c,
+                    }
+                    return None
+                scales.append(float(scale))
+                offsets.append(float(offset))
+                overlaps.append(int(overlap))
+                ref_meds.append(float(ref_med))
+                batch_meds.append(float(batch_med))
+            return scales, offsets, min(overlaps), ref_meds, batch_meds
+
+        scale, offset, overlap, ref_med, batch_med = compute_overlap_median_ratio(
+            master,
+            batch_data,
+            master_wht,
+            batch_wht,
+            min_overlap=min_overlap,
+            use_percentile_ratio=use_percentile,
+            percentile=percentile,
+        )
+        if scale is None or offset is None:
+            self._ibn_last_failure_info = {
+                "overlap": overlap,
+                "ref_med": ref_med,
+                "batch_med": batch_med,
+            }
+            return None
+        return [float(scale)], [float(offset)], int(overlap), [float(ref_med)], [float(batch_med)]
 
     def __init__(
         self,
@@ -1236,6 +1641,17 @@ class SeestarQueuedStacker:
         self._last_classic_batch_solved = True
         # Use custom stacking plan when provided
         self.use_batch_plan = False
+
+        # Inter-batch normalization state (auto-enabled per session)
+        self.interbatch_norm_active = False
+        self._ibn_ref_image = None
+        self._ibn_ref_wht = None
+        self._ibn_ref_median = None
+        self._ibn_batches_seen = 0
+        self._ibn_applied = 0
+        self._ibn_skipped = 0
+        self._ibn_last_scale = None
+        self._ibn_min_overlap = 1024
 
         self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
@@ -5228,8 +5644,10 @@ class SeestarQueuedStacker:
             self.stop_processing = True  # Provoquer l'arrêt propre du thread
         finally:
             logger.debug(
-                f"DEBUG QM [_worker V_NoDerotation]: Entrée dans le bloc FINALLY principal du worker."
+                f"DEBUG QM [_worker V_NoDerotation]: Entree dans le bloc FINALLY principal du worker."
             )
+            if getattr(self, "interbatch_norm_active", False):
+                self._interbatch_finalize_session()
             if (
                 hasattr(self, "cumulative_sum_memmap")
                 and self.cumulative_sum_memmap is not None
@@ -9798,6 +10216,13 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=2)
             return None, None, None
         _log_mem("after_stack")
+        if getattr(self, "interbatch_norm_active", False):
+            stacked_batch_data_np, batch_coverage_map_2d = self._apply_interbatch_normalization(
+                stacked_batch_data_np,
+                batch_coverage_map_2d,
+                context="stack_batch",
+                batch_num=current_batch_num,
+            )
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
     #########################################################################################################################################
@@ -10923,15 +11348,10 @@ class SeestarQueuedStacker:
         for ch in range(3):
             # When stacking classic batches in ``batch_size == 1`` mode, images
             # are already background normalised during the disk-based pipeline.
-            # Passing ``match_background=True`` to ``reproject_and_coadd`` would
+            # Passing ``match_background=False`` to ``reproject_and_coadd`` would
             # attempt another background matching step, which can result in NaNs
             # when some inputs have no overlap, producing an empty final image.
             # Keep the previous behaviour for other batch sizes.
-
-            try:  # [B1-MATCH-BG-FIX]
-                match_bg = getattr(self, "batch_size", 0) != 1
-            except Exception:
-                match_bg = True
 
             sci, cov = reproject_and_coadd(
                 channel_arrays_wcs[ch],
@@ -10940,7 +11360,7 @@ class SeestarQueuedStacker:
                 input_weights=channel_footprints[ch],
                 reproject_function=reproject_interp,
                 combine_function="mean",
-                match_background=match_bg,
+                match_background=False,
             )
 
 
@@ -11147,7 +11567,7 @@ class SeestarQueuedStacker:
                         try:
                             result = reproject_and_coadd_from_paths(
                                 paths,
-                                match_background=True,
+                                match_background=False,
                                 crop_to_footprint=True,
                                 prefer_streaming_fallback=True,
                             )
@@ -11403,14 +11823,14 @@ class SeestarQueuedStacker:
                 valid_paths,
                 output_projection=out_wcs,
                 shape_out=shape_out,
-                match_background=match_background,
+                match_background=False,
                 crop_to_footprint=True,
                 prefer_streaming_fallback=False,
             )
         else:
             result = ru.reproject_and_coadd_from_paths(
                 paths,
-                match_background=match_background,
+                match_background=False,
                 crop_to_footprint=True,
                 prefer_streaming_fallback=True,
             )
@@ -11752,7 +12172,7 @@ class SeestarQueuedStacker:
                     input_weights=weight_maps,
                     reproject_function=reproject_interp,
                     combine_function="mean",
-                    match_background=(bs > 1),
+                    match_background=False,
                 )
 
                 def _is_blank(_sci, _cov):
@@ -11793,7 +12213,7 @@ class SeestarQueuedStacker:
                             input_weights=weight_maps,
                             reproject_function=reproject_interp,
                             combine_function="mean",
-                            match_background=(bs > 1),
+                            match_background=False,
                         )
                         local_fallback_used = True
                     finally:
@@ -13504,6 +13924,9 @@ class SeestarQueuedStacker:
         self.neighborhood_size = int(neighborhood_size)
         self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
+
+        self._interbatch_start_session()
+
         self.weight_by_snr = bool(weight_by_snr)
         self.weight_by_stars = bool(weight_by_stars)
         self.snr_exponent = float(snr_exp)
@@ -15259,3 +15682,5 @@ class SeestarQueuedStacker:
                 self.freeze_reference_wcs = True
         except Exception:
             pass
+
+

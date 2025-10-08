@@ -29,6 +29,7 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 import numpy as np
+import cv2
 
 try:  # optional core helper
     from seestar.core.reprojection_utils import collect_headers as _collect_headers
@@ -160,25 +161,162 @@ def _subtract_sky_median(image, nsig=3.0, maxiters=5, min_valid: int = 1024):
     return image - med_val
 
 
+def _luminance_view(arr: np.ndarray) -> np.ndarray:
+    """Return a float32 luminance projection for RGB or grayscale arrays."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 3:
+        chw_layout = arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4)
+        if chw_layout:
+            channels = arr.shape[0]
+            r = arr[0]
+            g = arr[1] if channels > 1 else arr[0]
+            b = arr[2] if channels > 2 else arr[0]
+            return 0.299 * r + 0.587 * g + 0.114 * b
+        if arr.shape[2] >= 3:
+            return (
+                0.299 * arr[..., 0]
+                + 0.587 * arr[..., 1]
+                + 0.114 * arr[..., 2]
+            )
+        return arr[..., 0]
+    return arr.astype(np.float32, copy=False)
 
-class ReprojectCoaddResult:
-    def __init__(self, image, weight, wcs):
-        self.image = image
-        self.weight = weight
-        self.wcs = wcs
-
-    def __iter__(self):
-        yield self.image
-        yield self.weight
 
 
-def _estimate_mem_gb(shape_out, n_maps=2):
-    h, w = int(shape_out[0]), int(shape_out[1])
-    bytes_total = h * w * 4 * n_maps
-    return bytes_total / (1024**3)
+def _sigma_clipped_median(values: np.ndarray, sigma: float = 3.0, maxiters: int = 5) -> float:
+    if values.size == 0:
+        return float('nan')
+    clipped = sigma_clip(values, sigma=sigma, maxiters=maxiters)
+    med = np.nanmedian(clipped.filled(np.nan))
+    return float(med) if np.isfinite(med) else float('nan')
 
 
-# [B1-COADD-FIX] Garantir une image 2D pour la reprojection
+
+def compute_overlap_median_ratio(
+    ref_img: np.ndarray,
+    new_img: np.ndarray,
+    ref_wht: np.ndarray | None = None,
+    new_wht: np.ndarray | None = None,
+    *,
+    min_overlap: int = 1024,
+    sigma: float = 3.0,
+    maxiters: int = 5,
+    use_percentile_ratio: bool = True,
+    percentile: float = 90.0,
+) -> Tuple[Optional[float], Optional[float], int, float, float]:
+    """Estimate multiplicative scale so ``new_img`` matches ``ref_img``."""
+    ref_lum = _luminance_view(ref_img)
+    new_lum = _luminance_view(new_img)
+
+    mask = np.isfinite(ref_lum) & np.isfinite(new_lum)
+    mask &= ref_lum > 0
+    mask &= new_lum > 0
+
+    if ref_wht is not None:
+        ref_w = np.asarray(ref_wht, dtype=np.float32)
+        if ref_w.ndim == 3:
+            ref_w = np.mean(ref_w, axis=2)
+        mask &= ref_w > 0
+    if new_wht is not None:
+        new_w = np.asarray(new_wht, dtype=np.float32)
+        if new_w.ndim == 3:
+            new_w = np.mean(new_w, axis=2)
+        mask &= new_w > 0
+
+    overlap = int(np.count_nonzero(mask))
+    if overlap < int(min_overlap):
+        return None, None, overlap, float("nan"), float("nan")
+
+    ref_vals = ref_lum[mask]
+    new_vals = new_lum[mask]
+    if ref_vals.size == 0 or new_vals.size == 0:
+        return None, None, overlap, float("nan"), float("nan")
+
+    ref_med = _sigma_clipped_median(ref_vals, sigma=sigma, maxiters=maxiters)
+    new_med = _sigma_clipped_median(new_vals, sigma=sigma, maxiters=maxiters)
+
+    if use_percentile_ratio:
+        if (not np.isfinite(ref_med)) or ref_med <= 0:
+            ref_med = float(np.nanpercentile(ref_vals, percentile))
+        if (not np.isfinite(new_med)) or new_med <= 0 or abs(new_med) < 1e-6:
+            new_med = float(np.nanpercentile(new_vals, percentile))
+
+    if not np.isfinite(ref_med) or not np.isfinite(new_med) or abs(new_med) < 1e-6:
+        return None, None, overlap, float(ref_med), float(new_med)
+
+    offset = float(ref_med - new_med)
+    scale = abs(float(ref_med / new_med))
+    scale = float(np.clip(scale, 0.2, 5.0))
+
+    return scale, offset, overlap, float(ref_med), float(new_med)
+
+
+def estimate_background_2d(
+    image: np.ndarray,
+    wht: np.ndarray | None = None,
+    *,
+    downsample: int = 4,
+) -> np.ndarray:
+    """Estimate a smooth 2D background model for ``image``."""
+    arr = np.asarray(image, dtype=np.float32)
+    weight_2d = None
+    if wht is not None:
+        weight = np.asarray(wht, dtype=np.float32)
+        if weight.ndim == 3:
+            weight_2d = np.mean(weight, axis=2)
+        else:
+            weight_2d = weight
+
+    def _estimate(channel: np.ndarray) -> np.ndarray:
+        mask = np.isfinite(channel)
+        if weight_2d is not None:
+            mask &= weight_2d > 0
+        if int(np.count_nonzero(mask)) < 64:
+            return np.zeros_like(channel, dtype=np.float32)
+
+        valid = channel[mask]
+        median = float(np.nanmedian(valid)) if valid.size else 0.0
+        std = float(np.nanstd(valid)) if valid.size else 0.0
+        if not np.isfinite(std):
+            std = 0.0
+
+        work = channel.copy()
+        if std > 0:
+            high_mask = mask & (channel > median + 3.0 * std)
+            work[high_mask] = median
+        work[~mask] = median
+
+        h, w = work.shape
+        if downsample > 1:
+            small_w = max(1, w // downsample)
+            small_h = max(1, h // downsample)
+            small = cv2.resize(work, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        else:
+            small = work
+
+        ksize = max(3, int(min(small.shape) * 0.25))
+        if ksize % 2 == 0:
+            ksize += 1
+        blurred = cv2.GaussianBlur(small, (ksize, ksize), 0)
+        if downsample > 1:
+            blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        upper = np.nanpercentile(blurred, 95.0)
+        if np.isfinite(upper):
+            np.clip(blurred, None, upper, out=blurred)
+        if std > 0:
+            lower = median - 5.0 * std
+            np.clip(blurred, lower, None, out=blurred)
+        return blurred.astype(np.float32, copy=False)
+
+    if arr.ndim == 3:
+        bg = np.zeros_like(arr, dtype=np.float32)
+        for c in range(arr.shape[2]):
+            bg[..., c] = _estimate(arr[..., c])
+        return bg
+    return _estimate(arr)
+
+
 def _ensure_2d(img: np.ndarray) -> np.ndarray:  # [B1-COADD-FIX]
     """
     Force une image 2D. Si HWC (RGB), lever si cette fonction est appelée
@@ -1010,4 +1148,6 @@ __all__ = [
     "reproject_interp",
     "reproject_and_coadd_from_paths",
     "streaming_reproject_and_coadd",
+    "estimate_background_2d",
+    "compute_overlap_median_ratio",
 ]
