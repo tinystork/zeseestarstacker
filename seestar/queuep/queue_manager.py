@@ -1251,13 +1251,36 @@ class SeestarQueuedStacker:
 
         bg_model = estimate_background_2d(data, weights)
         bg_rms = 0.0
+        bg_offsets: list[float] = []
         if bg_model is not None:
             lum_bg = self._interbatch_luminance(bg_model)
             if valid_px > 0:
                 sample = lum_bg[mask]
                 if sample.size:
                     bg_rms = float(np.nanstd(sample))
+            if bg_model.ndim == 3:
+                for c in range(bg_model.shape[2]):
+                    channel_bg = np.asarray(bg_model[..., c], dtype=np.float32)
+                    channel_vals = channel_bg[mask]
+                    if channel_vals.size:
+                        bg_offsets.append(float(np.nanmedian(channel_vals)))
+                    else:
+                        bg_offsets.append(0.0)
+            else:
+                channel_bg = np.asarray(bg_model, dtype=np.float32)
+                channel_vals = channel_bg[mask]
+                if channel_vals.size:
+                    bg_offsets.append(float(np.nanmedian(channel_vals)))
+                else:
+                    bg_offsets.append(0.0)
             data -= bg_model
+            if bg_offsets:
+                if data.ndim == 3:
+                    for idx, offset in enumerate(bg_offsets):
+                        if idx < data.shape[2]:
+                            data[..., idx] += float(offset)
+                else:
+                    data += float(bg_offsets[0])
         self._ibn_bg_applied += 1
         bg_msg = (
             f"INFO: Batch k={batch_idx} BG2D: gaussian blur (RMS={bg_rms:.4f}, "
