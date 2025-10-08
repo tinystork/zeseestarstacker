@@ -11521,6 +11521,10 @@ class SeestarQueuedStacker:
             self.update_progress(f"⚠️ Outils de reprojection indisponibles: {e}", "WARN")
             return False
 
+        bs_mode = int(getattr(self, "batch_size", 0) or 0)
+        if bs_mode == 0:
+            return False
+
         data_pairs = []
         weight_maps = []
         wcs_list = []
@@ -11728,8 +11732,15 @@ class SeestarQueuedStacker:
         # accumulator which mirrors the historical workflow.
         _prev_force = _os.environ.get("REPROJECT_FORCE_LOCAL")
         bs = int(getattr(self, "batch_size", 0) or 0)
+        force_local = False
         if bs == 1:
-            _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+            if _prev_force != "1":
+                _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+        elif bs == 0:
+            force_local = True
+            if _prev_force != "1":
+                _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+        local_fallback_used = force_local or local_fallback_used
         try:
             for ch in range(data_pairs[0][0].shape[2]):
                 inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
@@ -11766,11 +11777,11 @@ class SeestarQueuedStacker:
 
                 if (
                     bs == 0
-                    and _prev_force != "1"
+                    and not force_local
                     and _is_blank(sci, cov)
                 ):
                     self.update_progress(
-                        "   ⚠️ Reproject (astropy) a renvoyé une image vide – bascule sur l'accumulateur local.",
+                        "   [Reproject] Astropy a renvoye une image vide -> bascule sur l'accumulateur local.",
                         "WARN",
                     )
                     _restore_env("1")
@@ -11793,6 +11804,8 @@ class SeestarQueuedStacker:
                     final_cov = np.asarray(cov, dtype=np.float32)
         finally:
             if bs == 1:
+                _restore_env(_prev_force)
+            elif bs == 0 and _prev_force != "1":
                 _restore_env(_prev_force)
 
         data_hwc = np.stack(final_channels, axis=-1)
