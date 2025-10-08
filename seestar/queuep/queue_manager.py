@@ -1137,6 +1137,8 @@ class SeestarQueuedStacker:
         self._ibn_use_percentile_ratio = True
         self._ibn_percentile_value = 90.0
         self._ibn_last_failure_info = {}
+        self._ibn_ref_baseline = None
+        self._ibn_last_batch_baseline = None
         msg = "INFO: Inter-batch normalization (MASTER_REF + BG2D) enabled (auto-start)"
         try:
             self.update_progress(msg, "INFO")
@@ -1221,6 +1223,31 @@ class SeestarQueuedStacker:
 
         mask = self._interbatch_compute_mask(data, weights)
         valid_px = int(np.count_nonzero(mask))
+
+        baseline = []
+        if data.ndim == 3:
+            for c in range(3):
+                channel = np.asarray(data[..., c], dtype=np.float32)
+                finite = np.isfinite(channel)
+                if weights is not None:
+                    if weights.ndim == 3:
+                        finite &= np.asarray(weights[..., c], dtype=np.float32) > 0
+                    else:
+                        finite &= np.asarray(weights, dtype=np.float32) > 0
+                if np.count_nonzero(finite):
+                    baseline.append(float(np.nanmedian(channel[finite])))
+                else:
+                    baseline.append(0.0)
+        else:
+            channel = np.asarray(data, dtype=np.float32)
+            finite = np.isfinite(channel)
+            if weights is not None:
+                finite &= np.asarray(weights, dtype=np.float32) > 0
+            if np.count_nonzero(finite):
+                baseline.append(float(np.nanmedian(channel[finite])))
+            else:
+                baseline.append(0.0)
+        self._ibn_last_batch_baseline = baseline
 
         bg_model = estimate_background_2d(data, weights)
         bg_rms = 0.0
