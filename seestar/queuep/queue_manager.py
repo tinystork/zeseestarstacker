@@ -1673,6 +1673,7 @@ class SeestarQueuedStacker:
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
+        self.match_background_for_final = False
         # Internal flag to allow bypassing aligned_*.fits when classic batches
 
         # are available for the final co-add in batch_size==1 mode. Ensure modes
@@ -11395,14 +11396,9 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
 
-        for ch in range(3):
-            # When stacking classic batches in ``batch_size == 1`` mode, images
-            # are already background normalised during the disk-based pipeline.
-            # Passing ``match_background=False`` to ``reproject_and_coadd`` would
-            # attempt another background matching step, which can result in NaNs
-            # when some inputs have no overlap, producing an empty final image.
-            # Keep the previous behaviour for other batch sizes.
+        match_bg = bool(getattr(self, "match_background_for_final", False))
 
+        for ch in range(3):
             sci, cov = reproject_and_coadd(
                 channel_arrays_wcs[ch],
                 output_projection=out_wcs,
@@ -11410,7 +11406,7 @@ class SeestarQueuedStacker:
                 input_weights=channel_footprints[ch],
                 reproject_function=reproject_interp,
                 combine_function="mean",
-                match_background=False,
+                match_background=match_bg,
             )
 
 
@@ -11463,6 +11459,8 @@ class SeestarQueuedStacker:
             reproject_and_coadd_from_paths,
             subtract_sigma_clipped_median,
         )
+
+        match_bg = bool(getattr(self, "match_background_for_final", False))
 
         def _safe_progress(msg, prog=None, level=None):
             try:
@@ -11617,7 +11615,7 @@ class SeestarQueuedStacker:
                         try:
                             result = reproject_and_coadd_from_paths(
                                 paths,
-                                match_background=False,
+                                match_background=match_bg,
                                 crop_to_footprint=True,
                                 prefer_streaming_fallback=True,
                             )
@@ -11806,6 +11804,10 @@ class SeestarQueuedStacker:
             "[BATCH SIZE=1] Tip: delete previous memmaps/temp and final.fits before re-running to avoid stale accumulation."
         )
 
+        match_bg = bool(
+            getattr(self, "match_background_for_final", match_background)
+        )
+
         paths = [p for p, _ in getattr(self, "intermediate_classic_batch_files", [])]
         if not paths:
             self.update_progress(
@@ -11873,14 +11875,14 @@ class SeestarQueuedStacker:
                 valid_paths,
                 output_projection=out_wcs,
                 shape_out=shape_out,
-                match_background=False,
+                match_background=match_bg,
                 crop_to_footprint=True,
                 prefer_streaming_fallback=False,
             )
         else:
             result = ru.reproject_and_coadd_from_paths(
                 paths,
-                match_background=False,
+                match_background=match_bg,
                 crop_to_footprint=True,
                 prefer_streaming_fallback=True,
             )
@@ -12211,6 +12213,7 @@ class SeestarQueuedStacker:
             if _prev_force != "1":
                 _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
         local_fallback_used = force_local or local_fallback_used
+        match_bg = bool(getattr(self, "match_background_for_final", False))
         try:
             for ch in range(data_pairs[0][0].shape[2]):
                 inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
@@ -12222,7 +12225,7 @@ class SeestarQueuedStacker:
                     input_weights=weight_maps,
                     reproject_function=reproject_interp,
                     combine_function="mean",
-                    match_background=False,
+                    match_background=match_bg,
                 )
 
                 def _is_blank(_sci, _cov):
@@ -12263,7 +12266,7 @@ class SeestarQueuedStacker:
                             input_weights=weight_maps,
                             reproject_function=reproject_interp,
                             combine_function="mean",
-                            match_background=False,
+                            match_background=match_bg,
                         )
                         local_fallback_used = True
                     finally:
@@ -13786,6 +13789,7 @@ class SeestarQueuedStacker:
         preserve_linear_output=False,
         reproject_between_batches=None,
         reproject_coadd_final=None,
+        match_background_for_final=False,
         chunk_size=None,
     ):
         logger.debug(
@@ -13826,6 +13830,9 @@ class SeestarQueuedStacker:
         logger.debug(f"    normalize_method: {normalize_method}")
         logger.debug(f"    weighting_method: {weighting_method}")
         logger.debug(f"    output_filename (arg de func): {output_filename}")
+        logger.debug(
+            f"    match_background_for_final (arg de func): {match_background_for_final}"
+        )
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
         if self.processing_active:
@@ -14046,6 +14053,12 @@ class SeestarQueuedStacker:
                 self.stack_final_combine = "reproject_coadd"
         logger.debug(
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
+        )
+
+        self.match_background_for_final = bool(match_background_for_final)
+        logger.debug(
+            "    [OutputFormat] self.match_background_for_final mis à : %s",
+            self.match_background_for_final,
         )
 
         # Disable solving of intermediate batches when reprojection is active
