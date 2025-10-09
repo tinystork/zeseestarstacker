@@ -6442,6 +6442,15 @@ class SeestarStackerGUI:
                         self.gui_event_queue.put(_apply_valid)
                     else:
                         self.root.after(0, _apply_valid)
+                if hasattr(self.settings, "match_background_for_final"):
+                    match_background_for_final = bool(
+                        getattr(self.settings, "match_background_for_final", False)
+                    )
+                else:
+                    match_background_for_final = (
+                        self.settings.stack_final_combine == "reproject_coadd"
+                    )
+
                 backend_kwargs = {
                     "input_dir": self.settings.input_folder,
                     "output_dir": self.settings.output_folder,
@@ -6522,6 +6531,7 @@ class SeestarStackerGUI:
                     "preserve_linear_output": self.settings.preserve_linear_output,
                     "reproject_between_batches": self.settings.reproject_between_batches,
                     "reproject_coadd_final": self.settings.reproject_coadd_final,
+                    "match_background_for_final": match_background_for_final,
                 }
 
                 if self.settings.batch_size == 1 and not special_single:
