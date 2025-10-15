@@ -654,7 +654,7 @@ logger.debug("Configuration warnings OK.")
 # --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
 # Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
 # Global version string to make sure it's always the same
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "v6.3.0 Boring"
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "v6.5.0 Boring"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -1779,6 +1779,7 @@ class SeestarQueuedStacker:
         self.drizzle_batch_output_dir = None
         self.classic_batch_output_dir = None
         self.final_stacked_path = None
+        self._auto_batch_size_zero_mode = None
 
         # Plate-solver configuration so early WCS solves have the required
         # attributes even if ``start_processing`` has not been called yet.
@@ -13943,7 +13944,10 @@ class SeestarQueuedStacker:
                         count_added += 1
             if count_added > 0:
                 self.files_in_queue += count_added
-                self._recalculate_total_batches()
+                if self._auto_batch_size_zero_mode:
+                    self._enable_auto_batching_for_zero_mode()
+                else:
+                    self._recalculate_total_batches()
             return count_added
         except FileNotFoundError:
             self.update_progress(
@@ -13960,6 +13964,40 @@ class SeestarQueuedStacker:
                 f"❌ Erreur scan dossier {os.path.basename(folder_path)}: {e}"
             )
             return 0
+
+    def _enable_auto_batching_for_zero_mode(self) -> bool:
+        """Create batch delimiters when using batch_size=0 without stack_plan."""
+        queue_items = [
+            os.path.abspath(str(item))
+            for item in list(self.queue.queue)
+            if item != _BATCH_BREAK_TOKEN
+        ]
+        if not queue_items:
+            return False
+
+        if self._auto_batch_size_zero_mode:
+            auto_batch_size = self._auto_batch_size_zero_mode
+        else:
+            try:
+                auto_batch_size = max(1, int(self._estimate_batch_size()))
+            except Exception:
+                auto_batch_size = 1
+            self._auto_batch_size_zero_mode = auto_batch_size
+
+        new_queue = Queue()
+        for idx, filepath in enumerate(queue_items):
+            new_queue.put(filepath)
+            if (idx + 1) % auto_batch_size == 0 and (idx + 1) < len(queue_items):
+                new_queue.put(_BATCH_BREAK_TOKEN)
+
+        self.queue = new_queue
+        self.use_batch_plan = True
+        self.all_input_filepaths = list(queue_items)
+        self.files_in_queue = len(queue_items)
+        self.total_batches_estimated = math.ceil(
+            self.files_in_queue / self._auto_batch_size_zero_mode
+        )
+        return True
 
     ################################################################################################################################################
 
@@ -15003,7 +15041,29 @@ class SeestarQueuedStacker:
         else:
             self.use_batch_plan = False
             initial_files_added = self._add_files_to_queue(self.current_folder)
-            if initial_files_added > 0:
+            should_auto_batch = (
+                self.batch_size == 0
+                and not self._has_stack_plan
+                and self.reproject_coadd_final
+            )
+            if should_auto_batch and initial_files_added > 0:
+                if self._enable_auto_batching_for_zero_mode():
+                    self.logger.info(
+                        "[AutoBatch] batch_size=0 sans stack_plan -> %d images par lot",
+                        self._auto_batch_size_zero_mode,
+                    )
+                    self.update_progress(
+                        f"[AutoBatch] Mode batch_size=0: {self._auto_batch_size_zero_mode} images par lot (sans stack_plan)."
+                    )
+                    self.update_progress(
+                        f"[AutoBatch] Total lots estimes: {self.total_batches_estimated}"
+                    )
+                else:
+                    self._recalculate_total_batches()
+                    self.update_progress(
+                        f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
+                    )
+            elif initial_files_added > 0:
                 self._recalculate_total_batches()
                 self.update_progress(
                     f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
