@@ -1426,12 +1426,14 @@ class SettingsManager:
 
             try:
                 self.batch_size = int(self.batch_size)
-                if self.batch_size < 0:
-                    original = self.batch_size
-                    self.batch_size = 0
+                # ⚠️ 0 doit aussi devenir Auto (comme l’implémentation initiale)
+                if self.batch_size <= 0:
                     messages.append(
-                        f"Taille Lot ({original}) ajusté à {self.batch_size} (auto)"
+                        "Taille Lot (<=0) interprétée comme mode Auto "
+                        "(estimation dynamique de la taille de lot)."
                     )
+                    # on force une sentinelle négative si le QM attend <0 pour Auto
+                    self.batch_size = -1
             except (ValueError, TypeError):
                 original = self.batch_size
                 self.batch_size = defaults_fallback["batch_size"]
