@@ -1018,6 +1018,41 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
+    def _estimate_batch_size(self) -> int:
+        """Estimate an appropriate batch size based on available FITS files."""
+
+        sample_img_path = None
+        candidate_folders: list[str] = []
+
+        if self.current_folder and os.path.isdir(self.current_folder):
+            candidate_folders.append(self.current_folder)
+
+        for folder in getattr(self, "additional_folders", []) or []:
+            if folder and os.path.isdir(folder) and folder not in candidate_folders:
+                candidate_folders.append(folder)
+
+        for folder in candidate_folders:
+            try:
+                fits_files = [
+                    f
+                    for f in sorted(os.listdir(folder))
+                    if f.lower().endswith((".fit", ".fits"))
+                ]
+            except Exception:
+                continue
+            if fits_files:
+                sample_img_path = os.path.join(folder, fits_files[0])
+                break
+
+        try:
+            estimated = estimate_batch_size(sample_image_path=sample_img_path)
+            return max(1, int(estimated))
+        except Exception as err:
+            warn_msg = f"⚠️ Erreur estimation taille lot auto: {err}. Utilisation défaut (10)."
+            self.update_progress(warn_msg, "WARN")
+            self.logger.warning("[AutoBatch] %s", warn_msg)
+            return 10
+
     def _start_drizzle_process(
         self,
         batch_temp_filepaths_list,
@@ -1568,6 +1603,7 @@ class SeestarQueuedStacker:
         **kwargs,
     ):
         self.progress_callback = None
+        self.logger = logger
         self._configure_global_threads(thread_fraction)
         self.autotuner = CpuIoAutoTuner(self) if autotune else None
         self.io_profile = io_profile
@@ -1824,6 +1860,7 @@ class SeestarQueuedStacker:
 
         self.all_input_filepaths = []
         self.reference_shape = None
+        self._has_stack_plan = False
 
         # --- NEW ---
         # Store the original reference frame size (H, W) so that reprojection
@@ -3731,15 +3768,29 @@ class SeestarQueuedStacker:
         """Estimates the total number of batches based on files_in_queue."""
         if getattr(self, "use_batch_plan", False):
             return
-        if self.batch_size > 0:
-            self.total_batches_estimated = math.ceil(
-                self.files_in_queue / self.batch_size
-            )
-        else:
-            self.update_progress(
-                f"⚠️ Taille de lot invalide ({self.batch_size}), impossible d'estimer le nombre total de lots."
-            )
-            self.total_batches_estimated = 0
+        if self.batch_size <= 0:
+            if not getattr(self, "_has_stack_plan", False):
+                self.batch_size = max(1, int(self._estimate_batch_size()))
+                if self.files_in_queue > 0:
+                    self.total_batches_estimated = math.ceil(
+                        self.files_in_queue / self.batch_size
+                    )
+                else:
+                    self.total_batches_estimated = 0
+                if self.total_batches_estimated > 0:
+                    self.logger.info(
+                        f"[AutoBatch] Création de {self.total_batches_estimated} lots ({self.batch_size} images par lot)"
+                    )
+            else:
+                self.update_progress(
+                    f"⚠️ Taille de lot invalide ({self.batch_size}), impossible d'estimer le nombre total de lots."
+                )
+                self.total_batches_estimated = 0
+            return
+
+        self.total_batches_estimated = math.ceil(
+            self.files_in_queue / self.batch_size
+        )
 
     ##########################################################################
 
@@ -9022,6 +9073,17 @@ class SeestarQueuedStacker:
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
             batch_wht = batch_coverage_map_2d.astype(np.float32)
 
+            if not (
+                np.all(np.isfinite(batch_sum))
+                and np.all(np.isfinite(batch_wht))
+                and np.any(batch_wht > 0)
+            ):
+                warn_msg = "[AutoBatch] Lot ignoré (somme non valide ou poids nul)"
+                self.logger.warning(warn_msg)
+                self.update_progress(warn_msg, "WARN")
+                self.failed_stack_count += num_physical_images_in_batch
+                return
+
             pre_sum_min = float(np.min(self.cumulative_sum_memmap))
             pre_sum_max = float(np.max(self.cumulative_sum_memmap))
             pre_wht_min = float(np.min(self.cumulative_wht_memmap))
@@ -12817,18 +12879,35 @@ class SeestarQueuedStacker:
                 if "final_sum" in locals():
                     self._close_memmaps()
 
-                    eps = 1e-9
                     final_wht_map_for_postproc = np.maximum(
                         final_wht_map_2d_from_memmap, 0.0
                     )
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        final_image_initial_raw = final_sum / np.maximum(
-                            final_wht_map_2d_from_memmap[..., None], eps
-                        )
-                    final_image_initial_raw = np.nan_to_num(
-                        final_image_initial_raw, nan=0.0, posinf=0.0, neginf=0.0
+                    cumulative_sum = final_sum.astype(np.float64, copy=False)
+                    cumulative_wht = final_wht_map_for_postproc.astype(
+                        np.float64, copy=False
                     )
-                    final_image_initial_raw = final_image_initial_raw.astype(np.float32)
+                    valid_mask = cumulative_wht > 0
+                    final_image = np.zeros_like(cumulative_sum, dtype=np.float64)
+                    if final_image.ndim == 3:
+                        final_image[valid_mask] = (
+                            cumulative_sum[valid_mask]
+                            / cumulative_wht[valid_mask][:, None]
+                        )
+                    else:
+                        final_image[valid_mask] = (
+                            cumulative_sum[valid_mask]
+                            / cumulative_wht[valid_mask]
+                        )
+                    final_image = np.nan_to_num(
+                        final_image, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    final_image_initial_raw = final_image.astype(np.float32)
+                    self.logger.info(
+                        "[AutoBatch] Validation sortie: min=%.3f, max=%.3f, NaN=%d",
+                        float(np.min(final_image_initial_raw)),
+                        float(np.max(final_image_initial_raw)),
+                        int(np.isnan(final_image_initial_raw).sum()),
+                    )
                     self.update_progress(
                         f"    DEBUG QM: Classic Mode - final_image_initial_raw (HWC, après SUM/WHT et nan_to_num) - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
                     )
@@ -13853,6 +13932,13 @@ class SeestarQueuedStacker:
         self.current_folder = os.path.abspath(input_dir) if input_dir else None
         self.output_folder = os.path.abspath(output_dir) if output_dir else None
 
+        plan_candidate = (
+            os.path.join(self.current_folder, "stack_plan.csv")
+            if self.current_folder
+            else None
+        )
+        self._has_stack_plan = bool(plan_candidate and os.path.isfile(plan_candidate))
+
         if self.autotuner:
             self.autotuner.start()
 
@@ -14144,7 +14230,16 @@ class SeestarQueuedStacker:
             )
 
         requested_batch_size = batch_size
-        if requested_batch_size == 0:
+        if requested_batch_size <= 0 and not self._has_stack_plan:
+            estimated = self._estimate_batch_size()
+            self.batch_size = max(1, int(estimated))
+            self.logger.info(
+                f"[AutoBatch] Mode activé (plan absent) – estimation: {self.batch_size} images/lot"
+            )
+            self.update_progress(
+                f"✅ Taille lot auto estimée et appliquée: {self.batch_size}", None
+            )
+        elif requested_batch_size == 0:
             # Mode "batch size 0" explicite : aucun lot, tout en RAM
             self.batch_size = 0
             if self.reproject_between_batches:
@@ -14173,33 +14268,6 @@ class SeestarQueuedStacker:
                 )
             elif self.reproject_coadd_final and getattr(self, "stack_final_combine", "").lower() != "reproject_coadd":
                 self.stack_final_combine = "reproject_coadd"
-        elif requested_batch_size < 0:
-            sample_img_path_for_bsize = None
-            if input_dir and os.path.isdir(input_dir):
-                fits_files_bsize = [
-                    f
-                    for f in os.listdir(input_dir)
-                    if f.lower().endswith((".fit", ".fits"))
-                ]
-                sample_img_path_for_bsize = (
-                    os.path.join(input_dir, fits_files_bsize[0])
-                    if fits_files_bsize
-                    else None
-                )
-            try:
-                estimated_size = estimate_batch_size(
-                    sample_image_path=sample_img_path_for_bsize
-                )
-                self.batch_size = max(1, estimated_size)
-                self.update_progress(
-                    f"✅ Taille lot auto estimée et appliquée: {self.batch_size}", None
-                )
-            except Exception as est_err:
-                self.update_progress(
-                    f"⚠️ Erreur estimation taille lot: {est_err}. Utilisation défaut (10).",
-                    None,
-                )
-                self.batch_size = 10
         else:
             self.batch_size = max(1, int(requested_batch_size))
         self.update_progress(
@@ -14627,6 +14695,7 @@ class SeestarQueuedStacker:
 
         plan_path = os.path.join(self.current_folder, "stack_plan.csv")
         plan_exists = os.path.isfile(plan_path)
+        self._has_stack_plan = plan_exists
         use_plan = requested_batch_size <= 0 and plan_exists
 
         special_single_csv = (
