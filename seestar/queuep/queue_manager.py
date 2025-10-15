@@ -3769,6 +3769,12 @@ class SeestarQueuedStacker:
         if getattr(self, "use_batch_plan", False):
             return
         if self.batch_size <= 0:
+            if self.batch_size == 0:
+                # Honour explicit "all in RAM" mode: keep batch_size at 0 and expose a
+                # single logical batch so downstream logic (reproject&coadd, white-fix,
+                # etc.) continues to behave like legacy batch_size=0 runs.
+                self.total_batches_estimated = 1 if self.files_in_queue > 0 else 0
+                return
             if not getattr(self, "_has_stack_plan", False):
                 self.batch_size = max(1, int(self._estimate_batch_size()))
                 if self.files_in_queue > 0:
@@ -11292,6 +11298,8 @@ class SeestarQueuedStacker:
         « Reproject + Co‑add ».
         """
 
+        self._ensure_reference_wcs_for_mode0(batch_files)
+
         try:
             from seestar.enhancement.reproject_utils import (
                 reproject_and_coadd,
@@ -11309,6 +11317,8 @@ class SeestarQueuedStacker:
         channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
         wcs_for_grid: List[WCS] = []
         headers_for_grid = []
+        ref_p1 = None
+        ref_p99 = None
 
         # --- 2. Loop over saved batch FITS --------------------------------------
         for sci_path, wht_paths in batch_files:
@@ -11414,6 +11424,23 @@ class SeestarQueuedStacker:
             # 2.3 Prepare batch data
             # ------------------------------------------------------------------
             img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            if ref_p1 is None or ref_p99 is None:
+                try:
+                    base = img_hwc.astype(np.float32, copy=False)
+                    if base.ndim == 3:
+                        lum = (
+                            0.299 * base[..., 0]
+                            + 0.587 * base[..., 1]
+                            + 0.114 * base[..., 2]
+                        )
+                    else:
+                        lum = base
+                    finite = np.isfinite(lum)
+                    if np.count_nonzero(finite) > 50:
+                        ref_p1 = float(np.nanpercentile(lum[finite], 1.0))
+                        ref_p99 = float(np.nanpercentile(lum[finite], 99.0))
+                except Exception:
+                    ref_p1, ref_p99 = None, None
 
             # 2.4 Feed per‑channel lists -------------------------------------
             wcs_for_grid.append(batch_wcs)
@@ -11480,6 +11507,62 @@ class SeestarQueuedStacker:
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
         data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(data_hwc, cov_hw, out_wcs)
+        apply_white_fix = (
+            int(getattr(self, "batch_size", 0) or 0) == 0
+            and getattr(self, "reproject_coadd_final", False)
+        )
+        if apply_white_fix:
+            try:
+                arr = data_hwc.astype(np.float32, copy=False)
+                if arr.ndim == 3:
+                    luminance = (
+                        0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+                    )
+                else:
+                    luminance = arr
+                finite = np.isfinite(luminance)
+                if np.count_nonzero(finite) > 50:
+                    p1 = float(np.nanpercentile(luminance[finite], 1.0))
+                    p99 = float(np.nanpercentile(luminance[finite], 99.0))
+                    rng = p99 - p1
+                    mean_val = float(np.nanmean(luminance[finite]))
+                    triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
+                    if triggered and (
+                        ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1
+                    ):
+                        self.update_progress(
+                            (
+                                f"[Reproject White-Fix] rescale to reference "
+                                f"(cur p1/p99={p1:.6f}/{p99:.6f} -> ref {ref_p1:.3f}/{ref_p99:.3f})."
+                            ),
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        ref_scale = max(ref_p99 - ref_p1, 1e-6)
+                        arr = (arr - p1) / cur_scale
+                        arr = arr * ref_scale + ref_p1
+                        arr = np.clip(
+                            arr,
+                            ref_p1 - 5 * ref_scale,
+                            ref_p99 + 5 * ref_scale,
+                        )
+                        data_hwc = arr.astype(np.float32, copy=False)
+                    elif triggered:
+                        self.update_progress(
+                            "[Reproject White-Fix] fallback normalization (no valid reference).",
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        arr = ((arr - p1) / cur_scale).clip(0.0, 1.0)
+                        data_hwc = arr.astype(np.float32, copy=False)
+            except Exception as _e_fix:
+                try:
+                    self.update_progress(
+                        f"[Reproject White-Fix] skipped due to error: {_e_fix}",
+                        "DEBUG",
+                    )
+                except Exception:
+                    pass
         self.current_stack = data_hwc
         self.current_coverage = cov_hw
         self.current_stack_header = fits.Header()
@@ -11994,6 +12077,77 @@ class SeestarQueuedStacker:
             pass
         return cropped_img, cropped_cov, new_wcs
 
+    def _ensure_reference_wcs_for_mode0(self, batch_files):
+        """Populate reference WCS/header when running the mode-0 reproject pass."""
+        try:
+            bs_mode = int(getattr(self, "batch_size", 0) or 0)
+        except Exception:
+            bs_mode = 0
+        if bs_mode != 0 or not getattr(self, "reproject_coadd_final", False):
+            return
+
+        need_wcs = getattr(self, "reference_wcs_object", None) is None
+        need_hdr = getattr(self, "reference_header_for_wcs", None) is None
+        need_shape = getattr(self, "reference_shape", None) is None
+        if not (need_wcs or need_hdr or need_shape):
+            return
+
+        for sci_path, _wht_paths in batch_files:
+            hdr = None
+            try:
+                hdr = fits.getheader(sci_path, memmap=False)
+            except Exception:
+                hdr = None
+            if hdr is None:
+                continue
+
+            height = int(hdr.get("NAXIS2") or 0)
+            width = int(hdr.get("NAXIS1") or 0)
+            if height <= 0 or width <= 0:
+                try:
+                    data_shape = fits.getdata(sci_path, memmap=False).shape
+                    if len(data_shape) >= 2:
+                        height = data_shape[-2]
+                        width = data_shape[-1]
+                except Exception:
+                    pass
+
+            try:
+                wcs_candidate = WCS(hdr, naxis=2)
+                if height > 0 and width > 0:
+                    ensure_wcs_pixel_shape(wcs_candidate, height, width)
+            except Exception:
+                continue
+
+            if need_wcs:
+                self.reference_wcs_object = wcs_candidate.deepcopy()
+                if height > 0 and width > 0:
+                    try:
+                        self.reference_wcs_object.pixel_shape = (width, height)
+                    except Exception:
+                        pass
+                need_wcs = False
+
+            if need_shape and height > 0 and width > 0:
+                self.reference_shape = (height, width)
+                need_shape = False
+
+            if need_hdr:
+                self.reference_header_for_wcs = hdr.copy()
+                self.ref_wcs_header = self.reference_header_for_wcs
+                need_hdr = False
+
+            try:
+                self.update_progress(
+                    "   [Reproject] Référence WCS initialisée (mode batch_size=0).",
+                    "DEBUG",
+                )
+            except Exception:
+                pass
+
+            if not (need_wcs or need_hdr or need_shape):
+                break
+
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
         if self.reference_wcs_object is None or self.reference_shape is None:
@@ -12044,6 +12198,8 @@ class SeestarQueuedStacker:
         ``reproject_and_coadd``.  The clustering phase present in ZeMosaic is
         omitted here.
         """
+
+        self._ensure_reference_wcs_for_mode0(batch_files)
 
         try:
             from seestar.enhancement.reproject_utils import (
@@ -12271,9 +12427,30 @@ class SeestarQueuedStacker:
             if _prev_force != "1":
                 _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
         elif bs == 0:
-            force_local = True
-            if _prev_force != "1":
-                _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+            needs_local = (
+                getattr(self, "reference_wcs_object", None) is None
+                or getattr(self, "reference_shape", None) is None
+                or getattr(self, "reference_header_for_wcs", None) is None
+            )
+            if needs_local:
+                force_local = True
+                if _prev_force != "1":
+                    _os.environ["REPROJECT_FORCE_LOCAL"] = "1"
+                try:
+                    self.update_progress(
+                        "   [Reproject] Mode 0: référence WCS absente -> fallback local forcé.",
+                        "DEBUG",
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.update_progress(
+                        "   [Reproject] Mode 0: référence WCS détectée -> tentative Astropy.",
+                        "DEBUG",
+                    )
+                except Exception:
+                    pass
         local_fallback_used = force_local or local_fallback_used
         match_bg = bool(getattr(self, "match_background_for_final", False))
         try:
@@ -12363,10 +12540,11 @@ class SeestarQueuedStacker:
         bs = int(getattr(self, "batch_size", 0) or 0)
         apply_white_fix = True
         if bs == 0 and local_fallback_used:
-            apply_white_fix = False
+            # Keep white-fix active even when we had to fall back locally so the
+            # near-flat output still gets rescaled.
             try:
                 self.update_progress(
-                    "[Reproject White-Fix] ignoré (fallback local utilisé pour bs=0).",
+                    "[Reproject White-Fix] fallback local bs=0 -> correction maintenue.",
                     "DEBUG",
                 )
             except Exception:
@@ -14229,8 +14407,12 @@ class SeestarQueuedStacker:
                 f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}"
             )
 
-        requested_batch_size = batch_size
-        if requested_batch_size <= 0 and not self._has_stack_plan:
+        try:
+            requested_batch_size = int(batch_size)
+        except (TypeError, ValueError):
+            requested_batch_size = -1
+
+        if requested_batch_size < 0 and not self._has_stack_plan:
             estimated = self._estimate_batch_size()
             self.batch_size = max(1, int(estimated))
             self.logger.info(
