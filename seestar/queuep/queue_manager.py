@@ -735,9 +735,10 @@ except ImportError as e_feather:
     # lors des appels ultérieurs, bien qu'on vérifiera _FEATHERING_AVAILABLE.
 
 
-def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
-    logger.error("Fonction feather_by_weight_map non disponible (échec import).")
-    return img  # Retourner l'image originale
+if not _FEATHERING_AVAILABLE:
+    def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6):
+        logger.error("Fonction feather_by_weight_map non disponible (échec import).")
+        return img  # Retourner l'image originale
 
 
 def renormalize_fits(
@@ -1164,7 +1165,7 @@ class SeestarQueuedStacker:
         self._ibn_master_ready = False
         self._ibn_candidate_pool = []
         self._ibn_candidate_limit = 8
-        self._ibn_master_min = 5
+        self._ibn_master_min = 1
         self._ibn_counter = 0
         self._ibn_bg_applied = 0
         self._ibn_feather_cache = {}
@@ -1216,6 +1217,9 @@ class SeestarQueuedStacker:
         self._ibn_candidate_pool = []
         self._ibn_feather_cache = {}
         self._ibn_last_failure_info = {}
+        self._final_combine_ibn_started = False
+        self._final_combine_ibn_master_set = False
+        self._final_combine_ibn_master_batch_idx = None
 
     def _apply_interbatch_normalization(
         self,
@@ -1425,6 +1429,74 @@ class SeestarQueuedStacker:
             [float(m) for m in batch_meds],
         )
         return data, weights
+
+    def _should_use_final_combine_ibn(self) -> bool:
+        """Return True when final-combine normalization against batch #1 is desired."""
+        if getattr(self, "reproject_between_batches", False):
+            return False
+        if getattr(self, "reproject_coadd_final", False):
+            return False
+        if not getattr(self, "use_classic_batches_for_final_coadd", True):
+            return False
+        mode = str(getattr(self, "stack_final_combine", "")).lower()
+        return mode in {"mean", "winsorized_sigma_clip"}
+
+    def _ensure_final_ibn_session(self) -> None:
+        """Restart IBN for the classic final combine workflow."""
+        if getattr(self, "_final_combine_ibn_started", False):
+            return
+        self._interbatch_start_session()
+        self._ibn_master_min = 1
+        self._final_combine_ibn_started = True
+        self._final_combine_ibn_master_set = False
+        self._final_combine_ibn_master_batch_idx = None
+
+    def _apply_final_combine_interbatch_normalization(
+        self,
+        batch_data,
+        batch_wht,
+        *,
+        batch_num: int | None = None,
+    ):
+        """Normalize classic mini-stacks on the forced IBN master."""
+        self._ensure_final_ibn_session()
+
+        if not getattr(self, "_final_combine_ibn_master_set", False):
+            data_norm, wht_norm = self._apply_interbatch_normalization(
+                batch_data,
+                batch_wht,
+                context="final_combine",
+                batch_num=batch_num,
+            )
+            self._ibn_ref_image = np.array(data_norm, dtype=np.float32, copy=True)
+            self._ibn_ref_wht = (
+                None
+                if wht_norm is None
+                else np.array(wht_norm, dtype=np.float32, copy=True)
+            )
+            self._ibn_master_ready = True
+            idx = int(batch_num) if batch_num is not None else max(
+                1, getattr(self, "_ibn_counter", 1)
+            )
+            self._ibn_batches_seen = max(1, idx)
+            self._ibn_counter = max(getattr(self, "_ibn_counter", 0), idx)
+            self._final_combine_ibn_master_set = True
+            self._final_combine_ibn_master_batch_idx = idx
+            try:
+                self.update_progress(
+                    f"   [IBN] Master final combine fixé sur le lot #{idx}", "INFO"
+                )
+            except Exception:
+                pass
+            logger.info("Final combine IBN master set from batch %d", idx)
+            return data_norm, wht_norm
+
+        return self._apply_interbatch_normalization(
+            batch_data,
+            batch_wht,
+            context="final_combine",
+            batch_num=batch_num,
+        )
 
     def _interbatch_luminance(self, arr: np.ndarray) -> np.ndarray:
         arr = np.asarray(arr, dtype=np.float32)
@@ -10337,12 +10409,19 @@ class SeestarQueuedStacker:
             return None, None, None
         _log_mem("after_stack")
         if getattr(self, "interbatch_norm_active", False):
-            stacked_batch_data_np, batch_coverage_map_2d = self._apply_interbatch_normalization(
-                stacked_batch_data_np,
-                batch_coverage_map_2d,
-                context="stack_batch",
-                batch_num=current_batch_num,
-            )
+            if self._should_use_final_combine_ibn():
+                stacked_batch_data_np, batch_coverage_map_2d = self._apply_final_combine_interbatch_normalization(
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    batch_num=current_batch_num,
+                )
+            else:
+                stacked_batch_data_np, batch_coverage_map_2d = self._apply_interbatch_normalization(
+                    stacked_batch_data_np,
+                    batch_coverage_map_2d,
+                    context="stack_batch",
+                    batch_num=current_batch_num,
+                )
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
     #########################################################################################################################################
@@ -14285,6 +14364,9 @@ class SeestarQueuedStacker:
         self.perform_cleanup = bool(perform_cleanup)
 
         self._interbatch_start_session()
+        self._final_combine_ibn_started = False
+        self._final_combine_ibn_master_set = False
+        self._final_combine_ibn_master_batch_idx = None
 
         self.weight_by_snr = bool(weight_by_snr)
         self.weight_by_stars = bool(weight_by_stars)
