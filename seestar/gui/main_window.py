@@ -6442,14 +6442,13 @@ class SeestarStackerGUI:
                         self.gui_event_queue.put(_apply_valid)
                     else:
                         self.root.after(0, _apply_valid)
-                if hasattr(self.settings, "match_background_for_final"):
-                    match_background_for_final = bool(
-                        getattr(self.settings, "match_background_for_final", False)
-                    )
+                raw_match_bg = getattr(
+                    self.settings, "match_background_for_final", None
+                )
+                if raw_match_bg is None:
+                    match_background_for_final = None
                 else:
-                    match_background_for_final = (
-                        self.settings.stack_final_combine == "reproject_coadd"
-                    )
+                    match_background_for_final = bool(raw_match_bg)
 
                 backend_kwargs = {
                     "input_dir": self.settings.input_folder,
