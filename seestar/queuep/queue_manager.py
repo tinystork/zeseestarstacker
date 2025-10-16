@@ -1341,20 +1341,23 @@ class SeestarQueuedStacker:
         skipped = getattr(self, "_ibn_skipped", 0)
         bg_applied = getattr(self, "_ibn_bg_applied", 0)
         master_ready = getattr(self, "_ibn_master_ready", False)
+        seen = getattr(self, "_ibn_batches_seen", 0)
         summary = (
             f"INFO: Inter-batch normalization summary: master_ready={master_ready}, "
-            f"applied_to={applied}, skipped={skipped} (BG2D applied={bg_applied})"
+            f"applied_to={applied}, skipped={skipped} (BG2D applied={bg_applied}), "
+            f"batches_seen={seen}"
         )
         try:
             self.update_progress(summary, "INFO")
         except Exception:
             pass
         logger.info(
-            "Inter-batch normalization summary: master_ready=%s applied_to=%d skipped=%d bg2d=%d",
+            "Inter-batch normalization summary: master_ready=%s applied_to=%d skipped=%d bg2d=%d batches_seen=%d",
             master_ready,
             applied,
             skipped,
             bg_applied,
+            seen,
         )
         self.interbatch_norm_active = False
         self._ibn_ref_image = None
@@ -14735,6 +14738,13 @@ class SeestarQueuedStacker:
                 )
             elif self.reproject_coadd_final and getattr(self, "stack_final_combine", "").lower() != "reproject_coadd":
                 self.stack_final_combine = "reproject_coadd"
+            # Re-synchronise final combine flags with GUI selection for BS=0
+            try:
+                _fm = str(getattr(self, "stack_final_combine", "")).lower()
+                if _fm in ("reproject", "mean", "median", "winsorized_sigma_clip"):
+                    self.reproject_coadd_final = False
+            except Exception:
+                pass
         else:
             self.batch_size = max(1, int(requested_batch_size))
         self.update_progress(
