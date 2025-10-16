@@ -280,6 +280,7 @@ def _reproject_worker(
     ref_wcs_header: fits.Header,
     shape_out: tuple,
     use_gpu: bool = False,
+    match_background: bool = False,
 ):
     """Reproject a FITS image onto ``ref_wcs_header``.
 
@@ -297,6 +298,9 @@ def _reproject_worker(
         Output shape ``(H, W)`` for the reprojection.
     use_gpu : bool, optional
         Ignored. Present for API compatibility.
+    match_background : bool, optional
+        When ``True``, subtract a sigma-clipped median background from the
+        reprojected image before returning it. Defaults to ``False``.
     """
 
     from seestar.enhancement.reproject_utils import reproject_interp
@@ -427,7 +431,68 @@ def _reproject_worker(
         float(np.nanmax(footprint)),
     )
 
-    return reproj.astype(np.float32), footprint.astype(np.float32)
+    footprint = np.nan_to_num(footprint, nan=0.0)
+    weight_map = footprint.astype(np.float32, copy=False)
+
+    radial = make_radial_weight_map(shape_out[0], shape_out[1]).astype(
+        np.float32, copy=False
+    )
+    if weight_map.ndim == 3:
+        if weight_map.shape[0] in (1, 3, 4) and weight_map.shape[1:] == (
+            shape_out[0],
+            shape_out[1],
+        ):
+            weight_map *= radial[None, :, :]
+        elif weight_map.shape[2] in (1, 3, 4) and weight_map.shape[0:2] == (
+            shape_out[0],
+            shape_out[1],
+        ):
+            weight_map *= radial[..., None]
+        else:  # fallback broadcast
+            weight_map *= radial
+    else:
+        weight_map *= radial
+
+    reproj = np.asarray(reproj, dtype=np.float32)
+    if reproj.ndim == 3 and reproj.shape[0] in (1, 3, 4) and reproj.shape[1:] == (
+        shape_out[0],
+        shape_out[1],
+    ):
+        reproj *= weight_map
+    elif reproj.ndim == 3 and reproj.shape[2] in (1, 3, 4) and reproj.shape[0:2] == (
+        shape_out[0],
+        shape_out[1],
+    ):
+        reproj *= weight_map
+    else:
+        reproj *= weight_map
+
+    valid_pixels = int(np.count_nonzero(weight_map))
+    logger.debug(
+        "[FOOTPRINT_MASK] Applied footprint mask to batch (%d valid pixels)",
+        valid_pixels,
+    )
+
+    # Optional background matching (sigma-clipped median subtraction)
+    if match_background:
+        try:
+            from seestar.enhancement.reproject_utils import (
+                subtract_sigma_clipped_median,
+            )
+            reproj, med_val = subtract_sigma_clipped_median(reproj)
+            logger.debug(
+                "[MATCH_BG] Applied sigma-clipped background offset (%.5f) to %s",
+                float(med_val),
+                os.path.basename(fits_path),
+            )
+        except Exception as e:
+            logger.warning(
+                "[MATCH_BG] Background match failed for %s: %s",
+                os.path.basename(fits_path),
+                e,
+            )
+
+    return reproj.astype(np.float32, copy=False), weight_map.astype(np.float32, copy=False)
 
 
 def _stack_worker(args):
@@ -1103,18 +1168,82 @@ class SeestarQueuedStacker:
     # Parallel reprojection of a list of FITS files
     # ------------------------------------------------------------------
 
+    def _get_final_match_background(self, default: bool = True) -> bool:
+        """Return the desired ``match_background`` flag for the final combine."""
+        settings_obj = getattr(self, "settings", None)
+        if settings_obj is not None:
+            value = getattr(settings_obj, "match_background_for_final", None)
+            if value is not None:
+                result = bool(value)
+                self.match_background_for_final = result
+                return result
+
+        if getattr(self, "_match_background_for_final_set", False):
+            result = bool(getattr(self, "match_background_for_final", default))
+            self.match_background_for_final = result
+            return result
+
+        if hasattr(self, "match_background_for_final"):
+            value = getattr(self, "match_background_for_final")
+            if value is not None:
+                result = bool(value)
+                self.match_background_for_final = result
+                return result
+
+        result = bool(default)
+        self.match_background_for_final = result
+        return result
+
     def _process_batches(self, batch_fits_list: list[str]):
         """Reproject and accumulate each FITS file individually."""
 
         if not batch_fits_list or self.reference_shape is None:
             return
 
+        mode = str(getattr(self, "stack_final_combine", "")).lower()
+        default_match_bg = mode == "reproject_coadd"
+        match_background = self._get_final_match_background(default=default_match_bg)
+        if match_background and mode == "reproject_coadd":
+            logger.info(
+                "[MATCH_BG] Background matching enabled for final coadd (mode=%s)",
+                getattr(self, "stack_final_combine", mode),
+            )
+
         worker = partial(
             _reproject_worker,
             ref_wcs_header=self.ref_wcs_header,
             shape_out=self.reference_shape,
             use_gpu=self.use_gpu,
+            match_background=match_background,
         )
+
+        def _ensure_hwc(arr):
+            if arr is None:
+                return None
+            data = np.asarray(arr, dtype=np.float32)
+            if data.ndim == 2:
+                data = data[..., None]
+            elif (
+                data.ndim == 3
+                and data.shape[0] in (1, 3, 4)
+                and data.shape[-1] not in (1, 3, 4)
+            ):
+                data = np.moveaxis(data, 0, -1)
+            return data
+
+        def _ensure_hw(arr):
+            if arr is None:
+                return None
+            weights = np.asarray(arr, dtype=np.float32)
+            if (
+                weights.ndim == 3
+                and weights.shape[0] in (1, 3, 4)
+                and weights.shape[-1] not in (1, 3, 4)
+            ):
+                weights = np.moveaxis(weights, 0, -1)
+            if weights.ndim == 3:
+                weights = np.nanmean(weights, axis=2)
+            return weights.astype(np.float32, copy=False)
 
         for fits_path in batch_fits_list:
             try:
@@ -1123,6 +1252,8 @@ class SeestarQueuedStacker:
                 continue
 
             reproj_data, reproj_wht = worker(fits_path)
+            reproj_data = _ensure_hwc(reproj_data)
+            reproj_wht = _ensure_hw(reproj_wht)
 
             if getattr(self, "interbatch_norm_active", False):
                 reproj_data, reproj_wht = self._apply_interbatch_normalization(
@@ -1130,9 +1261,23 @@ class SeestarQueuedStacker:
                     reproj_wht,
                     context="reproject",
                 )
+                reproj_data = _ensure_hwc(reproj_data)
+                reproj_wht = _ensure_hw(reproj_wht)
+                if reproj_wht is not None:
+                    mask = (reproj_wht > 0).astype(np.float32, copy=False)
+                    if reproj_data.ndim == 3:
+                        reproj_data *= mask[..., None]
+                    else:
+                        reproj_data *= mask
+
+            if reproj_data is None:
+                continue
+
+            if reproj_wht is None:
+                reproj_wht = np.ones(reproj_data.shape[:2], dtype=np.float32)
 
             # continuous accumulation
-            self.cumulative_sum_memmap += reproj_data * reproj_wht[..., None]
+            self.cumulative_sum_memmap += reproj_data
             if self.cumulative_wht_memmap.shape != reproj_wht.shape:
                 from numpy.lib.format import open_memmap
 
@@ -1682,6 +1827,7 @@ class SeestarQueuedStacker:
         self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
         self.use_gpu = bool(gpu)
         self.align_on_disk = align_on_disk
+        self.settings = settings
         # Keep track of background drizzle processes
         self.drizzle_processes = []
         # Dedicated pool for drizzle tasks.  Instance methods are made
@@ -1782,6 +1928,7 @@ class SeestarQueuedStacker:
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
         self.match_background_for_final = False
+        self._match_background_for_final_set = False
         # Internal flag to allow bypassing aligned_*.fits when classic batches
 
         # are available for the final co-add in batch_size==1 mode. Ensure modes
@@ -4098,6 +4245,7 @@ class SeestarQueuedStacker:
             # donc ce bloc 'else' est pour la clarté mais pas strictement nécessaire ici si le flux est correct.)
             pass  # Les attributs self.mosaic_drizzle_xyz sont déjà settés par start_processing et ne sont pas lus ici.
 
+        ibn_finalized = False
         try:
             # =====================================================================================
             # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
@@ -5802,6 +5950,9 @@ class SeestarQueuedStacker:
             logger.debug(
                 "DEBUG QM [_worker V_DrizIncrTrue_Fix1]: *** APRÈS LE BLOC if/elif/else DE FINALISATION ***"
             )
+            if (not ibn_finalized) and getattr(self, "interbatch_norm_active", False):
+                self._interbatch_finalize_session()
+                ibn_finalized = True
 
         # --- FIN DU BLOC TRY PRINCIPAL DU WORKER ---
         except RuntimeError as rte:
@@ -5827,7 +5978,7 @@ class SeestarQueuedStacker:
             logger.debug(
                 f"DEBUG QM [_worker V_NoDerotation]: Entree dans le bloc FINALLY principal du worker."
             )
-            if getattr(self, "interbatch_norm_active", False):
+            if (not ibn_finalized) and getattr(self, "interbatch_norm_active", False):
                 self._interbatch_finalize_session()
             if (
                 hasattr(self, "cumulative_sum_memmap")
@@ -11392,6 +11543,15 @@ class SeestarQueuedStacker:
             )
             return False
 
+        mode = str(getattr(self, "stack_final_combine", "")).lower()
+        default_match_bg = mode == "reproject_coadd"
+        match_bg = self._get_final_match_background(default=default_match_bg)
+        if match_bg and mode == "reproject_coadd":
+            logger.info(
+                "[MATCH_BG] Background matching enabled for final coadd (mode=%s)",
+                getattr(self, "stack_final_combine", mode),
+            )
+
         # --- 1. Containers -------------------------------------------------------
         channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
         channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
@@ -11565,8 +11725,6 @@ class SeestarQueuedStacker:
         final_channels = []
         final_cov = None
 
-        match_bg = bool(getattr(self, "match_background_for_final", False))
-
         for ch in range(3):
             sci, cov = reproject_and_coadd(
                 channel_arrays_wcs[ch],
@@ -11685,7 +11843,7 @@ class SeestarQueuedStacker:
             subtract_sigma_clipped_median,
         )
 
-        match_bg = bool(getattr(self, "match_background_for_final", False))
+        match_bg = self._get_final_match_background(default=True)
 
         def _safe_progress(msg, prog=None, level=None):
             try:
@@ -12029,9 +12187,7 @@ class SeestarQueuedStacker:
             "[BATCH SIZE=1] Tip: delete previous memmaps/temp and final.fits before re-running to avoid stale accumulation."
         )
 
-        match_bg = bool(
-            getattr(self, "match_background_for_final", match_background)
-        )
+        match_bg = self._get_final_match_background(default=match_background)
 
         paths = [p for p, _ in getattr(self, "intermediate_classic_batch_files", [])]
         if not paths:
@@ -12532,7 +12688,7 @@ class SeestarQueuedStacker:
                 except Exception:
                     pass
         local_fallback_used = force_local or local_fallback_used
-        match_bg = bool(getattr(self, "match_background_for_final", False))
+        match_bg = self._get_final_match_background(default=True)
         try:
             for ch in range(data_pairs[0][0].shape[2]):
                 inputs_ch = [(img[..., ch], wcs) for img, wcs in data_pairs]
@@ -14440,6 +14596,7 @@ class SeestarQueuedStacker:
         )
 
         self.match_background_for_final = bool(match_background_for_final)
+        self._match_background_for_final_set = True
         logger.debug(
             "    [OutputFormat] self.match_background_for_final mis à : %s",
             self.match_background_for_final,
