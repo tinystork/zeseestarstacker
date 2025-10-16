@@ -17,6 +17,11 @@ try:  # Prefer the reference implementation when available
 except Exception:  # pragma: no cover - gracefully handle absence of reproject
     _astropy_reproject_and_coadd = None
 
+try:  # Background matching helpers (may be unavailable on older versions)
+    from reproject.mosaicking.background import solve_corrections_sgd as _solve_corrections_sgd
+except Exception:  # pragma: no cover - optional dependency
+    _solve_corrections_sgd = None
+
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
@@ -149,6 +154,74 @@ def subtract_sigma_clipped_median(img, min_valid: int = 1024):
     med = np.nanmedian(clipped.filled(np.nan))
     med_val = 0.0 if not np.isfinite(med) else float(med)
     return img - med_val, med_val
+
+
+def _estimate_background_corrections(images, footprints):
+    """Estimate additive corrections to match image backgrounds.
+
+    Parameters
+    ----------
+    images : list of ndarray
+        Reprojected images converted to ``float`` arrays.
+    footprints : list of ndarray
+        Corresponding footprints indicating valid pixels (> 0).
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Additive corrections to subtract from each image so their
+        backgrounds align. ``None`` when no correction can be computed.
+    """
+
+    n_images = len(images)
+    if n_images <= 1:
+        return None
+
+    offsets = np.full((n_images, n_images), np.nan, dtype=np.float64)
+    for i in range(n_images):
+        fp_i = footprints[i]
+        arr_i = images[i]
+        for j in range(i + 1, n_images):
+            mask = (fp_i > 0) & (footprints[j] > 0)
+            if not np.any(mask):
+                continue
+            diff = arr_i[mask] - images[j][mask]
+            if diff.size == 0:
+                continue
+            diff = diff[np.isfinite(diff)]
+            if diff.size == 0:
+                continue
+            median = float(np.nanmedian(diff))
+            if not np.isfinite(median):
+                continue
+            offsets[i, j] = median
+            offsets[j, i] = -median
+
+    if not np.isfinite(offsets).any():
+        return None
+
+    if _solve_corrections_sgd is not None:
+        try:
+            corrections = np.asarray(_solve_corrections_sgd(offsets), dtype=np.float64)
+        except Exception:  # pragma: no cover - solver edge-cases depend on version
+            logger.warning("Background matching solver failed", exc_info=True)
+            return None
+    else:  # pragma: no cover - fallback when solver unavailable
+        corrections = np.zeros(n_images, dtype=np.float64)
+        ref = 0
+        for idx in range(1, n_images):
+            if np.isfinite(offsets[idx, ref]):
+                corrections[idx] = offsets[idx, ref]
+            elif np.isfinite(offsets[ref, idx]):
+                corrections[idx] = -offsets[ref, idx]
+
+    if not np.isfinite(corrections).any():
+        return None
+
+    mean_corr = float(np.nanmean(corrections[np.isfinite(corrections)]))
+    corrections = corrections - mean_corr
+    corrections[~np.isfinite(corrections)] = 0.0
+    return corrections
 
 
 def _subtract_sky_median(image, nsig=3.0, maxiters=5, min_valid: int = 1024):
@@ -493,6 +566,10 @@ def reproject_and_coadd(
     kept = 0  # [B1-COADD-FIX]
     total = 0  # [B1-COADD-FIX]
 
+    reproj_images = []
+    reproj_footprints = []
+    reproj_weights = []
+
     for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
         total += 1  # [B1-COADD-FIX]
         img2d = _ensure_2d(np.asarray(img))  # [B1-COADD-FIX]
@@ -504,6 +581,9 @@ def reproject_and_coadd(
             return_footprint=True,
             **kwargs,
         )  # [B1-COADD-FIX]
+
+        proj_img = np.asarray(proj_img, dtype=np.float64)
+        footprint = np.asarray(footprint, dtype=np.float64)
 
         proj_img = np.nan_to_num(
             proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
@@ -525,7 +605,7 @@ def reproject_and_coadd(
                 pass
 
         if weight is None:  # [B1-COADD-FIX]
-            weight_proj = footprint  # [B1-COADD-FIX]
+            weight_proj = footprint.copy()  # [B1-COADD-FIX]
         elif np.isscalar(weight):  # [B1-COADD-FIX]
             weight_proj = footprint * float(weight)  # [B1-COADD-FIX]
         else:
@@ -539,26 +619,52 @@ def reproject_and_coadd(
                 return_footprint=True,
                 **kwargs,
             )  # [B1-COADD-FIX]
-            weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
+            weight_proj = np.asarray(w_reproj * w_fp, dtype=np.float64)  # [B1-COADD-FIX]
 
         weight_proj = np.nan_to_num(
             weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
         )  # [B1-COADD-FIX]
 
         if np.any(footprint > 0):  # [B1-COADD-FIX]
-            proj_img = np.nan_to_num(
-                proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
-            )
-            weight_proj = np.nan_to_num(
-                weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
-            )
-            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
-            cov_image += weight_proj  # [B1-COADD-FIX]
-            kept += 1  # [B1-COADD-FIX]
+            reproj_images.append(proj_img)
+            reproj_footprints.append(footprint)
+            reproj_weights.append(weight_proj)
         else:
             logger.debug("[B1-COADD-FIX] Skipped entry (zero footprint).")  # [B1-COADD-FIX]
 
-        del proj_img, footprint, weight_proj  # [B1-COADD-FIX]
+    corrections = None
+    if match_background and reproj_images:
+        corrections = _estimate_background_corrections(reproj_images, reproj_footprints)
+        if corrections is None:
+            logger.info("Background matching requested but no corrections were computed.")
+        else:
+            logger.debug(
+                "Applying background corrections: min=%.6g max=%.6g",
+                float(np.nanmin(corrections)),
+                float(np.nanmax(corrections)),
+            )
+
+    for idx, (proj_img, footprint, weight_proj) in enumerate(
+        zip(reproj_images, reproj_footprints, reproj_weights)
+    ):
+        if corrections is not None and idx < len(corrections):
+            corr = corrections[idx]
+            if np.isfinite(corr):
+                proj_img = proj_img - corr
+        proj_img = np.nan_to_num(
+            proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )
+        weight_proj = np.nan_to_num(
+            weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )
+        if np.any(weight_proj > 0):
+            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
+            cov_image += weight_proj  # [B1-COADD-FIX]
+            kept += 1  # [B1-COADD-FIX]
+
+        reproj_images[idx] = None
+        reproj_footprints[idx] = None
+        reproj_weights[idx] = None
 
     out = np.divide(
         sum_image,
@@ -569,6 +675,7 @@ def reproject_and_coadd(
     np.nan_to_num(out, copy=False, nan=0.0, posinf=0.0, neginf=0.0)  # [B1-COADD-FIX]
 
     try:
+        valid = cov_image > 0
         logger.info(
             "[B1-COADD-FIX] coadd stats: kept=%d/%d, cov>0=%d, cov_sum=%.3f, sum_min=%.3g, sum_max=%.3g",
             kept,
