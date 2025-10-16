@@ -4370,7 +4370,17 @@ class SeestarStackerGUI:
             lock = getattr(qs, "folders_lock", None)
             if lock and lock.acquire(blocking=False):
                 try:
-                    count = len(qs.additional_folders)
+                    # Unifier la vue: backend + dossiers stagés côté GUI
+                    current = set(os.path.abspath(p) for p in getattr(qs, "additional_folders", []) or [])
+                    staged = [
+                        os.path.abspath(p)
+                        for p in (getattr(self, "additional_folders_to_process", []) or [])
+                        if p
+                    ]
+                    for p in staged:
+                        if p not in current:
+                            current.add(p)
+                    count = len(current)
                 finally:
                     lock.release()
             else:
@@ -4380,7 +4390,16 @@ class SeestarStackerGUI:
                     pass
                 return
         else:
-            count = len(self.additional_folders_to_process)
+            # En dehors du traitement: n'afficher que les dossiers en attente GUI (unicité)
+            try:
+                staged = [
+                    os.path.abspath(p)
+                    for p in (self.additional_folders_to_process or [])
+                    if p
+                ]
+                count = len(set(staged))
+            except Exception:
+                count = len(self.additional_folders_to_process)
 
         try:
             if count == 0:
