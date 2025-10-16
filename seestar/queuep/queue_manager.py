@@ -7961,6 +7961,13 @@ class SeestarQueuedStacker:
 
         if self.reproject_between_batches:
             self.stacked_batches_count += 1
+            # Aligner le comportement ETA avec le chemin classique
+            # afin que l'UI reçoive des mises à jour en mode
+            # "Reproject & Coadd".
+            try:
+                self._send_eta_update()
+            except Exception:
+                pass
             num_in_batch = len(batch_items)
             stacked_np, hdr, wht_2d = self._stack_batch(
                 batch_items,
@@ -14128,6 +14135,17 @@ class SeestarQueuedStacker:
                 os.path.abspath(self.current_folder) if self.current_folder else None
             )
             existing_abs = [os.path.abspath(p) for p in self.additional_folders]
+            # Messages distincts pour de meilleurs retours UX
+            if current_abs and abs_path == current_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en cours: {os.path.basename(folder_path)}"
+                )
+                return False
+            if abs_path in existing_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en attente: {os.path.basename(folder_path)}"
+                )
+                return False
             if (current_abs and abs_path == current_abs) or abs_path in existing_abs:
                 self.update_progress(
                     f"ⓘ Dossier déjà en cours ou ajouté: {os.path.basename(folder_path)}"

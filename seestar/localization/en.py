@@ -157,6 +157,7 @@ EN_TRANSLATIONS = {
     "tooltip_save_as_float32": "If checked, the final FITS file will be saved using 32-bit floating-point numbers, preserving the maximum numerical precision from processing but resulting in larger files (approx. 2x). If unchecked (default), the file will be saved as 16-bit unsigned integers (0-65535 range after scaling from 0-1), significantly reducing file size.",
     "tooltip_preserve_linear_output": "If enabled, skips percentile-based normalization before saving. The uint16 output will scale the raw 0-1 values directly to 0-65535.",
     "tooltip_hq_ram_limit": "Max granted RAM for process",
+    "tooltip_add_folder_disabled": "Add disabled: reproject between batches or threaded boring mode active",
     # ... end expert tab ...
     # --- Preview Tab ---
     "white_balance": "White Balance (Preview)",

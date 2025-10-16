@@ -729,6 +729,11 @@ class SeestarStackerGUI:
                     self.batch_size.set(0)
         except tk.TclError:
             pass
+        # Refresh Add Folder availability if a run is ongoing
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
 
     def _on_batch_size_changed(self, *args):
         """Toggle boring-thread mode when the batch size equals 1."""
@@ -2098,6 +2103,10 @@ class SeestarStackerGUI:
             state=tk.NORMAL,
         )
         self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
         self.show_folders_button = ttk.Button(
             control_frame,
             text="View Inputs",
@@ -2466,6 +2475,11 @@ class SeestarStackerGUI:
             self.reproject_coadd_var.set(False)
         self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
+        # Update Add Folder enable/disable promptly if processing
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
 
     #################################################################################################################################
 
@@ -2778,7 +2792,7 @@ class SeestarStackerGUI:
     #############################################################################################################################
 
     def _show_input_folder_list(self):
-        """Displays the list of input folders in a simple pop-up window."""
+        """Displays a unified view of input folders (main, current, queued, staged)."""
 
         main_folder = self.input_path.get()
 
@@ -2790,32 +2804,46 @@ class SeestarStackerGUI:
         # Always add the main input folder first
         folder_list.append(os.path.abspath(main_folder))
 
+        # Build a unified view of additional folders
         additional_folders = []
-        # Get additional folders based on processing state
+        current_proc = None
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker:
             try:
-                # Safely access the list using the lock
                 with self.queued_stacker.folders_lock:
-                    # Get a copy to avoid issues if modified during iteration
                     additional_folders = list(self.queued_stacker.additional_folders)
+                    if getattr(self.queued_stacker, "current_folder", None):
+                        current_proc = self.queued_stacker.current_folder
             except Exception as e:
                 print(f"Error accessing queued stacker folders: {e}")
-                # Proceed without additional folders from backend if error occurs
-        else:
-            # Get folders added before processing started
-            additional_folders = self.additional_folders_to_process
+                # Continue with what we have
+
+        # Always append any GUI-staged folders not yet flushed to backend
+        for f in getattr(self, "additional_folders_to_process", []) or []:
+            if f not in additional_folders:
+                additional_folders.append(f)
 
         # Add absolute paths of additional folders
         for folder in additional_folders:
             abs_path = os.path.abspath(folder)
-            if abs_path not in folder_list:  # Avoid duplicates if added strangely
+            if abs_path not in folder_list:  # Avoid duplicates
                 folder_list.append(abs_path)
 
         # --- Format the text ---
-        if len(folder_list) == 1:
+        header_lines = []
+        if current_proc:
+            try:
+                header_lines.append(
+                    f"  Current (processing):\n    {os.path.abspath(current_proc)}\n"
+                )
+            except Exception:
+                pass
+
+        if len(folder_list) == 1 and not additional_folders:
             display_text = f"{self.tr('input_folder')}\n  {folder_list[0]}"
         else:
             display_text = f"{self.tr('input_folder')} (Main):\n  {folder_list[0]}\n\n"
+            if header_lines:
+                display_text += "".join(header_lines) + "\n"
             display_text += f"{self.tr('Additional:')} ({len(folder_list) - 1})\n"
             for i, folder in enumerate(folder_list[1:], 1):
                 display_text += f"  {i}. {folder}\n"
@@ -4139,13 +4167,35 @@ class SeestarStackerGUI:
     # --- NOUVELLE MÉTHODE pour gérer la requête d'ajout ---
     def handle_add_folder_request(self, folder_path):
         """
-        Gère une requête d'ajout de dossier, en l'ajoutant soit à la liste
-        pré-démarrage, soit en appelant le backend si le traitement est actif.
+        Gère une requête d'ajout de dossier. En mode traitement:
+        - si le backend n'a pas encore démarré, on 'stage' le dossier côté GUI
+          puis on le 'flush' automatiquement dès que le worker démarre.
+        - si le backend tourne déjà, on délègue immédiatement au backend.
+        En dehors du traitement, on alimente la liste pré‑démarrage.
         """
         abs_folder = os.path.abspath(folder_path)
 
-        if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
-            # Traitement actif : appeler le backend
+        if self.processing and hasattr(self, "queued_stacker"):
+            # Backend pas encore prêt ? On stage et on flush à l'initialisation.
+            if not self.queued_stacker.is_running():
+                if abs_folder not in self.additional_folders_to_process:
+                    self.additional_folders_to_process.append(abs_folder)
+                    self.update_progress_gui(
+                        f"ⓘ Dossier en attente de démarrage backend: {os.path.basename(abs_folder)}",
+                        None,
+                    )
+                    self.update_additional_folders_display()
+                else:
+                    messagebox.showinfo(
+                        self.tr("info"),
+                        self.tr(
+                            "Folder already added",
+                            default="Folder already added to the list.",
+                        ),
+                    )
+                return
+
+            # Traitement actif et backend opérationnel : appeler le backend
             add_success = self.queued_stacker.add_folder(abs_folder)
             if not add_success:
                 messagebox.showwarning(
@@ -4156,23 +4206,24 @@ class SeestarStackerGUI:
                     ),
                 )
             # La mise à jour de l'affichage se fera via callback "folder_count_update" du backend
+            return
+
+        # Traitement non actif : ajouter à la liste pré‑démarrage
+        if abs_folder not in self.additional_folders_to_process:
+            self.additional_folders_to_process.append(abs_folder)
+            self.update_progress_gui(
+                f"ⓘ Dossier ajouté pour prochain traitement: {os.path.basename(abs_folder)}",
+                None,
+            )
+            self.update_additional_folders_display()
         else:
-            # Traitement non actif : ajouter à la liste pré-démarrage
-            if abs_folder not in self.additional_folders_to_process:
-                self.additional_folders_to_process.append(abs_folder)
-                self.update_progress_gui(
-                    f"ⓘ Dossier ajouté pour prochain traitement: {os.path.basename(abs_folder)}",
-                    None,
-                )
-                self.update_additional_folders_display()  # Mettre à jour l'affichage UI
-            else:
-                messagebox.showinfo(
-                    self.tr("info"),
-                    self.tr(
-                        "Folder already added",
-                        default="Folder already added to the list.",
-                    ),
-                )
+            messagebox.showinfo(
+                self.tr("info"),
+                self.tr(
+                    "Folder already added",
+                    default="Folder already added to the list.",
+                ),
+            )
 
     def _track_processing_progress(self):
         """Monitors the QueuedStacker worker thread and updates GUI stats."""
@@ -4184,12 +4235,27 @@ class SeestarStackerGUI:
         # ``queued_stacker.is_running()`` would still be False.  Poll until the
         # worker is running or ``self.processing`` gets cleared (e.g. because the
         # backend failed to start).
+        # Attente du vrai démarrage backend ET flush des dossiers stagés
         while (
             self.processing
             and hasattr(self, "queued_stacker")
             and not self.queued_stacker.is_running()
         ):
             time.sleep(0.1)
+
+        # Le backend vient de démarrer: transférer les dossiers stagés côté GUI
+        try:
+            if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
+                staged = list(self.additional_folders_to_process)
+                if staged:
+                    self.additional_folders_to_process.clear()
+                    for f in staged:
+                        try:
+                            self.queued_stacker.add_folder(f)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         while self.processing and hasattr(self, "queued_stacker"):
             try:
@@ -4308,6 +4374,10 @@ class SeestarStackerGUI:
                 finally:
                     lock.release()
             else:
+                try:
+                    self.root.after(100, self.update_additional_folders_display)
+                except tk.TclError:
+                    pass
                 return
         else:
             count = len(self.additional_folders_to_process)
@@ -4803,6 +4873,76 @@ class SeestarStackerGUI:
         # même si la case principale était déjà décochée.
         if state == tk.DISABLED:
             self._update_drizzle_options_state()
+
+        # Mettre à jour l'état du bouton "Add Folder" selon les conditions courantes
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
+
+    def update_add_folder_button_state(self):
+        """Active ou grise le bouton Add Folder selon les conditions courantes.
+
+        Désactive si un traitement est en cours (self.processing == True) ET
+        (reprojection entre lots active OU mode boring thread actif). Sinon, active.
+        Ajoute/retire une infobulle pédagogique lorsqu'il est désactivé.
+        """
+        try:
+            btn = getattr(self, "add_files_button", None)
+            if not btn or not hasattr(btn, "winfo_exists") or not btn.winfo_exists():
+                return
+
+            # État de traitement en cours
+            run_active = bool(getattr(self, "processing", False))
+
+            # Reprojection active: prioriser la variable UI si disponible
+            reproject_active = False
+            try:
+                reproject_active = bool(self.reproject_between_batches_var.get())
+            except Exception:
+                reproject_active = bool(getattr(self.settings, "reproject_between_batches", False))
+
+            # Mode boring thread actif
+            threaded_boring = False
+            try:
+                threaded_boring = bool(self.boring_thread_var.get())
+            except Exception:
+                threaded_boring = bool(getattr(self.settings, "boring_thread_mode", False))
+
+            disable_btn = run_active and (reproject_active or threaded_boring)
+
+            try:
+                btn.config(state=(tk.DISABLED if disable_btn else tk.NORMAL))
+            except tk.TclError:
+                pass
+
+            # Gérer l'infobulle dynamique
+            if not hasattr(self, "tooltips"):
+                self.tooltips = {}
+            tt_key = "tooltip_add_files_button_disabled_dynamic"
+            if disable_btn:
+                if tt_key not in self.tooltips:
+                    try:
+                        self.tooltips[tt_key] = ToolTip(
+                            btn,
+                            lambda: self.tr(
+                                "tooltip_add_folder_disabled",
+                                default="Ajout désactivé : reprojection ou mode Boring actif",
+                            ),
+                        )
+                    except Exception:
+                        pass
+            else:
+                tooltip = self.tooltips.pop(tt_key, None)
+                if tooltip:
+                    try:
+                        tooltip.hidetip()
+                        tooltip.unschedule()
+                    except Exception:
+                        pass
+        except Exception:
+            # Sécurité: ignorer toute erreur ici pour ne pas bloquer l'UI
+            pass
 
     def _debounce_resize(self, event=None):
         if self._after_id_resize:
