@@ -81,7 +81,7 @@ from ..tools.file_ops import move_to_stacked
 logger.debug("Imports standard OK.")
 
 
-from typing import Literal, List, Tuple
+from typing import Literal, List, Tuple, Optional
 
 import astroalign as aa
 import cv2
@@ -1183,12 +1183,18 @@ class SeestarQueuedStacker:
             self.match_background_for_final = result
             return result
 
-        if hasattr(self, "match_background_for_final"):
-            value = getattr(self, "match_background_for_final")
-            if value is not None:
-                result = bool(value)
-                self.match_background_for_final = result
-                return result
+        value = getattr(self, "match_background_for_final", None)
+        if value is not None and (
+            value
+            or getattr(self, "_match_background_for_final_set", False)
+        ):
+            result = bool(value)
+            self.match_background_for_final = result
+            return result
+
+        if getattr(self, "batch_size", None) == 1:
+            self.match_background_for_final = False
+            return False
 
         result = bool(default)
         self.match_background_for_final = result
@@ -1927,7 +1933,7 @@ class SeestarQueuedStacker:
         # Option de reprojection des lots empilés intermédiaires
         self.reproject_between_batches = False
         self.reproject_coadd_final = False
-        self.match_background_for_final = False
+        self.match_background_for_final: Optional[bool] = None
         self._match_background_for_final_set = False
         # Internal flag to allow bypassing aligned_*.fits when classic batches
 
@@ -11544,7 +11550,8 @@ class SeestarQueuedStacker:
             return False
 
         mode = str(getattr(self, "stack_final_combine", "")).lower()
-        default_match_bg = mode == "reproject_coadd"
+        bs_current = getattr(self, "batch_size", 0)
+        default_match_bg = (mode == "reproject_coadd") or (bs_current != 1)
         match_bg = self._get_final_match_background(default=default_match_bg)
         if match_bg and mode == "reproject_coadd":
             logger.info(
@@ -14319,7 +14326,7 @@ class SeestarQueuedStacker:
         preserve_linear_output=False,
         reproject_between_batches=None,
         reproject_coadd_final=None,
-        match_background_for_final=False,
+        match_background_for_final=None,
         chunk_size=None,
     ):
         logger.debug(
@@ -14595,12 +14602,13 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
 
-        self.match_background_for_final = bool(match_background_for_final)
-        self._match_background_for_final_set = True
-        logger.debug(
-            "    [OutputFormat] self.match_background_for_final mis à : %s",
-            self.match_background_for_final,
-        )
+        if match_background_for_final is not None:
+            self.match_background_for_final = bool(match_background_for_final)
+            self._match_background_for_final_set = True
+            logger.debug(
+                "    [OutputFormat] self.match_background_for_final mis à : %s",
+                self.match_background_for_final,
+            )
 
         # Disable solving of intermediate batches when reprojection is active
         # and the reference WCS should remain fixed.

@@ -1238,6 +1238,7 @@ class SettingsManager:
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
         # Default final combination method
         defaults_dict["stack_final_combine"] = "mean"
+        defaults_dict["match_background_for_final"] = None
         defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
