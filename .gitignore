@@ -48,3 +48,6 @@ memmap_accumulators/
 *_autosave_*.json
 zemosaic_config.json
 seestar_settings.json
+
+# === Fichiers de sauvegarde log ===
+seestar.txt
