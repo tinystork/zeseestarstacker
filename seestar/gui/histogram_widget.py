@@ -47,7 +47,9 @@ class HistogramWidget(ttk.Frame):
         # When True, the X axis range is preserved across batches
         self.freeze_x_range = False
         # When True, the Y axis range is preserved across batches
-        self.freeze_y_range = True
+        # Default changed to False so Y auto-rescales on each new stack
+        # to keep the signal fully visible in the histogram.
+        self.freeze_y_range = False
         self._stored_ylim = None
 
         # When True, the X axis scale is preserved across batches
@@ -399,34 +401,25 @@ class HistogramWidget(ttk.Frame):
                 else: print(f"Warn HistoWidget.plot_histogram: Discrépance taille histo pour canal {i}")
             
             # Adaptive Y top (log scale) to avoid clipping while staying stable
-            target_top_y_limit = 100
+            # Compute directly from display counts to guarantee headroom
+            display_max = 0.0
+            for hist_counts in hist_data_details_to_plot['hists']:
+                if isinstance(hist_counts, np.ndarray) and hist_counts.size:
+                    display_max = max(display_max, float(np.max(hist_counts) + 1.0))
+
+            target_top_y_limit = 100.0
             desired_top = None
             if all_pixel_counts_for_ylim:
                 all_pixel_counts_np = np.array(all_pixel_counts_for_ylim)
                 counts_greater_than_zero = all_pixel_counts_np[all_pixel_counts_np > 0]
-
                 if counts_greater_than_zero.size > 0:
                     max_actual_count = float(np.max(counts_greater_than_zero))
-                    is_data_01_like_range = (
-                        (self.data_max_for_current_plot - self.data_min_for_current_plot) <= 2.0
-                        and self.data_min_for_current_plot >= -0.1
-                        and self.data_max_for_current_plot <= 2.015
-                    )
-
-                    if is_data_01_like_range:
-                        p98_counts = float(np.percentile(counts_greater_than_zero, 98))
-                        target_top_y_limit = max(500.0, p98_counts * 3.0)
-                        # Keep within [0.5x, 1.5x] of the actual maximum to stay reasonable
-                        target_top_y_limit = max(target_top_y_limit, max_actual_count * 0.5)
-                        target_top_y_limit = min(target_top_y_limit, max_actual_count * 1.5)
-                    else:  # ADU-like
-                        p995 = float(np.percentile(counts_greater_than_zero, 99.5))
-                        target_top_y_limit = max(10.0, p995 * 1.5)
-
-                    # Always retain headroom above the actual maximum
-                    desired_top = max(target_top_y_limit, max_actual_count * 1.25, 100.0)
+                    # Robust percentile headroom; works for both 0-1 and ADU ranges
+                    p99 = float(np.percentile(counts_greater_than_zero, 99))
+                    # Ensure top comfortably above the tallest visible bin
+                    desired_top = max(100.0, p99 * 2.5, max_actual_count * 1.40, display_max * 1.40)
             if desired_top is None:
-                desired_top = target_top_y_limit
+                desired_top = max(100.0, display_max * 1.40)
 
             current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8
             desired_top = max(desired_top, current_ylim_bottom + 10.0)
@@ -447,12 +440,27 @@ class HistogramWidget(ttk.Frame):
 
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})"); self.ax.set_ylabel("Nbre Pixels (log)")
 
+            # X-axis handling: preserve user zoom, but EXPAND if new data exceeds it
             if was_x_zoomed_and_relevant:
-                self.ax.set_xlim(xlim_before_plot)
-                print(f"  -> Zoom X utilisateur restauré. Xlim: {xlim_before_plot}")
+                x0, x1 = xlim_before_plot
+                desired_min, desired_max = float(current_plot_min_x), float(current_plot_max_x)
+                eps = 1e-9 * max(desired_max - desired_min, 1.0)
+                if x0 > desired_min + eps:
+                    x0 = desired_min
+                if x1 < desired_max - eps:
+                    x1 = desired_max
+                self.ax.set_xlim(x0, x1)
+                print(f"  -> Zoom X restauré/étendu: ({x0:.4g}, {x1:.4g})")
             elif self.freeze_x_range and self._stored_xlim is not None:
-                self.ax.set_xlim(self._stored_xlim)
-                print(f"  -> Xlim gelé restauré: {self._stored_xlim}")
+                x0, x1 = self._stored_xlim
+                desired_min, desired_max = float(current_plot_min_x), float(current_plot_max_x)
+                eps = 1e-9 * max(desired_max - desired_min, 1.0)
+                if x0 > desired_min + eps:
+                    x0 = desired_min
+                if x1 < desired_max - eps:
+                    x1 = desired_max
+                self.ax.set_xlim(x0, x1)
+                print(f"  -> Xlim gelé restauré/étendu: ({x0:.4g}, {x1:.4g})")
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
