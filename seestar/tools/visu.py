@@ -151,7 +151,55 @@ class HistogramWidget(QWidget):
             if is_valid_lim: self.ax.set_xlim(current_xlim) # Restaurer zoom/pan précédent
             else: self.ax.set_xlim(0, 1) # Afficher plage complète par défaut
 
-            # --- 5. Final Draw ---
+            # --- 5. Ensure X/Y axes fit data on each update ---
+            try:
+                if self._hist_data_cache and 'hists' in self._hist_data_cache:
+                    # --- Y autoscale with robust headroom ---
+                    all_counts = []
+                    display_max = 0.0
+                    for hist_channel in self._hist_data_cache['hists']:
+                        try:
+                            all_counts.extend(hist_channel[hist_channel > 0])
+                            display_max = max(display_max, float(np.max(hist_channel) + 1.0))
+                        except Exception:
+                            pass
+                    if all_counts:
+                        counts = np.asarray(all_counts)
+                        max_actual = float(np.max(counts))
+                        p99 = float(np.percentile(counts, 99))
+                        desired_top = max(100.0, p99 * 2.5, max_actual * 1.40, display_max * 1.40)
+                    else:
+                        desired_top = max(100.0, display_max * 1.40)
+                    bottom = max(0.8, self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8)
+                    if desired_top <= bottom + 1.0:
+                        desired_top = bottom + 10.0
+                    self.ax.set_yscale('log')
+                    self.ax.set_ylim(bottom, desired_top)
+
+                    # --- X autoscale: expand to include new data range ---
+                    try:
+                        bins = self._hist_data_cache.get('bins', None)
+                        if bins is not None and len(bins) > 1:
+                            data_min_x = float(bins[0])
+                            data_max_x = float(bins[-1])
+                            cur_xlim = self.ax.get_xlim()
+                            x0, x1 = cur_xlim[0], cur_xlim[1]
+                            span = max(data_max_x - data_min_x, 1e-12)
+                            eps = 1e-9 * span
+                            if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+                                self.ax.set_xlim(data_min_x, data_max_x)
+                            else:
+                                if x0 > data_min_x + eps:
+                                    x0 = data_min_x
+                                if x1 < data_max_x - eps:
+                                    x1 = data_max_x
+                                self.ax.set_xlim(x0, x1)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # --- 6. Final Draw ---
             self.figure.tight_layout(pad=0.5); self.canvas.draw()
         except Exception as e: print(f"Erreur plot_histogram: {e}"); traceback.print_exc(); self.ax.clear(); self.ax.set_xlim(0, 1); self.ax.set_ylim(0, 1); self.canvas.draw()
         finally: self.histogramUpdated.emit()
