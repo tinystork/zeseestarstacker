@@ -193,6 +193,11 @@ EN_TRANSLATIONS = {
     "zoom_histo_button": "Zoom Histogram",
     "reset_histo_button": "Reset Histogram",
     "auto_zoom_histo_check": "Auto zoom histogram",
+    # Preview toolbar buttons
+    "zoom_100_button": "Zoom 100%",
+    "zoom_fit_button": "Zoom Fit",
+    "rotate_left": "Rotate Left",
+    "rotate_right": "Rotate Right",
     # --- Control Buttons ---
     "start": "Start",
     "stop": "Stop",

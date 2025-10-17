@@ -2181,6 +2181,45 @@ class SeestarStackerGUI:
             command=lambda: self.preview_manager.zoom_fit(),
         )
         self.zoom_fit_button.pack(side=tk.LEFT, padx=5)
+        # Preview resolution cycle button (1, 1/2, 1/3, 1/4)
+        try:
+            initial_factor = int(getattr(self.queued_stacker, "preview_downsample_factor", 2))
+        except Exception:
+            initial_factor = 2
+        self._preview_res_factors = [1, 2, 3, 4]
+        # Find index of the initial factor; default to 2 if not found
+        self._preview_res_idx = (
+            self._preview_res_factors.index(initial_factor)
+            if initial_factor in self._preview_res_factors
+            else 1
+        )
+
+        def _make_res_label(f: int) -> str:
+            return f"Res 1/{f}" if f > 1 else "Res 1/1"
+
+        self.preview_res_button = ttk.Button(
+            zoom_btn_frame,
+            text=_make_res_label(self._preview_res_factors[self._preview_res_idx]),
+            command=lambda: self._cycle_preview_resolution(),
+            width=10,
+        )
+        self.preview_res_button.pack(side=tk.LEFT, padx=(15, 5))
+
+        # Rotate buttons next to zoom/res controls
+        self.rotate_left_button = ttk.Button(
+            zoom_btn_frame,
+            text=self.tr("rotate_left", default="Rotate Left"),
+            command=lambda: self.preview_manager.rotate_left(),
+            width=12,
+        )
+        self.rotate_left_button.pack(side=tk.LEFT, padx=(5, 5))
+        self.rotate_right_button = ttk.Button(
+            zoom_btn_frame,
+            text=self.tr("rotate_right", default="Rotate Right"),
+            command=lambda: self.preview_manager.rotate_right(),
+            width=12,
+        )
+        self.rotate_right_button.pack(side=tk.LEFT, padx=5)
         self.histogram_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5))
         control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))
         self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
@@ -2194,6 +2233,32 @@ class SeestarStackerGUI:
         self._on_apply_batch_feathering_changed()
         self._update_low_wht_mask_options_state()
         self._update_bn_options_state()
+
+    def _cycle_preview_resolution(self):
+        """Cycle preview downsample factor among 1, 2, 3, 4 and refresh preview."""
+        try:
+            # Advance index cyclically
+            self._preview_res_idx = (self._preview_res_idx + 1) % len(self._preview_res_factors)
+            factor = self._preview_res_factors[self._preview_res_idx]
+            # Update button label
+            self.preview_res_button.config(text=(f"Res 1/{factor}" if factor > 1 else "Res 1/1"))
+            # Tell backend and request a refresh
+            if hasattr(self, "queued_stacker") and self.queued_stacker:
+                setter = getattr(self.queued_stacker, "set_preview_downsample_factor", None)
+                refresher = getattr(self.queued_stacker, "refresh_preview", None)
+                try:
+                    if callable(setter):
+                        setter(factor)
+                except Exception:
+                    pass
+                try:
+                    if callable(refresher):
+                        refresher()
+                except Exception:
+                    pass
+        except Exception:
+            # Silent fail to avoid breaking UI if anything unexpected happens
+            pass
         self._update_cb_options_state()
         self._update_crop_options_state()
         self._update_master_tile_crop_state()
@@ -3137,6 +3202,8 @@ class SeestarStackerGUI:
             "reset_expert_button": "reset_expert_button",
             "zoom_100_button": "zoom_100_button",
             "zoom_fit_button": "zoom_fit_button",
+            "rotate_left": "rotate_left_button",
+            "rotate_right": "rotate_right_button",
         }
         for key, attr_name in buttons_keys.items():
             self.widgets_to_translate[key] = getattr(self, attr_name, None)

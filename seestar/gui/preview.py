@@ -65,6 +65,8 @@ class PreviewManager:
         self.current_display_params = {} # Store params used for last display
         self.image_info_text_content = "" # Store content for info text area
         self.current_stack_count = 0 # Add variable to store stack count
+        # Rotation state (degrees, multiples of 90)
+        self.rotation_degrees = 0
 
         # --- Store info for text overlay ---
         self.display_img_count = 0
@@ -239,6 +241,34 @@ class PreviewManager:
         self.last_displayed_pil_image = pil_img
         self._redraw_canvas()
 
+    # --- Rotation controls ---
+    def rotate_left(self):
+        """Rotate preview 90° counter-clockwise and redraw."""
+        self.rotation_degrees = (self.rotation_degrees + 90) % 360
+        # Reset pan to avoid disorientation when aspect flips
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
+        if self.last_displayed_pil_image:
+            self._redraw_canvas()
+
+    def rotate_right(self):
+        """Rotate preview 90° clockwise and redraw."""
+        self.rotation_degrees = (self.rotation_degrees - 90) % 360
+        # Reset pan to avoid disorientation when aspect flips
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
+        if self.last_displayed_pil_image:
+            self._redraw_canvas()
+
+    def _get_effective_image_size(self):
+        """Return (w,h) of the image after applying current rotation (multiples of 90)."""
+        if not self.last_displayed_pil_image:
+            return 0, 0
+        w, h = self.last_displayed_pil_image.size
+        if self.rotation_degrees % 180 == 0:
+            return w, h
+        return h, w
+
 
 
 
@@ -330,6 +360,12 @@ class PreviewManager:
 
         # --- 2. Draw Astronomical Preview Image (if available) ---
         if pil_image_to_draw:
+            # Apply rotation before any resizing for best quality
+            try:
+                if self.rotation_degrees % 360 != 0:
+                    pil_image_to_draw = pil_image_to_draw.rotate(self.rotation_degrees, expand=True)
+            except Exception as rot_err:
+                print(f"Error rotating preview image: {rot_err}")
             img_width, img_height = pil_image_to_draw.size
             if img_width > 0 and img_height > 0:
                 # --- Resize and create Tk PhotoImage for astro image ---
@@ -475,7 +511,7 @@ class PreviewManager:
         canvas_h = self.canvas.winfo_height()
         if canvas_w <= 0 or canvas_h <= 0:
             return
-        img_w, img_h = self.last_displayed_pil_image.size
+        img_w, img_h = self._get_effective_image_size()
         self.zoom_level = 1.0
         self._view_offset_x = img_w / 2 - canvas_w / 2
         self._view_offset_y = img_h / 2 - canvas_h / 2
@@ -489,7 +525,7 @@ class PreviewManager:
         canvas_h = self.canvas.winfo_height()
         if canvas_w <= 0 or canvas_h <= 0:
             return
-        img_w, img_h = self.last_displayed_pil_image.size
+        img_w, img_h = self._get_effective_image_size()
         if img_w == 0 or img_h == 0:
             return
         self.zoom_level = min(canvas_w / img_w, canvas_h / img_h)

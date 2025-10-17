@@ -719,7 +719,7 @@ logger.debug("Configuration warnings OK.")
 # --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
 # Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
 # Global version string to make sure it's always the same
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "v6.6.5 Boring"
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "7.0.0 Boring ostentus"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -2039,6 +2039,13 @@ class SeestarQueuedStacker:
         self.enable_preview = False
         logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
 
+        # Preview downsample factor (1 = full, 2 = 1/2, 3 = 1/3, 4 = 1/4)
+        # Used to reduce RAM usage for the GUI preview.
+        try:
+            self.preview_downsample_factor = int(getattr(settings, "preview_downsample_factor", 2))
+        except Exception:
+            self.preview_downsample_factor = 2
+
         # Cumulative weight map across all batches
         from numpy.lib.format import open_memmap
 
@@ -2898,6 +2905,30 @@ class SeestarQueuedStacker:
     # UI helpers
     ###########################################################################################################################################################
 
+    def set_preview_downsample_factor(self, factor: int) -> None:
+        """Set the downsample factor used for GUI preview (1,2,3,4)."""
+        try:
+            f = int(factor)
+        except Exception:
+            f = 2
+        f = max(1, min(4, f))
+        self.preview_downsample_factor = f
+        try:
+            self.update_progress(f"Preview resolution set to 1/{f}")
+        except Exception:
+            pass
+
+    def refresh_preview(self) -> None:
+        """Request a preview refresh using the current downsample factor."""
+        try:
+            if getattr(self, "drizzle_active_session", False) and getattr(self, "cumulative_drizzle_data", None) is not None:
+                self._update_preview_incremental_drizzle()
+            else:
+                # Use SUM/W path which recomputes and applies downsample
+                self._update_preview_sum_w()
+        except Exception:
+            traceback.print_exc(limit=1)
+
     def get_estimated_total_images(self) -> int:
         """Return a robust estimate of the total images to process for this run.
 
@@ -3123,7 +3154,7 @@ class SeestarQueuedStacker:
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
-    def _update_preview_sum_w(self, downsample_factor=2):
+    def _update_preview_sum_w(self, downsample_factor=None):
         """
         Met à jour l'aperçu en utilisant les accumulateurs SUM et WHT.
         Calcule l'image moyenne, applique optionnellement le Low WHT Mask,
@@ -3244,12 +3275,22 @@ class SeestarQueuedStacker:
 
             # Sous-échantillonnage pour l'affichage
             preview_data_to_send = preview_data_normalized
-            if downsample_factor > 1:
+            # Resolve effective downsample factor: parameter > attribute > default(2)
+            try:
+                eff_factor = int(downsample_factor) if downsample_factor is not None else int(getattr(self, "preview_downsample_factor", 2))
+            except Exception:
+                eff_factor = 2
+            if eff_factor < 1:
+                eff_factor = 1
+            if eff_factor > 4:
+                eff_factor = 4
+
+            if eff_factor > 1:
                 try:
                     h, w = preview_data_normalized.shape[
                         :2
                     ]  # Fonctionne pour N&B (H,W) et Couleur (H,W,C)
-                    new_h, new_w = h // downsample_factor, w // downsample_factor
+                    new_h, new_w = h // eff_factor, w // eff_factor
                     if (
                         new_h > 10 and new_w > 10
                     ):  # Éviter de réduire à une taille trop petite
@@ -3260,7 +3301,7 @@ class SeestarQueuedStacker:
                             interpolation=cv2.INTER_AREA,
                         )
                         logger.debug(
-                            f"DEBUG QM [_update_preview_sum_w]: Aperçu sous-échantillonné à {preview_data_to_send.shape}"
+                            f"DEBUG QM [_update_preview_sum_w]: Aperçu sous-échantillonné (x1/{eff_factor}) à {preview_data_to_send.shape}"
                         )
                 except Exception as e_resize:
                     logger.debug(
@@ -3369,6 +3410,23 @@ class SeestarQueuedStacker:
                     cv2.resize(data_to_send[0], new_size, interpolation=cv2.INTER_AREA),
                     cv2.resize(data_to_send[1], new_size, interpolation=cv2.INTER_AREA),
                 )
+
+            # Apply GUI-selected downsample factor as a final step (1,2,3,4)
+            try:
+                eff_factor = int(getattr(self, "preview_downsample_factor", 2))
+            except Exception:
+                eff_factor = 2
+            eff_factor = max(1, min(4, eff_factor))
+            if eff_factor > 1:
+                try:
+                    h, w = data_to_send[0].shape[:2]
+                    new_size = (max(1, w // eff_factor), max(1, h // eff_factor))
+                    data_to_send = (
+                        cv2.resize(data_to_send[0], new_size, interpolation=cv2.INTER_AREA),
+                        cv2.resize(data_to_send[1], new_size, interpolation=cv2.INTER_AREA),
+                    )
+                except Exception as _e_ds:
+                    logger.debug(f"WARN: Drizzle preview extra downsample failed: {_e_ds}")
             header_to_send = (
                 self.current_stack_header.copy()
                 if self.current_stack_header
