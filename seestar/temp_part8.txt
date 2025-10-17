@@ -1,0 +1,800 @@
+            if not isinstance(weights, np.ndarray):
+                weights = np.asarray(weights, dtype=np.float32)
+            elif weights.dtype != np.float32:
+                weights = weights.astype(np.float32)
+
+        counter = getattr(self, "_ibn_counter", 0)
+        if batch_num is not None:
+            batch_idx = int(batch_num)
+            counter = max(counter, batch_idx)
+        else:
+            counter += 1
+            batch_idx = counter
+        self._ibn_counter = counter
+        self._ibn_batches_seen = counter
+        batch_idx = counter
+
+        mask = self._interbatch_compute_mask(data, weights)
+        valid_px = int(np.count_nonzero(mask))
+
+        baseline = []
+        if data.ndim == 3:
+            for c in range(3):
+                channel = np.asarray(data[..., c], dtype=np.float32)
+                finite = np.isfinite(channel)
+                if weights is not None:
+                    if weights.ndim == 3:
+                        finite &= np.asarray(weights[..., c], dtype=np.float32) > 0
+                    else:
+                        finite &= np.asarray(weights, dtype=np.float32) > 0
+                if np.count_nonzero(finite):
+                    baseline.append(float(np.nanmedian(channel[finite])))
+                else:
+                    baseline.append(0.0)
+        else:
+            channel = np.asarray(data, dtype=np.float32)
+            finite = np.isfinite(channel)
+            if weights is not None:
+                finite &= np.asarray(weights, dtype=np.float32) > 0
+            if np.count_nonzero(finite):
+                baseline.append(float(np.nanmedian(channel[finite])))
+            else:
+                baseline.append(0.0)
+        self._ibn_last_batch_baseline = baseline
+
+        bg_model = estimate_background_2d(data, weights)
+        bg_rms = 0.0
+        bg_offsets: list[float] = []
+        if bg_model is not None:
+            lum_bg = self._interbatch_luminance(bg_model)
+            if valid_px > 0:
+                sample = lum_bg[mask]
+                if sample.size:
+                    bg_rms = float(np.nanstd(sample))
+            if bg_model.ndim == 3:
+                for c in range(bg_model.shape[2]):
+                    channel_bg = np.asarray(bg_model[..., c], dtype=np.float32)
+                    channel_vals = channel_bg[mask]
+                    if channel_vals.size:
+                        bg_offsets.append(float(np.nanmedian(channel_vals)))
+                    else:
+                        bg_offsets.append(0.0)
+            else:
+                channel_bg = np.asarray(bg_model, dtype=np.float32)
+                channel_vals = channel_bg[mask]
+                if channel_vals.size:
+                    bg_offsets.append(float(np.nanmedian(channel_vals)))
+                else:
+                    bg_offsets.append(0.0)
+            data -= bg_model
+            if bg_offsets:
+                if data.ndim == 3:
+                    for idx, offset in enumerate(bg_offsets):
+                        if idx < data.shape[2]:
+                            data[..., idx] += float(offset)
+                else:
+                    data += float(bg_offsets[0])
+        self._ibn_bg_applied += 1
+        bg_msg = (
+            f"INFO: Batch k={batch_idx} BG2D: gaussian blur (RMS={bg_rms:.4f}, "
+            f"valid_px={valid_px}, context={context})"
+        )
+        try:
+            self.update_progress(bg_msg, "INFO")
+        except Exception:
+            pass
+        logger.info(
+            "Batch %d background model applied: rms=%.4f valid_px=%d context=%s",
+            batch_idx,
+            bg_rms,
+            valid_px,
+            context,
+        )
+
+        candidate_weights = None if weights is None else np.array(weights, copy=True)
+        candidate_data = np.array(data, copy=True)
+
+        if not getattr(self, "_ibn_master_ready", False):
+            score = self._interbatch_quality_score(candidate_data)
+            self._interbatch_register_candidate(
+                batch_idx,
+                candidate_data,
+                candidate_weights,
+                score,
+                context,
+            )
+
+        weights = self._interbatch_apply_feather(weights)
+
+        if not getattr(self, "_ibn_master_ready", False):
+            if data.ndim == 3:
+                np.clip(data, 0.0, None, out=data)
+            else:
+                data = np.clip(data, 0.0, None)
+            return data, weights
+
+        scales_info = self._interbatch_compute_scales(data, weights)
+        if scales_info is None:
+            info = getattr(self, "_ibn_last_failure_info", {})
+            overlap = info.get("overlap")
+            if overlap is not None and overlap > 0:
+                warn_msg = (
+                    f"WARN: Batch k={batch_idx} Gain skipped (overlap too small: {overlap:.0f} px) -- BG2D applied"
+                )
+            else:
+                warn_msg = f"WARN: Batch k={batch_idx} Gain skipped (insufficient overlap) -- BG2D applied"
+            try:
+                self.update_progress(warn_msg, "WARN")
+            except Exception:
+                pass
+            logger.warning(
+                "Inter-batch normalization skipped for batch %d (context=%s, info=%s)",
+                batch_idx,
+                context,
+                info,
+            )
+            return data, weights
+
+        scales, offsets, overlap, ref_meds, batch_meds = scales_info
+        self._ibn_last_failure_info = {}
+
+        corr_offsets: list[float] = []
+        if len(scales) >= 3 and data.ndim == 3:
+            for c in range(3):
+                scale = float(scales[c])
+                corr_offset = float(ref_meds[c] - scale * batch_meds[c])
+                data[..., c] = data[..., c] * scale + corr_offset
+                corr_offsets.append(corr_offset)
+        else:
+            scale = float(scales[0])
+            corr_offset = float(ref_meds[0] - scale * batch_meds[0])
+            data = data * scale + corr_offset
+            corr_offsets.append(corr_offset)
+
+        self._ibn_applied += 1
+        self._ibn_last_scale = float(scales[-1])
+
+        if len(scales) >= 3:
+            gain_msg = (
+                f"INFO: Batch k={batch_idx} Gain RGB: overlap={overlap:.0f} px "
+                f"a={float(scales[0]):.3f}/{float(scales[1]):.3f}/{float(scales[2]):.3f} "
+                f"offset={corr_offsets[0]:.4f}/{corr_offsets[1]:.4f}/{corr_offsets[2]:.4f} "
+                f"ref_med={float(ref_meds[0]):.4f}/{float(ref_meds[1]):.4f}/{float(ref_meds[2]):.4f} "
+                f"new_med={float(batch_meds[0]):.4f}/{float(batch_meds[1]):.4f}/{float(batch_meds[2]):.4f}"
+            )
+        else:
+            gain_msg = (
+                f"INFO: Batch k={batch_idx} Gain: overlap={overlap:.0f} px "
+                f"ref_med={float(ref_meds[0]):.4f} new_med={float(batch_meds[0]):.4f} "
+                f"scale={float(scales[0]):.3f} offset={corr_offsets[0]:.4f}"
+            )
+        try:
+            self.update_progress(gain_msg, "INFO")
+        except Exception:
+            pass
+        logger.info(
+            "Inter-batch normalization applied to batch %d (context=%s): scales=%s offsets=%s overlap=%d ref_meds=%s new_meds=%s",
+            batch_idx,
+            context,
+            [float(s) for s in scales],
+            [float(o) for o in offsets],
+            overlap,
+            [float(m) for m in ref_meds],
+            [float(m) for m in batch_meds],
+        )
+        return data, weights
+
+    def _should_use_final_combine_ibn(self) -> bool:
+        """Return True when final-combine normalization against batch #1 is desired."""
+        if getattr(self, "reproject_between_batches", False):
+            return False
+        if getattr(self, "reproject_coadd_final", False):
+            return False
+        if not getattr(self, "use_classic_batches_for_final_coadd", True):
+            return False
+        mode = str(getattr(self, "stack_final_combine", "")).lower()
+        return mode in {"mean", "winsorized_sigma_clip"}
+
+    def _ensure_final_ibn_session(self) -> None:
+        """Restart IBN for the classic final combine workflow."""
+        if getattr(self, "_final_combine_ibn_started", False):
+            return
+        self._interbatch_start_session()
+        self._ibn_master_min = 1
+        self._final_combine_ibn_started = True
+        self._final_combine_ibn_master_set = False
+        self._final_combine_ibn_master_batch_idx = None
+
+    def _apply_final_combine_interbatch_normalization(
+        self,
+        batch_data,
+        batch_wht,
+        *,
+        batch_num: int | None = None,
+    ):
+        """Normalize classic mini-stacks on the forced IBN master."""
+        self._ensure_final_ibn_session()
+
+        if not getattr(self, "_final_combine_ibn_master_set", False):
+            data_norm, wht_norm = self._apply_interbatch_normalization(
+                batch_data,
+                batch_wht,
+                context="final_combine",
+                batch_num=batch_num,
+            )
+            self._ibn_ref_image = np.array(data_norm, dtype=np.float32, copy=True)
+            self._ibn_ref_wht = (
+                None
+                if wht_norm is None
+                else np.array(wht_norm, dtype=np.float32, copy=True)
+            )
+            self._ibn_master_ready = True
+            idx = int(batch_num) if batch_num is not None else max(
+                1, getattr(self, "_ibn_counter", 1)
+            )
+            self._ibn_batches_seen = max(1, idx)
+            self._ibn_counter = max(getattr(self, "_ibn_counter", 0), idx)
+            self._final_combine_ibn_master_set = True
+            self._final_combine_ibn_master_batch_idx = idx
+            try:
+                self.update_progress(
+                    f"   [IBN] Master final combine fixé sur le lot #{idx}", "INFO"
+                )
+            except Exception:
+                pass
+            logger.info("Final combine IBN master set from batch %d", idx)
+            return data_norm, wht_norm
+
+        return self._apply_interbatch_normalization(
+            batch_data,
+            batch_wht,
+            context="final_combine",
+            batch_num=batch_num,
+        )
+
+    def _interbatch_luminance(self, arr: np.ndarray) -> np.ndarray:
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim == 3:
+            if arr.shape[2] >= 3:
+                return 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+            return arr[..., 0]
+        return arr
+
+    def _interbatch_compute_mask(self, data: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
+        if data.ndim == 3:
+            mask = np.all(np.isfinite(data), axis=2)
+        else:
+            mask = np.isfinite(data)
+        if weights is not None:
+            w = np.asarray(weights, dtype=np.float32)
+            if w.ndim == 3:
+                w = np.mean(w, axis=2)
+            mask &= w > 0
+        return mask
+
+    def _interbatch_quality_score(self, image: np.ndarray) -> float:
+        try:
+            metrics = self._calculate_quality_metrics(image)
+            snr = float(metrics.get("snr", 0.0))
+            stars = float(metrics.get("stars", 0.0))
+            return snr + 50.0 * stars
+        except Exception:
+            return 0.0
+
+    def _interbatch_register_candidate(self, batch_idx: int, data: np.ndarray, weights: np.ndarray | None, score: float, context: str) -> None:
+        if getattr(self, "_ibn_master_ready", False):
+            return
+        pool = getattr(self, "_ibn_candidate_pool", [])
+        pool.append(
+            {
+                "score": float(score),
+                "index": int(batch_idx),
+                "data": np.array(data, copy=True),
+                "weights": None if weights is None else np.array(weights, copy=True),
+                "context": context,
+            }
+        )
+        pool.sort(key=lambda item: item["score"], reverse=True)
+        limit = getattr(self, "_ibn_candidate_limit", 8)
+        pool = pool[:limit]
+        self._ibn_candidate_pool = pool
+        if len(pool) >= getattr(self, "_ibn_master_min", 5) and not getattr(self, "_ibn_master_ready", False):
+            used = self._interbatch_build_master_reference()
+            if used:
+                msg = f"INFO: MASTER_REF built from N={used} frames (weighted mean)"
+                try:
+                    self.update_progress(msg, "INFO")
+                except Exception:
+                    pass
+                logger.info(
+                    "MASTER_REF built from %d frames (first index %d)",
+                    used,
+                    pool[0]["index"] if pool else batch_idx,
+                )
+
+    def _interbatch_build_master_reference(self) -> int:
+        pool = getattr(self, "_ibn_candidate_pool", [])
+        if len(pool) < getattr(self, "_ibn_master_min", 5):
+            return 0
+        limit = getattr(self, "_ibn_candidate_limit", len(pool))
+        top = pool[:limit]
+        data_stack = np.stack([item["data"] for item in top], axis=0)
+        weights_available = all(item["weights"] is not None for item in top)
+        master = None
+        master_wht = None
+        if weights_available:
+            w_stack = np.stack([item["weights"] for item in top], axis=0)
+            weight_sum = np.sum(w_stack, axis=0)
+            eps = 1e-6
+            if data_stack.ndim == 4:
+                num = np.sum(data_stack * w_stack[..., None], axis=0)
+                master = num / np.maximum(weight_sum[..., None], eps)
+            else:
+                num = np.sum(data_stack * w_stack, axis=0)
+                master = num / np.maximum(weight_sum, eps)
+            master_wht = weight_sum.astype(np.float32)
+        else:
+            master = np.mean(data_stack, axis=0)
+        self._ibn_ref_image = np.asarray(master, dtype=np.float32)
+        self._ibn_ref_wht = None if master_wht is None else np.asarray(master_wht, dtype=np.float32)
+        self._ibn_master_ready = True
+        self._ibn_candidate_pool = []
+        return len(top)
+
+    def _interbatch_apply_feather(self, weights: np.ndarray | None) -> np.ndarray | None:
+        if weights is None:
+            return None
+        base_shape = weights.shape[:2]
+        cache = getattr(self, "_ibn_feather_cache", {})
+        radial = cache.get(base_shape)
+        if radial is None:
+            radial = make_radial_weight_map(base_shape[0], base_shape[1], feather_fraction=0.98, floor=0.10)
+            cache[base_shape] = radial
+            self._ibn_feather_cache = cache
+        if weights.ndim == 3:
+            weights *= radial[..., None]
+        else:
+            weights *= radial
+        return weights
+
+    def _interbatch_compute_scales(self, batch_data: np.ndarray, batch_wht: np.ndarray | None):
+        master = getattr(self, "_ibn_ref_image", None)
+        if master is None:
+            self._ibn_last_failure_info = {"reason": "no_master"}
+            return None
+        master_wht = getattr(self, "_ibn_ref_wht", None)
+        min_overlap = getattr(self, "_ibn_min_overlap", 10000)
+        use_percentile = getattr(self, "_ibn_use_percentile_ratio", True)
+        percentile = getattr(self, "_ibn_percentile_value", 90.0)
+
+        if master.ndim == 3 and batch_data.ndim == 3 and master.shape[2] >= 3 and batch_data.shape[2] >= 3:
+            scales = []
+            offsets = []
+            overlaps = []
+            ref_meds = []
+            batch_meds = []
+            for c in range(3):
+                scale, offset, overlap, ref_med, batch_med = compute_overlap_median_ratio(
+                    master[..., c],
+                    batch_data[..., c],
+                    master_wht,
+                    batch_wht,
+                    min_overlap=min_overlap,
+                    use_percentile_ratio=use_percentile,
+                    percentile=percentile,
+                )
+                if scale is None or offset is None:
+                    self._ibn_last_failure_info = {
+                        "overlap": overlap,
+                        "ref_med": ref_med,
+                        "batch_med": batch_med,
+                        "channel": c,
+                    }
+                    return None
+                scales.append(float(scale))
+                offsets.append(float(offset))
+                overlaps.append(int(overlap))
+                ref_meds.append(float(ref_med))
+                batch_meds.append(float(batch_med))
+            return scales, offsets, min(overlaps), ref_meds, batch_meds
+
+        scale, offset, overlap, ref_med, batch_med = compute_overlap_median_ratio(
+            master,
+            batch_data,
+            master_wht,
+            batch_wht,
+            min_overlap=min_overlap,
+            use_percentile_ratio=use_percentile,
+            percentile=percentile,
+        )
+        if scale is None or offset is None:
+            self._ibn_last_failure_info = {
+                "overlap": overlap,
+                "ref_med": ref_med,
+                "batch_med": batch_med,
+            }
+            return None
+        return [float(scale)], [float(offset)], int(overlap), [float(ref_med)], [float(batch_med)]
+
+    def __init__(
+        self,
+        gpu: bool = False,
+        io_profile: str = "ssd",
+        thread_fraction: float = 0.75,
+        batch_size: int | None = None,
+        settings: SettingsManager | None = None,
+        autotune: bool = False,
+        align_on_disk: bool = False,
+        *args,
+        **kwargs,
+    ):
+        self.progress_callback = None
+        self.logger = logger
+        self._configure_global_threads(thread_fraction)
+        self.autotuner = CpuIoAutoTuner(self) if autotune else None
+        self.io_profile = io_profile
+        self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
+        self.use_gpu = bool(gpu)
+        self.align_on_disk = align_on_disk
+        self.settings = settings
+        # Keep track of background drizzle processes
+        self.drizzle_processes = []
+        # Dedicated pool for drizzle tasks.  Instance methods are made
+        # picklable via ``__getstate__``/``__setstate__`` so we can always rely
+        # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
+        # platform.
+        Executor = lambda **kw: ProcessPoolExecutor(
+            mp_context=get_context("spawn"), **kw
+        )
+
+        self.drizzle_executor = Executor(
+            max_workers=max(1, self.num_threads // 2),
+        )
+        # Persistent pool for quality metric computation
+        q_fraction = 0.75
+        if hasattr(self, "thread_fraction"):
+            try:
+                q_fraction = min(0.75, float(self.thread_fraction))
+            except Exception:
+                q_fraction = 0.75
+        self.quality_executor = ProcessPoolExecutor(
+            max_workers=_suggest_pool_size(q_fraction),
+            mp_context=get_context("spawn"),
+        )
+        logger.debug(
+            "Quality pool started with %d workers", self.quality_executor._max_workers
+        )
+        # Cache pour les grilles d'indices afin de ne pas
+        # recalculer ``np.indices`` à chaque image.
+        self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
+        self.max_reproj_workers = _suggest_pool_size(0.5)
+        self.max_stack_workers = _suggest_pool_size(0.75)
+        if batch_size is None:
+            self.batch_size = (
+                min(4, self.num_threads)
+                if io_profile == "usb"
+                else self.num_threads * 2
+            )
+        else:
+            self.batch_size = int(batch_size)
+        logger.debug(
+            "\n==== DÉBUT INITIALISATION SeestarQueuedStacker (AVEC LocalAligner) ===="
+        )
+
+        # --- 1. Attributs Critiques et Simples ---
+        logger.debug("  -> Initialisation attributs simples et flags...")
+
+        self.processing_active = False
+        self.stop_processing = False
+        self.processing_error = None
+        self.is_mosaic_run = False
+        self.drizzle_active_session = False
+        self.mosaic_alignment_mode = "local_fast_fallback"
+        self.use_wcs_fallback_for_mosaic = True
+
+        self.fa_orb_features = 5000
+        self.fa_min_abs_matches = 12
+        self.fa_min_ransac_raw = 7
+        self.fa_ransac_thresh = 5.0
+        self.fa_daofind_fwhm = 3.5
+        self.fa_daofind_thr_sig = 4.0
+        self.fa_max_stars_descr = 750
+
+        self.mosaic_drizzle_kernel = "square"
+        self.mosaic_drizzle_pixfrac = 0.8
+        self.mosaic_drizzle_fillval = "0.0"
+        self.mosaic_drizzle_wht_threshold = 0.01
+
+        # Inter-batch reprojection flag (Drizzle Standard mode)
+        self.inter_batch_reprojection = False
+
+        self.perform_cleanup = True
+        self.use_quality_weighting = True
+        self.correct_hot_pixels = True
+        self.apply_chroma_correction = True
+        self.apply_final_scnr = False
+        self.normalize_method = "none"
+        self.weighting_method = "none"
+        # Flag pour détecter un arrêt demandé explicitement par l'utilisateur
+        self.user_requested_stop = False
+
+        # Info message pour l'utilisateur
+        self.warned_unaligned_source_folders = set()
+
+        # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
+
+        self.save_final_as_float32 = False  # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
+        logger.debug(
+            f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}"
+        )
+        self.preserve_linear_output = False
+        logger.debug(
+            f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
+        )
+        self.max_hq_mem = getattr(settings, "max_hq_mem", 8 * 1024**3)
+        self.stack_final_combine = getattr(settings, "stack_final_combine", "mean")
+        # Option de reprojection des lots empilés intermédiaires
+        self.reproject_between_batches = False
+        self.reproject_coadd_final = False
+        self.match_background_for_final: Optional[bool] = None
+        self._match_background_for_final_set = False
+        # Internal flag to allow bypassing aligned_*.fits when classic batches
+
+        # are available for the final co-add in batch_size==1 mode. Ensure modes
+        # with ``batch_size!=1`` behave exactly as before.
+        self.use_classic_batches_for_final_coadd = (
+            bool(getattr(settings, "use_classic_batches_for_final_coadd", True))
+            if getattr(self, "batch_size", 0) == 1
+            else False
+
+        )
+        # Liste des fichiers intermédiaires en mode Classic avec reprojection
+        self.intermediate_classic_batch_files = []
+        # Batches that failed astrometric solving
+        self.unsolved_classic_batch_files = set()
+        # Status flag for the most recently saved batch
+        self._last_classic_batch_solved = True
+        # Use custom stacking plan when provided
+        self.use_batch_plan = False
+
+        # Inter-batch normalization state (auto-enabled per session)
+        self.interbatch_norm_active = False
+        self._ibn_ref_image = None
+        self._ibn_ref_wht = None
+        self._ibn_ref_median = None
+        self._ibn_batches_seen = 0
+        self._ibn_applied = 0
+        self._ibn_skipped = 0
+        self._ibn_last_scale = None
+        self._ibn_min_overlap = 1024
+
+        self.partial_save_interval = 1
+        self.stacked_subdir_name = "stacked"
+        self.move_stacked = False
+        self._current_batch_paths = []
+        self.batch_count_path = None
+        self._resume_requested = False
+
+        # Flag indicating the queue was pre-populated externally
+        self.queue_prepared = False
+
+        # Master arrays when combining batches with incremental reprojection
+        self.master_sum = None
+        self.master_coverage = None
+        self.reproject_output_wcs = None
+
+        # Backward compatibility attributes removed in favour of
+        # ``reproject_between_batches``. They may still appear in old settings
+        # files, so we simply ignore them here.
+
+        # --- FIN NOUVEAU ---
+
+        self.progress_callback = None
+        self.preview_callback = None
+        self.queue = Queue()
+        self.gui_event_queue = GuiEventQueue()
+        self.folders_lock = threading.Lock()
+        self.aligned_counter = 0
+        self.counter_lock = threading.Lock()
+        self.processing_thread = None
+        self.processed_files = set()
+        self.additional_folders = []
+        self.current_folder = None
+        self.output_folder = None
+        self.unaligned_folder = None
+        self.drizzle_temp_dir = None
+        self.output_filename = ""
+        self.drizzle_batch_output_dir = None
+        self.classic_batch_output_dir = None
+        self.final_stacked_path = None
+        self._auto_batch_size_zero_mode = None
+
+        # Plate-solver configuration so early WCS solves have the required
+        # attributes even if ``start_processing`` has not been called yet.
+        self.local_solver_preference = str(kwargs.get("local_solver_preference", "none"))
+        self.astap_path = str(kwargs.get("astap_path", ""))
+        self.astap_data_dir = str(kwargs.get("astap_data_dir", ""))
+        self.astap_search_radius = float(kwargs.get("astap_search_radius", 3.0))
+        self.astap_downsample = int(kwargs.get("astap_downsample", 1))
+        self.astap_sensitivity = int(kwargs.get("astap_sensitivity", 100))
+        self.local_ansvr_path = str(kwargs.get("local_ansvr_path", ""))
+        self.api_key = kwargs.get("api_key")
+
+        self.reference_wcs_object = None
+        self.reference_header_for_wcs = None
+        self.ref_wcs_header = None
+        self.reference_pixel_scale_arcsec = None
+        self.drizzle_output_wcs = None
+        self.drizzle_output_shape_hw = None
+        self.fixed_output_wcs = None
+        self.fixed_output_shape = None
+
+        self.sum_memmap_path = None
+        self.wht_memmap_path = None
+        self.cumulative_sum_memmap = None
+        self.cumulative_wht_memmap = None
+        self.memmap_shape = None
+        self.memmap_dtype_sum = np.float32
+        self.memmap_dtype_wht = np.float32
+        self.enable_preview = False
+        logger.debug("  -> Attributs SUM/W (memmap) initialisés à None.")
+
+        # Cumulative weight map across all batches
+        from numpy.lib.format import open_memmap
+
+        seestar_root = Path(__file__).resolve().parents[1]
+        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
+        H, W = 1, 1
+        self.cumulative_wht_memmap = open_memmap(
+            self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
+        )
+        self.cumulative_wht_path = self.cumulative_wht_memmap.filename
+        self.cumulative_wht_memmap[:] = 0.0
+
+        # Options pour déplacement et sauvegarde partiels
+        self.partial_save_interval = 1
+        self.stacked_subdir_name = "stacked"
+        self.batch_count_path = None
+        self._current_batch_paths = []
+        self.move_stacked = False
+
+        self.use_quality_weighting = False
+        self.weight_by_snr = True
+        self.weight_by_stars = True
+        self.snr_exponent = 1.0
+        self.stars_exponent = 0.5
+        self.min_weight = 0.01
+        self.apply_feathering = False
+        self.apply_batch_feathering = True
+        self.feather_blur_px = 256
+
+        self.current_batch_data = []
+        self.current_stack_header = None
+        self.current_stack_data_raw = None
+        self.images_in_cumulative_stack = 0
+        self.cumulative_drizzle_data = None
+        self.cumulative_drizzle_data_raw = None
+        self.total_exposure_seconds = 0.0
+        self.intermediate_drizzle_batch_files = []
+
+        # When inter-batch reprojection is enabled we may want to keep the
+        # reference WCS fixed after the first successful plate-solve to avoid
+        # drifting of the solution between batches. This flag controls that
+        # behaviour. When ``True`` the reference WCS is only set once and
+        # subsequent solves will not modify it.
+        self.freeze_reference_wcs = False
+        # Control whether stacked batches are individually solved with ASTAP.
+        # This remains ``True`` by default for backwards compatibility.
+        self.solve_batches = True
+
+        self.all_input_filepaths = []
+        self.reference_shape = None
+        self._has_stack_plan = False
+
+        # --- NEW ---
+        # Store the original reference frame size (H, W) so that reprojection
+        # of stacked batches can optionally keep the exact input dimensions.
+        self.input_reference_shape_hw = None
+        # Flag controlling whether reprojection should enforce the original
+        # input size instead of the expanded drizzle size.
+        self.keep_input_size_for_reproject = False
+
+        self.incremental_drizzle_objects = []
+        logger.debug(
+            "  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide."
+        )
+
+        if settings is not None:
+            try:
+                self.reproject_between_batches = bool(
+                    getattr(settings, "reproject_between_batches", False)
+                )
+                logger.debug(
+                    f"  -> Flag reproject_between_batches initialisé depuis settings: {self.reproject_between_batches}"
+                )
+                # When using inter-batch reprojection we want to keep the
+                # reference WCS stable after the first solve.
+                self.freeze_reference_wcs = self.reproject_between_batches
+                self.reproject_coadd_final = bool(
+                    getattr(settings, "reproject_coadd_final", False)
+                    or getattr(settings, "stack_final_combine", "") == "reproject_coadd"
+                )
+                if self.reproject_coadd_final:
+                    self.stack_final_combine = "reproject_coadd"
+                logger.debug(
+                    f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
+                )
+            except Exception:
+                logger.debug(
+                    "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
+                )
+
+        self.stacking_mode = "kappa-sigma"
+        self.kappa = 2.5
+        self.batch_size = 10
+        self.stack_kappa_low = 2.5
+        self.stack_kappa_high = 2.5
+        self.winsor_limits = (0.05, 0.05)
+        if not getattr(self, "stack_final_combine", None):
+            self.stack_final_combine = "mean"
+        self.stack_reject_algo = "none"
+        self.hot_pixel_threshold = 3.0
+        self.neighborhood_size = 5
+        self.bayer_pattern = "GRBG"
+        self.drizzle_mode = "Final"
+        self.drizzle_scale = 2.0
+        self.drizzle_wht_threshold = 0.0
+        self.drizzle_kernel = "square"
+        self.drizzle_pixfrac = 1.0
+        self.drizzle_fillval = "0.0"  # default fill value for Drizzle
+        self.final_scnr_target_channel = "green"
+        self.final_scnr_amount = 0.8
+        self.final_scnr_preserve_luminosity = True
+
+        self.files_in_queue = 0
+        self.processed_files_count = 0
+        self.aligned_files_count = 0
+        self.stacked_batches_count = 0
+        self.total_batches_estimated = 0
+        self.failed_align_count = 0
+        self.failed_stack_count = 0
+        self.skipped_files_count = 0
+        self.aligned_temp_dir = None
+        self.aligned_temp_paths = []
+        self.photutils_bn_applied_in_session = False
+        self.bn_globale_applied_in_session = False
+        self.cb_applied_in_session = False
+        self.feathering_applied_in_session = False
+        self.low_wht_mask_applied_in_session = False
+        self.scnr_applied_in_session = False
+        self.crop_applied_in_session = False
+        self.photutils_params_used_in_session = {}
+        self.last_saved_data_for_preview = None
+
+        logger.debug("  -> Attributs simples et paramètres par défaut initialisés.")
+
+        self.local_aligner_instance = None
+        self.is_local_alignment_preferred_for_mosaic = True
+        logger.debug(
+            f"  -> Mosaïque: Préférence pour alignement local: {self.is_local_alignment_preferred_for_mosaic}"
+        )
+
+        try:
+            logger.debug("  -> Instanciation ChromaticBalancer...")
+            self.chroma_balancer = ChromaticBalancer(border_size=50, blur_radius=15)
+            logger.debug("     ✓ ChromaticBalancer OK.")
+        except Exception as e_cb:
+            logger.debug(f"  -> ERREUR ChromaticBalancer: {e_cb}")
+            self.chroma_balancer = None
+
+        try:
+            logger.debug(
+                "  -> Instanciation SeestarAligner (pour alignement général astroalign)..."
+            )
+            self.aligner = SeestarAligner()
+            self.aligner.use_cuda = self.use_cuda
+            logger.debug("     ✓ SeestarAligner (astroalign) OK.")
+        except Exception as e_align:
+            logger.debug(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")
+            self.aligner = None
+            raise

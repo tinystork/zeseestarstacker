@@ -1,0 +1,200 @@
+
+                    if (
+                        path_of_processed_ref_panel_basename
+                        and file_name_for_log == path_of_processed_ref_panel_basename
+                    ):
+                        self.update_progress(
+                            f"   [WorkerLoop] Panneau d'ancre '{file_name_for_log}' déjà traité. Ignoré dans la boucle principale."
+                        )
+                        logger.debug(
+                            f"DEBUG QM [_worker V_LoopFocus]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité (path_of_processed_ref_panel_basename='{path_of_processed_ref_panel_basename}')."
+                        )
+                        self.processed_files_count += 1
+                        queue_ref.task_done()
+                        _log_mem(f"after_image_{iteration_count}")
+                        getattr(self, "_indices_cache", {}).clear()
+                        gc.collect()
+                        continue
+
+                    item_result_tuple = None
+
+                    logger.debug(
+                        f"  DEBUG _worker (iter {iteration_count}): PRE-CALL _process_file pour '{file_name_for_log}'"
+                    )
+                    logger.debug(
+                        f"    - use_local_aligner_for_this_mosaic_run: {use_local_aligner_for_this_mosaic_run}"
+                    )
+                    logger.debug(
+                        f"    - use_astrometry_per_panel_mosaic: {use_astrometry_per_panel_mosaic}"
+                    )
+                    logger.debug(
+                        f"    - self.is_mosaic_run (juste avant if/elif): {self.is_mosaic_run}"
+                    )
+
+                    _log_mem("before_align")
+                    if use_local_aligner_for_this_mosaic_run:
+                        logger.debug(
+                            f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_local_aligner_for_this_mosaic_run' pour _process_file."
+                        )  # DEBUG
+                        item_result_tuple = self._process_file(
+                            file_path,
+                            reference_image_data_for_global_alignment,
+                            solve_astrometry_for_this_file=False,
+                            fa_orb_features_config=self.fa_orb_features,
+                            fa_min_abs_matches_config=self.fa_min_abs_matches,
+                            fa_min_ransac_inliers_value_config=self.fa_min_ransac_raw,
+                            fa_ransac_thresh_config=self.fa_ransac_thresh,
+                            daofind_fwhm_config=self.fa_daofind_fwhm,
+                            daofind_threshold_sigma_config=self.fa_daofind_thr_sig,
+                            max_stars_to_describe_config=self.fa_max_stars_descr,
+                            align_on_disk=self.align_on_disk,
+                        )
+                        _log_mem("after_align")
+
+                        self.processed_files_count += (
+                            1  # Mis ici car _process_file est appelé
+                        )
+                        if (
+                            item_result_tuple
+                            and isinstance(item_result_tuple, tuple)
+                            and len(item_result_tuple) == 6
+                            and item_result_tuple[0] is not None
+                            and item_result_tuple[3] is not None
+                            and isinstance(item_result_tuple[3], WCS)
+                            and item_result_tuple[4] is not None
+                        ):
+                            (
+                                panel_data,
+                                panel_header,
+                                _scores,
+                                panel_wcs,
+                                panel_matrix_m,
+                                panel_mask,
+                            ) = item_result_tuple
+                            all_aligned_files_with_info_for_mosaic.append(
+                                (
+                                    panel_data,
+                                    panel_header,
+                                    panel_wcs,
+                                    panel_matrix_m,
+                                    panel_mask,
+                                )
+                            )
+                            self.aligned_files_count += 1
+                            self._increment_aligned_counter()
+                            align_method_used_log = panel_header.get(
+                                "_ALIGN_METHOD_LOG", ("Unknown", None)
+                            )[0]
+                            logger.debug(
+                                f"  DEBUG QM [_worker / Mosaïque Locale]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic."
+                            )
+                        else:
+                            self.failed_align_count += 1
+                            logger.debug(
+                                f"  DEBUG QM [_worker / Mosaïque Locale]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}"
+                            )
+                            if hasattr(self, "_move_to_unaligned"):
+                                self._move_to_unaligned(file_path)
+
+                    elif use_astrometry_per_panel_mosaic:
+                        logger.debug(
+                            f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'use_astrometry_per_panel_mosaic' pour _process_file."
+                        )  # DEBUG
+                        _log_mem("before_align")
+                        item_result_tuple = self._process_file(
+                            file_path,
+                            reference_image_data_for_global_alignment,  # Passé mais pas utilisé pour l'alignement direct dans ce mode
+                            solve_astrometry_for_this_file=(
+                                False if self.reproject_between_batches else True
+                            ),
+                            align_on_disk=self.align_on_disk,
+                        )
+                        _log_mem("after_align")
+                        self.processed_files_count += 1
+                        if (
+                            item_result_tuple
+                            and isinstance(item_result_tuple, tuple)
+                            and len(item_result_tuple) == 6
+                            and item_result_tuple[0] is not None
+                            and item_result_tuple[3] is not None
+                            and isinstance(item_result_tuple[3], WCS)
+                        ):
+                            (
+                                panel_data,
+                                panel_header,
+                                _scores,
+                                wcs_object_panel,
+                                M_returned,
+                                valid_mask_panel,
+                            ) = item_result_tuple
+                            M_to_store = (
+                                M_returned
+                                if M_returned is not None
+                                else np.array(
+                                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32
+                                )
+                            )
+                            all_aligned_files_with_info_for_mosaic.append(
+                                (
+                                    panel_data,
+                                    panel_header,
+                                    wcs_object_panel,
+                                    M_to_store,
+                                    valid_mask_panel,
+                                )
+                            )
+                            self.aligned_files_count += 1
+                            self._increment_aligned_counter()
+                            align_method_used_log = panel_header.get(
+                                "_ALIGN_METHOD_LOG", ("Unknown", None)
+                            )[0]
+                            logger.debug(
+                                f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Panneau '{file_name_for_log}' traité ({align_method_used_log}) et ajouté à all_aligned_files_with_info_for_mosaic."
+                            )
+                        else:
+                            self.failed_align_count += 1
+                            logger.debug(
+                                f"  DEBUG QM [_worker / Mosaïque AstroPanel]: Échec traitement/alignement panneau '{file_name_for_log}'. _process_file a retourné: {item_result_tuple}"
+                            )
+                            if hasattr(self, "_move_to_unaligned"):
+                                self._move_to_unaligned(file_path)
+
+                    else:  # Stacking Classique ou Drizzle Standard (non-mosaïque)
+                        logger.debug(
+                            f"  DEBUG _worker (iter {iteration_count}): Entrée branche 'Stacking Classique/Drizzle Standard' pour _process_file."
+                        )
+                        solve_astrometry = False
+                        if (
+                            self.reproject_between_batches
+                            and self.drizzle_active_session
+                            and not current_batch_items_with_masks_for_stack_batch
+                        ):
+                            solve_astrometry = True
+
+                        item_result_tuple = self._process_file(
+                            file_path,
+                            reference_image_data_for_global_alignment,
+                            solve_astrometry_for_this_file=solve_astrometry,
+                            align_on_disk=self.align_on_disk,
+                        )
+                        self.processed_files_count += 1
+                        if (
+                            item_result_tuple
+                            and isinstance(item_result_tuple, tuple)
+                            and len(item_result_tuple) == 6
+                            and item_result_tuple[0] is not None
+                        ):
+                            if self.reproject_between_batches:
+                                # --- NEW incremental reprojection on *stacked* batches ---
+                                # store only the components expected by
+                                # ``_stack_batch`` (data, header, scores,
+                                # wcs_object, valid_mask)
+                                # _stack_batch expects (data, header, scores, wcs, valid_mask)
+                                # item_result_tuple structure is
+                                # (data, header, scores, wcs, matrix_M, valid_mask)
+                                current_batch_items_with_masks_for_stack_batch.append(
+                                    (
+                                        item_result_tuple[0],
+                                        item_result_tuple[1],
+                                        item_result_tuple[2],
+                                        item_result_tuple[3],

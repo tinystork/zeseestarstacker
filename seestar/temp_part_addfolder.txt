@@ -1,0 +1,200 @@
+        reproject_dir = os.path.join(
+            self.temp_folder or self.output_folder, "reproject_memmap"
+        )
+        if os.path.isdir(reproject_dir):
+            try:
+                shutil.rmtree(reproject_dir)
+                self.update_progress(
+                    f"🧹 Dossier memmap supprimé: {os.path.basename(reproject_dir)}"
+                )
+            except Exception:
+                pass
+
+    ################################################################################################################################################
+
+    def add_folder(self, folder_path):
+        if not self.processing_active:
+            self.update_progress(
+                "ⓘ Impossible d'ajouter un dossier, traitement non actif."
+            )
+            return False
+        if self.reproject_between_batches:
+            self.update_progress("⚠️ Reprojection active : ajout de dossier désactivé")
+            return False
+        abs_path = os.path.abspath(folder_path)
+        if not os.path.isdir(abs_path):
+            self.update_progress(f"❌ Dossier non trouvé: {folder_path}")
+            return False
+        output_abs = os.path.abspath(self.output_folder) if self.output_folder else None
+        if output_abs:
+            norm_abs_path = os.path.normcase(abs_path)
+            norm_output_path = os.path.normcase(output_abs)
+            if norm_abs_path == norm_output_path or norm_abs_path.startswith(
+                norm_output_path + os.sep
+            ):
+                self.update_progress(
+                    f"⚠️ Impossible d'ajouter le dossier de sortie: {os.path.basename(folder_path)}"
+                )
+                return False
+        with self.folders_lock:
+            current_abs = (
+                os.path.abspath(self.current_folder) if self.current_folder else None
+            )
+            existing_abs = [os.path.abspath(p) for p in self.additional_folders]
+            # Messages distincts pour de meilleurs retours UX
+            if current_abs and abs_path == current_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en cours: {os.path.basename(folder_path)}"
+                )
+                return False
+            if abs_path in existing_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en attente: {os.path.basename(folder_path)}"
+                )
+                return False
+            if (current_abs and abs_path == current_abs) or abs_path in existing_abs:
+                self.update_progress(
+                    f"ⓘ Dossier déjà en cours ou ajouté: {os.path.basename(folder_path)}"
+                )
+                return False
+            self.additional_folders.append(abs_path)
+            folder_count = len(self.additional_folders)
+        self.update_progress(
+            f"✅ Dossier ajouté à la file d'attente : {os.path.basename(folder_path)}"
+        )
+        self.update_progress(f"folder_count_update:{folder_count}")
+        # Pré-queue immédiate dans un thread pour éviter de bloquer l'UI
+        # et refléter rapidement le total fichiers / lots.
+        def _bg_prequeue(path):
+            try:
+                added_now = self._add_files_to_queue(path)
+                if added_now > 0:
+                    try:
+                        self._send_eta_update()
+                    except Exception:
+                        pass
+                    try:
+                        self._update_preview(force_update=True)
+                    except Exception:
+                        pass
+            except Exception:
+                # Échec silencieux: le worker retombera sur le scan normal
+                pass
+
+        try:
+            threading.Thread(
+                target=_bg_prequeue,
+                args=(abs_path,),
+                daemon=True,
+                name="QM_AddFolderPrequeue",
+            ).start()
+        except Exception:
+            pass
+        return True
+
+    ################################################################################################################################################
+
+    def _add_files_to_queue(self, folder_path):
+        count_added = 0
+        try:
+            abs_folder_path = os.path.abspath(folder_path)
+            # ---> AJOUTER CETTE LIGNE <---
+            logger.debug(
+                f"DEBUG [_add_files_to_queue]: Scanning absolute path: '{abs_folder_path}'"
+            )
+            # ------------------------------
+            self.update_progress(
+                f"🔍 Scan du dossier: {os.path.basename(folder_path)}..."
+            )
+            files_in_folder = sorted(os.listdir(abs_folder_path))
+            # ---> AJOUTER CETTE LIGNE <---
+            logger.debug(
+                f"DEBUG [_add_files_to_queue]: os.listdir found: {files_in_folder}"
+            )
+            # ------------------------------
+            new_files_found_in_folder = []
+            for fname in files_in_folder:
+                # ---> AJOUTER CETTE LIGNE (optionnel mais peut aider) <---
+                logger.debug(f"DEBUG [_add_files_to_queue]: Checking file: '{fname}'")
+                # ---------------------------------------------------------
+                if self.stop_processing:
+                    self.update_progress("⛔ Scan interrompu.")
+                    break
+                if fname.lower().endswith((".fit", ".fits")):
+                    fpath = os.path.join(abs_folder_path, fname)
+                    if self.stacked_subdir_name in os.path.relpath(
+                        fpath, abs_folder_path
+                    ).split(os.sep):
+                        continue
+                    abs_fpath = os.path.abspath(fpath)
+                    if self.stacked_subdir_name in Path(abs_fpath).parts:
+                        continue
+                    if abs_fpath not in self.processed_files:
+                        # ---> AJOUTER CETTE LIGNE <---
+                        logger.debug(
+                            f"DEBUG [_add_files_to_queue]: ADDING to queue and processed_files: '{fpath}'"
+                        )
+                        # ------------------------------
+                        self.queue.put(fpath)
+                        self.processed_files.add(abs_fpath)
+                        count_added += 1
+            if count_added > 0:
+                self.files_in_queue += count_added
+                if self._auto_batch_size_zero_mode:
+                    self._enable_auto_batching_for_zero_mode()
+                else:
+                    self._recalculate_total_batches()
+            return count_added
+        except FileNotFoundError:
+            self.update_progress(
+                f"❌ Erreur scan: Dossier introuvable {os.path.basename(folder_path)}"
+            )
+            return 0
+        except PermissionError:
+            self.update_progress(
+                f"❌ Erreur scan: Permission refusée {os.path.basename(folder_path)}"
+            )
+            return 0
+        except Exception as e:
+            self.update_progress(
+                f"❌ Erreur scan dossier {os.path.basename(folder_path)}: {e}"
+            )
+            return 0
+
+    def _enable_auto_batching_for_zero_mode(self) -> bool:
+        """Create batch delimiters when using batch_size=0 without stack_plan."""
+        queue_items = [
+            os.path.abspath(str(item))
+            for item in list(self.queue.queue)
+            if item != _BATCH_BREAK_TOKEN
+        ]
+        if not queue_items:
+            return False
+
+        if self._auto_batch_size_zero_mode:
+            auto_batch_size = self._auto_batch_size_zero_mode
+        else:
+            try:
+                auto_batch_size = max(1, int(self._estimate_batch_size()))
+            except Exception:
+                auto_batch_size = 1
+            self._auto_batch_size_zero_mode = auto_batch_size
+
+        new_queue = Queue()
+        for idx, filepath in enumerate(queue_items):
+            new_queue.put(filepath)
+            if (idx + 1) % auto_batch_size == 0 and (idx + 1) < len(queue_items):
+                new_queue.put(_BATCH_BREAK_TOKEN)
+
+        self.queue = new_queue
+        self.use_batch_plan = True
+        self.all_input_filepaths = list(queue_items)
+        self.files_in_queue = len(queue_items)
+        self.total_batches_estimated = math.ceil(
+            self.files_in_queue / self._auto_batch_size_zero_mode
+        )
+        return True
+
+    ################################################################################################################################################
+
+    # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---

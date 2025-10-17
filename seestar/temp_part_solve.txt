@@ -1,0 +1,300 @@
+                logger.debug(f"      Négatifs SCI_ACCUM: {np.sum(temp_ch_data < 0)}")
+            else:
+                logger.debug("    SCI_ACCUM: Données vides ou invalides.")
+            if temp_ch_wht is not None and temp_ch_wht.size > 0:
+                logger.debug(
+                    f"    WHT_ACCUM (out_wht): Min={np.min(temp_ch_wht):.4g}, Max={np.max(temp_ch_wht):.4g}, Mean={np.mean(temp_ch_wht):.4g}"
+                )
+            else:
+                logger.debug("    WHT_ACCUM: Données vides ou invalides.")
+        # --- FIN DEBUG ---
+
+        try:
+            # Les `final_output_images_list` contiennent la somme(data*wht) et `final_output_weights_list` contient la somme(wht)
+            # La division se fera dans _save_final_stack. Ici, on stack juste pour retourner.
+            cube = np.stack(final_output_images_list, axis=0)
+            w_cube = np.stack(final_output_weights_list, axis=0)
+            if cube.nbytes > self.max_hq_mem:
+                self.update_progress(
+                    "HQ combine : trop de RAM, bascule en passe 2 par bandes"
+                )
+                final_sci_image_HWC = self._combine_hq_by_tiles(
+                    final_output_images_list,
+                    final_output_weights_list,
+                    kappa=self.stack_kappa_high,
+                    winsor_limits=self.winsor_limits,
+                    tile_h=getattr(
+                        getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
+                    ),
+                    batch_id=current_batch_num,
+                    use_memmap=use_memmap,
+                )
+            else:
+                if self.stack_final_combine == "winsorized_sigma_clip":
+                    final_sci_image_HWC, _ = self._stack_winsorized_sigma(
+                        cube,
+                        w_cube,
+                        kappa=self.stack_kappa_high,
+                        winsor_limits=self.winsor_limits,
+                        max_mem_bytes=self.max_hq_mem,
+                    )
+                    gc.collect()  # FIX MEMLEAK
+                elif self.stack_final_combine == "median":
+                    final_sci_image_HWC, _ = _stack_median(cube, w_cube)
+                else:
+                    final_sci_image_HWC, _ = _stack_mean(cube, w_cube)
+            final_wht_map_HWC = np.sum(w_cube, axis=0).astype(np.float32)
+
+            # --- SECTION CLIPPING CONDITIONNEL POUR LANCZOS COMMENTÉE ---
+            # if self.drizzle_kernel.lower() in ["lanczos2", "lanczos3"]:
+            #     logger.debug(f"DEBUG [CombineBatches V4]: CLIPPING LANCZOS TEMPORAIREMENT DÉSACTIVÉ.")
+            #     # logger.debug(f"DEBUG [CombineBatches V4]: Application du clipping spécifique pour kernel {self.drizzle_kernel}.")
+            #     # self.update_progress(f"   Appli. clipping spécifique pour Lanczos...", "DEBUG_DETAIL")
+            #     # clip_min_lanczos = 0.0
+            #     # clip_max_lanczos = 2.0 # Exemple, à ajuster.
+            #     # logger.debug(f"  [CombineBatches V4]: Clipping Lanczos: Min={clip_min_lanczos}, Max={clip_max_lanczos}")
+            #     # logger.debug(f"    Avant clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            #     # final_sci_image_HWC = np.clip(final_sci_image_HWC, clip_min_lanczos, clip_max_lanczos)
+            #     # logger.debug(f"    Après clip (Ch0): Min={np.min(final_sci_image_HWC[...,0]):.4g}, Max={np.max(final_sci_image_HWC[...,0]):.4g}")
+            # --- FIN SECTION CLIPPING COMMENTÉE ---
+
+            # Nettoyage NaN/Inf et s'assurer que les poids sont non-négatifs
+            final_sci_image_HWC = np.nan_to_num(
+                final_sci_image_HWC, nan=0.0, posinf=0.0, neginf=0.0
+            )
+            final_wht_map_HWC = np.nan_to_num(
+                final_wht_map_HWC, nan=0.0, posinf=0.0, neginf=0.0
+            )
+            final_wht_map_HWC = np.maximum(
+                final_wht_map_HWC, 0.0
+            )  # Poids doivent être >= 0
+
+            self.update_progress(
+                f"   -> Assemblage final Drizzle terminé (Shape Sci HWC: {final_sci_image_HWC.shape}, Wht HWC: {final_wht_map_HWC.shape})"
+            )
+            self.images_in_cumulative_stack = (
+                total_contributing_ninputs_for_final_header
+            )
+        except Exception as e_final_asm:
+            self.update_progress(
+                f"   - ERREUR pendant assemblage final Drizzle: {e_final_asm}", "ERROR"
+            )
+            final_sci_image_HWC = None
+            final_wht_map_HWC = None
+        finally:
+            del final_drizzlers, final_output_images_list, final_output_weights_list
+            gc.collect()
+
+        logger.debug("=" * 70 + "\n")
+        return final_sci_image_HWC, final_wht_map_HWC
+
+    def _run_astap_and_update_header(self, fits_path: str) -> bool:
+        """Solve the provided FITS with the configured solver and update its header."""
+        try:
+            header = fits.getheader(fits_path)
+        except Exception as e:
+            self.update_progress(f"   [Solver] Échec lecture header: {e}", "ERROR")
+            return False
+
+        solver_settings = {
+            "local_solver_preference": getattr(self, "local_solver_preference", "none"),
+            "api_key": getattr(self, "api_key", ""),
+            "astap_path": getattr(self, "astap_path", ""),
+            "astap_data_dir": getattr(self, "astap_data_dir", ""),
+            "astap_search_radius": getattr(self, "astap_search_radius", 3.0),
+            "astap_downsample": getattr(self, "astap_downsample", 1),
+            "astap_sensitivity": getattr(self, "astap_sensitivity", 100),
+            "local_ansvr_path": getattr(self, "local_ansvr_path", ""),
+            "scale_est_arcsec_per_pix": getattr(
+                self, "reference_pixel_scale_arcsec", None
+            ),
+            "scale_tolerance_percent": 20,
+            "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+            "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+            "astrometry_net_timeout_sec": getattr(
+                self, "astrometry_net_timeout_sec", 300
+            ),
+            "use_radec_hints": getattr(self, "use_radec_hints", False),
+        }
+
+        # In Reproject & Coadd mode we now forward the user configured ASTAP
+        # options without forcing a blind search or RA/DEC hints.  This mirrors
+        # the simpler invocation used in ZeMosaic.
+
+        self.update_progress(f"   [Solver] Solve {os.path.basename(fits_path)}…")
+        if self.astrometry_solver:
+            wcs = self.astrometry_solver.solve(
+                fits_path,
+                header,
+                solver_settings,
+                update_header_with_solution=True,
+                batch_size=getattr(self, "batch_size", None),
+                final_combine=getattr(self, "stack_final_combine", None),
+            )
+        else:
+            wcs = solve_image_wcs(
+                fits_path,
+                header,
+                solver_settings,
+                update_header_with_solution=True,
+                batch_size=getattr(self, "batch_size", None),
+                final_combine=getattr(self, "stack_final_combine", None),
+            )
+        if wcs is None:
+            self.update_progress("   [Solver] Échec résolution", "WARN")
+            return False
+        try:
+            with fits.open(fits_path, mode="update") as hdul:
+                hdul[0].header = header
+                hdul.flush()
+        except Exception as e:
+            self.update_progress(f"   [Solver] Erreur écriture header: {e}", "WARN")
+        return True
+
+    def _cache_solved_image(self, data, header, wcs_obj, idx):
+        """Cache solved image data to a temporary FITS and return the path."""
+        cache_dir = os.path.join(self.output_folder, "reproj_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"solved_{idx:05d}.fits")
+        hdr = header.copy()
+        if wcs_obj is not None:
+            try:
+                hdr.update(wcs_obj.to_header())
+            except Exception:
+                pass
+        data_to_save = np.moveaxis(data, -1, 0) if data.ndim == 3 else data
+        fits.PrimaryHDU(data=data_to_save.astype(np.float32), header=hdr).writeto(
+            cache_path, overwrite=True
+        )
+        return cache_path
+
+    def _solve_cumulative_stack(self):
+        """Solve the current cumulative stack with ASTAP and update reference WCS."""
+
+        if (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.reference_header_for_wcs is None
+        ):
+            return None, None
+
+        sum_arr = np.array(self.cumulative_sum_memmap, dtype=np.float32)
+        wht_arr = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            wht_safe = np.maximum(wht_arr, 1e-6)
+            stack = np.nan_to_num(sum_arr / wht_safe[:, :, np.newaxis])
+
+        hdr = self.reference_header_for_wcs.copy()
+
+        # If the reference WCS is frozen and already defined, skip solving
+        # additional stacked batches and simply return the current stack using
+        # the existing reference header.
+        if self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            self.reference_header_for_wcs = hdr.copy()
+            self.ref_wcs_header = hdr.copy()
+            logger.debug(
+                "DEBUG QM [_solve_cumulative_stack]: Skipping ASTAP solve (freeze_reference_wcs)."
+            )
+            return stack.astype(np.float32), hdr
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp.close()
+        fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
+            tmp.name, overwrite=True
+        )
+        solved_ok = self._run_astap_and_update_header(tmp.name)
+        if solved_ok:
+            hdr = fits.getheader(tmp.name)
+        os.remove(tmp.name)
+
+        try:
+            new_wcs = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(
+                new_wcs,
+                int(hdr.get("NAXIS2")),
+                int(hdr.get("NAXIS1")),
+            )
+        except Exception:
+            new_wcs = None
+
+        if self.reference_wcs_object is None or not self.freeze_reference_wcs:
+            if new_wcs is not None:
+                self.reference_wcs_object = new_wcs
+
+        self.reference_header_for_wcs = hdr.copy()
+        self.ref_wcs_header = hdr.copy()
+
+        return stack.astype(np.float32), hdr
+
+    def _load_and_prepare_simple(self, fits_path: str):
+        data = _fits_getdata_safe(fits_path, memmap=True).astype(np.float32, copy=False)
+        hdr = fits.getheader(fits_path)
+        try:
+            input_wcs = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(
+                input_wcs,
+                int(hdr.get("NAXIS2")),
+                int(hdr.get("NAXIS1")),
+            )
+        except Exception:
+            input_wcs = None
+        if data.ndim == 2:
+            data = data[:, :, None]
+        wht = np.ones(data.shape[:2], dtype=np.float32)
+        return data, wht, hdr, input_wcs
+
+    def _can_resume(self, out_dir: Path) -> bool:
+        req = [
+            "memmap_accumulators/cumulative_SUM.npy",
+            "memmap_accumulators/cumulative_WHT.npy",
+            "batches_count.txt",
+        ]
+        return all((out_dir / r).exists() for r in req)
+
+    def _open_existing_memmaps(self) -> bool:
+        try:
+            memmap_dir = Path(self.output_folder) / "memmap_accumulators"
+            self.sum_memmap_path = memmap_dir / "cumulative_SUM.npy"
+            self.wht_memmap_path = memmap_dir / "cumulative_WHT.npy"
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path, mode="r+"
+            )
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path, mode="r+"
+            )
+            self.memmap_shape = self.cumulative_sum_memmap.shape
+            if self.batch_count_path and Path(self.batch_count_path).exists():
+                try:
+                    self.stacked_batches_count = int(
+                        Path(self.batch_count_path).read_text().strip()
+                    )
+                except Exception:
+                    self.stacked_batches_count = 0
+            return True
+        except Exception as e:
+            self.update_progress(f"⚠️ Reprise impossible: {e}", "WARN")
+            return False
+
+    def _create_sum_wht_memmaps(self, shape_hw):
+        """(Re)create SUM/WHT memmaps for the given output shape.
+
+        The previously processed batch count is preserved to avoid
+        skewing ETA calculations when memmaps are reallocated.
+        """
+        prev_count = getattr(self, "stacked_batches_count", 0)
+
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        os.makedirs(memmap_dir, exist_ok=True)
+        self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+        self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+        self.memmap_shape = (shape_hw[0], shape_hw[1], 3)
+        self.batch_count_path = os.path.join(self.output_folder, "batches_count.txt")
+
+        self.cumulative_sum_memmap = np.lib.format.open_memmap(
+            self.sum_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_sum,
+            shape=self.memmap_shape,
+        )
+        self.cumulative_wht_memmap = np.lib.format.open_memmap(
+            self.wht_memmap_path,

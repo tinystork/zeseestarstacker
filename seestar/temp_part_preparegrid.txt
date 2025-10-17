@@ -1,0 +1,400 @@
+                        "WARN",
+                    )
+
+        if not wcs_list:
+            self.update_progress(
+                "❌ Échec de la préparation de la grille : aucun WCS valide trouvé après résolution.",
+                "ERROR",
+            )
+            return False
+
+        if self.reference_wcs_object is None or not self.freeze_reference_wcs:
+            # For ``batch_size == 1`` we mimic the behaviour of live stacking
+            # (``batch_size == 0``) by adopting the first frame's WCS and
+            # dimensions as the global grid. This avoids expanding the canvas
+            # to the union of all dithered frames which previously produced a
+            # grid twice as large (e.g. 3840x2160 for 1920x1080 inputs).
+            if getattr(self, "batch_size", 0) == 1:
+                wcs_list = wcs_list[:1]
+                header_list = header_list[:1]
+                ref_wcs = wcs_list[0]
+                ref_shape = ref_wcs.pixel_shape
+            elif (
+                len(wcs_list) == 1
+                and self.reproject_between_batches
+                and not self.is_mosaic_run
+            ):
+                # When doing classic stacking with reprojection of a single
+                # file, use the dynamic bounding-box logic to avoid cropping.
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid_dynamic(
+                    wcs_list,
+                    header_list,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
+                )
+            elif len(wcs_list) == 1:
+                ref_wcs = wcs_list[0]
+                ref_shape = ref_wcs.pixel_shape
+            else:
+                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                    wcs_list,
+                    header_list,
+                    scale_factor=(
+                        self.drizzle_scale if self.drizzle_active_session else 1.0
+                    ),
+                    auto_rotate=True,
+                )
+                if ref_wcs is None:
+                    self.update_progress(
+                        "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
+                    )
+                    return False
+
+            # Store the computed grid for subsequent batches. Whether the
+            # reference WCS remains fixed is decided by ``freeze_reference_wcs``
+            # which may be controlled by the caller.
+            self.reference_wcs_object = ref_wcs
+            self.reference_shape = ref_shape
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+            self.ref_wcs_header = self.reference_header_for_wcs
+        else:
+            ref_wcs = self.reference_wcs_object
+            ref_shape = (
+                int(self.reference_header_for_wcs["NAXIS2"]),
+                int(self.reference_header_for_wcs["NAXIS1"]),
+            )
+
+        self.reference_wcs_object = ref_wcs
+        self.reference_shape = ref_shape
+        if self.reference_header_for_wcs is None:
+            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        self.ref_wcs_header = self.reference_header_for_wcs
+        try:
+            self.reference_wcs_object.pixel_shape = (
+                self.reference_shape[1],
+                self.reference_shape[0],
+            )
+            self.reference_wcs_object._naxis1 = self.reference_shape[1]
+            self.reference_wcs_object._naxis2 = self.reference_shape[0]
+        except Exception:
+            pass
+
+        # Do not automatically enable inter-batch reprojection when preparing
+        # the global grid. The user's existing preference is preserved.
+
+        crval_str = ", ".join(f"{x:.5f}" for x in self.reference_wcs_object.wcs.crval)
+        self.update_progress(
+            f"🗺️ Grille globale finale prête – Centre={crval_str}, Shape={self.reference_shape}",
+            "INFO",
+        )
+
+        self._ensure_memmaps_match_reference()
+
+        return True
+
+    def _recalculate_total_batches(self):
+        """Estimates the total number of batches based on files_in_queue."""
+        if getattr(self, "use_batch_plan", False):
+            return
+        if self.batch_size <= 0:
+            if self.batch_size == 0:
+                # Honour explicit "all in RAM" mode: keep batch_size at 0 and expose a
+                # single logical batch so downstream logic (reproject&coadd, white-fix,
+                # etc.) continues to behave like legacy batch_size=0 runs.
+                self.total_batches_estimated = 1 if self.files_in_queue > 0 else 0
+                return
+            if not getattr(self, "_has_stack_plan", False):
+                self.batch_size = max(1, int(self._estimate_batch_size()))
+                if self.files_in_queue > 0:
+                    self.total_batches_estimated = math.ceil(
+                        self.files_in_queue / self.batch_size
+                    )
+                else:
+                    self.total_batches_estimated = 0
+                if self.total_batches_estimated > 0:
+                    self.logger.info(
+                        f"[AutoBatch] Création de {self.total_batches_estimated} lots ({self.batch_size} images par lot)"
+                    )
+            else:
+                self.update_progress(
+                    f"⚠️ Taille de lot invalide ({self.batch_size}), impossible d'estimer le nombre total de lots."
+                )
+                self.total_batches_estimated = 0
+            return
+
+        self.total_batches_estimated = math.ceil(
+            self.files_in_queue / self.batch_size
+        )
+
+    ##########################################################################
+
+    def _get_quality_executor(self) -> ProcessPoolExecutor:
+        """Return a valid executor for quality metrics."""
+        if getattr(self, "quality_executor", None) is None or getattr(
+            self.quality_executor, "_shutdown", False
+        ):
+            max_workers = _suggest_pool_size(0.75)
+            self.quality_executor = ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=get_context("spawn"),
+            )
+            logger.debug("Quality pool (re)started with %d workers", max_workers)
+        return self.quality_executor
+
+    ################################################################################################################################################
+
+    def _calculate_quality_metrics(self, image_data):
+        """Calculate SNR and star count using a separate process.
+
+        Large arrays can cause issues when serialized for a ``ProcessPoolExecutor``
+        under Windows.  To avoid this, very large images (``>32 MB``) are
+        processed in the current process instead of being sent to the worker pool.
+        """
+
+        if image_data is None:
+            return {"snr": 0.0, "stars": 0.0}
+
+        try:
+            # Prefer in-process computation on Windows or when only one worker
+            # is available. Spawning a process to pickle large NumPy arrays can
+            # stall the UI and significantly slow down the pipeline.
+            executor = (
+                self._get_quality_executor()
+                if hasattr(self, "_get_quality_executor")
+                else getattr(self, "quality_executor", None)
+            )
+            maxw = getattr(executor, "_max_workers", 1) if executor else 1
+            small_enough = image_data.nbytes <= 32 * 1024 * 1024
+            use_executor = small_enough and (maxw > 1) and (os.name != "nt")
+
+            if use_executor and executor is not None:
+                future = executor.submit(_quality_metrics_worker, image_data)
+                # Conservative timeout to avoid hangs; fallback to local on timeout
+                try:
+                    scores, star_msg, num_stars = future.result(timeout=30)
+                except Exception:
+                    scores, star_msg, num_stars = _quality_metrics_worker(image_data)
+            else:
+                # Fallback to in-process computation for large arrays or Windows
+                scores, star_msg, num_stars = _quality_metrics_worker(image_data)
+
+        except Exception as e:
+            self.update_progress(
+                f"      Quality Scores -> Process error: {e}. Scores set to 0.",
+                "WARN",
+            )
+            return {"snr": 0.0, "stars": 0.0}
+
+        if star_msg:
+            self.update_progress(f"      Quality Scores -> {star_msg}")
+
+        self.update_progress(
+            f"      Quality Scores -> SNR: {scores['snr']:.2f}, Stars: {scores['stars']:.3f} ({num_stars} raw)"
+        )
+        return scores
+
+    ##################################################################################################################
+
+    def set_progress_callback(self, callback):
+        """Définit la fonction de rappel pour les mises à jour de progression."""
+        # logger.debug("DEBUG QM: Appel de set_progress_callback.") # Optionnel
+        self.progress_callback = callback
+        # Passer le callback à l'aligneur astroalign s'il existe
+        if (
+            hasattr(self, "aligner")
+            and self.aligner is not None
+            and hasattr(self.aligner, "set_progress_callback")
+            and callable(callback)
+        ):
+            try:
+                # logger.debug("DEBUG QM: Tentative de configuration callback sur aligner (astroalign)...")
+                self.aligner.set_progress_callback(callback)
+                # logger.debug("DEBUG QM: Callback aligner (astroalign) configuré.")
+            except Exception as e_align_cb:
+                logger.debug(
+                    f"Warning QM: Could not set progress callback on aligner (astroalign): {e_align_cb}"
+                )
+        # Passer le callback à l'aligneur local s'il existe
+        if (
+            hasattr(self, "local_aligner_instance")
+            and self.local_aligner_instance is not None
+            and hasattr(self.local_aligner_instance, "set_progress_callback")
+            and callable(callback)
+        ):
+            try:
+                # logger.debug("DEBUG QM: Tentative de configuration callback sur local_aligner_instance...")
+                self.local_aligner_instance.set_progress_callback(callback)
+                # logger.debug("DEBUG QM: Callback local_aligner_instance configuré.")
+            except Exception as e_local_cb:
+                logger.debug(
+                    f"Warning QM: Could not set progress callback on local_aligner_instance: {e_local_cb}"
+                )
+
+    ################################################################################################################################################
+
+    def set_preview_callback(self, callback):
+        """Définit la fonction de rappel pour les mises à jour de l'aperçu."""
+        logger.debug("DEBUG QM: Appel de set_preview_callback (VERSION ULTRA PROPRE).")
+        self.preview_callback = callback
+
+    ################################################################################################################################################
+
+    def _worker(self):
+        """
+        Thread principal pour le traitement des images.
+        """
+        if threading.current_thread() is threading.main_thread():
+            logger.warning("_worker running on main thread - this should not happen")
+        logger.debug(
+            "\n"
+            + "=" * 10
+            + f" DEBUG QM [_worker V_NoDerotation]: Initialisation du worker "
+            + "=" * 10
+        )
+        self.processing_active = True
+        self.processing_error = None
+        # start_time_session = time.monotonic() # Décommenter si besoin
+        self._eta_start_time = time.monotonic()
+
+        reference_image_data_for_global_alignment = None
+        reference_header_for_global_alignment = None
+        mosaic_ref_panel_image_data = None  # Utilisé seulement si local_fast_fallback
+        mosaic_ref_panel_header = None  # Utilisé seulement si local_fast_fallback
+
+        current_batch_items_with_masks_for_stack_batch = []
+        self._current_batch_paths = []
+        self.intermediate_drizzle_batch_files = []
+        solved_items_for_final_reprojection = []
+        all_aligned_files_with_info_for_mosaic = []
+
+        # --- 0.B Détermination du mode d'opération (basé sur self.xxx settés par start_processing) ---
+        use_local_aligner_for_this_mosaic_run = (
+            self.is_mosaic_run
+            and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]
+            and _LOCAL_ALIGNER_AVAILABLE
+            and self.local_aligner_instance is not None
+        )
+        use_wcs_fallback_if_local_fails = (  # Utilisé seulement si use_local_aligner_for_this_mosaic_run est True
+            use_local_aligner_for_this_mosaic_run
+            and self.mosaic_alignment_mode == "local_fast_fallback"
+        )
+        use_astrometry_per_panel_mosaic = (
+            self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel"
+        )
+
+        logger.debug(f"DEBUG QM [_worker V_NoDerotation]: Configuration de la session:")
+        logger.debug(f"  - is_mosaic_run: {self.is_mosaic_run}")
+        if self.is_mosaic_run:
+            logger.debug(f"    - mosaic_alignment_mode: '{self.mosaic_alignment_mode}'")
+            logger.debug(
+                f"    - -> Utilisation Aligneur Local (FastAligner): {use_local_aligner_for_this_mosaic_run}"
+            )
+            if use_local_aligner_for_this_mosaic_run:
+                logger.debug(
+                    f"      - Fallback WCS si FastAligner échoue: {use_wcs_fallback_if_local_fails}"
+                )
+            logger.debug(
+                f"    - -> Utilisation Astrometry par Panneau: {use_astrometry_per_panel_mosaic}"
+            )  # Crucial
+        logger.debug(
+            f"  - drizzle_active_session (pour stacking standard non-mosaïque): {self.drizzle_active_session}"
+        )
+        if self.drizzle_active_session and not self.is_mosaic_run:
+            logger.debug(f"    - drizzle_mode (standard): '{self.drizzle_mode}'")
+
+        path_of_processed_ref_panel_basename = (
+            None  # Pour skipper le panneau d'ancre si local_fast_fallback
+        )
+
+        # Récupérer les paramètres Drizzle spécifiques à la mosaïque depuis mosaic_settings_dict
+        mosaic_drizzle_kernel_effective = str(
+            self.mosaic_settings_dict.get("kernel", "square")
+        )
+        mosaic_drizzle_pixfrac_effective = float(
+            self.mosaic_settings_dict.get("pixfrac", 1.0)
+        )
+        mosaic_drizzle_fillval_effective = str(
+            self.mosaic_settings_dict.get("fillval", "0.0")
+        )
+        mosaic_drizzle_wht_threshold_effective = float(
+            self.mosaic_settings_dict.get("wht_threshold", 0.01)
+        )
+
+        # Les paramètres globaux de Drizzle (self.drizzle_kernel, self.drizzle_pixfrac, etc.)
+        # sont déjà configurés par start_processing.
+        # Ici, nous les *surchargons* avec les valeurs spécifiques à la mosaïque si le mode mosaïque est actif.
+        if self.is_mosaic_run:
+            self.drizzle_kernel = mosaic_drizzle_kernel_effective
+            self.drizzle_pixfrac = mosaic_drizzle_pixfrac_effective
+            self.drizzle_fillval = mosaic_drizzle_fillval_effective  # <-- Assurez-vous que cet attribut existe sur self
+            self.drizzle_wht_threshold = mosaic_drizzle_wht_threshold_effective  # <-- Assurez-vous que cet attribut existe sur self
+
+            logger.debug(
+                f"DEBUG QM [_worker]: Mode Mosaïque ACTIF. Surcharge des paramètres Drizzle globaux:"
+            )
+            logger.debug(
+                f"  -> self.drizzle_kernel mis à '{self.drizzle_kernel}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_pixfrac mis à '{self.drizzle_pixfrac}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_fillval mis à '{self.drizzle_fillval}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_wht_threshold mis à '{self.drizzle_wht_threshold}' (depuis mosaic_settings)"
+            )
+        else:
+            # S'assurer que les attributs spécifiques à la mosaïque (qui ne sont pas self.drizzle_*)
+            # ont une valeur par défaut, même si le mode mosaïque n'est pas actif.
+            # Cela évite des erreurs si on les lit par erreur dans d'autres branches de code.
+            # (Si vos attributs `mosaic_drizzle_kernel` etc. ne sont pas déjà initialisés dans `__init__`,
+            # il faudrait les initialiser ici. Actuellement, ils le sont via `start_processing` ou `initialize`
+            # donc ce bloc 'else' est pour la clarté mais pas strictement nécessaire ici si le flux est correct.)
+            pass  # Les attributs self.mosaic_drizzle_xyz sont déjà settés par start_processing et ne sont pas lus ici.
+
+        ibn_finalized = False
+        try:
+            # =====================================================================================
+            # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
+            # =====================================================================================
+
+            self.update_progress("⭐ Préparation image(s) de référence...")
+
+            # --- Détermination du dossier et des fichiers pour la référence ---
+            files_for_ref_scan = []
+            folder_for_ref_scan = None
+            if self.current_folder and os.path.isdir(self.current_folder):
+                files_for_ref_scan = sorted(
+                    [
+                        f
+                        for f in os.listdir(self.current_folder)
+                        if f.lower().endswith((".fit", ".fits"))
+                    ]
+                )
+                if files_for_ref_scan:
+                    folder_for_ref_scan = self.current_folder
+
+            if (
+                not files_for_ref_scan
+                and hasattr(self, "additional_folders")
+                and self.additional_folders
+            ):
+                first_additional = self.additional_folders[0]
+                if os.path.isdir(first_additional):
+                    files_for_ref_scan_add = sorted(
+                        [
+                            f
+                            for f in os.listdir(first_additional)
+                            if f.lower().endswith((".fit", ".fits"))
+                        ]
+                    )
+                    if files_for_ref_scan_add:
+                        files_for_ref_scan = files_for_ref_scan_add
+                        folder_for_ref_scan = first_additional
+                        logger.debug(
+                            f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence."
+                        )
+
+            if (not files_for_ref_scan or not folder_for_ref_scan) and getattr(

@@ -1,0 +1,480 @@
+            and self.local_aligner_instance is not None
+            and hasattr(self.local_aligner_instance, "set_progress_callback")
+            and callable(callback)
+        ):
+            try:
+                # logger.debug("DEBUG QM: Tentative de configuration callback sur local_aligner_instance...")
+                self.local_aligner_instance.set_progress_callback(callback)
+                # logger.debug("DEBUG QM: Callback local_aligner_instance configuré.")
+            except Exception as e_local_cb:
+                logger.debug(
+                    f"Warning QM: Could not set progress callback on local_aligner_instance: {e_local_cb}"
+                )
+
+    ################################################################################################################################################
+
+    def set_preview_callback(self, callback):
+        """Définit la fonction de rappel pour les mises à jour de l'aperçu."""
+        logger.debug("DEBUG QM: Appel de set_preview_callback (VERSION ULTRA PROPRE).")
+        self.preview_callback = callback
+
+    ################################################################################################################################################
+
+    def _worker(self):
+        """
+        Thread principal pour le traitement des images.
+        """
+        if threading.current_thread() is threading.main_thread():
+            logger.warning("_worker running on main thread - this should not happen")
+        logger.debug(
+            "\n"
+            + "=" * 10
+            + f" DEBUG QM [_worker V_NoDerotation]: Initialisation du worker "
+            + "=" * 10
+        )
+        self.processing_active = True
+        self.processing_error = None
+        # start_time_session = time.monotonic() # Décommenter si besoin
+        self._eta_start_time = time.monotonic()
+
+        reference_image_data_for_global_alignment = None
+        reference_header_for_global_alignment = None
+        mosaic_ref_panel_image_data = None  # Utilisé seulement si local_fast_fallback
+        mosaic_ref_panel_header = None  # Utilisé seulement si local_fast_fallback
+
+        current_batch_items_with_masks_for_stack_batch = []
+        self._current_batch_paths = []
+        self.intermediate_drizzle_batch_files = []
+        solved_items_for_final_reprojection = []
+        all_aligned_files_with_info_for_mosaic = []
+
+        # --- 0.B Détermination du mode d'opération (basé sur self.xxx settés par start_processing) ---
+        use_local_aligner_for_this_mosaic_run = (
+            self.is_mosaic_run
+            and self.mosaic_alignment_mode in ["local_fast_fallback", "local_fast_only"]
+            and _LOCAL_ALIGNER_AVAILABLE
+            and self.local_aligner_instance is not None
+        )
+        use_wcs_fallback_if_local_fails = (  # Utilisé seulement si use_local_aligner_for_this_mosaic_run est True
+            use_local_aligner_for_this_mosaic_run
+            and self.mosaic_alignment_mode == "local_fast_fallback"
+        )
+        use_astrometry_per_panel_mosaic = (
+            self.is_mosaic_run and self.mosaic_alignment_mode == "astrometry_per_panel"
+        )
+
+        logger.debug(f"DEBUG QM [_worker V_NoDerotation]: Configuration de la session:")
+        logger.debug(f"  - is_mosaic_run: {self.is_mosaic_run}")
+        if self.is_mosaic_run:
+            logger.debug(f"    - mosaic_alignment_mode: '{self.mosaic_alignment_mode}'")
+            logger.debug(
+                f"    - -> Utilisation Aligneur Local (FastAligner): {use_local_aligner_for_this_mosaic_run}"
+            )
+            if use_local_aligner_for_this_mosaic_run:
+                logger.debug(
+                    f"      - Fallback WCS si FastAligner échoue: {use_wcs_fallback_if_local_fails}"
+                )
+            logger.debug(
+                f"    - -> Utilisation Astrometry par Panneau: {use_astrometry_per_panel_mosaic}"
+            )  # Crucial
+        logger.debug(
+            f"  - drizzle_active_session (pour stacking standard non-mosaïque): {self.drizzle_active_session}"
+        )
+        if self.drizzle_active_session and not self.is_mosaic_run:
+            logger.debug(f"    - drizzle_mode (standard): '{self.drizzle_mode}'")
+
+        path_of_processed_ref_panel_basename = (
+            None  # Pour skipper le panneau d'ancre si local_fast_fallback
+        )
+
+        # Récupérer les paramètres Drizzle spécifiques à la mosaïque depuis mosaic_settings_dict
+        mosaic_drizzle_kernel_effective = str(
+            self.mosaic_settings_dict.get("kernel", "square")
+        )
+        mosaic_drizzle_pixfrac_effective = float(
+            self.mosaic_settings_dict.get("pixfrac", 1.0)
+        )
+        mosaic_drizzle_fillval_effective = str(
+            self.mosaic_settings_dict.get("fillval", "0.0")
+        )
+        mosaic_drizzle_wht_threshold_effective = float(
+            self.mosaic_settings_dict.get("wht_threshold", 0.01)
+        )
+
+        # Les paramètres globaux de Drizzle (self.drizzle_kernel, self.drizzle_pixfrac, etc.)
+        # sont déjà configurés par start_processing.
+        # Ici, nous les *surchargons* avec les valeurs spécifiques à la mosaïque si le mode mosaïque est actif.
+        if self.is_mosaic_run:
+            self.drizzle_kernel = mosaic_drizzle_kernel_effective
+            self.drizzle_pixfrac = mosaic_drizzle_pixfrac_effective
+            self.drizzle_fillval = mosaic_drizzle_fillval_effective  # <-- Assurez-vous que cet attribut existe sur self
+            self.drizzle_wht_threshold = mosaic_drizzle_wht_threshold_effective  # <-- Assurez-vous que cet attribut existe sur self
+
+            logger.debug(
+                f"DEBUG QM [_worker]: Mode Mosaïque ACTIF. Surcharge des paramètres Drizzle globaux:"
+            )
+            logger.debug(
+                f"  -> self.drizzle_kernel mis à '{self.drizzle_kernel}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_pixfrac mis à '{self.drizzle_pixfrac}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_fillval mis à '{self.drizzle_fillval}' (depuis mosaic_settings)"
+            )
+            logger.debug(
+                f"  -> self.drizzle_wht_threshold mis à '{self.drizzle_wht_threshold}' (depuis mosaic_settings)"
+            )
+        else:
+            # S'assurer que les attributs spécifiques à la mosaïque (qui ne sont pas self.drizzle_*)
+            # ont une valeur par défaut, même si le mode mosaïque n'est pas actif.
+            # Cela évite des erreurs si on les lit par erreur dans d'autres branches de code.
+            # (Si vos attributs `mosaic_drizzle_kernel` etc. ne sont pas déjà initialisés dans `__init__`,
+            # il faudrait les initialiser ici. Actuellement, ils le sont via `start_processing` ou `initialize`
+            # donc ce bloc 'else' est pour la clarté mais pas strictement nécessaire ici si le flux est correct.)
+            pass  # Les attributs self.mosaic_drizzle_xyz sont déjà settés par start_processing et ne sont pas lus ici.
+
+        ibn_finalized = False
+        try:
+            # =====================================================================================
+            # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
+            # =====================================================================================
+
+            self.update_progress("⭐ Préparation image(s) de référence...")
+
+            # --- Détermination du dossier et des fichiers pour la référence ---
+            files_for_ref_scan = []
+            folder_for_ref_scan = None
+            if self.current_folder and os.path.isdir(self.current_folder):
+                files_for_ref_scan = sorted(
+                    [
+                        f
+                        for f in os.listdir(self.current_folder)
+                        if f.lower().endswith((".fit", ".fits"))
+                    ]
+                )
+                if files_for_ref_scan:
+                    folder_for_ref_scan = self.current_folder
+
+            if (
+                not files_for_ref_scan
+                and hasattr(self, "additional_folders")
+                and self.additional_folders
+            ):
+                first_additional = self.additional_folders[0]
+                if os.path.isdir(first_additional):
+                    files_for_ref_scan_add = sorted(
+                        [
+                            f
+                            for f in os.listdir(first_additional)
+                            if f.lower().endswith((".fit", ".fits"))
+                        ]
+                    )
+                    if files_for_ref_scan_add:
+                        files_for_ref_scan = files_for_ref_scan_add
+                        folder_for_ref_scan = first_additional
+                        logger.debug(
+                            f"DEBUG QM [_worker]: Dossier initial vide/invalide, utilisation du premier dossier additionnel '{os.path.basename(folder_for_ref_scan)}' pour la référence."
+                        )
+
+            if (not files_for_ref_scan or not folder_for_ref_scan) and getattr(
+                self, "use_batch_plan", False
+            ):
+                plan_path = os.path.join(self.current_folder, "stack_plan.csv")
+                if os.path.isfile(plan_path):
+                    try:
+                        batches_for_ref = get_batches_from_stack_plan(
+                            plan_path, self.current_folder
+                        )
+                        first_fp = None
+                        for batch in batches_for_ref:
+                            for fp in batch:
+                                if os.path.isfile(fp):
+                                    first_fp = fp
+                                    break
+                            if first_fp:
+                                break
+                        if first_fp:
+                            folder_for_ref_scan = os.path.dirname(first_fp)
+                            files_for_ref_scan = [os.path.basename(first_fp)]
+                    except Exception as plan_err:
+                        logger.debug(
+                            f"ERREUR lecture stack_plan.csv pour référence (worker): {plan_err}"
+                        )
+
+            if not files_for_ref_scan or not folder_for_ref_scan:
+                raise RuntimeError(
+                    "Aucun fichier FITS trouvé dans les dossiers d'entrée initiaux pour déterminer la référence."
+                )
+            # --- Fin logique dossier/fichiers référence ---
+
+            # Configuration de self.aligner pour _get_reference_image
+            self.aligner.correct_hot_pixels = self.correct_hot_pixels
+            self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
+            self.aligner.neighborhood_size = self.neighborhood_size
+            self.aligner.bayer_pattern = self.bayer_pattern
+            # self.aligner.reference_image_path est déjà setté dans start_processing
+
+            logger.debug(
+                f"DEBUG QM [_worker]: Appel à self.aligner._get_reference_image avec dossier '{os.path.basename(folder_for_ref_scan)}' pour la référence de base/globale..."
+            )
+            # _get_reference_image DOIT s'assurer que s'il ajoute _SOURCE_PATH à son header interne
+            # avant de sauvegarder reference_image.fit, il utilise os.path.basename().
+            # C'est la source de l'erreur "keyword too long".
+            (
+                reference_image_data_for_global_alignment,
+                reference_header_for_global_alignment,
+            ) = self.aligner._get_reference_image(
+                folder_for_ref_scan, files_for_ref_scan, self.output_folder
+            )
+            if (
+                reference_image_data_for_global_alignment is None
+                or reference_header_for_global_alignment is None
+            ):
+                raise RuntimeError(
+                    "Échec critique obtention image/header de référence de base (globale/premier panneau)."
+                )
+
+            # Préparation du header qui sera utilisé pour le WCS de référence global
+            self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
+            self.ref_wcs_header = self.reference_header_for_wcs
+
+            # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
+            # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
+            # nous devons extraire le nom de base pour nos propres besoins.
+            # Le fichier reference_image.fit lui-même (s'il contient _SOURCE_PATH) doit avoir été sauvegardé
+            # par _get_reference_image en utilisant déjà un nom de base pour ce mot-clé.
+            original_source_path_from_ref_fits = (
+                reference_header_for_global_alignment.get("_SOURCE_PATH")
+            )
+
+            if original_source_path_from_ref_fits:
+                source_basename_for_wcs_ref = os.path.basename(
+                    str(original_source_path_from_ref_fits)
+                )
+                # Utiliser une clé claire pour indiquer que c'est le nom de base du fichier de référence
+                self.reference_header_for_wcs["REF_FNAME"] = (
+                    source_basename_for_wcs_ref,
+                    "Basename of the source file for global WCS reference",
+                )
+
+                # Pour la logique de mosaïque locale, path_of_processed_ref_panel_basename
+                # doit aussi être juste le nom de base.
+                if use_local_aligner_for_this_mosaic_run:
+                    path_of_processed_ref_panel_basename = source_basename_for_wcs_ref
+                    logger.debug(
+                        f"DEBUG QM [_worker]: Panneau d'ancre identifié par basename: {path_of_processed_ref_panel_basename}"
+                    )
+            else:
+                # Si _SOURCE_PATH n'est pas dans le header de reference_image.fit, on ne peut pas le définir
+                # Cela pourrait arriver si _get_reference_image ne l'ajoute pas.
+                logger.debug(
+                    "WARN QM [_worker]: Mot-clé '_SOURCE_PATH' non trouvé dans le header de l'image de référence globale."
+                )
+                if use_local_aligner_for_this_mosaic_run:
+                    path_of_processed_ref_panel_basename = (
+                        "unknown_reference_panel.fits"  # Fallback
+                    )
+
+            ref_temp_processing_dir = os.path.join(
+                self.output_folder, "temp_processing"
+            )
+            reference_image_path_for_solver = os.path.join(
+                ref_temp_processing_dir, "reference_image.fit"
+            )
+
+            # À ce stade, reference_image.fit doit exister, sinon l'erreur que tu as eue se produira.
+            if not os.path.exists(reference_image_path_for_solver):
+                # Cette erreur devrait être prévenue si _get_reference_image fonctionne correctement
+                # ET si la correction pour _SOURCE_PATH trop long est appliquée DANS _get_reference_image.
+                raise RuntimeError(
+                    f"CRITICAL: Fichier de référence '{reference_image_path_for_solver}' non trouvé après appel à _get_reference_image. Vérifier la logique de sauvegarde dans SeestarAligner._get_reference_image pour les headers longs."
+                )
+
+            logger.debug(
+                f"DEBUG QM [_worker]: Image de référence de base (pour shape et solving) prête: {reference_image_path_for_solver}"
+            )
+
+            # --- 1.A Plate-solving de la référence ---
+            if (
+                self.drizzle_active_session
+                or self.is_mosaic_run
+                or self.reproject_between_batches
+                or self.reproject_coadd_final
+            ):
+                self.update_progress(
+                    "DEBUG WORKER: Section 1.A - Plate-solving de la référence..."
+                )
+            else:
+                logger.debug(
+                    "DEBUG QM [_worker]: Plate-solving de la référence ignoré (mode Stacking Classique sans reprojection)."
+                )
+            # Éviter d'écraser un WCS déjà déterminé. On se contente de
+            # réinitialiser si aucun WCS valide n'est présent.
+            if not (
+                self.reproject_between_batches and self.freeze_reference_wcs
+            ) and not (
+                self.reference_wcs_object
+                and getattr(self.reference_wcs_object, "is_celestial", False)
+            ):
+                self.reference_wcs_object = None
+            # Temporaire pour la logique mosaïque locale ; peut être prérempli
+            # avec un WCS existant si disponible.
+            temp_wcs_ancre = (
+                self.reference_wcs_object
+                if self.reference_wcs_object
+                and getattr(self.reference_wcs_object, "is_celestial", False)
+                else None
+            )
+
+            logger.debug(f"!!!! DEBUG _WORKER AVANT CRÉATION DICT SOLVEUR ANCRE !!!!")
+            logger.debug(f"    self.is_mosaic_run = {self.is_mosaic_run}")
+            logger.debug(
+                f"    self.local_solver_preference = '{getattr(self, 'local_solver_preference', 'NON_DÉFINI')}'"
+            )
+            logger.debug(
+                f"    self.astap_search_radius = {getattr(self, 'astap_search_radius', 'NON_DÉFINI')}"
+            )
+            logger.debug(
+                f"    self.reference_pixel_scale_arcsec = {self.reference_pixel_scale_arcsec}"
+            )
+
+            solver_settings_for_ref_anchor = {
+                "local_solver_preference": self.local_solver_preference,
+                "api_key": self.api_key,
+                "astap_path": self.astap_path,
+                "astap_data_dir": self.astap_data_dir,
+                "astap_search_radius": self.astap_search_radius,
+                "astap_downsample": self.astap_downsample,
+                "astap_sensitivity": self.astap_sensitivity,
+                "local_ansvr_path": self.local_ansvr_path,
+                "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,  # Peut être None au premier passage
+                "scale_tolerance_percent": 20,
+                "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
+                "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
+                "astrometry_net_timeout_sec": getattr(
+                    self, "astrometry_net_timeout_sec", 300
+                ),
+                # Hints can dramatically speed ASTAP when RA/DEC are present
+                "use_radec_hints": False,
+            }
+            # (Vos logs pour le contenu de solver_settings_for_ref_anchor peuvent rester ici)
+            logger.debug(
+                f"DEBUG QM (_worker): Contenu de solver_settings_for_ref_anchor:"
+            )
+            for key_s, val_s in solver_settings_for_ref_anchor.items():
+                if key_s == "api_key":
+                    logger.debug(
+                        f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'"
+                    )
+                else:
+                    logger.debug(f"    '{key_s}': '{val_s}'")
+
+            logger.debug(
+                f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}"
+            )
+
+            # --- CAS 1: Mosaïque Locale (FastAligner avec ou sans fallback WCS) ---
+            if (
+                use_local_aligner_for_this_mosaic_run
+            ):  # Flag défini au tout début de _worker
+                self.update_progress(
+                    "⭐ Mosaïque Locale: Traitement du panneau de référence (ancrage)..."
+                )
+                mosaic_ref_panel_image_data = reference_image_data_for_global_alignment
+                mosaic_ref_panel_header = self.reference_header_for_wcs.copy()
+
+                if reference_header_for_global_alignment.get("_SOURCE_PATH"):
+                    # path_of_processed_ref_panel_basename est déjà défini plus haut
+                    mosaic_ref_panel_header["_PANREF_FN"] = (
+                        path_of_processed_ref_panel_basename,
+                        "Base name of this mosaic ref panel source",
+                    )
+
+                if temp_wcs_ancre is not None:
+                    self.update_progress(
+                        "   -> Mosaïque Locale: WCS de référence déjà présent. Solving ignoré.",
+                        "INFO_DETAIL",
+                    )
+                elif self.astrometry_solver and os.path.exists(
+                    reference_image_path_for_solver
+                ):
+                    self.update_progress(
+                        "   -> Mosaïque Locale: Tentative résolution astrométrique ancre via self.astrometry_solver.solve..."
+                    )
+                    temp_wcs_ancre = self._solve_astrometry_async(
+                        reference_image_path_for_solver,
+                        mosaic_ref_panel_header,
+                        solver_settings_for_ref_anchor,
+                        update_header_with_solution=True,
+                        progress_message="   -> Mosaïque Locale: Résolution astrométrique en cours...",
+                    )
+                    if temp_wcs_ancre:
+                        self.update_progress(
+                            "   -> Mosaïque Locale: Astrometry (via solveur) ancre RÉUSSI."
+                        )
+                    else:
+                        self.update_progress(
+                            "   -> Mosaïque Locale: Astrometry (via solveur) ancre ÉCHOUÉ."
+                        )
+                else:
+                    self.update_progress(
+                        "   -> Mosaïque Locale: AstrometrySolver non dispo ou fichier réf. manquant. Solving ancre impossible.",
+                        "ERROR",
+                    )
+
+                if temp_wcs_ancre is None:
+                    self.update_progress(
+                        "   ⚠️ Échec de tous les solveurs pour panneau de référence. Tentative WCS approximatif (fallback)..."
+                    )
+                    _cwfh_func = None
+                    from ..enhancement.drizzle_integration import (
+                        _create_wcs_from_header as _cwfh,
+                    )
+
+                    _cwfh_func = _cwfh
+                    if _cwfh_func:
+                        temp_wcs_ancre = _cwfh_func(mosaic_ref_panel_header)
+                    if temp_wcs_ancre and temp_wcs_ancre.is_celestial:
+                        nx_hdr_a = mosaic_ref_panel_header.get("NAXIS1")
+                        ny_hdr_a = mosaic_ref_panel_header.get("NAXIS2")
+                        if nx_hdr_a and ny_hdr_a:
+                            temp_wcs_ancre.pixel_shape = (int(nx_hdr_a), int(ny_hdr_a))
+                        elif hasattr(mosaic_ref_panel_image_data, "shape"):
+                            temp_wcs_ancre.pixel_shape = (
+                                mosaic_ref_panel_image_data.shape[1],
+                                mosaic_ref_panel_image_data.shape[0],
+                            )
+
+                if temp_wcs_ancre is None:
+                    raise RuntimeError(
+                        "Mosaïque Locale: Échec critique obtention WCS pour panneau de référence."
+                    )
+                self.reference_wcs_object = temp_wcs_ancre
+
+                if self.reference_wcs_object:
+                    try:
+                        scale_deg = np.mean(
+                            np.abs(
+                                proj_plane_pixel_scales(self.reference_wcs_object)
+                            )
+                        )
+                        arcsec_raw = scale_deg * 3600.0
+                        if arcsec_raw < 0.1 or arcsec_raw > 30.0:
+                            logger.warning(
+                                "Reference WCS pixel scale %.3f arcsec/pix outside [0.1, 30.0]; clipping.",
+                                arcsec_raw,
+                            )
+                        self.reference_pixel_scale_arcsec = float(
+                            np.clip(arcsec_raw, 0.1, 30.0)
+                        )
+                    except Exception:
+                        pass  # Ignorer si erreur de calcul
+
+                if self.reference_wcs_object:
+                    logger.debug(
+                        f"  DEBUG QM [_worker]: Infos WCS du Panneau d'Ancrage (self.reference_wcs_object): CRVAL={self.reference_wcs_object.wcs.crval if self.reference_wcs_object.wcs else 'N/A'} ..."
+                    )
+
+                mat_identite_ref_panel = np.array(
+                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32

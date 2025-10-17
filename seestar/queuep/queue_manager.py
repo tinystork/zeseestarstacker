@@ -2870,7 +2870,14 @@ class SeestarQueuedStacker:
                 self.current_stack_header.copy() if self.current_stack_header else None
             )
             img_count = self.images_in_cumulative_stack
-            total_imgs_est = self.files_in_queue
+            # Use a robust estimate that accounts for queued + processed + pending additional folders
+            try:
+                if hasattr(self, "get_estimated_total_images"):
+                    total_imgs_est = self.get_estimated_total_images()
+                else:
+                    total_imgs_est = self.files_in_queue
+            except Exception:
+                total_imgs_est = self.files_in_queue
             current_batch = self.stacked_batches_count
             total_batches_est = self.total_batches_estimated
             stack_name = f"Stack ({img_count}/{total_imgs_est} Img | Batch {current_batch}/{total_batches_est if total_batches_est > 0 else '?'})"
@@ -2886,6 +2893,92 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.debug(f"Error in preview callback: {e}")
             traceback.print_exc(limit=2)
+
+    ###########################################################################################################################################################
+    # UI helpers
+    ###########################################################################################################################################################
+
+    def get_estimated_total_images(self) -> int:
+        """Return a robust estimate of the total images to process for this run.
+
+        It combines:
+          - images already processed (``processed_files_count``),
+          - items still pending in the internal queue (excluding batch-break tokens),
+          - FITS images found in any still-pending additional folders (excluding already-seen files and "stacked" dirs).
+
+        Guarantees a non-decreasing estimate by returning at least ``files_in_queue``.
+        """
+        try:
+            # Items pending in the queue (exclude batch break tokens if used)
+            pending_in_queue = 0
+            try:
+                for it in list(self.queue.queue):  # type: ignore[attr-defined]
+                    if it != _BATCH_BREAK_TOKEN:
+                        pending_in_queue += 1
+            except Exception:
+                # Fallback when internal deque is not available
+                try:
+                    pending_in_queue = int(self.queue.qsize())
+                except Exception:
+                    pending_in_queue = 0
+
+            # Snapshot additional folders without blocking the worker for long
+            add_folders = []
+            try:
+                lock = getattr(self, "folders_lock", None)
+                if lock is not None and hasattr(lock, "acquire"):
+                    if lock.acquire(timeout=0.05):
+                        try:
+                            add_folders = list(getattr(self, "additional_folders", []) or [])
+                        finally:
+                            try:
+                                lock.release()
+                            except Exception:
+                                pass
+                    else:
+                        # Couldn't get the lock quickly; use a best-effort snapshot
+                        add_folders = list(getattr(self, "additional_folders", []) or [])
+                else:
+                    add_folders = list(getattr(self, "additional_folders", []) or [])
+            except Exception:
+                add_folders = list(getattr(self, "additional_folders", []) or [])
+
+            # Count FITS files still present in those additional folders and not already seen
+            additional_pending = 0
+            try:
+                for folder in add_folders:
+                    try:
+                        abs_folder = os.path.abspath(folder)
+                        for fn in os.listdir(abs_folder):
+                            if not fn.lower().endswith((".fit", ".fits")):
+                                continue
+                            fpath = os.path.join(abs_folder, fn)
+                            # Skip any file inside a "stacked" subdir
+                            try:
+                                if self.stacked_subdir_name in os.path.relpath(fpath, abs_folder).split(os.sep):
+                                    continue
+                            except Exception:
+                                pass
+                            try:
+                                if self.stacked_subdir_name in Path(os.path.abspath(fpath)).parts:
+                                    continue
+                            except Exception:
+                                pass
+                            if os.path.abspath(fpath) not in self.processed_files:
+                                additional_pending += 1
+                    except Exception:
+                        # Ignore unreadable additional folders
+                        pass
+            except Exception:
+                additional_pending = 0
+
+            processed = int(getattr(self, "processed_files_count", 0) or 0)
+            fiq = int(getattr(self, "files_in_queue", 0) or 0)
+            total = processed + pending_in_queue + additional_pending
+            # Ensure monotonic behaviour for the UI denominator
+            return max(fiq, total)
+        except Exception:
+            return int(getattr(self, "files_in_queue", 0) or 0)
 
     ###########################################################################################################################################################
 
@@ -14190,6 +14283,16 @@ class SeestarQueuedStacker:
             ).start()
         except Exception:
             pass
+        # Lancer aussi une résolution WCS en tâche de fond pour ce dossier
+        try:
+            threading.Thread(
+                target=self._background_solve_folder,
+                args=(abs_path,),
+                daemon=True,
+                name="QM_BgSolveFolder",
+            ).start()
+        except Exception:
+            pass
         return True
 
     ################################################################################################################################################
@@ -14295,6 +14398,151 @@ class SeestarQueuedStacker:
         )
         return True
 
+    ################################################################################################################################################
+
+    def _should_background_solve(self) -> bool:
+        """Retourne True si le flux actif s'appuie sur un WCS (utile pour BG solve)."""
+        try:
+            return bool(
+                getattr(self, "reproject_between_batches", False)
+                or getattr(self, "reproject_coadd_final", False)
+                or getattr(self, "is_mosaic_run", False)
+                or getattr(self, "drizzle_active_session", False)
+            )
+        except Exception:
+            return False
+
+    def _background_solve_folder(self, folder_path: str) -> int:
+        """Résout en arrière-plan le WCS des FITS d'un dossier sans geler le GUI.
+
+        - Pool limité (1–2 threads) pour charge CPU faible
+        - Header FITS mis à jour via `_run_astap_and_update_header`
+        - Ignore les fichiers déjà munis d'un WCS valide
+
+        Retourne le nombre de tentatives effectuées.
+        """
+        try:
+            if not os.path.isdir(folder_path):
+                return 0
+            if not self._should_background_solve():
+                return 0
+
+            # Éviter les doublons sur le même dossier
+            if not hasattr(self, "_bg_solving_folders"):
+                self._bg_solving_folders = set()
+            lock = getattr(self, "folders_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self.folders_lock = lock
+            with lock:
+                if folder_path in self._bg_solving_folders:
+                    return 0
+                self._bg_solving_folders.add(folder_path)
+
+            try:
+                files = [
+                    os.path.join(folder_path, f)
+                    for f in sorted(os.listdir(folder_path))
+                    if f.lower().endswith((".fit", ".fits"))
+                ]
+            except Exception:
+                files = []
+            if not files:
+                with lock:
+                    self._bg_solving_folders.discard(folder_path)
+                return 0
+
+            targets = []
+            stacked_name = getattr(self, "stacked_subdir_name", "stacked")
+            for fp in files:
+                # ignorer les chemins du sous-dossier stacked
+                try:
+                    rel_parts = os.path.relpath(fp, folder_path).split(os.sep)
+                    if stacked_name in rel_parts:
+                        continue
+                except Exception:
+                    pass
+                # déterminer rapidement si un WCS valide existe déjà
+                try:
+                    hdr = fits.getheader(fp, memmap=False)
+                    try:
+                        # essayer d'injecter un WCS sidecar si présent
+                        hdr = inject_sanitized_wcs(hdr, fp) or hdr
+                    except Exception:
+                        pass
+                    has = False
+                    try:
+                        w = WCS(hdr, naxis=2)
+                        has = bool(getattr(w, "is_celestial", False))
+                    except Exception:
+                        has = False
+                    if not has:
+                        targets.append(fp)
+                except Exception:
+                    targets.append(fp)
+
+            if not targets:
+                with lock:
+                    self._bg_solving_folders.discard(folder_path)
+                return 0
+
+            try:
+                self.update_progress(
+                    f"[BG-Solve] Résolution WCS de {len(targets)} fichier(s) dans '{os.path.basename(folder_path)}'",
+                    None,
+                )
+            except Exception:
+                pass
+
+            try:
+                ncpu = os.cpu_count() or 1
+            except Exception:
+                ncpu = 1
+            max_workers = max(1, min(2, ncpu // 4 or 1))
+
+            def _solve_one(pth: str) -> bool:
+                if getattr(self, "stop_processing", False):
+                    return False
+                try:
+                    return bool(self._run_astap_and_update_header(pth))
+                except Exception:
+                    return False
+
+            done = 0
+            ok_count = 0
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    futs = {ex.submit(_solve_one, p): p for p in targets}
+                    for fut in concurrent.futures.as_completed(futs):
+                        try:
+                            ok = bool(fut.result())
+                        except Exception:
+                            ok = False
+                        done += 1
+                        if ok:
+                            ok_count += 1
+                        if done == len(targets) or ok or (done % 5 == 0):
+                            try:
+                                self.update_progress(
+                                    f"[BG-Solve] Avancement {done}/{len(targets)} (succès: {ok_count})",
+                                    None,
+                                )
+                            except Exception:
+                                pass
+            finally:
+                with lock:
+                    self._bg_solving_folders.discard(folder_path)
+
+            try:
+                self.update_progress(
+                    f"[BG-Solve] Terminé: {ok_count}/{len(targets)} résolus dans '{os.path.basename(folder_path)}'",
+                    None,
+                )
+            except Exception:
+                pass
+            return done
+        except Exception:
+            return 0
     ################################################################################################################################################
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---

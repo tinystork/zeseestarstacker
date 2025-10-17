@@ -1,0 +1,200 @@
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        ]:
+            os.environ[var] = str(nthreads)
+        try:
+            from threadpoolctl import threadpool_limits
+        except Exception:
+            threadpool_limits = None
+        if threadpool_limits:
+            try:
+                threadpool_limits(nthreads)
+            except Exception:
+                pass
+
+        if "mkl" in sys.modules:
+            try:
+                sys.modules["mkl"].set_num_threads(nthreads)
+            except Exception:
+                pass
+        try:
+            cv2.setNumThreads(nthreads)
+        except Exception:
+            pass
+        self.num_threads = nthreads
+        if hasattr(self, "update_progress"):
+            self.update_progress(f"Threads limited to {nthreads}")
+
+    def _get_indices(self, shape_hw: tuple[int, int], flat: bool = False):
+        """Return cached np.indices for ``shape_hw``.
+
+        Parameters
+        ----------
+        shape_hw : tuple[int, int]
+            Image shape ``(H, W)``.
+        flat : bool, optional
+            Whether to return flattened arrays.
+        """
+        shape_hw = tuple(int(v) for v in shape_hw)
+        grid = self._indices_cache.get(shape_hw)
+        if grid is None:
+            grid = np.indices(shape_hw)
+            self._indices_cache[shape_hw] = grid
+        if flat:
+            return grid.reshape(2, -1)
+        return grid
+
+    def _process_batch_parallel(self, filepaths: list[str]):
+        start = time.monotonic()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as ex:
+            results = list(ex.map(self._process_file, filepaths))
+        duration = time.monotonic() - start
+        msg = f"Processed {len(filepaths)} images in {duration:.2f} s"
+        self.update_progress(msg)
+
+        if duration / max(len(filepaths), 1) > 0.01 and self.batch_size > 1:
+            self.batch_size = max(1, self.batch_size // 2)
+            self.update_progress(f"Batch size reduced to {self.batch_size}")
+        return results
+
+    def _prefetch(self, file_paths):
+        if self.io_profile != "usb":
+            return
+
+        def _read_one(p):
+            try:
+                with open(p, "rb") as f:
+                    f.read(1024)
+            except Exception:
+                pass
+
+        def _run(files):
+            async def _prefetch_async():
+                tasks = [asyncio.to_thread(_read_one, fp) for fp in files]
+                await asyncio.gather(*tasks)
+
+            asyncio.run(_prefetch_async())
+
+        threading.Thread(
+            target=_run,
+            args=(list(file_paths),),
+            daemon=True,
+        ).start()
+
+    def _estimate_batch_size(self) -> int:
+        """Estimate an appropriate batch size based on available FITS files."""
+
+        sample_img_path = None
+        candidate_folders: list[str] = []
+
+        if self.current_folder and os.path.isdir(self.current_folder):
+            candidate_folders.append(self.current_folder)
+
+        for folder in getattr(self, "additional_folders", []) or []:
+            if folder and os.path.isdir(folder) and folder not in candidate_folders:
+                candidate_folders.append(folder)
+
+        for folder in candidate_folders:
+            try:
+                fits_files = [
+                    f
+                    for f in sorted(os.listdir(folder))
+                    if f.lower().endswith((".fit", ".fits"))
+                ]
+            except Exception:
+                continue
+            if fits_files:
+                sample_img_path = os.path.join(folder, fits_files[0])
+                break
+
+        try:
+            estimated = estimate_batch_size(sample_image_path=sample_img_path)
+            return max(1, int(estimated))
+        except Exception as err:
+            warn_msg = f"⚠️ Erreur estimation taille lot auto: {err}. Utilisation défaut (10)."
+            self.update_progress(warn_msg, "WARN")
+            self.logger.warning("[AutoBatch] %s", warn_msg)
+            return 10
+
+    def _start_drizzle_process(
+        self,
+        batch_temp_filepaths_list,
+        current_batch_num=0,
+        total_batches_est=0,
+    ):
+        """Launch incremental drizzle processing using the dedicated executor."""
+
+        fut = self.drizzle_executor.submit(
+            drizzle_batch_worker,
+            (
+                self,
+                batch_temp_filepaths_list,
+                current_batch_num,
+                total_batches_est,
+            ),
+        )
+        self.drizzle_processes.append(fut)
+
+    def _wait_drizzle_processes(self):
+        """Wait for all background drizzle processes to finish."""
+        for p in self.drizzle_processes:
+            if hasattr(p, "join"):
+                p.join()
+                result = None
+            else:
+                try:
+                    result = p.result()
+                except Exception:
+                    result = None
+            if result and isinstance(result, tuple) and len(result) == 2:
+                sci_path, wht_paths = result
+                if isinstance(sci_path, list) and isinstance(wht_paths, list):
+                    # Result from _process_incremental_drizzle_batch - update
+                    # our persistent drizzle arrays
+                    for idx, driz in enumerate(self.incremental_drizzle_objects or []):
+                        if idx < len(sci_path) and idx < len(wht_paths):
+                            driz.out_img[...] = sci_path[idx]
+                            driz.out_wht[...] = wht_paths[idx]
+                    self.incremental_drizzle_sci_arrays = sci_path
+                    self.incremental_drizzle_wht_arrays = wht_paths
+                elif sci_path and wht_paths:
+                    self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
+        self.drizzle_processes = []
+
+    # ------------------------------------------------------------------
+    # Parallel reprojection of a list of FITS files
+    # ------------------------------------------------------------------
+
+    def _get_final_match_background(self, default: bool = True) -> bool:
+        """Return the desired ``match_background`` flag for the final combine."""
+        settings_obj = getattr(self, "settings", None)
+        if settings_obj is not None:
+            value = getattr(settings_obj, "match_background_for_final", None)
+            if value is not None:
+                result = bool(value)
+                self.match_background_for_final = result
+                return result
+
+        if getattr(self, "_match_background_for_final_set", False):
+            result = bool(getattr(self, "match_background_for_final", default))
+            self.match_background_for_final = result
+            return result
+
+        value = getattr(self, "match_background_for_final", None)
+        if value is not None and (
+            value
+            or getattr(self, "_match_background_for_final_set", False)
+        ):
+            result = bool(value)
+            self.match_background_for_final = result
+            return result
+
+        if getattr(self, "batch_size", None) == 1:
+            self.match_background_for_final = False
+            return False
+
+        result = bool(default)
+        self.match_background_for_final = result

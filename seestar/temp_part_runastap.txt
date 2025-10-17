@@ -1,0 +1,220 @@
+        The previously processed batch count is preserved to avoid
+        skewing ETA calculations when memmaps are reallocated.
+        """
+        prev_count = getattr(self, "stacked_batches_count", 0)
+
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        os.makedirs(memmap_dir, exist_ok=True)
+        self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+        self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+        self.memmap_shape = (shape_hw[0], shape_hw[1], 3)
+        self.batch_count_path = os.path.join(self.output_folder, "batches_count.txt")
+
+        self.cumulative_sum_memmap = np.lib.format.open_memmap(
+            self.sum_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_sum,
+            shape=self.memmap_shape,
+        )
+        self.cumulative_wht_memmap = np.lib.format.open_memmap(
+            self.wht_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_wht,
+            shape=shape_hw,
+        )
+
+        self.cumulative_sum_memmap[:] = 0.0
+        self.cumulative_wht_memmap[:] = 0.0
+
+        self.stacked_batches_count = prev_count
+        self._update_batch_count_file()
+
+    def _ensure_memmaps_match_reference(self) -> None:
+        """Ensure SUM/WHT memmaps match ``self.reference_shape``."""
+        if self.reference_shape is None:
+            return
+
+        expected_sum_shape = (self.reference_shape[0], self.reference_shape[1], 3)
+        expected_wht_shape = (self.reference_shape[0], self.reference_shape[1])
+
+        need_recreate = (
+            self.cumulative_sum_memmap is None
+            or self.cumulative_wht_memmap is None
+            or self.cumulative_sum_memmap.shape != expected_sum_shape
+            or self.cumulative_wht_memmap.shape != expected_wht_shape
+        )
+
+        if need_recreate:
+            self._close_memmaps()
+            prev_count = getattr(self, "stacked_batches_count", 0)
+
+            memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+            os.makedirs(memmap_dir, exist_ok=True)
+            self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+            self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+            self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                self.sum_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_sum,
+                shape=expected_sum_shape,
+            )
+            self.cumulative_sum_memmap[:] = 0.0
+            self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                self.wht_memmap_path,
+                mode="w+",
+                dtype=self.memmap_dtype_wht,
+                shape=expected_wht_shape,
+            )
+            self.cumulative_wht_memmap[:] = 0.0
+            self.memmap_shape = expected_sum_shape
+            self.stacked_batches_count = prev_count
+            self._update_batch_count_file()
+            self.update_progress(f"Re-init memmaps → new shape {self.memmap_shape[:2]}")
+
+    def finalize_continuous_stack(self):
+        wht = self.cumulative_wht_memmap
+        sum_ = self.cumulative_sum_memmap
+
+        mask = wht > 0
+        avg = np.zeros_like(sum_, dtype=np.float32)
+        if np.any(mask):
+            avg[mask] = (sum_[mask] / wht[mask][..., None]).astype(np.float32)
+
+            ys, xs = np.where(mask)
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+
+            avg = avg[y0:y1, x0:x1, :]
+            if self.reference_header_for_wcs is not None:
+                hdr = self.reference_header_for_wcs.copy()
+                if "CRPIX1" in hdr:
+                    hdr["CRPIX1"] -= x0
+                if "CRPIX2" in hdr:
+                    hdr["CRPIX2"] -= y0
+                self.reference_header_for_wcs = hdr
+            if getattr(self, "reference_wcs_object", None) is not None:
+                hdr = self.reference_wcs_object.to_header()
+                hdr["CRPIX1"] -= x0
+                hdr["CRPIX2"] -= y0
+                self.reference_wcs_object = WCS(hdr)
+
+        hdu = fits.PrimaryHDU(
+            data=avg.astype(np.float32), header=self.reference_header_for_wcs
+        )
+        # Save inside the configured output folder so batch_size=0 behaves like
+        # before the classic-batch additions.
+        out_fp = os.path.join(
+            getattr(self, "output_folder", ""), "master_stack_classic_nodriz.fits"
+        )
+        fits.writeto(out_fp, hdu.data, hdu.header, overwrite=True)
+        self.final_stacked_path = out_fp
+
+    def _final_reproject_cached_files(self, cache_list):
+        """Reproject cached solved images and accumulate them."""
+        if not cache_list:
+            self.update_progress(
+                "⚠️ Aucun fichier résolu pour reprojection finale.", "WARN"
+            )
+            return
+
+        wcs_list = [w for _, w, _ in cache_list if w is not None]
+        headers = [h for _, _, h in cache_list]
+        scale_factor = (
+            self.drizzle_scale + 1.0
+            if self.drizzle_active_session
+            else self.drizzle_scale
+        )
+        out_wcs, out_shape = self._calculate_final_mosaic_grid(
+            wcs_list,
+            headers,
+            scale_factor=scale_factor,
+            auto_rotate=True,
+        )
+        if out_wcs is None or out_shape is None:
+            self.update_progress("⚠️ Échec du calcul de la grille finale.", "WARN")
+            return
+
+        self.reference_wcs_object = out_wcs
+        self._close_memmaps()
+        self._create_sum_wht_memmaps(out_shape)
+
+        for path, wcs_obj, hdr in cache_list:
+            try:
+                with fits.open(path, memmap=False) as hdul:
+                    dat = hdul[0].data.astype(np.float32)
+                if dat.ndim == 3 and dat.shape[0] in (3, 4):
+                    dat = np.moveaxis(dat, 0, -1)
+                cov = np.ones(dat.shape[:2], dtype=np.float32)
+                reproj_img, cov = self._reproject_to_reference(dat, wcs_obj)
+                self._combine_batch_result(reproj_img, hdr, cov, batch_wcs=None)
+                if hasattr(self.cumulative_sum_memmap, "flush"):
+                    self.cumulative_sum_memmap.flush()
+                if hasattr(self.cumulative_wht_memmap, "flush"):
+                    self.cumulative_wht_memmap.flush()
+            except Exception as e:
+                self.update_progress(
+                    f"⚠️ Reprojection finale ignorée pour {os.path.basename(path)}: {e}",
+                    "WARN",
+                )
+
+        self._save_final_stack(output_filename_suffix="_classic_sumw")
+
+    def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
+        """Save a classic batch and optionally solve/reproject it."""
+        out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
+        os.makedirs(out_dir, exist_ok=True)
+
+        sci_fits = os.path.join(out_dir, f"classic_batch_{batch_idx:03d}.fits")
+        wht_paths: list[str] = []
+
+        final_stacked = stacked_np
+        final_wht = wht_2d
+        np.nan_to_num(final_wht, copy=False)
+        # Potential WCS present on the incoming header (e.g. from drizzle)
+        input_wcs = None
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            pass
+
+        # Crop the stacked tile before solving so the WCS corresponds
+        # to the final data saved on disk.
+        if (
+            getattr(self, "apply_master_tile_crop", False)
+            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
+        ):
+            try:
+                cp = self.master_tile_crop_percent_decimal
+                dh = int(final_stacked.shape[0] * cp)
+                dw = int(final_stacked.shape[1] * cp)
+                if dh > 0 or dw > 0:
+                    end_h = -dh if dh != 0 else None
+                    end_w = -dw if dw != 0 else None
+                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
+                    final_wht = final_wht[dh:end_h, dw:end_w]
+                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
+                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+            except Exception:
+                pass
+
+        # Update WCS object after potential cropping adjustments
+        try:
+            input_wcs = WCS(header, naxis=2)
+        except Exception:
+            input_wcs = None
+
+        # Propagate basic pointing information so intermediate batches remain
+        # self-contained even when solving is deferred. RA/DEC are taken from
+        # the WCS if available or fall back to the reference header.
+        if "RA" not in header:
+            if "CRVAL1" in header:
+                header["RA"] = (
+                    float(header["CRVAL1"]),
+                    "[deg] Approx pointing RA from WCS",
+                )
+            elif (
+                getattr(self, "reference_header_for_wcs", None) is not None
+                and "RA" in self.reference_header_for_wcs
+            ):

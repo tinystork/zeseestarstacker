@@ -1,0 +1,60 @@
+                f"✅ Taille lot auto estimée et appliquée: {self.batch_size}", None
+            )
+        elif requested_batch_size == 0:
+            # Mode "batch size 0" explicite : aucun lot, tout en RAM
+            self.batch_size = 0
+            if self.reproject_between_batches:
+                self.update_progress(
+                    "ⓘ batch_size=0 : désactivation de la reprojection entre lots (workflow WIP).",
+                    None,
+                )
+                logger.debug(
+                    "  -> batch_size=0: reproject_between_batches forcé à False pour reproduire WIP."
+                )
+                self.reproject_between_batches = False
+            if not self.freeze_reference_wcs:
+                logger.debug(
+                    "  -> batch_size=0: freeze_reference_wcs activé pour conserver la grille WIP."
+                )
+                self.freeze_reference_wcs = True
+            if reproject_coadd_final is None and not self.reproject_coadd_final:
+                self.reproject_coadd_final = True
+                self.stack_final_combine = "reproject_coadd"
+                self.update_progress(
+                    "ⓘ batch_size=0 : activation automatique de Reproject&Coadd (comportement WIP).",
+                    None,
+                )
+                logger.debug(
+                    "  -> batch_size=0: reproject_coadd_final forcé à True pour reproduire le workflow WIP."
+                )
+            elif self.reproject_coadd_final and getattr(self, "stack_final_combine", "").lower() != "reproject_coadd":
+                self.stack_final_combine = "reproject_coadd"
+            # Re-synchronise final combine flags with GUI selection for BS=0
+            try:
+                _fm = str(getattr(self, "stack_final_combine", "")).lower()
+                if _fm in ("reproject", "mean", "median", "winsorized_sigma_clip"):
+                    self.reproject_coadd_final = False
+            except Exception:
+                pass
+        else:
+            self.batch_size = max(1, int(requested_batch_size))
+        self.update_progress(
+            f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}"
+        )
+        logger.debug(
+            "DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session."
+        )
+
+        # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
+        # ... (le reste de la méthode est inchangé) ...
+        logger.debug(
+            "DEBUG QM (start_processing): Étape 2 - Préparation référence (shape ET WCS global si Drizzle/Mosaïque)..."
+        )
+        reference_image_data_for_shape_determination = None
+        reference_header_for_shape_determination = None
+        ref_shape_hwc = None
+
+        try:
+            potential_folders_for_shape = []
+            if self.current_folder and os.path.isdir(self.current_folder):
+                potential_folders_for_shape.append(self.current_folder)

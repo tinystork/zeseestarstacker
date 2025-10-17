@@ -1,0 +1,350 @@
+                            except Exception:
+                                has_wcs = False
+                        if not has_wcs and getattr(self, "batch_size", 0) != 0:
+                            try:
+                                self._run_astap_and_update_header(sci_path)
+                                hdr = fits.getheader(sci_path, memmap=False)
+                            except Exception:
+                                hdr = None
+
+            # 2.1 Load science cube + WCS
+            try:
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    if hdr is None:
+                        hdr = hdul[0].header
+                h, w = data_cxhxw.shape[-2:]
+                if getattr(self, "batch_size", 0) == 0 and self.reference_wcs_object is not None:
+                    batch_wcs = self.reference_wcs_object
+                    batch_wcs.pixel_shape = (w, h)
+                else:
+                    batch_wcs = WCS(hdr, naxis=2)
+                    ensure_wcs_pixel_shape(batch_wcs, h, w)
+            except Exception:
+                continue  # silently skip unreadable batch
+
+            # 2.2 Load coverage / weight map (or fallback)
+            try:
+                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
+                    np.float32, copy=False
+                )
+                np.nan_to_num(coverage, copy=False)
+                coverage *= make_radial_weight_map(*coverage.shape)
+            except Exception:
+                coverage = np.ones((h, w), dtype=np.float32)
+
+            # ------------------------------------------------------------------
+            # 2.3 Prepare batch data
+            # ------------------------------------------------------------------
+            img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+            if ref_p1 is None or ref_p99 is None:
+                try:
+                    base = img_hwc.astype(np.float32, copy=False)
+                    if base.ndim == 3:
+                        lum = (
+                            0.299 * base[..., 0]
+                            + 0.587 * base[..., 1]
+                            + 0.114 * base[..., 2]
+                        )
+                    else:
+                        lum = base
+                    finite = np.isfinite(lum)
+                    if np.count_nonzero(finite) > 50:
+                        ref_p1 = float(np.nanpercentile(lum[finite], 1.0))
+                        ref_p99 = float(np.nanpercentile(lum[finite], 99.0))
+                except Exception:
+                    ref_p1, ref_p99 = None, None
+
+            # 2.4 Feed per‑channel lists -------------------------------------
+            wcs_for_grid.append(batch_wcs)
+            headers_for_grid.append(hdr)
+
+            for ch in range(3):
+                channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
+                channel_footprints[ch].append(coverage)
+
+        # --- 3. Sanity checks ----------------------------------------------------
+        if len(wcs_for_grid) < 2:
+            self.update_progress(
+                f"⚠️ Reprojection ignorée : seulement {len(wcs_for_grid)} WCS valides.",
+                "WARN",
+            )
+            return False
+
+        # --- 4. Determine output grid -------------------------------------------
+        if self.reference_wcs_object is not None and self.reference_shape is not None:
+            out_wcs = self.reference_wcs_object
+            out_shape = self.reference_shape
+        elif self.freeze_reference_wcs and self.reference_wcs_object is not None:
+            out_wcs, out_shape = self._calculate_fixed_orientation_grid(
+                self.reference_wcs_object,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+        else:
+            out_wcs, out_shape = self._calculate_final_mosaic_grid(
+                wcs_for_grid,
+                headers_for_grid,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+                auto_rotate=True,
+            )
+        if out_wcs is None or out_shape is None:
+            self.update_progress(
+                "⚠️ Reprojection ignorée : échec du calcul de la grille finale.",
+                "WARN",
+            )
+            return False
+
+        # --- 5. Combine per‑channel stacks --------------------------------------
+        final_channels = []
+        final_cov = None
+
+        for ch in range(3):
+            sci, cov = reproject_and_coadd(
+                channel_arrays_wcs[ch],
+                output_projection=out_wcs,
+                shape_out=out_shape,
+                input_weights=channel_footprints[ch],
+                reproject_function=reproject_interp,
+                combine_function="mean",
+                match_background=match_bg,
+            )
+
+
+            final_channels.append(sci.astype(np.float32))
+
+            if final_cov is None:
+                final_cov = cov.astype(np.float32)
+
+        data_hwc = np.stack(final_channels, axis=-1)
+        cov_hw = final_cov
+        data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(data_hwc, cov_hw, out_wcs)
+        apply_white_fix = (
+            int(getattr(self, "batch_size", 0) or 0) == 0
+            and getattr(self, "reproject_coadd_final", False)
+        )
+        if apply_white_fix:
+            try:
+                arr = data_hwc.astype(np.float32, copy=False)
+                if arr.ndim == 3:
+                    luminance = (
+                        0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+                    )
+                else:
+                    luminance = arr
+                finite = np.isfinite(luminance)
+                if np.count_nonzero(finite) > 50:
+                    p1 = float(np.nanpercentile(luminance[finite], 1.0))
+                    p99 = float(np.nanpercentile(luminance[finite], 99.0))
+                    rng = p99 - p1
+                    mean_val = float(np.nanmean(luminance[finite]))
+                    triggered = (rng <= 3e-3 and mean_val >= 0.9) or (mean_val >= 0.98)
+                    if triggered and (
+                        ref_p1 is not None and ref_p99 is not None and ref_p99 > ref_p1
+                    ):
+                        self.update_progress(
+                            (
+                                f"[Reproject White-Fix] rescale to reference "
+                                f"(cur p1/p99={p1:.6f}/{p99:.6f} -> ref {ref_p1:.3f}/{ref_p99:.3f})."
+                            ),
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        ref_scale = max(ref_p99 - ref_p1, 1e-6)
+                        arr = (arr - p1) / cur_scale
+                        arr = arr * ref_scale + ref_p1
+                        arr = np.clip(
+                            arr,
+                            ref_p1 - 5 * ref_scale,
+                            ref_p99 + 5 * ref_scale,
+                        )
+                        data_hwc = arr.astype(np.float32, copy=False)
+                    elif triggered:
+                        self.update_progress(
+                            "[Reproject White-Fix] fallback normalization (no valid reference).",
+                            "WARN",
+                        )
+                        cur_scale = max(rng, 1e-6)
+                        arr = ((arr - p1) / cur_scale).clip(0.0, 1.0)
+                        data_hwc = arr.astype(np.float32, copy=False)
+            except Exception as _e_fix:
+                try:
+                    self.update_progress(
+                        f"[Reproject White-Fix] skipped due to error: {_e_fix}",
+                        "DEBUG",
+                    )
+                except Exception:
+                    pass
+        self.current_stack = data_hwc
+        self.current_coverage = cov_hw
+        self.current_stack_header = fits.Header()
+        self.current_stack_header.update(out_wcs.to_header(relax=True))
+
+        # Caller will take care of saving the FITS file / updating GUI, etc.
+        return True
+
+    def _finalize_reproject_and_coadd_streaming(
+        self,
+        aligned_dir: str,
+        out_fp: str,
+        *,
+        auto_rotate: bool = False,
+        wht_mode: str = "mean",
+        memmap_dir: str | None = None,
+    ) -> bool:
+        """Reproject & Coadd en streaming pour batch size = 1.
+
+        Les images alignées ``aligned_*.fits`` sont reprojetées vers une grille
+        WCS globale fixe, puis accumulées sur disque via des memmaps afin de ne
+        pas consommer de RAM. L'image finale est sauvegardée avec une extension
+        ``WHT``.
+        """
+
+        import glob
+        import os
+        import tempfile
+        import numpy as np
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        from seestar.core.reprojection_utils import (
+            collect_headers,
+            compute_final_output_grid,
+        )
+        from seestar.utils.wcs_utils import inject_sanitized_wcs
+        from seestar.enhancement.reproject_utils import (
+            reproject_interp,
+            reproject_and_coadd_from_paths,
+            subtract_sigma_clipped_median,
+        )
+
+        match_bg = self._get_final_match_background(default=True)
+
+        def _safe_progress(msg, prog=None, level=None):
+            try:
+                self.update_progress(msg, prog, level)
+            except Exception:
+                pass
+
+        # --- New classic-batch path for batch_size == 1 ---------------------
+        if (
+            getattr(self, "batch_size", 0) == 1
+            and getattr(self, "use_classic_batches_for_final_coadd", True)
+        ):
+            import time
+
+            job_dir = os.path.abspath(os.path.join(aligned_dir, os.pardir))
+            classic_files = sorted(
+                glob.glob(os.path.join(job_dir, "classic_batch*.fit*"))
+                + glob.glob(os.path.join(aligned_dir, "classic_batch*.fit*"))
+            )
+            classic_files = [p for p in classic_files if os.path.isfile(p)]
+            if len(classic_files) >= 2:
+                _safe_progress(
+                    f"BS=1 → classic-batch coadd choisi ({len(classic_files)} fichiers)",
+                    level="DEBUG",
+                )
+                t_start = time.time()
+
+                def _extract_params(hdr):
+                    keys = [
+                        "NAXIS1",
+                        "NAXIS2",
+                        "CRPIX1",
+                        "CRPIX2",
+                        "CRVAL1",
+                        "CRVAL2",
+                        "CTYPE1",
+                        "CTYPE2",
+                    ]
+                    params = {k: hdr.get(k) for k in keys}
+                    if "CD1_1" in hdr:
+                        for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2"):
+                            params[k] = hdr.get(k)
+                    else:
+                        for k in ("PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2"):
+                            params[k] = hdr.get(k)
+                    return params
+
+                def _params_close(p1, p2, tol=1e-6):
+                    for k, v1 in p1.items():
+                        v2 = p2.get(k)
+                        if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                            if not np.isfinite(v1) or not np.isfinite(v2):
+                                return False
+                            if abs(v1 - v2) > tol:
+                                return False
+                        else:
+                            if v1 != v2:
+                                return False
+                    return True
+
+                try:
+                    ref_hdr = fits.getheader(classic_files[0], memmap=False)
+                    ref_params = _extract_params(ref_hdr)
+                    same_grid = True
+                    for fp in classic_files[1:]:
+                        try:
+                            hdr = fits.getheader(fp, memmap=False)
+                            if not _params_close(ref_params, _extract_params(hdr)):
+                                same_grid = False
+                                break
+                        except Exception:
+                            same_grid = False
+                            break
+                except Exception:
+                    same_grid = False
+
+                if same_grid:
+                    def _fast_coadd(paths, hdr_ref):
+                        C = None
+                        sum_arr = wht_arr = None
+                        for fp in paths:
+                            with fits.open(fp, memmap=True) as hdul:
+                                data = np.asarray(hdul[0].data, dtype=np.float32)
+                                if data.ndim == 2:
+                                    arr = data[np.newaxis, ...]
+                                elif data.ndim == 3 and data.shape[0] in (1, 3, 4):
+                                    arr = data[:3]
+                                else:
+                                    arr = np.moveaxis(data, -1, 0)[:3]
+                            C = arr.shape[0] if C is None else C
+                            if sum_arr is None:
+                                sum_arr = np.zeros_like(arr, dtype=np.float32)
+                                wht_arr = np.zeros(arr.shape[1:], dtype=np.float32)
+                            mask = np.mean(arr, axis=0)
+                            w = (mask != 0).astype(np.float32)
+                            for c in range(C):
+                                ch, _med = subtract_sigma_clipped_median(
+                                    arr[c], min_valid=100
+                                )
+                                sum_arr[c] += ch * w
+                            wht_arr += w
+                        if sum_arr is None or not np.any(wht_arr > 0):
+                            return False
+                        eps = 1e-6
+                        res = sum_arr / np.maximum(wht_arr, eps)
+                        ys, xs = np.nonzero(wht_arr > 0)
+                        y0, y1 = ys.min(), ys.max() + 1
+                        x0, x1 = xs.min(), xs.max() + 1
+                        res = res[:, y0:y1, x0:x1]
+                        wht_crop = wht_arr[y0:y1, x0:x1]
+                        hdr_out = hdr_ref.copy()
+                        hdr_out["NAXIS1"] = x1 - x0
+                        hdr_out["NAXIS2"] = y1 - y0
+                        if "CRPIX1" in hdr_out:
+                            hdr_out["CRPIX1"] -= x0
+                        if "CRPIX2" in hdr_out:
+                            hdr_out["CRPIX2"] -= y0
+                        fits.HDUList(
+                            [
+                                fits.PrimaryHDU(res.astype(np.float32), header=hdr_out),
+                                fits.ImageHDU(wht_crop.astype(np.float32), name="WHT"),
+                            ]
+                        ).writeto(out_fp, overwrite=True)
+                        logger.debug(
+                            "fast-path classic-batch: sum range [%.4g, %.4g], wht range [%.4g, %.4g]",
+                            float(np.nanmin(res)),
+                            float(np.nanmax(res)),
+                            float(np.nanmin(wht_crop)),
+                            float(np.nanmax(wht_crop)),
+                        )
+                        logger.debug(

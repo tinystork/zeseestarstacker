@@ -3367,7 +3367,8 @@ class SeestarStackerGUI:
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-            self.aligned_files_var.set(default_aligned_fmt.format(count="--"))
+            # Afficher 0 à l'ouverture pour plus de clarté
+            self.aligned_files_var.set(default_aligned_fmt.format(count=0))
             self.remaining_time_var.set("--:--:--")
         else:  # Ensure static labels are translated if processing
             if hasattr(self, "remaining_static_label"):
@@ -3641,6 +3642,13 @@ class SeestarStackerGUI:
                 self.preview_img_count = img_count
                 # Toujours refléter un nouveau total si le backend l'a recalculé
                 self.preview_total_imgs = total_imgs
+                try:
+                    if hasattr(self, "queued_stacker") and hasattr(self.queued_stacker, "get_estimated_total_images"):
+                        _est_total = int(self.queued_stacker.get_estimated_total_images())
+                        if _est_total and _est_total > int(self.preview_total_imgs or 0):
+                            self.preview_total_imgs = _est_total
+                except Exception:
+                    pass
                 self.preview_current_batch = current_batch
                 self.preview_total_batches = total_batches
                 self.refresh_preview(recalculate_histogram=True)
@@ -3658,6 +3666,13 @@ class SeestarStackerGUI:
         self.preview_img_count = img_count
         # Toujours refléter un nouveau total si le backend l'a recalculé
         self.preview_total_imgs = total_imgs
+        try:
+            if hasattr(self, "queued_stacker") and hasattr(self.queued_stacker, "get_estimated_total_images"):
+                _est_total = int(self.queued_stacker.get_estimated_total_images())
+                if _est_total and _est_total > int(self.preview_total_imgs or 0):
+                    self.preview_total_imgs = _est_total
+        except Exception:
+            pass
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
 
@@ -4273,7 +4288,14 @@ class SeestarStackerGUI:
                 q_stacker = self.queued_stacker
                 processed = q_stacker.processed_files_count
                 aligned = q_stacker.aligned_files_count
-                total_queued = q_stacker.files_in_queue
+                # Prefer a robust total that includes queued + processed + pending additional folders
+                try:
+                    if hasattr(q_stacker, "get_estimated_total_images"):
+                        total_queued = int(q_stacker.get_estimated_total_images())
+                    else:
+                        total_queued = int(q_stacker.files_in_queue)
+                except Exception:
+                    total_queued = int(getattr(q_stacker, "files_in_queue", 0) or 0)
 
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
@@ -4348,8 +4370,14 @@ class SeestarStackerGUI:
                 and isinstance(getattr(qs, "processed_files_count", None), int)
             ):
 
-                remaining = max(0, qs.files_in_queue - qs.processed_files_count)
-                total = qs.files_in_queue
+                try:
+                    if hasattr(qs, "get_estimated_total_images"):
+                        total = int(qs.get_estimated_total_images())
+                    else:
+                        total = int(qs.files_in_queue)
+                except Exception:
+                    total = int(getattr(qs, "files_in_queue", 0) or 0)
+                remaining = max(0, total - int(qs.processed_files_count))
                 self.remaining_files_var.set(f"{remaining}/{total}")
             else:
                 # Données indisponibles : on affiche un placeholder neutre
@@ -4368,7 +4396,7 @@ class SeestarStackerGUI:
         qs = getattr(self, "queued_stacker", None)
         if self.processing and qs and qs.is_running():
             lock = getattr(qs, "folders_lock", None)
-            if lock and lock.acquire(blocking=False):
+            if lock and lock.acquire(timeout=0.15):
                 try:
                     # Unifier la vue: backend + dossiers stagés côté GUI
                     current = set(os.path.abspath(p) for p in getattr(qs, "additional_folders", []) or [])
@@ -4385,10 +4413,24 @@ class SeestarStackerGUI:
                     lock.release()
             else:
                 try:
-                    self.root.after(100, self.update_additional_folders_display)
-                except tk.TclError:
+                    # Fallback non bloquant: lire un cliché et calculer tout de même
+                    current = [
+                        os.path.abspath(p)
+                        for p in (getattr(qs, "additional_folders", []) or [])
+                    ]
+                    staged = [
+                        os.path.abspath(p)
+                        for p in (getattr(self, "additional_folders_to_process", []) or [])
+                        if p
+                    ]
+                    union_abs = []
+                    for p in current + staged:
+                        if p not in union_abs:
+                            union_abs.append(p)
+                    count = len(union_abs)
+                except Exception:
+                    # Dernier recours: garder la valeur courante de count
                     pass
-                return
         else:
             # En dehors du traitement: n'afficher que les dossiers en attente GUI (unicité)
             try:
@@ -5368,8 +5410,37 @@ class SeestarStackerGUI:
         # --- CODE EXISTANT (garde intact le reste) ------------------------------
         # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
+            # Use the count provided by the backend event to avoid race conditions
             try:
-                self.root.after_idle(self.update_additional_folders_display)
+                parts = message.split(":", 1)
+                backend_count = int(parts[1]) if len(parts) == 2 else 0
+            except Exception:
+                backend_count = 0
+
+            # If some folders are still staged on the GUI side, include them
+            try:
+                staged = [p for p in (getattr(self, "additional_folders_to_process", []) or []) if p]
+                staged_count = len(set(os.path.abspath(p) for p in staged))
+            except Exception:
+                staged_count = 0
+
+            total_count = backend_count + staged_count
+
+            try:
+                if total_count <= 0:
+                    self.additional_folders_var.set(self.tr("no_additional_folders"))
+                elif total_count == 1:
+                    self.additional_folders_var.set(self.tr("1 additional folder"))
+                else:
+                    self.additional_folders_var.set(
+                        self.tr("{count} additional folders", default="{count} add. folders").format(count=total_count)
+                    )
+            except tk.TclError:
+                pass
+
+            # Also refresh the remaining counter; this is cheap and keeps UI consistent
+            try:
+                self.root.after_idle(self.update_remaining_files)
             except tk.TclError:
                 pass
             return
@@ -5941,6 +6012,12 @@ class SeestarStackerGUI:
                 self.open_output_button.config(state=tk.NORMAL if can_open_output_final else tk.DISABLED)
             if hasattr(self, "remaining_time_var"):
                 self.remaining_time_var.set("00:00:00")
+            # Remettre le compteur Aligned à 0 en fin de traitement (demande utilisateur)
+            try:
+                default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+                self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+            except Exception:
+                pass
             self.additional_folders_to_process = []
             self.update_additional_folders_display()
             self.update_remaining_files()
@@ -6526,11 +6603,34 @@ class SeestarStackerGUI:
         self.time_per_image = 0
         self.global_start_time = time.monotonic()
         self.batches_processed_for_preview_refresh = 0
+        # Do not reset the aligned counter here; keep last value until backend updates.
+        # This avoids a confusing flash to 0 right when pressing Start.
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+        # self.aligned_files_var.set(default_aligned_fmt.format(count=0))  # moved to end-of-processing
+
+        # Capture GUI-staged additional folders
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        # Mettre à jour le label Additional localement sans recalcul global pour éviter un flash à 0
+        try:
+            _staged_unique = []
+            for p in (folders_to_pass_to_backend or []):
+                ap = os.path.abspath(p)
+                if ap not in _staged_unique:
+                    _staged_unique.append(ap)
+            _count = len(_staged_unique)
+            if _count <= 0:
+                self.additional_folders_var.set(self.tr("no_additional_folders"))
+            elif _count == 1:
+                self.additional_folders_var.set(self.tr("1 additional folder"))
+            else:
+                self.additional_folders_var.set(
+                    self.tr("{count} additional folders", default="{count} add. folders").format(count=_count)
+                )
+        except Exception:
+            pass
+        # Maintenant vider la liste stagée (évite doublons quand le backend va consommer initial_additional_folders)
         self.additional_folders_to_process = []
-        self.update_additional_folders_display()
+        # Ne PAS rappeler update_additional_folders_display ici pour éviter de repasser à 0
         self._set_parameter_widgets_state(tk.DISABLED)
         if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
             self.stop_button.config(state=tk.NORMAL)
@@ -6545,6 +6645,24 @@ class SeestarStackerGUI:
             self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n")
             self.status_text.config(state=tk.DISABLED)
         print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK.")
+
+        # Estimer et afficher immédiatement le total d'images (évite le passage par "No files waiting")
+        try:
+            def _count_fits_in_folder(folder: str) -> int:
+                try:
+                    if not folder or not os.path.isdir(folder):
+                        return 0
+                    return sum(1 for f in os.listdir(folder) if f.lower().endswith((".fit", ".fits")))
+                except Exception:
+                    return 0
+
+            est_total = _count_fits_in_folder(self.settings.input_folder)
+            for f in folders_to_pass_to_backend:
+                est_total += _count_fits_in_folder(f)
+            if est_total > 0:
+                self.remaining_files_var.set(f"{est_total}/{est_total}")
+        except Exception:
+            pass
 
         # --- 4. Synchronisation et Validation des Settings ---
         print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")

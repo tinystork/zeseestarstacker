@@ -1,0 +1,250 @@
+                    data_final_pour_retour = (
+                        image_for_alignment_or_drizzle_input.astype(np.float32)
+                    )
+            else:
+                align_method_log_msg = "Astroalign_Standard_Attempted"
+                if reference_image_data_for_alignment is None:
+                    raise RuntimeError("Image de référence Astroalign manquante.")
+
+                (
+                    aligned_img_astroalign,
+                    align_success_astroalign,
+                ) = self.aligner._align_image(
+                    image_for_alignment_or_drizzle_input,
+                    reference_image_data_for_alignment,
+                    file_name,
+                    force_same_shape_as_ref=True,
+                    use_disk=align_on_disk,
+                )
+
+                if align_success_astroalign and aligned_img_astroalign is not None:
+                    align_method_log_msg = "Astroalign_Standard_Success"
+                    logger.debug(
+                        f"     - APRÈS ALIGNEMENT (Astroalign): aligned_img_astroalign - Range: [{np.min(aligned_img_astroalign):.4g}, {np.max(aligned_img_astroalign):.4g}], Shape: {aligned_img_astroalign.shape}, Dtype: {aligned_img_astroalign.dtype}"
+                    )
+                    data_final_pour_retour = aligned_img_astroalign.astype(np.float32)
+
+                    if (
+                        (self.reproject_between_batches or self.reproject_coadd_final)
+                        and self.reference_wcs_object is not None
+                    ):
+                        # Attach the reference WCS so batches can be reprojected
+                        wcs_final_pour_retour = self.reference_wcs_object
+
+                    if not is_drizzle_or_mosaic_mode:
+                        # In classic stacking mode, keep the aligned image as-is
+                        pass
+                    else:
+                        # Pour Drizzle Standard, data_final_pour_retour est déjà aligned_img_astroalign.
+                        # _align_image est censé avoir préservé la plage ADU si l'entrée était ADU.
+                        logger.debug(
+                            f"       - DRIZZLE STANDARD: data_final_pour_retour (venant de aligned_img_astroalign) gardé en ADU. Range: [{np.min(data_final_pour_retour):.4g}, {np.max(data_final_pour_retour):.4g}]"
+                        )
+                else:
+                    align_method_log_msg = "Astroalign_Standard_Fail"
+                    raise RuntimeError(
+                        f"Échec Alignement Astroalign standard pour {file_name}."
+                    )
+                matrice_M_calculee = None
+
+            header_final_pour_retour["_ALIGN_METHOD_LOG"] = (
+                align_method_log_msg,
+                "Alignment method used",
+            )
+
+            logger.debug(
+                f"  -> [5/7] Création du masque de pixels valides pour '{file_name}'..."
+            )
+            if data_final_pour_retour is None:
+                raise ValueError("Données finales pour masque sont None.")
+            if data_final_pour_retour.ndim == 3:
+                luminance_mask_src = (
+                    0.299 * data_final_pour_retour[..., 0]
+                    + 0.587 * data_final_pour_retour[..., 1]
+                    + 0.114 * data_final_pour_retour[..., 2]
+                )
+            elif data_final_pour_retour.ndim == 2:
+                luminance_mask_src = data_final_pour_retour
+            else:
+                valid_pixel_mask_2d = np.ones(
+                    data_final_pour_retour.shape[:2], dtype=bool
+                )
+                logger.debug(f"     - Masque (tous valides, shape inattendue).")
+
+            if "valid_pixel_mask_2d" not in locals() or valid_pixel_mask_2d is None:
+                logger.debug(
+                    f"     - Création masque depuis luminance_mask_src. Range luminance: [{np.min(luminance_mask_src):.4g}, {np.max(luminance_mask_src):.4g}]"
+                )
+                max_lum_val = np.nanmax(luminance_mask_src)
+                if max_lum_val <= 1e-5:
+                    valid_pixel_mask_2d = np.ones(luminance_mask_src.shape, dtype=bool)
+                    logger.debug(
+                        "     - Luminance très faible, masque par défaut tout True."
+                    )
+                else:
+                    mask_threshold = (
+                        1.0
+                        if (is_drizzle_or_mosaic_mode and max_lum_val > 1.5 + 1e-5)
+                        else 1e-5
+                    )  # +1e-5 pour float
+                    valid_pixel_mask_2d = (luminance_mask_src > mask_threshold).astype(
+                        bool
+                    )
+                    logger.debug(
+                        f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
+                    )
+
+            # --- Background equalization for batch_size == 1 -------------------
+            if self.batch_size == 1 and valid_pixel_mask_2d is not None:
+                # Align behaviour with batch_size=0: remove only a robust sky
+                # offset; avoid multiplicative scaling and hard clipping which
+                # can amplify noise and saturate highlights.
+                try:
+                    from astropy.stats import sigma_clip
+
+                    if data_final_pour_retour.ndim == 2:
+                        luminance = data_final_pour_retour
+                    else:
+                        luminance = (
+                            0.299 * data_final_pour_retour[..., 0]
+                            + 0.587 * data_final_pour_retour[..., 1]
+                            + 0.114 * data_final_pour_retour[..., 2]
+                        )
+                    # Darker half of valid pixels as sky proxy
+                    sky_mask = valid_pixel_mask_2d & (
+                        luminance <= np.median(luminance[valid_pixel_mask_2d])
+                    )
+                    sky_pixels = int(np.sum(sky_mask))
+                    offset = 0.0
+                    if sky_pixels > 50:
+                        lum_clip = sigma_clip(
+                            luminance[sky_mask], sigma=3.0, maxiters=5
+                        )
+                        med = np.nanmedian(lum_clip.filled(np.nan))
+                        offset = 0.0 if not np.isfinite(med) else float(med)
+                        if abs(offset) > 1e-7:
+                            data_final_pour_retour = (
+                                data_final_pour_retour - offset
+                            ).astype(np.float32, copy=False)
+                    logger.debug(
+                        "[BS=1 EQ] sky_pixels=%d, sky_offset=%.6f (no scale)",
+                        sky_pixels,
+                        offset,
+                    )
+                except Exception as e_eq:
+                    logger.debug(
+                        f"Sky background equalization (offset only) skipped: {e_eq}"
+                    )
+
+            logger.debug(f"  -> [6/7] Calcul des scores qualité pour '{file_name}'...")
+            if self.use_quality_weighting:
+                quality_scores = self._calculate_quality_metrics(
+                    prepared_img_after_initial_proc
+                )
+            else:
+                logger.debug(f"     - Pondération qualité désactivée.")
+
+            if data_final_pour_retour is None:
+                raise RuntimeError(
+                    "data_final_pour_retour est None à la fin de _process_file."
+                )
+            if valid_pixel_mask_2d is None:
+                raise RuntimeError(
+                    "valid_pixel_mask_2d est None à la fin de _process_file."
+                )
+
+            if self.is_mosaic_run and self.mosaic_alignment_mode in [
+                "local_fast_fallback",
+                "local_fast_only",
+            ]:
+                if wcs_final_pour_retour is None or matrice_M_calculee is None:
+                    raise RuntimeError(
+                        f"Mosaïque locale '{file_name}', WCS ou M manquant. AlignMethod: {align_method_log_msg}"
+                    )
+            elif (
+                self.is_mosaic_run
+                and self.mosaic_alignment_mode == "astrometry_per_panel"
+            ):
+                if wcs_final_pour_retour is None:
+                    raise RuntimeError(
+                        f"Mosaïque AstroPanel '{file_name}', WCS résolu manquant. AlignMethod: {align_method_log_msg}"
+                    )
+
+            # ---- ULTIMATE DEBUG LOG ----
+            logger.debug(
+                f"ULTIMATE DEBUG QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: AVANT RETURN pour '{file_name}'."
+            )
+            if data_final_pour_retour is not None:
+                logger.debug(
+                    f"  >>> data_final_pour_retour - Shape: {data_final_pour_retour.shape}, Dtype: {data_final_pour_retour.dtype}, Range: [{np.min(data_final_pour_retour):.6g}, {np.max(data_final_pour_retour):.6g}], Mean: {np.mean(data_final_pour_retour):.6g}"
+                )
+            else:
+                logger.debug(f"  >>> data_final_pour_retour est None.")
+            if valid_pixel_mask_2d is not None:
+                logger.debug(
+                    f"  >>> valid_pixel_mask_2d - Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
+                )
+            else:
+                logger.debug(f"  >>> valid_pixel_mask_2d est None.")
+            logger.debug(f"  >>> quality_scores: {quality_scores}")
+            if wcs_final_pour_retour is not None:
+                logger.debug(f"  >>> wcs_final_pour_retour: Présent")
+            else:
+                logger.debug(f"  >>> wcs_final_pour_retour: None")
+            if matrice_M_calculee is not None:
+                logger.debug(f"  >>> matrice_M_calculee: Présente")
+            else:
+                logger.debug(f"  >>> matrice_M_calculee: None")
+            # ---- FIN ULTIMATE DEBUG LOG ----
+
+            return (
+                data_final_pour_retour,
+                header_final_pour_retour,
+                quality_scores,
+                wcs_final_pour_retour,
+                matrice_M_calculee,
+                valid_pixel_mask_2d,
+            )
+
+        except (ValueError, RuntimeError) as proc_err:
+            self.update_progress(
+                f"   ⚠️ Fichier '{file_name}' ignoré dans _process_file: {proc_err}",
+                "WARN",
+            )
+            logger.debug(
+                f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: (ValueError/RuntimeError) pour '{file_name}': {proc_err}"
+            )
+            header_final_pour_retour = (
+                header_final_pour_retour
+                if header_final_pour_retour is not None
+                else fits.Header()
+            )
+            header_final_pour_retour["_ALIGN_METHOD_LOG"] = (
+                f"Error_{type(proc_err).__name__}",
+                "Processing file error",
+            )
+            if hasattr(self, "_move_to_unaligned"):
+                self._move_to_unaligned(file_path)
+            return None, header_final_pour_retour, quality_scores, None, None, None
+        except Exception as e:
+            self.update_progress(
+                f"❌ Erreur critique traitement fichier {file_name} dans _process_file: {e}",
+                "ERROR",
+            )
+            logger.debug(
+                f"ERREUR QM [_process_file V_ProcessFile_M81_Debug_UltimateLog_1]: Exception générale pour '{file_name}': {e}"
+            )
+            traceback.print_exc(limit=3)
+            header_final_pour_retour = (
+                header_final_pour_retour
+                if header_final_pour_retour is not None
+                else fits.Header()
+            )
+            header_final_pour_retour["_ALIGN_METHOD_LOG"] = (
+                f"CritError_{type(e).__name__}",
+                "Critical processing error",
+            )
+            if hasattr(self, "_move_to_unaligned"):
+                self._move_to_unaligned(file_path)
+            return None, header_final_pour_retour, quality_scores, None, None, None
+        finally:
