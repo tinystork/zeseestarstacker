@@ -3639,8 +3639,8 @@ class SeestarStackerGUI:
                 self.current_preview_hist_data = preview_hist.copy()
                 self.current_stack_header = stack_header.copy() if stack_header else None
                 self.preview_img_count = img_count
-                if getattr(self, "preview_total_imgs", 0) == 0:
-                    self.preview_total_imgs = total_imgs
+                # Toujours refléter un nouveau total si le backend l'a recalculé
+                self.preview_total_imgs = total_imgs
                 self.preview_current_batch = current_batch
                 self.preview_total_batches = total_batches
                 self.refresh_preview(recalculate_histogram=True)
@@ -3656,8 +3656,8 @@ class SeestarStackerGUI:
         self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
-        if getattr(self, "preview_total_imgs", 0) == 0:
-            self.preview_total_imgs = total_imgs
+        # Toujours refléter un nouveau total si le backend l'a recalculé
+        self.preview_total_imgs = total_imgs
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
 

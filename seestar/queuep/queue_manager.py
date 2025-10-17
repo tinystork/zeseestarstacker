@@ -719,7 +719,7 @@ logger.debug("Configuration warnings OK.")
 # --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
 # Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
 # Global version string to make sure it's always the same
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "v6.6.0 Boring"
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "v6.6.2 Boring"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -4836,7 +4836,12 @@ class SeestarQueuedStacker:
                 file_name_for_log = "FichierInconnu"
 
                 try:
-                    file_path = self.queue.get(timeout=1.0)
+                    # Capture a stable reference to the queue for this iteration.
+                    # The queue object may be rebuilt (e.g. auto-batching) in
+                    # another thread; using this stable reference guarantees we
+                    # call task_done() on the same instance we called get() on.
+                    queue_ref = self.queue
+                    file_path = queue_ref.get(timeout=1.0)
                     if (
                         getattr(self, "use_batch_plan", False)
                         and file_path == _BATCH_BREAK_TOKEN
@@ -4849,7 +4854,7 @@ class SeestarQueuedStacker:
                             reference_image_data_for_global_alignment,
                             reference_header_for_global_alignment,
                         )
-                        self.queue.task_done()
+                        queue_ref.task_done()
                         _log_mem(f"after_image_{iteration_count}")
                         getattr(self, "_indices_cache", {}).clear()
                         gc.collect()
@@ -4868,7 +4873,7 @@ class SeestarQueuedStacker:
                             "INFO_DETAIL",
                         )
                         self.skipped_files_count += 1
-                        self.queue.task_done()
+                        queue_ref.task_done()
                         _log_mem(f"after_image_{iteration_count}")
                         getattr(self, "_indices_cache", {}).clear()
                         gc.collect()
@@ -4885,7 +4890,7 @@ class SeestarQueuedStacker:
                             f"DEBUG QM [_worker V_LoopFocus]: Panneau d'ancre '{file_name_for_log}' skippé car déjà traité (path_of_processed_ref_panel_basename='{path_of_processed_ref_panel_basename}')."
                         )
                         self.processed_files_count += 1
-                        self.queue.task_done()
+                        queue_ref.task_done()
                         _log_mem(f"after_image_{iteration_count}")
                         getattr(self, "_indices_cache", {}).clear()
                         gc.collect()
@@ -5375,7 +5380,7 @@ class SeestarQueuedStacker:
                             if hasattr(self, "_move_to_unaligned"):
                                 self._move_to_unaligned(file_path)
 
-                    self.queue.task_done()
+                    queue_ref.task_done()
                     _log_mem(f"after_image_{iteration_count}")
                     getattr(self, "_indices_cache", {}).clear()
                     gc.collect()
@@ -7959,7 +7964,8 @@ class SeestarQueuedStacker:
         if not batch_items:
             return ref_img, ref_hdr
 
-        if self.reproject_between_batches:
+        # Autoriser l'ajout dynamique même en mode reproject_between_batches
+        if False and self.reproject_between_batches:
             self.stacked_batches_count += 1
             # Aligner le comportement ETA avec le chemin classique
             # afin que l'UI reçoive des mises à jour en mode
@@ -9119,7 +9125,7 @@ class SeestarQueuedStacker:
                 f"DEBUG QM [_combine_batch_result]: erreur stats initiales: {dbg_err}"
             )
 
-        if self.reproject_between_batches:
+        if False and self.reproject_between_batches:
             input_wcs = batch_wcs
             if input_wcs is None and self.reference_wcs_object:
                 try:
@@ -14157,6 +14163,33 @@ class SeestarQueuedStacker:
             f"✅ Dossier ajouté à la file d'attente : {os.path.basename(folder_path)}"
         )
         self.update_progress(f"folder_count_update:{folder_count}")
+        # Pré-queue immédiate dans un thread pour éviter de bloquer l'UI
+        # et refléter rapidement le total fichiers / lots.
+        def _bg_prequeue(path):
+            try:
+                added_now = self._add_files_to_queue(path)
+                if added_now > 0:
+                    try:
+                        self._send_eta_update()
+                    except Exception:
+                        pass
+                    try:
+                        self._update_preview(force_update=True)
+                    except Exception:
+                        pass
+            except Exception:
+                # Échec silencieux: le worker retombera sur le scan normal
+                pass
+
+        try:
+            threading.Thread(
+                target=_bg_prequeue,
+                args=(abs_path,),
+                daemon=True,
+                name="QM_AddFolderPrequeue",
+            ).start()
+        except Exception:
+            pass
         return True
 
     ################################################################################################################################################
