@@ -1,2 +1,0 @@
-2025-10-17 03:21:26,435 [INFO] __main__: Log file initialised at F:\seescan\env\zeseestarstacker\seestar.txt
-2025-10-17 03:21:26,735 [INFO] seestar.queuep.queue_manager: Threads limited to 12
