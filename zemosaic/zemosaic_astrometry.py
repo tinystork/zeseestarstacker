@@ -138,15 +138,24 @@ def _parse_wcs_file_content_za(wcs_file_path, image_shape_hw, progress_callback=
         if progress_callback: progress_callback("    ASTAP WCS Parse ERREUR: Astropy non disponible pour parser WCS.", None, "ERROR")
         return None
     try:
-        with open(wcs_file_path, 'r', errors='replace') as f: wcs_text = f.read()
-        wcs_hdr_from_text = fits.Header.fromstring(wcs_text.replace('\r\n', '\n').replace('\r', '\n'), sep='\n')
-        if 'NAXIS1' not in wcs_hdr_from_text and image_shape_hw:
-            wcs_hdr_from_text['NAXIS1'] = image_shape_hw[1]
-        if 'NAXIS2' not in wcs_hdr_from_text and image_shape_hw:
-            wcs_hdr_from_text['NAXIS2'] = image_shape_hw[0]
+        # Read header text and normalize newlines. Some .wcs files contain invalid
+        # FITS CONTINUE cards (not attached to string values) that astropy.io.fits
+        # refuses to serialize. Passing the raw header text to AstropyWCS avoids
+        # FITS Card verification. If it still fails, strip CONTINUE lines as fallback.
+        with open(wcs_file_path, 'r', errors='replace') as f:
+            wcs_text_raw = f.read()
+        wcs_text_norm = wcs_text_raw.replace('\r\n', '\n').replace('\r', '\n')
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FITSFixedWarning)
-            wcs_obj = AstropyWCS(wcs_hdr_from_text, naxis=2, relax=True)
+            try:
+                # Prefer passing header string directly to bypass FITS Card checks
+                wcs_obj = AstropyWCS(wcs_text_norm, naxis=2, relax=True)
+            except Exception:
+                # Fallback: strip any invalid CONTINUE cards and retry
+                lines = wcs_text_norm.split('\n')
+                lines_no_continue = [ln for ln in lines if not ln.lstrip().upper().startswith('CONTINUE')]
+                cleaned_text = '\n'.join(lines_no_continue)
+                wcs_obj = AstropyWCS(cleaned_text, naxis=2, relax=True)
         if wcs_obj and wcs_obj.is_celestial:
             if image_shape_hw and image_shape_hw[0] > 0 and image_shape_hw[1] > 0:
                 try:
@@ -161,6 +170,206 @@ def _parse_wcs_file_content_za(wcs_file_path, image_shape_hw, progress_callback=
     except Exception as e:
         if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Exception lors du parsing WCS '{filename_log}': {e}", None, "ERROR")
         logger.error(f"Erreur parsing WCS '{wcs_file_path}': {e}", exc_info=True)
+        return None
+
+
+def _parse_wcs_file_content_za_v2(wcs_file_path, image_shape_hw, progress_callback=None):
+    """Parse un .wcs ASTAP de maniere robuste (encodage, CONTINUE, etc.).
+
+    - Lis en binaire puis nettoie les caracteres non-ASCII (ASTAP peut ecrire des degres/alpha/delta).
+    - Supprime les cartes CONTINUE orphelines.
+    - Tente WCS via chaine brute puis via fits.Header.
+    - Force pixel_shape si possible et sanitise image_shape_hw.
+    """
+    filename_log = os.path.basename(wcs_file_path)
+    if progress_callback:
+        progress_callback(
+            f"  ASTAP WCS Parse: Tentative parsing (v2) '{filename_log}' pour shape {image_shape_hw}",
+            None,
+            "DEBUG_DETAIL",
+        )
+    if not (os.path.exists(wcs_file_path) and os.path.getsize(wcs_file_path) > 0):
+        if progress_callback:
+            progress_callback(
+                f"    ASTAP WCS Parse ERREUR: Fichier WCS '{filename_log}' non trouve ou vide.",
+                None,
+                "WARN",
+            )
+        return None
+    if not ASTROPY_AVAILABLE_ASTROMETRY:
+        if progress_callback:
+            progress_callback(
+                "    ASTAP WCS Parse ERREUR: Astropy non disponible pour parser WCS.",
+                None,
+                "ERROR",
+            )
+        return None
+
+    # Sanitise shape -> ints
+    sane_shape_hw = None
+    try:
+        if image_shape_hw and len(image_shape_hw) >= 2:
+            h = int(image_shape_hw[0])
+            w = int(image_shape_hw[1])
+            sane_shape_hw = (h, w)
+    except Exception:
+        sane_shape_hw = None
+
+    try:
+        with open(wcs_file_path, 'rb') as f:
+            raw_bytes = f.read()
+        if raw_bytes.startswith(b"\xEF\xBB\xBF"):
+            raw_bytes = raw_bytes[3:]
+
+        try:
+            header_text = raw_bytes.decode('ascii')
+        except UnicodeDecodeError:
+            try:
+                header_text = raw_bytes.decode('latin-1')
+            except UnicodeDecodeError:
+                header_text = raw_bytes.decode(errors='ignore')
+
+        header_text_ascii = header_text.encode('ascii', errors='ignore').decode('ascii')
+        wcs_text_norm = header_text_ascii.replace('\r\n', '\n').replace('\r', '\n')
+        lines = wcs_text_norm.split('\n')
+        lines_no_continue = [ln for ln in lines if not ln.lstrip().upper().startswith('CONTINUE')]
+        cleaned_text = '\n'.join(lines_no_continue)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs_obj = None
+            last_err = None
+            try:
+                wcs_obj = AstropyWCS(cleaned_text, naxis=2, relax=True)
+            except Exception as e1:
+                last_err = e1
+                try:
+                    hdr = fits.Header.fromstring(cleaned_text, sep='\n')
+                    wcs_obj = AstropyWCS(hdr, naxis=2, relax=True)
+                except Exception as e2:
+                    last_err = e2
+
+        # If still failing, try manual key/value parse to build a minimal WCS header
+        if (not wcs_obj) or (not getattr(wcs_obj, 'is_celestial', False)):
+            try:
+                import re
+                kv = {}
+                for raw in lines_no_continue:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    up8 = line[:8].strip().upper()
+                    if up8 in {"COMMENT", "HISTORY", "END", "CONTINUE"}:
+                        continue
+                    # Try KEY = VALUE / comment
+                    m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$", line)
+                    if not m:
+                        continue
+                    key = m.group(1).upper()
+                    rest = m.group(2)
+                    # Strip inline comment
+                    if "/" in rest:
+                        rest = rest.split("/", 1)[0].rstrip()
+                    rest = rest.strip()
+                    # Unquote strings
+                    if (len(rest) >= 2) and ((rest[0] == rest[-1]) and rest[0] in ("'", '"')):
+                        val: object = rest[1:-1]
+                    else:
+                        # Convert FITS-like booleans and numbers (handle D exponents)
+                        if rest.upper() in ("T", "F"):
+                            val = True if rest.upper() == "T" else False
+                        else:
+                            rest_num = re.sub(r"([0-9])[dD]([+-]?[0-9]+)", r"\1E\2", rest)
+                            try:
+                                if "." in rest_num or "E" in rest_num.upper() or "-" in rest_num or "+" in rest_num:
+                                    val = float(rest_num)
+                                else:
+                                    val = int(rest_num)
+                            except Exception:
+                                val = rest
+                    kv[key] = val
+
+                # Build a minimal FITS header with WCS keys only
+                wcs_keys = [
+                    "WCSAXES","CRPIX1","CRPIX2","CRVAL1","CRVAL2",
+                    "CTYPE1","CTYPE2","CUNIT1","CUNIT2",
+                    "CD1_1","CD1_2","CD2_1","CD2_2",
+                    "PC1_1","PC1_2","PC2_1","PC2_2",
+                    "CDELT1","CDELT2","CROTA2","CROTA1",
+                    "LONPOLE","LATPOLE","EQUINOX","RADESYS",
+                ]
+                hdr_min = fits.Header()
+                hdr_min["SIMPLE"] = True
+                hdr_min["NAXIS"] = 2
+                if sane_shape_hw:
+                    hdr_min["NAXIS1"] = int(sane_shape_hw[1])
+                    hdr_min["NAXIS2"] = int(sane_shape_hw[0])
+                for k in wcs_keys:
+                    if k in kv:
+                        try:
+                            hdr_min[k] = kv[k]
+                        except Exception:
+                            pass
+                # If neither CD nor PC/CDELT present, try to infer from SCALE or PIXSCAL1
+                if ("CD1_1" not in hdr_min) and ("PC1_1" not in hdr_min) and ("CDELT1" not in hdr_min):
+                    for fallback_scale_key in ("SCALE", "PIXSCAL1"):
+                        if fallback_scale_key in kv:
+                            try:
+                                s = float(kv[fallback_scale_key])
+                                # assume square pixels, degrees per pixel if units unknown -> convert arcsec to deg if large
+                                if s > 1e-3:  # likely arcsec/pix
+                                    sdeg = s / 3600.0
+                                else:
+                                    sdeg = s
+                                hdr_min["CDELT1"] = -sdeg
+                                hdr_min["CDELT2"] = sdeg
+                                hdr_min["CTYPE1"] = hdr_min.get("CTYPE1", "RA---TAN")
+                                hdr_min["CTYPE2"] = hdr_min.get("CTYPE2", "DEC--TAN")
+                            except Exception:
+                                pass
+                            break
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FITSFixedWarning)
+                    wcs_obj = AstropyWCS(hdr_min, naxis=2, relax=True)
+            except Exception as e_build:
+                last_err = e_build
+
+        if wcs_obj and getattr(wcs_obj, 'is_celestial', False):
+            if sane_shape_hw and sane_shape_hw[0] > 0 and sane_shape_hw[1] > 0:
+                try:
+                    wcs_obj.pixel_shape = (int(sane_shape_hw[1]), int(sane_shape_hw[0]))
+                except Exception as e_ps:
+                    if progress_callback:
+                        progress_callback(
+                            f"    ASTAP WCS Parse AVERT: echec set pixel_shape: {e_ps}",
+                            None,
+                            "WARN",
+                        )
+            if progress_callback:
+                progress_callback(
+                    f"    ASTAP WCS Parse: Objet WCS parse (v2) avec succes depuis '{filename_log}'.",
+                    None,
+                    "DEBUG_DETAIL",
+                )
+            return wcs_obj
+
+        if progress_callback:
+            detail = str(last_err) if 'last_err' in locals() and last_err else 'WCS non valide'
+            progress_callback(
+                f"    ASTAP WCS Parse ERREUR: Echec creation WCS valide/celeste (v2) depuis '{filename_log}'. Detail: {detail}",
+                None,
+                "WARN",
+            )
+        return None
+    except Exception as e:
+        if progress_callback:
+            progress_callback(
+                f"    ASTAP WCS Parse ERREUR: Exception (v2) lors du parsing WCS '{filename_log}': {e}",
+                None,
+                "ERROR",
+            )
+        logger.error(f"Erreur parsing WCS v2 '{wcs_file_path}': {e}", exc_info=True)
         return None
 
 
@@ -267,19 +476,29 @@ def solve_with_astap(image_fits_path: str,
         except Exception as e_del_log_pre:
             if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Échec nettoyage pré-ASTAP log '{os.path.basename(astap_log_file_path)}': {e_del_log_pre}", None, "WARN")
 
-    cmd_list_astap = [astap_exe_path, "-f", image_fits_path, "-log"]
+    cmd_list_astap = [astap_exe_path, "-f", image_fits_path, "-log", "-wcs"]
     if astap_data_dir and os.path.isdir(astap_data_dir):
-         cmd_list_astap.extend(["-d", astap_data_dir])
+        cmd_list_astap.extend(["-d", astap_data_dir])
 
-    # --- MODIFICATION: Option -pxscale / -fov 0 temporairement enlevée pour test ---
-    # calculated_px_scale = _calculate_pixel_scale_from_header(original_fits_header, progress_callback)
-    # if calculated_px_scale and calculated_px_scale > 0.01 and calculated_px_scale < 50.0:
-    #     cmd_list_astap.extend(["-pxscale", f"{calculated_px_scale:.4f}"])
-    #     if progress_callback: progress_callback(f"  ASTAP Solve: Utilisation -pxscale {calculated_px_scale:.4f} arcsec/pix (calculé du header).", None, "DEBUG")
-    # else:
-    #     cmd_list_astap.extend(["-fov", "0"])
-    #     if progress_callback: progress_callback("  ASTAP Solve: -pxscale non calculable/utilisé. Utilisation -fov 0.", None, "DEBUG")
-    if progress_callback: progress_callback("  ASTAP Solve: Option -pxscale / -fov 0 non ajoutée explicitement (test). ASTAP estimera.", None, "DEBUG")
+    # Rétablit l’indication d’échelle ou FOV pour aider ASTAP
+    calculated_px_scale = _calculate_pixel_scale_from_header(original_fits_header, progress_callback)
+    if calculated_px_scale and 0.01 < float(calculated_px_scale) < 50.0:
+        cmd_list_astap.extend(["-pxscale", f"{float(calculated_px_scale):.4f}"])
+        if progress_callback:
+            progress_callback(
+                f"  ASTAP Solve: Utilisation -pxscale {float(calculated_px_scale):.4f} arcsec/pix (dérivé du header).",
+                None,
+                "DEBUG",
+            )
+    else:
+        # Blind solve: demande à ASTAP d’estimer le FOV automatiquement
+        cmd_list_astap.extend(["-fov", "0"])
+        if progress_callback:
+            progress_callback(
+                "  ASTAP Solve: -pxscale indisponible. Utilisation -fov 0 (auto).",
+                None,
+                "DEBUG",
+            )
 
 
     # Gestion du downsampling (-z)
@@ -289,24 +508,149 @@ def solve_with_astap(image_fits_path: str,
     else:
         if progress_callback: progress_callback(f"  ASTAP Solve: Downsample non spécifié ou invalide ({downsample_factor}). ASTAP utilisera son défaut pour -z.", None, "DEBUG_DETAIL")
 
-    # Gestion de la sensibilité (-sens)
-    if sensitivity is not None and isinstance(sensitivity, int): # Typiquement positif pour -sens 100
-        cmd_list_astap.extend(["-sens", str(sensitivity)])
-        if progress_callback: progress_callback(f"  ASTAP Solve: Utilisation -sens {sensitivity} (configuré).", None, "DEBUG")
-    else:
-        if progress_callback: progress_callback(f"  ASTAP Solve: Sensibilité non spécifiée ou invalide ({sensitivity}). ASTAP utilisera son défaut pour -sens.", None, "DEBUG_DETAIL")
+    # Sensibilité: l’option "-sens" n’est pas documentée côté CLI ASTAP.
+    # Par sécurité, on ignore ce paramètre pour éviter un échec immédiat du binaire.
+    if sensitivity is not None and progress_callback:
+        progress_callback(
+            f"  ASTAP Solve: Paramètre 'sensibilité' reçu ({sensitivity}) mais ignoré (option CLI non supportée).",
+            None,
+            "DEBUG_DETAIL",
+        )
 
-    # --- MODIFICATION: Gestion des hints RA/Dec et du rayon de recherche ---
-    # On n'ajoute plus -ra / -spd explicitement pour ce test, mais on ajoute -r si configuré
-    if search_radius_deg is not None and search_radius_deg > 0:
+    # Ajoute les hints RA/Dec si disponibles dans le header FITS
+    has_pos_hint = False
+    try:
+        ra_hours_hint = None
+        spd_deg_hint = None
+
+        def _safe_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        # RA/DEC candidats (ordre de priorité)
+        ra_candidates = [
+            original_fits_header.get("CRVAL1"),
+            original_fits_header.get("RA"),
+            original_fits_header.get("OBJCTRA"),
+            original_fits_header.get("TELRA"),
+        ]
+        dec_candidates = [
+            original_fits_header.get("CRVAL2"),
+            original_fits_header.get("DEC"),
+            original_fits_header.get("OBJCTDEC"),
+            original_fits_header.get("TELDEC"),
+        ]
+
+        # Keep CRVAL1 to disambiguate units: CRVAL1 is always in degrees (WCS)
+        crval1_val = original_fits_header.get("CRVAL1")
+        ra_val = next((v for v in ra_candidates if v is not None), None)
+        dec_val = next((v for v in dec_candidates if v is not None), None)
+
+        ra_deg = None
+        dec_deg = None
+
+        # Essaie d’interpréter RA
+        if isinstance(ra_val, (int, float)):
+            # If value comes from CRVAL1 (WCS), it is degrees even if <= 24
+            try:
+                same_as_crval1 = (crval1_val is not None and float(ra_val) == float(crval1_val))
+            except Exception:
+                same_as_crval1 = False
+            if same_as_crval1:
+                ra_deg = float(ra_val)
+            else:
+                # Otherwise: convert to degrees only if explicit unit is hours
+                try:
+                    unit = (original_fits_header.get("RAUNIT") or original_fits_header.get("CUNIT1") or "").strip().lower()
+                except Exception:
+                    unit = ""
+                if unit.startswith("h"):
+                    ra_deg = float(ra_val) * 15.0
+                else:
+                    # Default: treat numeric RA as degrees
+                    ra_deg = float(ra_val)
+        elif isinstance(ra_val, str):
+            # Essaye format HH:MM:SS[.s] => heures
+            s = ra_val.strip().lower().replace("h", ":").replace("m", ":").replace("s", "").replace(" ", ":")
+            parts = [p for p in s.split(":") if p != ""]
+            if 1 <= len(parts) <= 3 and all(p.replace(".", "", 1).lstrip("-+").isdigit() for p in parts):
+                hh = _safe_float(parts[0]) or 0.0
+                mm = _safe_float(parts[1]) or 0.0 if len(parts) > 1 else 0.0
+                ss = _safe_float(parts[2]) or 0.0 if len(parts) > 2 else 0.0
+                ra_deg = (hh + mm / 60.0 + ss / 3600.0) * 15.0
+            else:
+                # Dernier recours: nombre brut
+                val = _safe_float(ra_val)
+                if val is not None:
+                    ra_deg = float(val)
+
+        # Essaie d’interpréter DEC (toujours en degrés)
+        if isinstance(dec_val, (int, float)):
+            dec_deg = float(dec_val)
+        elif isinstance(dec_val, str):
+            s = dec_val.strip().lower().replace("d", ":").replace(" ", ":")
+            parts = [p for p in s.split(":") if p != ""]
+            if 1 <= len(parts) <= 3 and all(p.replace(".", "", 1).lstrip("-+").isdigit() for p in parts):
+                dd = _safe_float(parts[0]) or 0.0
+                mm = _safe_float(parts[1]) or 0.0 if len(parts) > 1 else 0.0
+                ss = _safe_float(parts[2]) or 0.0 if len(parts) > 2 else 0.0
+                sign = -1.0 if str(parts[0]).strip().startswith("-") else 1.0
+                dec_deg = sign * (abs(dd) + mm / 60.0 + ss / 3600.0)
+            else:
+                val = _safe_float(dec_val)
+                if val is not None:
+                    dec_deg = float(val)
+
+        if ra_deg is not None and dec_deg is not None:
+            # Convertit en -ra (heures) et -spd (dec+90)
+            ra_hours_hint = ra_deg / 15.0
+            spd_deg_hint = dec_deg + 90.0
+            # Contrainte domaines attendus
+            if ra_hours_hint < 0.0:
+                ra_hours_hint = (ra_hours_hint % 24.0)
+            if spd_deg_hint < 0.0:
+                spd_deg_hint = 0.0
+            if spd_deg_hint > 180.0:
+                spd_deg_hint = 180.0
+
+        if ra_hours_hint is not None and spd_deg_hint is not None:
+            has_pos_hint = True
+            cmd_list_astap.extend(["-ra", f"{ra_hours_hint:.6f}", "-spd", f"{spd_deg_hint:.6f}"])
+            if progress_callback:
+                progress_callback(
+                    f"  ASTAP Solve: Hints -ra {ra_hours_hint:.6f} h, -spd {spd_deg_hint:.6f}° (depuis header).",
+                    None,
+                    "DEBUG",
+                )
+        else:
+            if progress_callback:
+                progress_callback(
+                    "  ASTAP Solve: Hints RA/Dec absents ou invalides dans le header (résolution 'blind').",
+                    None,
+                    "DEBUG_DETAIL",
+                )
+    except Exception as e_hints:
+        if progress_callback:
+            progress_callback(f"  ASTAP Solve: Erreur extraction RA/Dec du header: {e_hints}", None, "WARN")
+
+    # Gestion du rayon de recherche (-r) uniquement s'il y a un hint de position
+    if has_pos_hint and search_radius_deg is not None and search_radius_deg > 0:
         cmd_list_astap.extend(["-r", str(search_radius_deg)])
-        if progress_callback: progress_callback(f"  ASTAP Solve: Utilisation rayon de recherche -r {search_radius_deg}° (pas de hints RA/Dec explicites).", None, "DEBUG")
+        if progress_callback:
+            progress_callback(
+                f"  ASTAP Solve: Utilisation -r {search_radius_deg}° (autour du hint RA/Dec).",
+                None,
+                "DEBUG",
+            )
     else:
-        # Si aucun rayon n'est spécifié, et qu'on n'utilise pas -fov 0 explicitement, ASTAP a son propre comportement.
-        # Si l'objectif est de forcer ASTAP à utiliser son mécanisme "blind" sans rayon, on ne met rien.
-        # Si on voulait forcer une recherche "full-sky" mais limitée par le fov, on aurait besoin de -fov 0 et -r (grand).
-        # Pour l'instant, on laisse ASTAP décider si -r n'est pas fourni.
-        if progress_callback: progress_callback(f"  ASTAP Solve: Pas de rayon de recherche explicite spécifié via -r. ASTAP utilisera ses valeurs par défaut pour la zone de recherche.", None, "DEBUG_DETAIL")
+        if progress_callback:
+            progress_callback(
+                "  ASTAP Solve: Aucun hint de position fiable; omission de -r pour un blind-solve.",
+                None,
+                "DEBUG_DETAIL",
+            )
 
 
     if progress_callback: progress_callback(f"  ASTAP Solve: Commande: {' '.join(cmd_list_astap)}", None, "DEBUG")
@@ -315,20 +659,9 @@ def solve_with_astap(image_fits_path: str,
     astap_success = False
 
     try:
-
-        astap_process_result = None
-        try:
-            if not multiprocessing.current_process().daemon:
-                with ProcessPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_run_astap_subprocess, cmd_list_astap, current_image_dir, timeout_sec)
-                    astap_process_result = future.result()
-            else:
-                raise RuntimeError("daemon process")
-        except (AssertionError, RuntimeError) as e_pool:
-            if progress_callback:
-                progress_callback(f"  ASTAP Solve: ProcessPoolExecutor indisponible ({e_pool}). Lancement direct.", None, "DEBUG_DETAIL")
-            astap_process_result = _run_astap_subprocess(cmd_list_astap, current_image_dir, timeout_sec)
-
+        # Run ASTAP directly to avoid nested ProcessPoolExecutors from threads (can hang on Windows).
+        # We still enforce a strict timeout via subprocess.run inside _run_astap_subprocess.
+        astap_process_result = _run_astap_subprocess(cmd_list_astap, current_image_dir, timeout_sec)
         logger.debug(f"ASTAP return code: {astap_process_result.returncode}")
 
         rc_astap = astap_process_result.returncode
@@ -351,7 +684,10 @@ def solve_with_astap(image_fits_path: str,
                     except Exception as e_shape_read:
                          if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Impossible de lire NAXIS1/2 du header ou du fichier FITS: {e_shape_read}. WCS parsing pourrait échouer.", None, "WARN")
                 if img_height > 0 and img_width > 0:
-                    wcs_solved_obj = _parse_wcs_file_content_za(expected_wcs_file_path, (img_height, img_width), progress_callback)
+                    # Utiliser le parseur robuste v2 (gestion encodage/CONTINUE)
+                    wcs_solved_obj = _parse_wcs_file_content_za_v2(
+                        expected_wcs_file_path, (img_height, img_width), progress_callback
+                    )
                 else:
                     if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Dimensions image (NAXIS1/2) non trouvées pour '{img_basename_log}'. WCS non parsé.", None, "ERROR")
                 if wcs_solved_obj and wcs_solved_obj.is_celestial:
