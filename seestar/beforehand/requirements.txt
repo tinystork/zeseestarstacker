@@ -19,4 +19,5 @@ photutils
 scipy
 scikit-image
 rasterio
+astroalign
 

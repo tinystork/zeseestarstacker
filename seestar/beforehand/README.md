@@ -26,6 +26,16 @@ Gui based Zesee Star Zenalalyser is a standalone analysis module for a lot of li
 
 For details on the result viewer interface, see [docs/visualisation.md](docs/visualisation.md).
 
+## Pre-computed sky statistics reuse
+
+The SNR analysis (`snr_module.calculate_snr`) already derives the sky
+background (`sky_bg`) and noise (`sky_noise`). These values are now reused by
+`starcount_module.calculate_starcount` and `ecc_module.calculate_fwhm_ecc` when
+provided, preventing an extra call to `sigma_clipped_stats`. When invoking the
+star count or FWHM helpers directly, pass the pre-computed statistics to skip
+their internal estimation; both functions automatically fall back to a fresh
+calculation if the supplied values are missing or non-finite.
+
 **Français**
 
 1. Créez un environnement virtuel et activez-le&nbsp;:

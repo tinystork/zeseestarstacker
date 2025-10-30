@@ -24,12 +24,44 @@ from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 
 
-def calculate_starcount(data, fwhm=3.5, threshold_sigma=5.0):
-    """Return number of stars detected in ``data`` using DAOStarFinder."""
+def calculate_starcount(data, fwhm=3.5, threshold_sigma=5.0, *, sky_bg=None, sky_noise=None):
+    """Return number of stars detected in ``data`` using DAOStarFinder.
+
+    Parameters
+    ----------
+    data : array-like
+        Image data array.
+    fwhm : float, optional
+        Full width at half maximum expected for stars (pixels).
+    threshold_sigma : float, optional
+        Detection threshold in multiples of the background noise.
+    sky_bg : float, optional
+        Pre-computed sky background level. When provided (finite), this value
+        is used instead of estimating it again with ``sigma_clipped_stats``.
+    sky_noise : float, optional
+        Pre-computed sky noise (standard deviation). When provided (finite and
+        positive), this value is used to scale the detection threshold.
+    """
     try:
-        mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-        finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * std)
-        sources = finder(data - median)
+        bg = sky_bg if sky_bg is not None and np.isfinite(sky_bg) else None
+        noise = (
+            sky_noise
+            if sky_noise is not None and np.isfinite(sky_noise) and sky_noise > 0
+            else None
+        )
+
+        if bg is None or noise is None:
+            _, median, std = sigma_clipped_stats(data, sigma=3.0)
+            if bg is None or not np.isfinite(bg):
+                bg = median
+            if noise is None or not np.isfinite(noise) or noise <= 0:
+                noise = std if std > 0 else np.nan
+
+        if not np.isfinite(bg) or not np.isfinite(noise) or noise <= 0:
+            return 0
+
+        finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * noise)
+        sources = finder(data - bg)
         return 0 if sources is None else len(sources)
     except Exception:
         return 0
